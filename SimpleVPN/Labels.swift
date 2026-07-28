@@ -1,0 +1,113 @@
+// Copyright 2026 James Deucker (bitwisecook)
+// SPDX-License-Identifier: GPL-3.0-only
+//
+//  Labels.swift
+//  User-defined labels applied to VPNs. A catalog of labels (name + colour) plus
+//  per-profile assignments, persisted in UserDefaults. Defaults: Prod / Lab / Home.
+//  Pure SwiftUI — colours round-trip through Color.Resolved (no AppKit).
+//
+
+import SwiftUI
+
+struct LabelDef: Identifiable, Codable, Sendable, Hashable {
+    var id: String
+    var name: String
+    var r: Double
+    var g: Double
+    var b: Double
+
+    var color: Color { Color(.sRGB, red: r, green: g, blue: b, opacity: 1) }
+
+    init(id: String = UUID().uuidString, name: String, r: Double, g: Double, b: Double) {
+        self.id = id; self.name = name; self.r = r; self.g = g; self.b = b
+    }
+    init(id: String = UUID().uuidString, name: String, resolved: Color.Resolved) {
+        self.init(id: id, name: name, r: Double(resolved.red), g: Double(resolved.green), b: Double(resolved.blue))
+    }
+    mutating func set(_ resolved: Color.Resolved) {
+        r = Double(resolved.red); g = Double(resolved.green); b = Double(resolved.blue)
+    }
+}
+
+@MainActor
+@Observable
+final class LabelStore {
+    private(set) var labels: [LabelDef]
+    private var assignments: [String: Set<String>]   // profile id → label ids
+
+    private static let labelsKey = "labels.catalog"
+    private static let assignKey = "labels.assignments"
+
+    static let defaults: [LabelDef] = [
+        LabelDef(id: "prod", name: "Prod", r: 0.96, g: 0.70, b: 0.70),  // pastel red
+        LabelDef(id: "lab",  name: "Lab",  r: 0.82, g: 0.76, b: 0.93),  // lavender
+        LabelDef(id: "home", name: "Home", r: 0.70, g: 0.80, b: 0.96),  // pastel blue
+    ]
+
+    init() {
+        let d = UserDefaults.standard
+        if let data = d.data(forKey: Self.labelsKey),
+           let cat = try? JSONDecoder().decode([LabelDef].self, from: data), !cat.isEmpty {
+            labels = cat
+        } else {
+            labels = Self.defaults
+        }
+        if let data = d.data(forKey: Self.assignKey),
+           let a = try? JSONDecoder().decode([String: Set<String>].self, from: data) {
+            assignments = a
+        } else {
+            assignments = [:]
+        }
+    }
+
+    func labels(for profile: String) -> [LabelDef] {
+        let ids = assignments[profile] ?? []
+        return labels.filter { ids.contains($0.id) }   // preserve catalog order
+    }
+
+    func isAssigned(_ label: LabelDef, to profile: String) -> Bool {
+        assignments[profile]?.contains(label.id) ?? false
+    }
+
+    func toggle(_ label: LabelDef, for profile: String) {
+        var set = assignments[profile] ?? []
+        if set.contains(label.id) { set.remove(label.id) } else { set.insert(label.id) }
+        assignments[profile] = set
+        persist()
+    }
+
+    func addLabel(name: String, resolved: Color.Resolved) {
+        labels.append(LabelDef(name: name.isEmpty ? "New Label" : name, resolved: resolved))
+        persist()
+    }
+
+    func update(_ label: LabelDef) {
+        if let i = labels.firstIndex(where: { $0.id == label.id }) { labels[i] = label; persist() }
+    }
+
+    func remove(_ id: String) {
+        labels.removeAll { $0.id == id }
+        for (p, set) in assignments where set.contains(id) {
+            var s = set; s.remove(id); assignments[p] = s
+        }
+        persist()
+    }
+
+    private func persist() {
+        let d = UserDefaults.standard
+        if let data = try? JSONEncoder().encode(labels) { d.set(data, forKey: Self.labelsKey) }
+        if let data = try? JSONEncoder().encode(assignments) { d.set(data, forKey: Self.assignKey) }
+    }
+}
+
+/// A pastel pill for a label.
+struct LabelPill: View {
+    let label: LabelDef
+    var body: some View {
+        Text(label.name)
+            .font(.caption2).fontWeight(.medium)
+            .foregroundStyle(.black.opacity(0.78))        // dark text reads on light pastels in both appearances
+            .padding(.horizontal, 7).padding(.vertical, 2)
+            .background(label.color, in: Capsule())
+    }
+}

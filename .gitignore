@@ -1,0 +1,11 @@
+# Xcode
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# XcodeGen output — project.yml is the source of truth (run `xcodegen generate`)
+SimpleVPN.xcodeproj/
+
+# OpenVPN engine build outputs — regenerate with Tools/build-openvpn3-xcframework.sh
+build/
+Vendor/

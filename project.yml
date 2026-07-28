@@ -1,0 +1,152 @@
+# Copyright 2026 James Deucker (bitwisecook)
+# SPDX-License-Identifier: GPL-3.0-only
+
+name: SimpleVPN
+options:
+  bundleIdPrefix: com.bragi0
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+# Mark the project as reviewed against the current Xcode so it stops offering its
+# "recommended settings" (which would switch us to Apple Development auto-signing and
+# auto-select architectures — both wrong for our Developer ID + arm64-only setup).
+# Bump this to match the Xcode in use (26.6 → 2660) whenever that changes.
+attributes:
+  LastUpgradeCheck: "2660"
+  LastSwiftUpdateCheck: "2660"
+
+# Shared build settings. Developer ID manual signing (system extension requires it).
+settings:
+  base:
+    ARCHS: arm64                              # Apple Silicon only (engine xcframework is arm64)
+    DEVELOPMENT_TEAM: QVUFB5676H
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "Developer ID Application"
+    ENABLE_HARDENED_RUNTIME: YES
+    SWIFT_VERSION: "6.0"                       # Swift 6 language mode = complete/strict concurrency
+    SWIFT_APPROACHABLE_CONCURRENCY: YES
+    SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    # Xcode "recommended settings" we accept (signing stays Developer ID, ARCHS stays arm64 by design).
+    DEAD_CODE_STRIPPING: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    STRING_CATALOG_GENERATE_SYMBOLS: YES
+
+targets:
+  # ---- Containing app (SwiftUI, macOS only) ----
+  SimpleVPN:
+    type: application
+    platform: macOS
+    sources:
+      - path: SimpleVPN
+        excludes:
+          - "SimpleVPN.entitlements"
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bragi0.SimpleVPN
+        PRODUCT_NAME: SimpleVPN
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: SimpleVPN
+        # Container app must NOT be sandboxed for the Developer ID / system-extension path
+        # (a sandboxed app can't talk to systemextensionsd). The MAS/appex variant is sandboxed.
+        ENABLE_APP_SANDBOX: NO
+        CODE_SIGN_ENTITLEMENTS: SimpleVPN/SimpleVPN.entitlements
+        PROVISIONING_PROFILE_SPECIFIER: "SimpleVPN App DirectDist"
+        REGISTER_APP_GROUPS: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+    dependencies:
+      - target: PacketTunnel
+        embed: true
+
+  # ---- Packet tunnel provider (system extension, Developer ID) ----
+  # Sysext is the DMG/sideload path. Appex variant for TestFlight/MAS is added later; both will
+  # share logic via the TunnelCore framework (M2/M3).
+  PacketTunnel:
+    type: system-extension
+    platform: macOS
+    sources:
+      - path: PacketTunnel
+        excludes:
+          - "Info.plist"
+          - "PacketTunnel.entitlements"
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bragi0.SimpleVPN.PacketTunnel
+        PRODUCT_NAME: com.bragi0.SimpleVPN.PacketTunnel
+        SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated   # NE extension has no main actor/UI
+        GENERATE_INFOPLIST_FILE: YES                 # synthesize CFBundleIdentifier/Version/etc onto our plist
+        INFOPLIST_FILE: PacketTunnel/Info.plist
+        ENABLE_APP_SANDBOX: YES
+        CODE_SIGN_ENTITLEMENTS: PacketTunnel/PacketTunnel.entitlements
+        PROVISIONING_PROFILE_SPECIFIER: "SimpleVPN Tunnel DirectDist"
+        REGISTER_APP_GROUPS: YES
+        SKIP_INSTALL: YES
+        # OpenVPN3 engine (ObjC++ bridge lands in M3)
+        SWIFT_OBJC_BRIDGING_HEADER: "PacketTunnel/PacketTunnel-Bridging-Header.h"
+        CLANG_CXX_LANGUAGE_STANDARD: "c++20"
+        CLANG_CXX_LIBRARY: "libc++"
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/Vendor/openvpn3-include"
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - "$(inherited)"
+          - "ASIO_STANDALONE=1"
+          - "HAVE_LZ4=1"
+          - "USE_ASIO=1"
+          - "USE_OPENSSL=1"
+          - "USE_TUN_BUILDER=1"
+          - "FMT_HEADER_ONLY=1"
+    dependencies:
+      - sdk: NetworkExtension.framework
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+      - sdk: libresolv.tbd
+      - framework: Vendor/OpenVPNEngine.xcframework
+        embed: false
+        link: true
+
+  # ---- Tests ----
+  SimpleVPNTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources: [SimpleVPNTests]
+    dependencies:
+      - target: SimpleVPN
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bragi0.SimpleVPNTests
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        PROVISIONING_PROFILE_SPECIFIER: ""
+
+  SimpleVPNUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources: [SimpleVPNUITests]
+    dependencies:
+      - target: SimpleVPN
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bragi0.SimpleVPNUITests
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        PROVISIONING_PROFILE_SPECIFIER: ""
+
+schemes:
+  SimpleVPN:
+    build:
+      targets:
+        SimpleVPN: all
+        PacketTunnel: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - SimpleVPNTests
+        - SimpleVPNUITests
