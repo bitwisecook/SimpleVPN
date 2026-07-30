@@ -66,7 +66,9 @@ echo "==> import Apple intermediate + root CA certs"
 # missing intermediate reads as a bogus "no identity found" rather than a
 # clear chain-of-trust error, so fetch these explicitly rather than assume.
 curl -fsSL -o "$INTERMEDIATE_G2" "https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer"
-curl -fsSL -o "$APPLE_ROOT" "https://www.apple.com/certificateauthority/AppleIncRootCertificate.cer"
+# NOTE: the Apple Inc Root lives under /appleca/, NOT /certificateauthority/ —
+# the latter 404s (found by the first live run of this workflow).
+curl -fsSL -o "$APPLE_ROOT" "https://www.apple.com/appleca/AppleIncRootCertificate.cer"
 security import "$INTERMEDIATE_G2" -k "$KEYCHAIN" -T /usr/bin/codesign -T /usr/bin/security
 security import "$APPLE_ROOT" -k "$KEYCHAIN" -T /usr/bin/codesign -T /usr/bin/security
 
