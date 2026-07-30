@@ -89,6 +89,19 @@ jobs:
       cache-hit: ${{ steps.cache.outputs.cache-hit }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Releases come from main, full stop. A v* tag on any other commit fails
+      # here before a single secret is decoded — tags are cheap to create
+      # anywhere, so the WORKFLOW is the enforcement point, not convention.
+      - name: Require the tagged commit to be on main
+        run: |
+          git fetch origin main --quiet
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::v* releases must be tagged on main; $GITHUB_SHA is not an ancestor of origin/main."
+            exit 1
+          fi
 
       # Fail fast and explicitly here rather than 20+ minutes later with a
       # cryptic SDK-not-found compile error (this repo is developed against
