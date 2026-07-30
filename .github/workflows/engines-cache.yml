@@ -30,7 +30,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Select Xcode + verify macOS 26 SDK
         id: xc
@@ -54,7 +54,7 @@ jobs:
       # If a third caller ever appears, revisit that tradeoff.
       - name: Restore/save engines cache
         id: cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             Vendor/OpenVPNEngine.xcframework
