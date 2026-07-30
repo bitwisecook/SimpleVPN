@@ -266,7 +266,7 @@ jobs:
           gh release create "$TAG" \
             --title "SimpleVPN $VERSION" \
             --generate-notes \
-            "${EXTRA_ARGS[@]}" \
+            ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
             "$DMG" "$DMG.sha256"
 
       - name: Clean up signing keychain + secrets
