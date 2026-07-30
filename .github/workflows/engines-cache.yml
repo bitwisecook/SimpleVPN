@@ -1,0 +1,91 @@
+name: Warm engines cache
+
+# Purpose: GitHub evicts an actions/cache entry that goes unused for 7 days,
+# but SimpleVPN tags (and therefore release.yml runs) are cut far less often
+# than weekly. Without this workflow, the *normal* case for a tag build is a
+# cache miss on Vendor/*.xcframework, paying a 20-45 minute cold engine build
+# on top of the app build/notarize itself. Running this on a schedule keeps
+# the cache entry's last-used timestamp fresh so a release build is fast far
+# more often than not — though a cold build always remains possible (a warm
+# run that itself fails leaves no cache), which is why release.yml's engines
+# job is a complete, correct cold-build path on its own and never assumes this
+# workflow has run.
+#
+# workflow_dispatch is also provided so the cache can be seeded by hand ahead
+# of cutting a release, without waiting for the next Monday.
+#
+# No secrets here — this workflow only builds the third-party engine
+# xcframeworks, never signs or notarizes anything.
+on:
+  schedule:
+    - cron: "17 4 * * 1" # every Monday 04:17 UTC — an arbitrary off-peak slot
+  workflow_dispatch: {}
+
+jobs:
+  engines:
+    # Same runner + same risk as release.yml's engines job — see the comment
+    # there. Kept as a plain runs-on rather than a reusable-workflow call
+    # (see the cache-key comment below for why duplication was chosen
+    # deliberately over indirection for these two call sites).
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode + verify macOS 26 SDK
+        id: xc
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+          if ! xcodebuild -showsdks | grep -qi "macosx26"; then
+            echo "FATAL: no macOS 26 SDK found on this runner image."
+            xcodebuild -showsdks
+            exit 1
+          fi
+          echo "version=$(xcodebuild -version | awk '/^Xcode/{print $2}')" >> "$GITHUB_OUTPUT"
+
+      # IMPORTANT: this key expression must be kept byte-identical to the one
+      # in .github/workflows/release.yml's `engines` job. A reusable workflow
+      # (workflow_call) would remove that duplication, but for exactly two
+      # call sites the indirection isn't worth it — a copy-paste key is easy
+      # to eyeball-diff, a shared workflow input is an extra layer to trace
+      # through when the key silently drifts and cache hit rate quietly halves.
+      # If a third caller ever appears, revisit that tradeoff.
+      - name: Restore/save engines cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            Vendor/OpenVPNEngine.xcframework
+            Vendor/OpenConnectEngine.xcframework
+            Vendor/SSHEngine.xcframework
+            Vendor/openvpn3-include
+            Vendor/openconnect-include
+            Vendor/libssh2-include
+          key: engines-${{ runner.os }}-${{ runner.arch }}-xcode${{ steps.xc.outputs.version }}-${{ hashFiles('Tools/build-openvpn3-xcframework.sh', 'Tools/build-openconnect-xcframework.sh', 'Tools/build-libssh2-xcframework.sh') }}
+
+      - name: Install pinned OpenSSL (cache miss only)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: Tools/ci/install-pinned-openssl.sh
+
+      - name: Build OpenVPNEngine.xcframework (cache miss only)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: Tools/build-openvpn3-xcframework.sh
+
+      - name: Build OpenConnectEngine.xcframework (cache miss only)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: Tools/build-openconnect-xcframework.sh
+
+      - name: Build SSHEngine.xcframework (cache miss only)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: Tools/build-libssh2-xcframework.sh
+
+      - name: Assert all engine artifacts exist
+        run: |
+          set -euo pipefail
+          for p in Vendor/OpenVPNEngine.xcframework Vendor/OpenConnectEngine.xcframework \
+                   Vendor/SSHEngine.xcframework Vendor/openvpn3-include \
+                   Vendor/openconnect-include Vendor/libssh2-include; do
+            if [ ! -e "$p" ]; then echo "FATAL: missing $p"; exit 1; fi
+          done

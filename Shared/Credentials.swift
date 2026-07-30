@@ -23,6 +23,7 @@ struct RawCredentials: Sendable {
     var username: String?
     var password: String?          // base password (no OTP)
     var otp: String?
+    var privateKeyPassphrase: String?  // unlocks the client private key (rides startTunnel options)
     var passkeyAssertion: Data?    // future
 }
 

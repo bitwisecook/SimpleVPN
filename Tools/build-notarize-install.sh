@@ -26,6 +26,9 @@ NOTARY_KEYID="$(python3 -c "import json,os;C=json.load(open(os.path.expanduser('
 NOTARY_KEY="$HOME/.asc/AuthKey_${NOTARY_KEYID}.p8"
 NOTARY_ISSUER="$(python3 -c "import json,os;C=json.load(open(os.path.expanduser('~/.asc/credentials.json')));print(C['accounts'][C['active']]['issuerID'])")"
 
+echo "==> geoip database freshness (refetched when >1 week old; soft-fails offline)"
+"$REPO/Tools/fetch-geoip.sh"
+
 echo "==> Release build (Developer ID, hardened runtime, no get-task-allow)"
 # codesign --timestamp contacts Apple's TSA and can fail transiently; retry a few times.
 build_once() {
@@ -52,7 +55,19 @@ echo "    ok"
 echo "==> zip + submit to notary (waits for result)"
 rm -f "$ZIP"
 /usr/bin/ditto -c -k --keepParent "$APP" "$ZIP"
-xcrun notarytool submit "$ZIP" --key "$NOTARY_KEY" --key-id "$NOTARY_KEYID" --issuer "$NOTARY_ISSUER" --wait
+# Capture the submission id and status so a rejection can be diagnosed — `submit
+# --wait` alone prints "Invalid" with no reason; the notary *log* has the details.
+SUBMIT_OUT="$(xcrun notarytool submit "$ZIP" --key "$NOTARY_KEY" --key-id "$NOTARY_KEYID" --issuer "$NOTARY_ISSUER" --wait 2>&1)"
+echo "$SUBMIT_OUT"
+SUBID="$(echo "$SUBMIT_OUT" | awk '/^ *id:/ {print $2; exit}')"
+if ! echo "$SUBMIT_OUT" | grep -q "status: Accepted"; then
+  echo "ERROR: notarization was not Accepted."
+  if [ -n "$SUBID" ]; then
+    echo "==> fetching notary log for $SUBID"
+    xcrun notarytool log "$SUBID" --key "$NOTARY_KEY" --key-id "$NOTARY_KEYID" --issuer "$NOTARY_ISSUER" || true
+  fi
+  exit 1
+fi
 
 echo "==> staple"
 xcrun stapler staple "$APP"

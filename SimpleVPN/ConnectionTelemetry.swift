@@ -23,29 +23,42 @@ final class ThroughputMonitor {
     private(set) var samples: [Sample] = []
     private(set) var latest: TunnelStats?
 
+    /// Passive link-health judgement from the byte counters alone — no probe
+    /// traffic. "Stalled" = we kept sending but nothing has come back for a
+    /// while, the train-tunnel signature.
+    enum LinkHealth: Equatable { case healthy, quiet, stalled(seconds: Int) }
+    private(set) var linkHealth: LinkHealth = .healthy
+    private var lastRxAdvance: Date?
+    private var txSinceRx: Int64 = 0
+    private static let stallThreshold: TimeInterval = 8
+
     var inRate: Double { samples.last?.inRate ?? 0 }
     var outRate: Double { samples.last?.outRate ?? 0 }
     /// Peak of either direction across the window — the chart's y-scale ceiling.
     var scaleMax: Double { max(1_024, samples.map { max($0.inRate, $0.outRate) }.max() ?? 0) }
 
-    private var timer: Timer?
+    private var pollTask: Task<Void, Never>?
     private var previous: TunnelStats?
     private var seq = 0
     private let window = 60
 
-    func start(profile: String) {
+    /// Poll the running tunnel at 1 Hz via the supplied fetcher (IPC — the only
+    /// live channel out of the system-context extension).
+    func start(profile: String, fetch: @escaping () async -> TunnelStats?) {
         stop()
         samples = []; previous = nil; latest = nil; seq = 0
-        tick(profile: profile)
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.tick(profile: profile) }
+        linkHealth = .healthy; lastRxAdvance = nil; txSinceRx = 0
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                if let s = await fetch() { self?.tick(with: s) }
+                try? await Task.sleep(for: .seconds(1))
+            }
         }
     }
 
-    func stop() { timer?.invalidate(); timer = nil }
+    func stop() { pollTask?.cancel(); pollTask = nil }
 
-    private func tick(profile: String) {
-        guard let s = TunnelStatsStore.read(profile: profile) else { return }
+    private func tick(with s: TunnelStats) {
         latest = s
         defer { previous = s }
         guard let prev = previous else { return }
@@ -56,6 +69,25 @@ final class ThroughputMonitor {
                               inRate: max(0, Double(s.bytesIn - prev.bytesIn) / dt),
                               outRate: max(0, Double(s.bytesOut - prev.bytesOut) / dt)))
         if samples.count > window { samples.removeFirst(samples.count - window) }
+        updateLinkHealth(current: s, previous: prev)
+    }
+
+    private func updateLinkHealth(current: TunnelStats, previous prev: TunnelStats) {
+        let now = Date()
+        if current.bytesIn > prev.bytesIn {
+            lastRxAdvance = now
+            txSinceRx = 0
+            linkHealth = .healthy
+            return
+        }
+        txSinceRx += max(0, current.bytesOut - prev.bytesOut)
+        guard let lastRx = lastRxAdvance else { lastRxAdvance = now; return }
+        let quietFor = now.timeIntervalSince(lastRx)
+        if quietFor >= Self.stallThreshold {
+            // Sending into the void → stalled. Nothing moving either way is just
+            // an idle link — quiet, not broken.
+            linkHealth = txSinceRx > 4_096 ? .stalled(seconds: Int(quietFor)) : .quiet
+        }
     }
 }
 
@@ -82,6 +114,9 @@ enum Fmt {
 struct ThroughputGraph: View {
     let samples: [ThroughputMonitor.Sample]
     let scaleMax: Double
+    /// Compact mode for tight surfaces (menu-bar dropdown): no axes, clipped —
+    /// axis labels must never spill over neighboring views.
+    var compact = false
 
     private let down = Color.blue
     private let up = Color.green
@@ -107,13 +142,16 @@ struct ThroughputGraph: View {
         .chartYScale(domain: 0...scaleMax)
         .chartXAxis(.hidden)
         .chartYAxis {
-            AxisMarks(position: .leading) { value in
-                AxisGridLine()
-                if let v = value.as(Double.self) { AxisValueLabel { Text(Fmt.rate(v)).font(.caption2) } }
+            if !compact {
+                AxisMarks(position: .leading) { value in
+                    AxisGridLine()
+                    if let v = value.as(Double.self) { AxisValueLabel { Text(Fmt.rate(v)).font(.caption2) } }
+                }
             }
         }
         .chartLegend(.hidden)
-        .frame(height: 160)
+        .frame(height: compact ? 56 : 160)
+        .clipped()
     }
 }
 
@@ -136,76 +174,164 @@ struct ThroughputReadout: View {
     }
 }
 
-// MARK: - Connection info (uptime · reconnects · railroad)
+// MARK: - Connection info (uptime · reconnects · railroad · details)
 
 struct ConnectionInfoPanel: View {
     let stats: TunnelStats?
     let clientLabel: String
+    let publicIP: PublicIPMonitor?
+    var paused = false
+    var bypassing = false
+
+    @Environment(TopologyMonitor.self) private var topo: TopologyMonitor?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 24) {
+            HStack(spacing: 10) {
                 metric("Uptime", Fmt.duration(stats?.uptime ?? 0), "clock")
                 metric("Reconnects", "\(stats?.reconnects ?? 0)", "arrow.triangle.2.circlepath")
                 if let total = stats { metric("Transferred", Fmt.byteCount(Double(total.bytesIn + total.bytesOut)), "arrow.up.arrow.down") }
                 Spacer()
             }
-            RailroadDiagram(client: clientLabel,
-                            endpoint: stats?.serverEndpoint ?? "",
-                            tunnelIP: stats?.tunnelIPv4 ?? "",
-                            proxies: stats?.proxies ?? [])
-            if let dns = stats?.dnsServers, !dns.isEmpty {
-                Label(dns.joined(separator: ", "), systemImage: "network")
+            if let topo {
+                RailroadView(topology: topo.topology,
+                             ourTunnelIPv4: stats?.tunnelIPv4,
+                             serverEndpoint: stats?.serverEndpoint ?? "",
+                             paused: paused,
+                             bypassing: bypassing)
+                    .onAppear { topo.startWatching() }
+                    .onDisappear { topo.stopWatching() }
+            }
+            if let proxies = stats?.proxies, !proxies.isEmpty {
+                Label(proxies.joined(separator: " · "), systemImage: "arrow.triangle.branch")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            // Additional proxies beyond the one shown in the railroad node.
-            if let proxies = stats?.proxies, proxies.count > 1 {
-                Label(proxies.dropFirst().joined(separator: " · "), systemImage: "arrow.triangle.branch")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
+            ConnectionDetailsPanel(stats: stats, publicIP: publicIP)
         }
     }
 
+    /// Boxed, so a metric reads as one unit with its number — bare stacked text left the
+    /// label and value looking like two unrelated lines. Matches the rounded-rect
+    /// treatment the address rows already use.
     private func metric(_ title: String, _ value: String, _ symbol: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Label(title, systemImage: symbol).font(.caption).foregroundStyle(.secondary)
             Text(value).font(.system(.body, design: .rounded)).monospacedDigit().bold()
         }
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .frame(minWidth: 92, alignment: .leading)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
-/// client → VPN endpoint → [proxy] → internet, with the tunnel IP annotated on the client.
-struct RailroadDiagram: View {
-    let client: String
-    let endpoint: String
-    let tunnelIP: String
-    let proxies: [String]
+// MARK: - Connection details (dual-stack, every value copyable)
+
+/// The precise network picture: IPv4 and IPv6 as first-class parallel columns,
+/// server transport, DNS, and where this Mac appears from — every address a
+/// CopyableValue.
+struct ConnectionDetailsPanel: View {
+    let stats: TunnelStats?
+    let publicIP: PublicIPMonitor?
 
     var body: some View {
-        HStack(spacing: 0) {
-            node(icon: "laptopcomputer", title: "This Mac", subtitle: tunnelIP.isEmpty ? client : tunnelIP)
-            link
-            node(icon: "lock.shield", title: "VPN", subtitle: endpoint.isEmpty ? "endpoint" : endpoint)
-            link
-            if let proxy = proxies.first {
-                node(icon: "arrow.triangle.branch", title: "Proxy", subtitle: proxy)
-                link
+        VStack(alignment: .leading, spacing: 10) {
+            GroupBox("Connection") {
+                VStack(alignment: .leading, spacing: 6) {
+                    if let server = serverLine {
+                        row("Server") { CopyableValue(value: server) }
+                    }
+                    if let ip = stats?.serverIP, !ip.isEmpty {
+                        row("Server address") { CopyableValue(value: ip) }
+                    }
+                    if let mtu = stats?.mtu {
+                        row("MTU") { Text("\(mtu)").font(.callout.monospaced()) }
+                    }
+                    if let dns = stats?.dnsServers, !dns.isEmpty {
+                        row("DNS") {
+                            VStack(alignment: .trailing, spacing: 2) {
+                                ForEach(dns, id: \.self) { CopyableValue(value: $0) }
+                            }
+                        }
+                    }
+                    if let domains = stats?.searchDomains, !domains.isEmpty {
+                        row("Search domains") { Text(domains.joined(separator: ", ")).font(.callout) }
+                    }
+                    if let proxies = stats?.proxies, !proxies.isEmpty {
+                        row("Proxies") {
+                            VStack(alignment: .trailing, spacing: 2) {
+                                ForEach(proxies, id: \.self) { CopyableValue(value: $0) }
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            node(icon: "globe", title: "Internet", subtitle: "egress")
+
+            HStack(alignment: .top, spacing: 10) {
+                familyBox(title: "IPv4",
+                          tunnel: stats?.tunnelIPv4,
+                          gateway: stats?.gateway4,
+                          publicAddress: publicIP?.publicIPv4)
+                familyBox(title: "IPv6",
+                          tunnel: stats?.tunnelIPv6,
+                          gateway: stats?.gateway6,
+                          publicAddress: publicIP?.publicIPv6)
+            }
+
+            if let publicIP, let country = publicIP.countryName {
+                HStack(spacing: 6) {
+                    Text(CountryCentroids.flag(for: publicIP.countryCode ?? ""))
+                    Text("Your connection appears from \(country).")
+                        .font(.callout).foregroundStyle(.secondary)
+                    if publicIP.isRefreshing {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Button {
+                            Task { await publicIP.refresh() }
+                        } label: { Image(systemName: "arrow.clockwise") }
+                            .buttonStyle(.borderless)
+                            .help("Check again")
+                    }
+                }
+                .accessibilityElement(children: .combine)
+            }
         }
-        .padding(.vertical, 6)
     }
 
-    private func node(icon: String, title: String, subtitle: String) -> some View {
-        VStack(spacing: 3) {
-            Image(systemName: icon).font(.title2).foregroundStyle(.tint)
-            Text(title).font(.caption).bold()
-            Text(subtitle).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-        }
-        .frame(maxWidth: .infinity)
+    private var serverLine: String? {
+        guard let s = stats, !s.serverEndpoint.isEmpty else { return nil }
+        var line = s.serverEndpoint
+        if let port = s.serverPort, !port.isEmpty { line += ":\(port)" }
+        if let proto = s.serverProto, !proto.isEmpty { line += " · \(proto.uppercased())" }
+        return line
     }
 
-    private var link: some View {
-        Image(systemName: "arrow.right").foregroundStyle(.secondary).font(.caption)
+    private func familyBox(title: String, tunnel: String?, gateway: String?, publicAddress: String?) -> some View {
+        GroupBox(title) {
+            VStack(alignment: .leading, spacing: 6) {
+                row("Tunnel") { valueOrDash(tunnel) }
+                row("Gateway") { valueOrDash(gateway) }
+                row("Public") { valueOrDash(publicAddress) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder private func valueOrDash(_ value: String?) -> some View {
+        if let value, !value.isEmpty {
+            CopyableValue(value: value)
+        } else {
+            Text("—").font(.callout).foregroundStyle(.secondary)
+                .accessibilityLabel("none")
+        }
+    }
+
+    private func row(_ label: String, @ViewBuilder value: () -> some View) -> some View {
+        LabeledContent {
+            value()
+        } label: {
+            Text(label).font(.callout).foregroundStyle(.secondary)
+        }
     }
 }
+

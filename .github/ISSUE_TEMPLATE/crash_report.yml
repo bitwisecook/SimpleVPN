@@ -1,0 +1,68 @@
+# Crash reports are raised by the app itself (Core/CrashDiagnostics.swift + the
+# "SimpleVPN quit unexpectedly" sheet), which pre-fills `diagnostics` and `summary`
+# and puts the full, user-reviewed backtrace on the clipboard to paste into `backtrace`.
+name: Crash report
+description: SimpleVPN quit unexpectedly
+title: "Crash: "
+labels: ["crash"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this — a crash with a backtrace is the most actionable kind
+        of bug report there is.
+
+        SimpleVPN filled in what it could. Please check the details below before
+        submitting: if you chose not to scrub, the backtrace can include file paths
+        containing your user name.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Crash summary
+      description: Filled in by SimpleVPN — the exception type and reason.
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: backtrace
+    attributes:
+      label: Crash details
+      description: Paste here — SimpleVPN copied this to your clipboard (⌘V).
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What were you doing when it crashed?
+      description: |
+        Even a rough note helps enormously — a backtrace says where it broke, not what
+        led there. For example: "clicked Cancel while it was still connecting", or
+        "opened Network Tools while a VPN was reconnecting".
+      placeholder: I was…
+    validations:
+      required: false
+
+  - type: dropdown
+    id: reproducible
+    attributes:
+      label: Does it happen again if you repeat those steps?
+      options:
+        - Every time
+        - Sometimes
+        - Only happened once
+        - Haven't tried
+    validations:
+      required: false
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Versions
+      description: Filled in by SimpleVPN. Versions and which VPN *types* are configured — no VPN names, addresses or credentials.
+      render: markdown
+    validations:
+      required: true

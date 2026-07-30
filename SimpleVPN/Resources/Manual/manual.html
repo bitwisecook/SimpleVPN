@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<!--
+  Copyright 2026 James Deucker (bitwisecook)
+  SPDX-License-Identifier: GPL-3.0-only
+
+  SimpleVPN's bundled manual. Fully self-contained (no external resources).
+  Anchor ids for OpenVPN settings are generated from the descriptor ids in
+  OpenVPNSettingDescriptors.swift ("openvpn.compression" → id="openvpn-compression");
+  keep them in sync. Light/dark follows the system via CSS variables; both
+  palettes meet WCAG AA for body and secondary text.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SimpleVPN Help</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --panel: #f5f5f7;
+    --text: #1d1d1f;          /* 16.1:1 on --bg */
+    --muted: #515157;         /* 7.4:1 on --bg */
+    --accent: #0a66cc;        /* 5.3:1 on --bg */
+    --border: #d2d2d7;
+    --warn-bg: #fff3e0;
+    --warn-border: #e8a33d;
+    --warn-text: #7a4a00;     /* 6.6:1 on --warn-bg */
+    --code-bg: #f0f0f2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1e1e21;
+      --panel: #29292e;
+      --text: #f2f2f4;        /* 14.8:1 on --bg */
+      --muted: #b3b3ba;       /* 7.2:1 on --bg */
+      --accent: #58a6ff;      /* 6.6:1 on --bg */
+      --border: #3d3d44;
+      --warn-bg: #3a2f18;
+      --warn-border: #c8892a;
+      --warn-text: #f0c680;
+      --code-bg: #2c2c31;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    display: flex;
+  }
+  nav {
+    position: sticky; top: 0;
+    width: 240px; min-width: 240px;
+    height: 100vh;
+    overflow-y: auto;
+    padding: 20px 14px 40px;
+    border-right: 1px solid var(--border);
+    background: var(--panel);
+  }
+  nav h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em;
+           color: var(--muted); margin: 18px 6px 6px; }
+  nav a { display: block; padding: 3px 6px; border-radius: 5px;
+          color: var(--text); text-decoration: none; font-size: 13px; }
+  nav a:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  main { flex: 1; max-width: 760px; padding: 28px 40px 80px; }
+  h1 { font-size: 28px; margin: 0 0 4px; }
+  h2 { font-size: 21px; margin: 44px 0 8px; padding-top: 12px; border-top: 1px solid var(--border); }
+  h3 { font-size: 16px; margin: 30px 0 4px; }
+  h2:target, h3:target {
+    animation: flash 1.6s ease-out 1;
+  }
+  @keyframes flash {
+    0%, 40% { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+    100% { background: transparent; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    h2:target, h3:target { animation: none; background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  }
+  p, li { color: var(--text); }
+  .muted { color: var(--muted); }
+  .default { color: var(--muted); font-size: 14px; margin: 0 0 8px; }
+  .warn {
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    color: var(--warn-text);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin: 10px 0;
+  }
+  code {
+    font: 14px ui-monospace, "SF Mono", Menlo, monospace;
+    background: var(--code-bg);
+    padding: 1px 5px; border-radius: 4px;
+  }
+  a { color: var(--accent); }
+  table { border-collapse: collapse; margin: 10px 0; }
+  td, th { border: 1px solid var(--border); padding: 6px 10px; font-size: 14px; text-align: left; }
+</style>
+</head>
+<body>
+
+<nav aria-label="Table of contents">
+  <h2>SimpleVPN</h2>
+  <a href="#importing">Importing VPNs</a>
+  <a href="#endpoints-map">Endpoints &amp; the Map</a>
+  <a href="#certificates">Certificates &amp; Keys</a>
+  <a href="#pausing">Pausing a VPN</a>
+  <a href="#connection-problems">Connection Problems</a>
+  <a href="#privacy">Privacy Notes</a>
+
+  <h2>Common Problems</h2>
+  <a href="#problem-mtu">Large Transfers Stall</a>
+  <a href="#problem-ipv6-leak">IPv6 Leak</a>
+  <a href="#problem-dns-leak">DNS Leak</a>
+  <a href="#problem-lan">Local Devices Unreachable</a>
+  <a href="#problem-udp-blocked">UDP Blocked</a>
+  <a href="#problem-otp-reneg">Repeated Code Prompts</a>
+  <a href="#problem-cipher">Cipher Mismatch</a>
+  <a href="#problem-cert">Server Identity</a>
+  <a href="#problem-idle">Drops When Idle</a>
+  <a href="#problem-captive">Wi-Fi Sign-in Page</a>
+
+  <h2>Connection</h2>
+  <a href="#openvpn-server">Server</a>
+  <a href="#openvpn-port">Port</a>
+  <a href="#openvpn-protocol">Protocol</a>
+  <a href="#openvpn-ip-version">Internet Protocol</a>
+  <a href="#openvpn-connect-timeout">Connection Timeout</a>
+
+  <h2>Reliability</h2>
+  <a href="#openvpn-tun-persist">Stay Connected</a>
+  <a href="#openvpn-retry-on-auth-failed">Retry After Failed Sign-in</a>
+  <a href="#openvpn-autologin-sessions">Session Tokens</a>
+
+  <h2>Network &amp; Privacy</h2>
+  <a href="#openvpn-local-lan">Local Network Access</a>
+  <a href="#openvpn-unused-families">Traffic the VPN Doesn't Carry</a>
+  <a href="#openvpn-google-dns-fallback">Google DNS Fallback</a>
+
+  <h2>Security</h2>
+  <a href="#openvpn-tls-version-min">Minimum TLS Version</a>
+  <a href="#openvpn-tls-cert-profile">Certificate Strictness</a>
+  <a href="#openvpn-compression">Compression</a>
+  <a href="#openvpn-legacy-algorithms">Outdated Encryption</a>
+  <a href="#openvpn-non-preferred-ciphers">Older Data Ciphers</a>
+  <a href="#openvpn-tls-cipher-list">TLS Cipher List</a>
+  <a href="#openvpn-tls-ciphersuites">TLS 1.3 Ciphersuites</a>
+
+  <h2>Proxy</h2>
+  <a href="#openvpn-proxy-host">Proxy Host</a>
+  <a href="#openvpn-proxy-port">Proxy Port</a>
+  <a href="#openvpn-proxy-username">Proxy Username</a>
+  <a href="#openvpn-proxy-cleartext-auth">Unencrypted Proxy Sign-in</a>
+
+  <h2>Troubleshooting</h2>
+  <a href="#openvpn-ssl-debug">TLS Diagnostics</a>
+  <a href="#openvpn-synchronous-dns">Blocking DNS Lookups</a>
+  <a href="#openvpn-no-client-cert">No Client Certificate</a>
+  <a href="#openvpn-key-direction">Key Direction</a>
+
+  <h2>WireGuard</h2>
+  <a href="#wg-address">Addresses</a>
+  <a href="#wg-dns">DNS Servers</a>
+  <a href="#wg-mtu">MTU</a>
+  <a href="#wg-listen-port">Listen Port</a>
+  <a href="#wg-table">Routing Table</a>
+  <a href="#wg-fwmark">Firewall Mark</a>
+  <a href="#wg-public-key">Peer Public Key</a>
+  <a href="#wg-endpoint">Endpoint</a>
+  <a href="#wg-allowed-ips">Allowed IPs</a>
+  <a href="#wg-preshared-key">Pre-shared Key</a>
+  <a href="#wg-keepalive">Persistent Keepalive</a>
+
+  <h2>SSH Tunnels</h2>
+  <a href="#ssh-identity-file">Identity File</a>
+  <a href="#ssh-proxy-jump">Jump Host</a>
+  <a href="#ssh-compression">Compression</a>
+  <a href="#ssh-keepalive">Keepalive</a>
+  <a href="#ssh-connect-timeout">Connect Timeout</a>
+  <a href="#ssh-strict-host-key">Host Key Checking</a>
+  <a href="#ssh-extra-options">Extra Options</a>
+
+  <h2>SSL VPN (OpenConnect)</h2>
+  <a href="#oc-cafile">CA Certificate File</a>
+  <a href="#oc-os">Reported OS</a>
+  <a href="#oc-no-dtls">Disable DTLS</a>
+  <a href="#oc-disable-csd">Skip Host Checker</a>
+  <a href="#oc-reconnect-timeout">Reconnect Timeout</a>
+  <a href="#oc-mtu">MTU</a>
+  <a href="#oc-extra-args">Extra Arguments</a>
+
+  <h2>Native (IKEv2 / IPsec)</h2>
+  <a href="#native-encryption">Encryption</a>
+  <a href="#native-integrity">Integrity / PRF</a>
+  <a href="#native-dh-group">Diffie-Hellman Group</a>
+  <a href="#native-dpd">Dead Peer Detection</a>
+  <a href="#native-pfs">Perfect Forward Secrecy</a>
+  <a href="#native-mobike">MOBIKE</a>
+  <a href="#native-include-all">Send All Traffic</a>
+  <a href="#native-exclude-local">Allow Local Network</a>
+  <a href="#native-disconnect-sleep">Disconnect on Sleep</a>
+</nav>
+
+<main>
+<h1>SimpleVPN Help</h1>
+<p class="muted">Every option explained in plain language: what it does, when to change it, and what can go wrong. Options apply per-VPN and take effect the next time that VPN connects. An option you never change follows the OpenVPN engine's default — including when a future update improves that default.</p>
+
+<h2 id="importing">Importing VPNs</h2>
+<p>SimpleVPN imports standard OpenVPN configuration files (<code>.ovpn</code>). Four ways, all equivalent:</p>
+<ul>
+  <li><strong>Drag and drop</strong> a file onto any SimpleVPN window.</li>
+  <li><strong>Double-click</strong> a <code>.ovpn</code> file in the Finder (or drop it on the Dock icon).</li>
+  <li><strong>File ▸ Import</strong>, or the <strong>+</strong> button in Manage VPNs.</li>
+</ul>
+<p>SimpleVPN checks the file with the same parser the tunnel uses, so a file that imports will also connect. If you import a file you already have, nothing is duplicated — SimpleVPN tells you which VPN already has that configuration. A file with the same <em>name</em> but different contents imports alongside the original with a numbered name.</p>
+
+<h2 id="endpoints-map">Endpoints &amp; the Map</h2>
+<p>A configuration file can list more than one server ("endpoint"). By default SimpleVPN lets OpenVPN try them <em>in order</em> until one answers. The map and the endpoint menu in the main window let you pin one endpoint instead — useful to pick a nearby country or a server that works on your current network.</p>
+<p>Choosing an endpoint simply sets the <a href="#openvpn-server">Server</a>, <a href="#openvpn-port">Port</a> and <a href="#openvpn-protocol">Protocol</a> options for you; choosing <em>Automatic</em> clears them again. Endpoint locations are country-level (see <a href="#privacy">Privacy Notes</a>), so pins sit at the centre of their country.</p>
+
+<h2 id="certificates">Certificates &amp; Keys</h2>
+<p>The Certificates tab of the VPN editor shows what's embedded in the configuration — certificate authority, your client certificate and private key, and any extra TLS key — as readable cards: names, issuer, organisation, expiry, and the web addresses a certificate covers. A red badge means expired; an orange badge means it expires within 30 days.</p>
+<p>Drop a certificate or key file on the matching well and SimpleVPN converts it and embeds it into the configuration for you. Accepted formats: PEM (<code>.pem</code>, <code>.crt</code>, <code>.key</code>), DER (<code>.cer</code>, <code>.der</code>), PKCS#12 bundles (<code>.p12</code>, <code>.pfx</code> — you'll be asked for the bundle password), and OpenVPN static keys. The format is detected from the file's contents, not its name — if you drop a key on the certificate well, SimpleVPN offers to put it in the right place.</p>
+
+<h2 id="pausing">Pausing a VPN</h2>
+<p>Pause stops VPN traffic without tearing the connection down: the secure (TLS) session is kept alive, so <strong>resuming does not ask you to sign in again</strong> — no password, no one-time code. Two kinds of pause:</p>
+<ul>
+  <li><strong>Pause — Block Traffic</strong> (the default): the VPN's routes stay in place, so traffic that would use the VPN simply waits/fails. Nothing leaks. Right for stepping away briefly.</li>
+  <li><strong>Pause &amp; Send Traffic Outside the VPN</strong>: the VPN's routes and DNS are removed, so <em>everything</em> uses your normal connection until you resume. This deliberately sends traffic outside the VPN — the red banner stays up the whole time as a reminder.</li>
+</ul>
+<p>Limits worth knowing:</p>
+<ul>
+  <li>Servers eventually expire idle sessions. If yours does, resuming triggers a silent reconnect using your remembered credentials or the server's session token — and if the VPN needs a fresh one-time code and no session token is available, you'll simply be asked to sign in again.</li>
+  <li>For the most reliable resume across network changes and sleep, turn on <a href="#openvpn-tun-persist">Stay connected through interruptions</a>.</li>
+  <li>A pause never outlives the connection: disconnecting (or a system-initiated stop) clears it.</li>
+</ul>
+
+<h2 id="connection-problems">Connection Problems</h2>
+<p>When a connection fails, SimpleVPN explains the kind of failure rather than showing a raw error:</p>
+<table>
+  <tr><th>Shown as</th><th>Usually means</th><th>Try</th></tr>
+  <tr><td>Sign-in problem</td><td>Wrong username, password or one-time code; or an expired account</td><td>Re-enter credentials; check the OTP hasn't expired</td></tr>
+  <tr><td>Network problem</td><td>No route to the server: offline, captive portal, or the port is blocked</td><td>Check your internet works; try <a href="#openvpn-protocol">TCP</a> on <a href="#openvpn-port">port 443</a></td></tr>
+  <tr><td>Server identity problem</td><td>The server's certificate failed verification</td><td>Contact the VPN's administrator — don't weaken <a href="#openvpn-tls-cert-profile">certificate checks</a> unless they tell you to</td></tr>
+  <tr><td>Couldn't set up the tunnel</td><td>macOS refused the network setup — often another VPN app is active</td><td>Disconnect other VPN software, then retry</td></tr>
+  <tr><td>Proxy problem</td><td>The HTTP proxy refused or dropped the connection</td><td>Check the <a href="#openvpn-proxy-host">proxy settings</a> and its sign-in</td></tr>
+</table>
+<p>While connected, SimpleVPN watches the connection <em>passively</em> (no test traffic is sent): if your Mac keeps sending but nothing comes back — a train entering a tunnel, hotel Wi-Fi dying — the status shows the interruption and, together with <a href="#openvpn-tun-persist">Stay connected through interruptions</a>, recovery happens automatically when the network returns.</p>
+
+<p>The <strong>Connection Doctor</strong>, shown on the connection window, turns these observations into named problems with a one-tap fix. Each card links to the matching section below. Fixes that trade a little security for reachability (allowing older ciphers, blocking a protocol the tunnel doesn't carry) are marked in amber, and every fix is reversible from the VPN's settings.</p>
+
+<h2 id="problem-mtu">Large transfers stall (MTU / fragmentation)</h2>
+<p><strong>Symptom:</strong> small pages and pings work, but large downloads, file copies or e-mail with attachments hang and eventually time out. The throughput graph shows you sending steadily while almost nothing comes back.</p>
+<p><strong>Cause:</strong> the tunnel adds its own headers, so a full-size packet that fit on the underlying network is now too big and gets fragmented. Many networks silently drop the oversized packet <em>and</em> the "please fragment" (ICMP "fragmentation needed") message that would let your Mac shrink it — a "PMTUD blackhole". Small packets slip through; big ones vanish.</p>
+<p><strong>Fix:</strong> the Doctor sets <code>mssfix</code>, which caps the size of the data each end offers so packets always fit — for TCP traffic (the large transfers that stall) this is invisible apart from things starting to work. If the Doctor measured your path it uses the exact value; otherwise it uses a safe 1360. You can tune it under the VPN's Reliability settings.</p>
+
+<h2 id="problem-ipv6-leak">IPv6 traffic may bypass the VPN</h2>
+<p><strong>Symptom:</strong> the tunnel is up, but a "what's my IP" site that supports IPv6 still shows your real address and location.</p>
+<p><strong>Cause:</strong> this tunnel only carries IPv4, yet your Mac still holds a public IPv6 address on Wi-Fi or Ethernet. IPv6-capable sites are reached over that address, outside the VPN — so they see where you really are.</p>
+<p><strong>Fix:</strong> the Doctor turns on <a href="#openvpn-unused-families">block traffic the VPN doesn't carry</a>, which stops your Mac using IPv6 while the IPv4-only tunnel is connected. The proper long-term fix is a tunnel that carries IPv6 too; ask your administrator.</p>
+
+<h2 id="problem-dns-leak">Website lookups may be leaking (DNS)</h2>
+<p><strong>Symptom:</strong> your traffic is protected, but a “DNS leak test” site shows your internet provider's or local network's DNS servers rather than the VPN's.</p>
+<p><strong>Cause:</strong> everything is routed through the VPN, but the VPN didn't hand your Mac a private DNS server — so the <em>names</em> of the sites you visit are still being looked up by whoever runs the local network, revealing where you're browsing even though the traffic itself is encrypted.</p>
+<p><strong>Fix:</strong> there's no safe automatic fix, so the Doctor explains it. The proper fix is server-side: the VPN's administrator should push a DNS server (OpenVPN <code>dhcp-option DNS …</code>). As a stopgap you can set a trusted DNS server manually in <strong>System Settings ▸ Network</strong>.</p>
+
+<h2 id="problem-lan">Local devices unreachable while connected</h2>
+<p><strong>Symptom:</strong> once connected you can no longer reach your printer, network drive, router page or other devices on your home or office network.</p>
+<p><strong>Cause:</strong> this is a full-tunnel VPN — <em>all</em> traffic, including to your own local network, is routed through the tunnel, where those local addresses don't exist.</p>
+<p><strong>Fix:</strong> the Doctor turns on <a href="#openvpn-local-lan">local network access</a>, which keeps traffic to private local addresses on your real network while everything else stays in the tunnel. Some administrators disable this deliberately; if it's re-blocked after connecting, that policy is being enforced server-side.</p>
+
+<h2 id="problem-udp-blocked">This network blocks the VPN's UDP traffic</h2>
+<p><strong>Symptom:</strong> the VPN never connects — or only connects on some networks (home works, the café or hotel doesn't).</p>
+<p><strong>Cause:</strong> the VPN's usual UDP packets are being dropped by the network, while ordinary web traffic on TCP port 443 still works. Guest, hotel and airport Wi-Fi commonly allow only web ports.</p>
+<p><strong>Fix:</strong> the Doctor switches the VPN to <a href="#openvpn-protocol">TCP</a> on <a href="#openvpn-port">port 443</a>, so it looks like normal secure web traffic and usually gets through. UDP is faster, so you may wish to switch back on networks where it works.</p>
+
+<h2 id="problem-otp-reneg">Keeps asking for a new code after connecting</h2>
+<p><strong>Symptom:</strong> you connect fine, then minutes or an hour later the VPN drops with a sign-in failure, even though nothing changed.</p>
+<p><strong>Cause:</strong> OpenVPN renegotiates its keys on a timer, and by default that re-runs the whole sign-in. With a one-time code that code is already spent, so the re-authentication fails.</p>
+<p><strong>Fix:</strong> the Doctor sets <code>reneg-sec 0</code> to stop the client forcing a re-sign-in. The cleaner fix is server-side: the administrator enables session tokens (<code>auth-gen-token</code>) so the first code is exchanged for a token and never demanded again — see <a href="#openvpn-autologin-sessions">Session Tokens</a>.</p>
+
+<h2 id="problem-cipher">Couldn't agree on an encryption cipher</h2>
+<p><strong>Symptom:</strong> the connection fails during setup with a message mentioning the cipher or "data channel".</p>
+<p><strong>Cause:</strong> SimpleVPN offers modern AEAD ciphers (AES-GCM, ChaCha20-Poly1305) by default. An older server may only offer an older cipher such as AES-CBC, so the two can't agree.</p>
+<p><strong>Fix:</strong> the Doctor allows <a href="#openvpn-non-preferred-ciphers">older data ciphers</a> so a shared one can be negotiated. AES-CBC is still secure; this is marked amber only because newer is preferable. The real fix is for the server to offer a modern cipher.</p>
+
+<h2 id="problem-cert">The server's identity couldn't be verified</h2>
+<p><strong>Symptom:</strong> the connection is refused with a certificate or verification error.</p>
+<p><strong>Cause:</strong> the server presented a certificate SimpleVPN doesn't trust — expired, self-signed, issued by a private authority, or the CA in your configuration is missing, wrong, or out of date.</p>
+<p><strong>Fix:</strong> there is no safe automatic fix, so the Doctor only explains it. Contact the VPN's administrator for the correct CA or an updated configuration. Do <em>not</em> weaken <a href="#openvpn-tls-cert-profile">certificate strictness</a> to get past this unless they explicitly tell you which setting to change — a verification failure is exactly what protects you from connecting to an impostor server.</p>
+
+<h2 id="problem-idle">Drops when the connection goes quiet</h2>
+<p><strong>Symptom:</strong> the VPN disconnects after periods of no activity — you come back to your Mac and it's dropped.</p>
+<p><strong>Cause:</strong> firewalls and NAT routers forget connections that have been idle for a while, and the tunnel is torn down.</p>
+<p><strong>Fix:</strong> the Doctor adds a small <code>keepalive</code> (a heartbeat every 10 seconds, giving up after 60) so the tunnel stays alive through quiet periods. Pairing this with <a href="#openvpn-tun-persist">Stay connected through interruptions</a> gives the most resilient connection.</p>
+
+<h2 id="problem-captive">A Wi-Fi sign-in page is blocking the connection</h2>
+<p><strong>Symptom:</strong> on a new Wi-Fi network the VPN won't connect, and web pages redirect to a "accept terms" or "sign in" screen.</p>
+<p><strong>Cause:</strong> this is a captive portal — the network holds all traffic hostage until you complete its sign-in page in a browser.</p>
+<p><strong>Fix:</strong> open any website (try a plain <code>http://</code> address), complete the network's sign-in or terms page, then connect the VPN. The Doctor only detects and explains this; there's nothing to change in the VPN's settings.</p>
+
+<h2 id="privacy">Privacy Notes</h2>
+<ul>
+  <li><strong>Endpoint locations</strong> come from a country-level IP database bundled inside the app (<a href="https://db-ip.com">IP Geolocation by DB-IP</a>, refreshed with app updates). No endpoint information leaves your Mac; only a normal DNS lookup of the server name happens.</li>
+  <li><strong>Your public address</strong> ("appears from…") requires asking an internet service what address it sees. SimpleVPN does this at launch, when a VPN connects or disconnects, and about every five minutes while a window is open. Turn it off entirely in <strong>Settings ▸ Privacy ▸ "Look up my public address"</strong> — off means those requests are never made (the map's you-are-here pin and the public-address rows simply disappear). Nothing else is sent.</li>
+  <li><strong>Secrets</strong> (passwords, proxy and private-key passwords) live only in your Keychain. They are never stored in VPN configuration files or system preferences.</li>
+</ul>
+
+<!-- ══════════════════ Connection ══════════════════ -->
+
+<h2 id="openvpn-server">Server</h2>
+<p class="default">Default: the server in the configuration file.</p>
+<p>Connects to a different server address than the one built into the configuration file, without editing the file. Useful when your provider gives several interchangeable servers, or an administrator asks you to test a specific one.</p>
+<p>The certificate checks still expect the <em>same organisation's</em> server — pointing this at an unrelated server will (correctly) fail verification.</p>
+
+<h2 id="openvpn-port">Port</h2>
+<p class="default">Default: the port in the configuration file (OpenVPN's usual port is 1194).</p>
+<p>Connects on a different port. The most common reason: restrictive networks (hotels, airports, corporate guest Wi-Fi) often block everything except web traffic — if your provider listens on port <code>443</code> too, setting port 443 with <a href="#openvpn-protocol">TCP</a> usually gets through.</p>
+
+<h2 id="openvpn-protocol">Protocol</h2>
+<p class="default">Default: whatever the configuration file says (usually UDP).</p>
+<p>How OpenVPN's packets travel to the server:</p>
+<ul>
+  <li><strong>UDP</strong> — fastest and best for streaming and calls. Some networks block it.</li>
+  <li><strong>TCP</strong> — slower under packet loss, but passes through nearly every network, especially on port 443 where it looks like ordinary secure web traffic.</li>
+  <li><strong>Adaptive</strong> — tries UDP first and falls back to TCP automatically.</li>
+</ul>
+<p>While an <a href="#openvpn-proxy-host">HTTP proxy</a> is configured, only TCP can be used — proxies can't carry UDP.</p>
+
+<h2 id="openvpn-ip-version">Internet Protocol</h2>
+<p class="default">Default: Automatic.</p>
+<p>Forces the connection <em>to the server</em> over IPv4 or IPv6. Leave on Automatic unless one of them is broken on your network — for example, some networks advertise IPv6 but don't actually route it, which can make connecting slow or flaky; forcing IPv4 fixes that. This only affects how you reach the server, not what traffic the tunnel carries (see <a href="#openvpn-unused-families">Traffic the VPN Doesn't Carry</a>).</p>
+
+<h2 id="openvpn-connect-timeout">Connection Timeout</h2>
+<p class="default">Default: keep trying forever.</p>
+<p>How long to keep trying before giving up when the server doesn't answer. "Keep trying forever" is right for a VPN you want up whenever possible; a short timeout is better when you connect on demand and want a fast, clear failure instead of a spinner.</p>
+
+<!-- ══════════════════ Reliability ══════════════════ -->
+
+<h2 id="openvpn-tun-persist">Stay Connected Through Interruptions</h2>
+<p class="default">Default: off.</p>
+<p>Keeps the VPN tunnel alive when your Mac changes networks or wakes from sleep — switching between Wi-Fi and hotspot, a train going through a tunnel — instead of tearing everything down and starting over. Reconnection is faster and apps usually don't notice the gap.</p>
+<p>Worth turning on for laptops that move around. The trade-off is negligible for most people: while the network is gone your traffic waits rather than failing immediately.</p>
+
+<h2 id="openvpn-retry-on-auth-failed">Keep Retrying After a Failed Sign-in</h2>
+<p class="default">Default: off — a rejected sign-in disconnects.</p>
+<p>Treats a rejected sign-in as temporary and retries after a pause. Useful when the server occasionally rejects logins under load, or with time-based one-time passwords that may expire mid-handshake. Leave off if you'd rather know immediately that your password is wrong.</p>
+
+<h2 id="openvpn-autologin-sessions">Use Server Session Tokens</h2>
+<p class="default">Default: on. Only shown for VPNs that sign in automatically.</p>
+<p>Lets the server hand out a temporary session pass after the first connection, so quick reconnects don't need a full sign-in. Only relevant to "autologin" configurations (no username/password). Turn off only if your server's administrator says its session handling misbehaves.</p>
+
+<!-- ══════════════════ Network & Privacy ══════════════════ -->
+
+<h2 id="openvpn-local-lan">Allow Local Network Access</h2>
+<p class="default">Default: off — the VPN decides what is reachable.</p>
+<p>Keeps devices on your home or office network — printers, file servers, smart-home gear — reachable while the VPN is connected, even when the VPN routes everything else through the tunnel. Turn on if printing or local file shares stop working when you connect. Security-conscious workplaces may prefer it off, so untrusted local networks can't reach your Mac's services while you're on the company VPN.</p>
+
+<h2 id="openvpn-unused-families">Traffic the VPN Doesn't Carry</h2>
+<p class="default">Default: let the server decide.</p>
+<p>Some VPNs only carry IPv4, or only IPv6. This decides what happens to the <em>other</em> kind of traffic:</p>
+<ul>
+  <li><strong>Allowed outside the VPN</strong> — it uses your normal connection. Convenient, but that traffic is not protected: a website reachable over IPv6 could see your real address while your IPv4 traffic is tunnelled (a classic "IPv6 leak").</li>
+  <li><strong>Blocked</strong> — traffic the VPN doesn't carry goes nowhere. More private; some sites may not load if they're only reachable over the blocked family.</li>
+</ul>
+
+<h2 id="openvpn-google-dns-fallback">Fall Back to Google DNS</h2>
+<p class="default">Default: off.</p>
+<p>Some VPNs route all your traffic but forget to provide DNS servers — then nothing can look up names and browsing appears broken. With this on, SimpleVPN falls back to Google's public DNS (8.8.8.8) in exactly that situation, so browsing keeps working.</p>
+<p>The privacy trade-off is real: Google can then see your DNS lookups. If your VPN is correctly configured this setting never activates.</p>
+
+<!-- ══════════════════ Security ══════════════════ -->
+
+<h2 id="openvpn-tls-version-min">Minimum TLS Version</h2>
+<p class="default">Default: the configuration file's minimum, or the system minimum.</p>
+<p>The oldest encryption-handshake version you'll accept from the server. TLS 1.2 (2008) and 1.3 (2018) are both considered secure today; requiring 1.3 is the strictest choice and works with modern servers.</p>
+<p>"No minimum" removes the floor entirely — including one set by the configuration file.</p>
+<div class="warn">Only choose "No minimum" for a very old server you must reach, and treat that connection as weakly protected.</div>
+<p>Note: this setting can raise the bar but never lowers one the configuration file already sets higher.</p>
+
+<h2 id="openvpn-tls-cert-profile">Certificate Strictness</h2>
+<p class="default">Default: the configuration file's setting, otherwise the engine's preferred profile.</p>
+<p>How strict to be about the <em>quality</em> of the server's certificate:</p>
+<ul>
+  <li><strong>Modern</strong> — requires at least 2048-bit RSA signed with SHA-256. Right for anything set up in the last decade.</li>
+  <li><strong>Legacy</strong> — additionally accepts 1024-bit RSA and SHA-1 signatures. Those are considered breakable; use only for old corporate servers you cannot avoid.</li>
+  <li><strong>Suite B</strong> — a strict NSA-defined profile used by some government deployments. Everything else will fail to connect.</li>
+</ul>
+<p><em>"Only if the configuration file doesn't specify"</em> applies your choice as a fallback instead of an override — the file's own setting, if present, wins.</p>
+
+<h2 id="openvpn-compression">Compression</h2>
+<p class="default">Default: off (compression stubs only) — recommended.</p>
+<p>Compressing VPN traffic sounds appealing but is dangerous: the <strong>VORACLE</strong> attack (2018) showed that an attacker who can inject content into your traffic can steal secrets — session cookies, tokens — from a compressed VPN stream. Modern traffic is mostly already compressed or encrypted anyway, so the speed win is tiny.</p>
+<ul>
+  <li><strong>Off</strong> — never compress. The safe choice.</li>
+  <li><strong>Downloads only</strong> — accept compressed data <em>from</em> the server but never compress what you send. This avoids the known attack (which needs your uploads compressed) while staying compatible with servers that insist on compression.</li>
+  <li><strong>Full</strong> — compress both directions.</li>
+</ul>
+<div class="warn">"Full" re-enables the attack surface. Use only on a network you trust end-to-end, or when an administrator requires it.</div>
+<p>If the configuration file itself asks for compression, "Downloads only" is the sensible compromise.</p>
+
+<h2 id="openvpn-legacy-algorithms">Allow Outdated Encryption</h2>
+<p class="default">Default: off.</p>
+<p>Permits ciphers that are obsolete and considered unsafe — Blowfish (BF-CBC), single DES, RC2. Some very old servers still use them. Turn on only if connecting fails with a cipher-related error and the server can't be upgraded — and treat the connection as weakly protected.</p>
+
+<h2 id="openvpn-non-preferred-ciphers">Allow Older Data Ciphers</h2>
+<p class="default">Default: off — only modern ciphers (AES-GCM, ChaCha20-Poly1305) are offered.</p>
+<p>Permits older-but-not-broken ciphers such as AES-CBC when the server can't use the modern ones. Unlike <a href="#openvpn-legacy-algorithms">outdated encryption</a>, these are still considered secure — just slower and no longer preferred. Turn on if a somewhat-old server refuses to negotiate a cipher.</p>
+
+<h2 id="openvpn-tls-cipher-list">TLS Cipher List</h2>
+<p class="default">Default: empty — the engine's built-in selection.</p>
+<p>An exact, colon-separated list of TLS (up to 1.2) cipher suites to offer, for servers with unusual requirements. This is an expert escape hatch: leave empty unless a server administrator gave you a precise string to paste. A wrong value simply prevents connecting.</p>
+
+<h2 id="openvpn-tls-ciphersuites">TLS 1.3 Ciphersuites</h2>
+<p class="default">Default: empty — the engine's built-in selection.</p>
+<p>Same as the <a href="#openvpn-tls-cipher-list">TLS cipher list</a>, but for TLS 1.3 connections, which use a separate list. Leave empty unless told otherwise.</p>
+
+<!-- ══════════════════ Proxy ══════════════════ -->
+
+<h2 id="openvpn-proxy-host">Proxy Host</h2>
+<p class="default">Default: no proxy.</p>
+<p>Reaches the VPN server <em>through</em> an HTTP proxy — common on corporate networks where direct outbound connections are blocked and everything must pass through a proxy. Enter the proxy's name or address here and its port next to it; your network's IT documentation will have both.</p>
+<p>Proxies carry TCP only: while a proxy is configured, the <a href="#openvpn-protocol">Protocol</a> effectively becomes TCP.</p>
+
+<h2 id="openvpn-proxy-port">Proxy Port</h2>
+<p class="default">Default: none — required once a proxy host is set.</p>
+<p>The port the proxy listens on. Common values are 8080, 3128, or 80.</p>
+
+<h2 id="openvpn-proxy-username">Proxy Username</h2>
+<p class="default">Default: none.</p>
+<p>Only needed if your proxy requires sign-in. The proxy password is stored in your Keychain, never in the configuration.</p>
+
+<h2 id="openvpn-proxy-cleartext-auth">Allow Unencrypted Proxy Sign-in</h2>
+<p class="default">Default: off — only digest-style sign-in is offered.</p>
+<p>Some proxies only support HTTP "Basic" authentication, which sends the proxy username and password essentially unencrypted <em>on your local network segment</em> (your VPN traffic itself stays encrypted). Turn on only if the proxy refuses to authenticate otherwise.</p>
+<div class="warn">Anyone able to watch your local network can read the proxy credentials. Use a proxy password you don't use anywhere else.</div>
+
+<!-- ══════════════════ Troubleshooting ══════════════════ -->
+
+<h2 id="openvpn-ssl-debug">TLS Diagnostics</h2>
+<p class="default">Default: off.</p>
+<p>Adds TLS handshake detail to the connection log — useful when support is diagnosing certificate or handshake failures. Higher levels are very chatty. Turn back off afterwards; it only slows things down.</p>
+
+<h2 id="openvpn-synchronous-dns">Use Blocking DNS Lookups</h2>
+<p class="default">Default: off.</p>
+<p>Changes <em>how</em> the server's name is looked up during connection (blocking instead of in the background). On unusual network setups — some proxies, some captive portals — the background lookup can misbehave and this fixes it. Otherwise it makes no visible difference.</p>
+
+<h2 id="openvpn-no-client-cert">Don't Send a Client Certificate</h2>
+<p class="default">Default: off — the configuration's certificate is used.</p>
+<p>Connects without identifying this Mac with its client certificate. Most servers that expect a certificate will refuse the connection; support may ask you to try this to isolate certificate problems, and a few servers genuinely run username/password-only.</p>
+
+<h2 id="openvpn-key-direction">Key Direction</h2>
+<p class="default">Default: bidirectional.</p>
+<p>Configurations using an extra HMAC key (<code>tls-auth</code>) have a "direction" that must complement the server's — 0 on one side, 1 on the other, or bidirectional on both. If the configuration file doesn't say and the server uses a direction, connecting fails with authentication-format errors. Only change on an administrator's instruction.</p>
+
+<!-- ══════════════════ WireGuard ══════════════════ -->
+
+<h2 id="wg-address">Addresses</h2>
+<p class="default">Required. From your provider.</p>
+<p>The IP address(es) this device is assigned inside the tunnel, each with a prefix length — e.g. <code>10.0.0.2/32</code> for IPv4, <code>fd00::2/128</code> for IPv6. WireGuard has no dynamic address assignment; the server tells you exactly what to put here.</p>
+
+<h2 id="wg-dns">DNS Servers</h2>
+<p class="default">Optional.</p>
+<p>DNS servers to use while connected — usually one inside the tunnel so that private names resolve. Leave empty to keep your current DNS. Multiple servers are comma-separated.</p>
+
+<h2 id="wg-mtu">MTU</h2>
+<p class="default">Default: auto-detected (usually 1420).</p>
+<p>The largest packet size the tunnel carries. WireGuard picks a sensible value automatically; set it lower (e.g. 1380 or 1280) only if some websites or transfers stall — a classic sign of MTU problems on the path.</p>
+
+<h2 id="wg-listen-port">Listen Port</h2>
+<p class="default">Default: chosen automatically.</p>
+<p>The local UDP port WireGuard listens on. Leave empty and the system picks a free one; set it only if you're accepting inbound connections and need a fixed port.</p>
+
+<h2 id="wg-table">Routing Table</h2>
+<p class="default">Default: auto.</p>
+<p><strong>auto</strong> installs routes for the Allowed IPs so matching traffic goes through the tunnel (and, for a full tunnel, adds a rule to protect the tunnel's own packets). <strong>off</strong> installs no routes at all — only choose this if you're managing routing yourself.</p>
+
+<h2 id="wg-fwmark">Firewall Mark</h2>
+<p class="default">Default: off.</p>
+<p>A firewall mark (fwmark) stamped on the tunnel's own outgoing packets, for advanced policy-based routing setups. Almost nobody needs this — leave it empty unless you're deliberately building custom routing rules.</p>
+
+<h2 id="wg-public-key">Peer Public Key</h2>
+<p class="default">Required. From your provider.</p>
+<p>The server peer's public key (a base64 string). WireGuard uses it to identify the server and encrypt to it — there are no usernames or passwords. If it's wrong, the handshake silently fails and nothing connects.</p>
+
+<h2 id="wg-endpoint">Endpoint</h2>
+<p class="default">Required.</p>
+<p>Where to reach the server: <code>host:port</code>, e.g. <code>vpn.example.com:51820</code>. WireGuard is UDP, so the port matters.</p>
+
+<h2 id="wg-allowed-ips">Allowed IPs</h2>
+<p class="default">Default: 0.0.0.0/0, ::/0 (full tunnel).</p>
+<p>The destinations that go through this peer — WireGuard's routing and its cryptographic access control in one setting. <code>0.0.0.0/0, ::/0</code> sends <em>all</em> traffic through the tunnel (full tunnel). List specific subnets instead (e.g. <code>10.0.0.0/8</code>) to make it a split tunnel that only carries those networks.</p>
+
+<h2 id="wg-preshared-key">Pre-shared Key</h2>
+<p class="default">Optional.</p>
+<p>An extra symmetric key layered on top of the normal WireGuard key exchange, for defence against future quantum attacks. Both sides must share the same value. Only set it if your provider gives you one.</p>
+
+<h2 id="wg-keepalive">Persistent Keepalive</h2>
+<p class="default">Default: off.</p>
+<p>How often (in seconds) to send a tiny keepalive so NAT routers and firewalls don't forget the tunnel and drop it. <code>25</code> is the usual value when you're behind NAT; leave it off on a server with a stable public address.</p>
+
+<!-- ══════════════════ SSH Tunnels ══════════════════ -->
+
+<h2 id="ssh-identity-file">Identity File</h2>
+<p class="default">Optional.</p>
+<p>Path to an SSH private key to authenticate with (e.g. <code>~/.ssh/id_ed25519</code>). Leave empty to use your default keys or a password. Key auth is more secure and needs no typing.</p>
+
+<h2 id="ssh-proxy-jump">Jump Host</h2>
+<p class="default">Optional.</p>
+<p>Reach the target through a bastion/jump server first: SSH connects to the jump host, then hops to the real host from there. Format <code>user@bastion</code> (add <code>:port</code> if non-standard). Common on locked-down networks where only the bastion is reachable.</p>
+
+<h2 id="ssh-compression">Compression</h2>
+<p class="default">Default: off.</p>
+<p>Compresses the SSH stream. Worth trying on very slow or high-latency links; on fast connections it just adds CPU work for no gain.</p>
+
+<h2 id="ssh-keepalive">Keepalive</h2>
+<p class="default">Default: 30 seconds.</p>
+<p>Sends a small keepalive at this interval so NAT routers and firewalls don't silently drop an idle tunnel. Lower it on aggressive networks; 0 disables it.</p>
+
+<h2 id="ssh-connect-timeout">Connect Timeout</h2>
+<p class="default">Default: system default.</p>
+<p>How long to wait while establishing the SSH connection before giving up. Set a short value for a fast, clear failure when a host is unreachable.</p>
+
+<h2 id="ssh-strict-host-key">Host Key Checking</h2>
+<p class="default">Default: Trust on first use.</p>
+<p>How SSH treats the server's identity key: <strong>Trust on first use</strong> accepts an unknown host once and remembers it (warns if it ever changes) — the sensible default. <strong>Only known hosts</strong> refuses anything not already in your known_hosts. <strong>Never check</strong> disables verification entirely.</p>
+<div class="warn">“Never check” leaves you open to man-in-the-middle attacks. Use only for throwaway hosts you don't care about.</div>
+
+<h2 id="ssh-extra-options">Extra Options</h2>
+<p class="default">Optional.</p>
+<p>Raw <code>ssh_config</code> directives, one per line as “Key Value” (e.g. <code>Ciphers aes256-gcm@openssh.com</code>, <code>MACs hmac-sha2-512</code>). An escape hatch for anything this screen doesn't expose.</p>
+
+<!-- ══════════════════ SSL VPN (OpenConnect) ══════════════════ -->
+
+<h2 id="oc-cafile">CA Certificate File</h2>
+<p class="default">Optional.</p>
+<p>A PEM file of certificate authorities to trust for the gateway, for organisations that issue their gateway certificate from a private CA. Not needed when the gateway uses a normal public certificate.</p>
+
+<h2 id="oc-os">Reported OS</h2>
+<p class="default">Default: the real OS.</p>
+<p>The operating system OpenConnect reports to the gateway. Some gateways run different access policies per OS, or only admit “known” clients — setting this to e.g. <code>mac-intel</code> or <code>win</code> can get you in where the default is rejected.</p>
+
+<h2 id="oc-no-dtls">Disable DTLS</h2>
+<p class="default">Default: off (DTLS used when available).</p>
+<p>SSL VPNs carry data over UDP (DTLS) for speed, falling back to TLS. Turn this on to force TLS — useful when the network blocks the UDP port or DTLS behaves badly, at some cost to throughput.</p>
+
+<h2 id="oc-disable-csd">Skip Host Checker</h2>
+<p class="default">Default: off.</p>
+<p>Many corporate gateways run a “host checker” / endpoint-posture script before admitting you. This replaces that step with a no-op so an unmanaged Mac can connect.</p>
+<div class="warn">Bypassing posture checks may violate your organisation's access policy. Some gateways also refuse to connect without it — it cuts both ways.</div>
+
+<h2 id="oc-reconnect-timeout">Reconnect Timeout</h2>
+<p class="default">Default: 300 seconds.</p>
+<p>After the tunnel drops, how long OpenConnect keeps trying to re-establish it before giving up.</p>
+
+<h2 id="oc-mtu">MTU</h2>
+<p class="default">Default: auto-detected.</p>
+<p>The largest packet size the tunnel carries. Leave empty unless transfers stall, then lower it (e.g. 1300).</p>
+
+<h2 id="oc-extra-args">Extra Arguments</h2>
+<p class="default">Optional.</p>
+<p>Raw OpenConnect command-line flags, one per line, for site-specific needs not covered above (e.g. <code>--no-http-keepalive</code>). See <code>man openconnect</code>.</p>
+
+<!-- ══════════════════ Native (IKEv2 / IPsec) ══════════════════ -->
+
+<h2 id="native-encryption">Encryption</h2>
+<p class="default">Default: automatic (macOS negotiates).</p>
+<p>The cipher protecting the IKE and data channels. Leave on Automatic and macOS picks a strong one; set a specific value only if your administrator requires it. AES-256-GCM is a solid modern choice.</p>
+
+<h2 id="native-integrity">Integrity / PRF</h2>
+<p class="default">Default: automatic.</p>
+<p>The hash that protects message integrity and derives keys. Automatic suits almost every server; SHA2-256/384/512 are the modern options if you must pin one.</p>
+
+<h2 id="native-dh-group">Diffie-Hellman Group</h2>
+<p class="default">Default: automatic.</p>
+<p>The key-exchange group for setting up the secure channel. Higher numbers are stronger; 19–21 and 31 are elliptic-curve (fast and strong). It must match a group the server offers, or the connection fails.</p>
+
+<h2 id="native-dpd">Dead Peer Detection</h2>
+<p class="default">Default: medium.</p>
+<p>How aggressively to check the server is still reachable so a dropped tunnel is noticed quickly. Higher reacts faster at the cost of a little extra traffic; Off relies on normal timeouts.</p>
+
+<h2 id="native-pfs">Perfect Forward Secrecy</h2>
+<p class="default">Default: off.</p>
+<p>Runs a fresh key exchange when rekeying the data channel, so compromising one key can't decrypt earlier traffic. Turn on if the server requires PFS.</p>
+
+<h2 id="native-mobike">MOBIKE</h2>
+<p class="default">Default: on.</p>
+<p>MOBIKE lets an IKEv2 tunnel survive your Mac changing networks (Wi-Fi to Ethernet, for instance) without reconnecting. Disable it only if a particular server misbehaves with MOBIKE enabled.</p>
+
+<h2 id="native-include-all">Send All Traffic</h2>
+<p class="default">Default: off.</p>
+<p>Routes <em>all</em> your traffic through the VPN (full tunnel). Off carries only the networks the server routes to you (split tunnel).</p>
+
+<h2 id="native-exclude-local">Allow Local Network</h2>
+<p class="default">Default: on (when sending all traffic).</p>
+<p>Even with everything going through the VPN, keep your local network — printers, file shares, other devices — directly reachable. Turn off for the strictest isolation.</p>
+
+<h2 id="native-disconnect-sleep">Disconnect on Sleep</h2>
+<p class="default">Default: off.</p>
+<p>Tear the VPN down when the Mac sleeps rather than resuming it on wake. Leave off to have the tunnel come straight back after sleep.</p>
+
+<hr style="border: none; border-top: 1px solid var(--border); margin-top: 48px">
+<p class="muted" style="font-size: 13px">SimpleVPN uses the OpenVPN 3 engine. <a href="https://db-ip.com">IP Geolocation by DB-IP</a>, licensed CC BY 4.0.</p>
+</main>
+</body>
+</html>

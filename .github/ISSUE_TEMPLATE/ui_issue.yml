@@ -1,0 +1,94 @@
+# Copyright 2026 James Deucker (bitwisecook)
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# UI / appearance issue form. SimpleVPN ▸ Help ▸ "Report a UI Issue…" opens this
+# with `diagnostics` and `appearance` prefilled. Field ids are load-bearing —
+# renaming one breaks the app's prefill link.
+name: UI or appearance issue
+description: Something looks wrong, is cut off, misaligned, unreadable, or animates badly
+labels: ["bug", "ui"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## A picture settles it in seconds
+
+        UI bugs are very hard to fix from a description alone — layout depends on
+        window size, display scale, appearance and accessibility settings.
+        **Please attach a screenshot, or a short screen recording if it's about
+        animation or something transient.**
+
+        Take one with your screenshot keys (SimpleVPN ▸ Help ▸ "Report a UI Issue…"
+        shows the exact keys *you* have configured), then **drag the file into the
+        box below** — GitHub uploads it.
+
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: Screenshot or screen recording
+      description: >
+        Drag the image or video file here. If it's an animation, a glitch that
+        flashes past, or anything about motion, a recording is much more useful
+        than a still.
+      placeholder: Drag your screenshot or recording into this box…
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-looks-wrong
+    attributes:
+      label: What looks wrong?
+      description: Point at what's in the picture — and what you expected instead.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where in the app?
+      options:
+        - Not sure
+        - Menu bar icon
+        - Menu bar dropdown
+        - Main window — sidebar (VPN list)
+        - Main window — connection pane
+        - Main window — live details / map / graph
+        - Manage VPNs
+        - Settings / options forms
+        - Network Tools
+        - Traffic log
+        - About / Help
+        - Somewhere else
+    validations:
+      required: true
+
+  - type: textarea
+    id: appearance
+    attributes:
+      label: Appearance and accessibility context
+      description: >
+        Pre-filled by "Report a UI Issue…" — light/dark, display scale, and whether
+        Increase Contrast / Reduce Motion / Reduce Transparency are on. These change
+        layout and rendering, so they matter.
+      placeholder: |
+        Appearance: Dark, 2x scale
+        Accessibility: Reduce Motion
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: >
+        Pre-filled — app / extension / macOS versions and which VPN *types* are
+        configured. No names, addresses or credentials.
+      placeholder: |
+        | App | |
+        | macOS | |
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Before you submit
+      options:
+        - label: I've checked my screenshot/recording doesn't show anything I'd rather keep private (hostnames, addresses, usernames, other windows).
+          required: true

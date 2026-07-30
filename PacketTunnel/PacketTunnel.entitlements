@@ -14,9 +14,9 @@
 	</array>
 	<key>com.apple.security.network.client</key>
 	<true/>
-	<key>keychain-access-groups</key>
-	<array>
-		<string>$(AppIdentifierPrefix)com.bragi0.SimpleVPN.shared</string>
-	</array>
+	<!-- No keychain-access-groups: the extension runs as root in the system
+	     context and can't read the user's keychain anyway; credentials are handed
+	     to it in-memory via startTunnel(options:). Dropping the group is least-
+	     privilege and signing-safe (entitlements may be a subset of the profile). -->
 </dict>
 </plist>

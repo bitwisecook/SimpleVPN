@@ -104,3 +104,30 @@ as `{password}{otp}` (no `static-challenge`). No client cert → `ENABLE_EXTERNA
   in the profile.
 - **Distribution:** system extension now (DMG sideload). A thin **app-extension** variant is added later for
   TestFlight/Mac App Store (which can't ship system extensions), sharing logic via a `TunnelCore` framework.
+
+## Settings/overrides architecture (M7 rework)
+
+- **`Shared/OpenVPNOverrides.swift`** — per-VPN engine overrides. Invariant: every field Optional,
+  `nil` = "engine default, never touched", never serialized; lenient decoding tolerates app↔extension
+  version skew. Persisted as one JSON blob at `providerConfiguration["overrides"]` (omitted when empty);
+  `providerConfiguration["vpnType"]` carries `VPNKind` (absent ⇒ openvpn). Secrets (proxy/private-key
+  passwords) go through `KeychainCredentialStore` (per-profile `secrets` service → read-once session
+  payload), NEVER providerConfiguration. Bridge side: `OVPNClientSettings` (apply-only-non-nil onto
+  `ClientAPI::Config` in `OpenVPN3Bridge.mm`).
+- **`SimpleVPN/Core/`** — UI-free layer (no SwiftUI/AppKit imports): descriptor registry
+  (`OpenVPNSettingDescriptors` — stable ids like `openvpn.compression` drive the Options form, manual
+  anchors, a11y labels, and future CLI/MDM addressing), `Policy` (MDM-shaped stub; all enable/disable
+  routes through it), profile evaluation (real `eval_config` via `OVPNProfileEvaluator.mm` — the app
+  links the engine xcframework for this), import pipeline, certificate import, endpoints/GeoIP,
+  failure diagnostics. When the CLI/API lands this group becomes the `TunnelCore`-style framework.
+- **Naming rule:** protocol-specific code carries the protocol's name (`OpenVPN*`/`OVPN*`); shared
+  infrastructure stays protocol-neutral. New VPN kinds (WireGuard, IPsec, …) switch on `VPNKind` at
+  four seams: NE protocol object, editor form, importer, connect flow.
+- **Manual:** `SimpleVPN/Resources/Manual/manual.html`, WKWebView window id "manual", anchors generated
+  from descriptor ids — keep them in sync.
+- **GeoIP:** country-level DB-IP mmdb under `Vendor/geoip/` (gitignored); `Tools/fetch-geoip.sh`
+  refreshes it when >1 week old (hooked into `build-notarize-install.sh`, soft-fails offline).
+  Map land geometry: `Tools/convert-naturalearth.py` → `SimpleVPN/Resources/Map/land-110m.bin`.
+- **Failure UX:** extension classifies openvpn3 events into `TunnelIncident`s (App Group); the app runs
+  failure-time diagnostics (DNS/reach/TLS/captive-portal, baseline comparison) — active probes ONLY on
+  failure; live link health is judged passively from byte counters.

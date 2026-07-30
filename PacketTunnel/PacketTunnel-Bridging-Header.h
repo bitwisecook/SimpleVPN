@@ -7,3 +7,4 @@
 //
 
 #import "OpenVPN3Bridge.h"
+#import "OpenConnectBridge.h"

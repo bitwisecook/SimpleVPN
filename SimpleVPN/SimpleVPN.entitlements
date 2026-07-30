@@ -12,6 +12,14 @@
 	<array>
 		<string>group.com.bragi0.SimpleVPN</string>
 	</array>
+	<!-- Hardened-runtime resource access for CoreLocation. WITHOUT this, locationd
+	     refuses to show the prompt at all and logs "Client has supported the hardened
+	     runtime but doesn't have the entitlement, not sending #AuthPrompt message" —
+	     the request silently does nothing. Being non-sandboxed does not exempt us.
+	     The permission itself is still off by default and only requested when the user
+	     turns on Settings ▸ General ▸ Privacy ▸ "Use this Mac's location". -->
+	<key>com.apple.security.personal-information.location</key>
+	<true/>
 	<key>keychain-access-groups</key>
 	<array>
 		<string>$(AppIdentifierPrefix)com.bragi0.SimpleVPN.shared</string>

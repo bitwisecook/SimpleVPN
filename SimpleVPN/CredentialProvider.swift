@@ -28,13 +28,15 @@ struct ManualCredentialProvider: CredentialProvider {
     var username: String
     var password: String
     var otp: String
+    var privateKeyPassphrase: String = ""
 
     func isAvailable(for profile: String) async -> Bool { true }
 
     func resolve(profile: String, fields: Set<CredentialField>) async throws -> RawCredentials {
         RawCredentials(username: username.isEmpty ? nil : username,
                        password: password.isEmpty ? nil : password,
-                       otp: otp.isEmpty ? nil : otp)
+                       otp: otp.isEmpty ? nil : otp,
+                       privateKeyPassphrase: privateKeyPassphrase.isEmpty ? nil : privateKeyPassphrase)
     }
 }
 

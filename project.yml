@@ -34,6 +34,13 @@ settings:
     DEAD_CODE_STRIPPING: YES
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     STRING_CATALOG_GENERATE_SYMBOLS: YES
+    # Crash reports have to be readable when they come back from a user over GitHub, and
+    # there is no symbol-upload service behind this app. So: always produce a dSYM, and
+    # do NOT strip the shipped binary — an unstripped release means an .ips a user pastes
+    # is already symbolised for our frames instead of being bare addresses.
+    DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+    STRIP_INSTALLED_PRODUCT: NO
+    COPY_PHASE_STRIP: NO
 
 targets:
   # ---- Containing app (SwiftUI, macOS only) ----
@@ -44,12 +51,19 @@ targets:
       - path: SimpleVPN
         excludes:
           - "SimpleVPN.entitlements"
+          - "Info.plist"
       - Shared
+      # Country-level GeoIP DB for endpoint pins (fetched/refreshed by
+      # Tools/fetch-geoip.sh; gitignored, so optional at generation time).
+      - path: Vendor/geoip/dbip-country-lite.mmdb
+        buildPhase: resources
+        optional: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.bragi0.SimpleVPN
         PRODUCT_NAME: SimpleVPN
-        GENERATE_INFOPLIST_FILE: YES
+        GENERATE_INFOPLIST_FILE: YES                 # synthesize the standard keys onto our plist
+        INFOPLIST_FILE: SimpleVPN/Info.plist         # hand-authored: .ovpn document type / UTI
         INFOPLIST_KEY_CFBundleDisplayName: SimpleVPN
         # Container app must NOT be sandboxed for the Developer ID / system-extension path
         # (a sandboxed app can't talk to systemextensionsd). The MAS/appex variant is sandboxed.
@@ -59,9 +73,37 @@ targets:
         REGISTER_APP_GROUPS: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        # The app links the OpenVPN3 engine solely for static profile evaluation
+        # (OVPNProfileEvaluator → OpenVPNClientHelper::eval_config). Same C++
+        # settings as the PacketTunnel target.
+        SWIFT_OBJC_BRIDGING_HEADER: "SimpleVPN/SimpleVPN-Bridging-Header.h"
+        CLANG_CXX_LANGUAGE_STANDARD: "c++20"
+        CLANG_CXX_LIBRARY: "libc++"
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/Vendor/openvpn3-include"
+          - "$(SRCROOT)/Vendor/libssh2-include"
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - "$(inherited)"
+          - "ASIO_STANDALONE=1"
+          - "HAVE_LZ4=1"
+          - "USE_ASIO=1"
+          - "USE_OPENSSL=1"
+          - "USE_TUN_BUILDER=1"
+          - "FMT_HEADER_ONLY=1"
     dependencies:
       - target: PacketTunnel
         embed: true
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+      - sdk: libresolv.tbd
+      - framework: Vendor/OpenVPNEngine.xcframework
+        embed: false
+        link: true
+      # In-process SSH engine (SOCKS / port-forwards / net-tunnel) via libssh2.
+      - framework: Vendor/SSHEngine.xcframework
+        embed: false
+        link: true
+      - sdk: libz.tbd
 
   # ---- Packet tunnel provider (system extension, Developer ID) ----
   # Sysext is the DMG/sideload path. Appex variant for TestFlight/MAS is added later; both will
@@ -93,6 +135,7 @@ targets:
         CLANG_CXX_LIBRARY: "libc++"
         HEADER_SEARCH_PATHS:
           - "$(SRCROOT)/Vendor/openvpn3-include"
+          - "$(SRCROOT)/Vendor/openconnect-include"
         GCC_PREPROCESSOR_DEFINITIONS:
           - "$(inherited)"
           - "ASIO_STANDALONE=1"
@@ -109,6 +152,14 @@ targets:
       - framework: Vendor/OpenVPNEngine.xcframework
         embed: false
         link: true
+      # OpenConnect SSL-VPN engine (Fortinet / F5 APM / AnyConnect / GlobalProtect),
+      # in-process. System libxml2/z/iconv are linked here (openconnect needs them).
+      - framework: Vendor/OpenConnectEngine.xcframework
+        embed: false
+        link: true
+      - sdk: libxml2.tbd
+      - sdk: libz.tbd
+      - sdk: libiconv.tbd
 
   # ---- Tests ----
   SimpleVPNTests:
@@ -120,6 +171,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.bragi0.SimpleVPNTests
+        GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "Apple Development"
         PROVISIONING_PROFILE_SPECIFIER: ""
@@ -133,6 +185,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.bragi0.SimpleVPNUITests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated   # XCTest template overrides are nonisolated
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "Apple Development"
         PROVISIONING_PROFILE_SPECIFIER: ""

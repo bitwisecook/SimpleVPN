@@ -12,36 +12,206 @@ import NetworkExtension
 import CoreGraphics
 
 enum UI {
-    static func color(_ s: NEVPNStatus) -> Color {
-        switch s {
-        case .connected: return .green
-        case .connecting, .reasserting: return .yellow
-        case .disconnecting: return .orange
-        default: return .secondary
-        }
-    }
+    // (status→color lives in DotState.color — the single source; a duplicate here
+    // had drifted to a contradictory mapping and was unused, so it's gone.)
     static var ovpnType: UTType { UTType(filenameExtension: "ovpn") ?? .data }
     static var appVersion: String {
         let i = Bundle.main.infoDictionary
         return "v\(i?["CFBundleShortVersionString"] as? String ?? "?") (build \(i?["CFBundleVersion"] as? String ?? "?"))"
     }
+    /// THE cancel-a-connection look, everywhere it appears: xmark.circle.fill in this
+    /// softened red. One definition because the sidebar and the header once drifted into
+    /// two dialects of the same action (bare bright-red ✕ vs filled soft-red circle) —
+    /// same session, same screen, different buttons.
+    static let cancelRed = Color(red: 0.82, green: 0.36, blue: 0.36)
+
     static func isActive(_ s: NEVPNStatus) -> Bool { s == .connected || s == .connecting || s == .reasserting }
-    static func parseRemote(_ ovpn: String) -> String? {
-        for line in ovpn.split(separator: "\n") {
-            let parts = line.split(separator: " ", omittingEmptySubsequences: true)
-            if parts.count >= 2, parts[0] == "remote" { return String(parts[1]) }
+    // Remote parsing lives with the engine evaluator now (ProfileEvaluation) and
+    // the multi-remote scanner (EndpointScanner).
+}
+
+/// Everything a status dot can say. Richer than NEVPNStatus: degraded (the
+/// train-tunnel state, from reasserting or passive stall detection) and
+/// captive-portal each get their own color and rhythm.
+enum DotState: Equatable {
+    case off             // disconnected/invalid — faint steady ember
+    case busy            // connecting / disconnecting — quick breath + ripple
+    case connected       // settles with a damped landing, then perfectly steady
+    case paused          // user chose this — steady half-dim, no rhythm, no nagging
+    case degraded        // connection lost/stalled — slow amber breath, no ripple
+    case captivePortal   // sign-in page in the way — indigo knock-knock + beacon
+
+    /// Standard mapping. `stalled` comes from passive traffic analysis where a
+    /// monitor is running; `captive` from the failure diagnostics; `paused` is
+    /// app-side state (NEVPNStatus has no paused).
+    static func from(status: NEVPNStatus, stalled: Bool = false, captive: Bool = false,
+                     paused: Bool = false) -> DotState {
+        if captive { return .captivePortal }
+        switch status {
+        case .connected: return paused ? .paused : (stalled ? .degraded : .connected)
+        case .reasserting: return .degraded
+        case .connecting, .disconnecting: return .busy
+        default: return .off
         }
-        return nil
+    }
+
+    /// Map a subprocess-engine status (SSH / OpenConnect) into the same dot
+    /// language used for OpenVPN, so every backend reads identically.
+    static func from(subprocess s: SubprocessTunnelManager.Status) -> DotState {
+        switch s {
+        case .connected: .connected
+        case .connecting: .busy
+        case .failed: .degraded
+        case .disconnected: .off
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .off: .secondary
+        case .busy: .yellow
+        case .connected: .green
+        case .paused: .green
+        case .degraded: .orange
+        case .captivePortal: .indigo
+        }
     }
 }
 
-/// Sidebar row: logo · name · label pills.
+/// The status dot, alive only while something needs attention. Each animated
+/// state has its own rhythm — busy: quick lopsided breath + ripple; degraded:
+/// a slow, deep amber breath (deliberately eye-catching but unhurried);
+/// captive portal: an indigo "knock-knock… rest" double pulse with a slow
+/// beacon ring. Connected settles through a damped landing into a perfectly
+/// steady dot (no perpetual motion), and off fades quickly to a faint ember.
+///
+/// Transitions never jump-cut between rhythms: on every state change the
+/// animation amplitude eases to zero and the new rhythm swells up from calm.
+/// Reduce Motion replaces all rhythms with static opacities.
+///
+/// WINDOWS ONLY. The TimelineView below is correct here, but must never be used
+/// for the menu-bar label: measured on macOS 26.6, a TimelineView in a
+/// MenuBarExtra label re-enters SwiftUI's update loop and spins the main thread
+/// at 100%. The menu bar has its own dot, driven from a Task — see MenuBarIcon
+/// and MenuBarLabel in MenuBarView.swift.
+struct StatusDot: View {
+    let state: DotState
+    var size: CGFloat = 8
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// 0 = at rest, 1 = the state's rhythm at full swing.
+    @State private var amplitude: Double = 0
+
+    /// Convenience for call sites that only know the NE status.
+    init(status: NEVPNStatus, size: CGFloat = 8) {
+        self.init(state: .from(status: status), size: size)
+    }
+
+    init(state: DotState, size: CGFloat = 8) {
+        self.state = state
+        self.size = size
+    }
+
+    private var animated: Bool {
+        switch state {
+        case .busy, .degraded, .captivePortal: !reduceMotion
+        case .off, .connected, .paused: false
+        }
+    }
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: amplitude == 0)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let motion = motion(at: t)
+
+            ZStack {
+                Circle()   // ripple / beacon ring
+                    .strokeBorder(state.color, lineWidth: max(1, size / 7))
+                    .scaleEffect(1 + motion.ringPhase * 1.5)
+                    .opacity((1 - motion.ringPhase) * motion.ringStrength * amplitude)
+                Circle()   // core
+                    .fill(state.color)
+                    .scaleEffect(restScale + amplitude * motion.scaleSwing)
+                    .opacity(restOpacity + amplitude * motion.opacitySwing)
+            }
+        }
+        .frame(width: size, height: size)
+        .animation(.easeOut(duration: 0.25), value: state)   // color/dim crossfade
+        .onChange(of: state, initial: true) {
+            // Dip through calm, then take up the new rhythm — no rhythm ever
+            // cuts directly into another. Settling into connected/off is the
+            // same dip, ending at rest: the breath damps out into a steady dot
+            // while the color crossfades.
+            withAnimation(.easeOut(duration: 0.3)) { amplitude = 0 }
+            if animated {
+                withAnimation(.easeIn(duration: 0.45).delay(0.3)) { amplitude = 1 }
+            }
+        }
+        .accessibilityHidden(true)   // rows/pills carry the status in text
+    }
+
+    // MARK: Rhythms
+
+    private struct Motion {
+        var scaleSwing: Double = 0
+        var opacitySwing: Double = 0
+        var ringPhase: Double = 0      // 0…1 across the ring's cycle
+        var ringStrength: Double = 0
+    }
+
+    private func motion(at t: Double) -> Motion {
+        switch state {
+        case .busy:
+            // Quick lopsided breath (fundamental + offset harmonic) + busy ripple.
+            let wave = sin(t * 2 * .pi / 1.7) + 0.3 * sin(t * 4 * .pi / 1.7 + 0.9)
+            return Motion(scaleSwing: 0.11 * wave,
+                          opacitySwing: -0.2 * (0.5 + 0.5 * wave),
+                          ringPhase: t.truncatingRemainder(dividingBy: 1.25) / 1.25,
+                          ringStrength: 0.5)
+        case .degraded:
+            // Slow, deep breath — attention through depth and patience, not speed.
+            let wave = sin(t * 2 * .pi / 2.6)
+            return Motion(scaleSwing: 0.09 * wave,
+                          opacitySwing: -0.35 * (0.5 + 0.5 * wave))
+        case .captivePortal:
+            // Knock-knock… rest: two soft pulses early in a 3 s cycle (gaussian
+            // envelopes, so they swell rather than blink), plus a slow beacon ring.
+            let cycle = t.truncatingRemainder(dividingBy: 3.0)
+            func pulse(at center: Double) -> Double {
+                let d = (cycle - center) / 0.16
+                return exp(-d * d)
+            }
+            let knock = pulse(at: 0.35) + pulse(at: 0.95)
+            return Motion(scaleSwing: 0.14 * knock,
+                          opacitySwing: -0.3 + 0.3 * min(1, knock),
+                          ringPhase: cycle / 3.0,
+                          ringStrength: 0.4)
+        case .off, .connected, .paused:
+            return Motion()
+        }
+    }
+
+    private var restScale: Double { state == .off ? 0.9 : 1 }
+
+    private var restOpacity: Double {
+        switch state {
+        case .connected: 1
+        case .paused: 0.5                                // steady half-dim: intentional, not alarming
+        case .off: 0.3                                   // faint ember
+        case .busy, .degraded: reduceMotion ? 0.65 : 0.95
+        case .captivePortal: reduceMotion ? 0.65 : 0.7   // knocks lift it to full
+        }
+    }
+}
+
+/// Sidebar row: logo · name · label pills. `dotState` lets a caller pass a
+/// reachability-aware state (stalled/paused/captive); default is status-only.
 struct VPNRow: View {
     let profile: VPNController.Profile
     let labelDefs: [LabelDef]
+    var dotState: DotState? = nil
     var body: some View {
         HStack(spacing: 8) {
-            LogoBadge(id: profile.id, status: profile.status)
+            LogoBadge(id: profile.id, status: profile.status, dotState: dotState)
             Text(profile.name).lineLimit(1).truncationMode(.tail)
             Spacer(minLength: 6)
             ForEach(labelDefs) { LabelPill(label: $0) }
@@ -52,11 +222,15 @@ struct VPNRow: View {
 struct LogoBadge: View {
     let id: String
     let status: NEVPNStatus
+    /// Pass a richer state (stall/captive-portal aware) where the caller has one.
+    var dotState: DotState? = nil
     var body: some View {
+        let state = dotState ?? .from(status: status)
         ZStack(alignment: .bottomTrailing) {
             logo.frame(width: 22, height: 22).clipShape(RoundedRectangle(cornerRadius: 5))
-            Circle().fill(UI.color(status)).frame(width: 7, height: 7)
-                .overlay(Circle().strokeBorder(.white.opacity(0.9), lineWidth: 1))
+            StatusDot(state: state, size: 7)
+                .overlay(Circle().strokeBorder(.white.opacity(0.9), lineWidth: 1)
+                    .opacity(state == .connected ? 1 : 0))
         }
     }
     @ViewBuilder private var logo: some View {
@@ -84,18 +258,24 @@ struct LogoWell: View {
     }
 }
 
-/// Liquid Glass status pill (plain capsule fallback pre-macOS 26).
-struct StatusPill: View {
-    let status: NEVPNStatus
+/// Live reachability chip: is the tunnel actually passing traffic right now?
+/// Reachable (green) · Idle (dim, no traffic either way) · No response (amber,
+/// we're sending but nothing comes back).
+struct ReachabilityPill: View {
+    let health: ThroughputMonitor.LinkHealth
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
-        let content = HStack(spacing: 6) {
-            Circle().fill(UI.color(status)).frame(width: 9, height: 9)
-            Text(VPNController.statusText(status)).font(.callout)
+        HStack(spacing: 5) {
+            StatusDot(state: health.reachabilityDot, size: 7)
+            Text(health.reachabilityLabel).font(.callout).foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 12).padding(.vertical, 6)
-
-        if #available(macOS 26, *) { content.glassEffect(.regular, in: .capsule) }
-        else { content.background(.quaternary, in: .capsule) }
+        .padding(.horizontal, 10).padding(.vertical, 5)
+        // Glass pill tinted by health; the tint cross-fades green→amber as the link
+        // stalls/recovers, so a reachability change is felt, not just re-labelled.
+        .glassEffect(.regular.tint(health.reachabilityDot.color.opacity(0.18)), in: .capsule)
+        .animation(reduceMotion ? nil : .smooth(duration: 0.4), value: health)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(health.reachabilityLabel)
     }
 }
 
@@ -116,6 +296,48 @@ struct LabelChip: View {
     }
 }
 
+/// A monospaced, selectable value with a hover-reveal copy button and a Copy
+/// context menu — used for every IP address, fingerprint, and identifier the
+/// user might want on the clipboard.
+struct CopyableValue: View {
+    let value: String
+    var font: Font = .callout.monospaced()
+
+    @State private var hovering = false
+    @State private var copied = false
+
+    private func copy() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(value)
+                .font(font)
+                .textSelection(.enabled)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Button {
+                copy()
+                copied = true
+                Task { try? await Task.sleep(for: .seconds(1.2)); copied = false }
+            } label: {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .foregroundStyle(copied ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
+            }
+            .buttonStyle(.borderless)
+            .opacity(hovering || copied ? 1 : 0)
+            .help("Copy")
+            .accessibilityLabel(copied ? "Copied" : "Copy \(value)")
+        }
+        .onHover { hovering = $0 }
+        .contextMenu { Button("Copy") { copy() } }
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(value)
+    }
+}
+
 /// Minimal text document for exporting an .ovpn.
 struct OVPNDocument: FileDocument {
     static var readableContentTypes: [UTType] { [UTType(filenameExtension: "ovpn") ?? .data, .plainText] }
@@ -126,5 +348,40 @@ struct OVPNDocument: FileDocument {
     }
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
         FileWrapper(regularFileWithContents: Data(text.utf8))
+    }
+}
+
+
+/// A platform-free activity spinner for transition-animated contexts.
+///
+/// SwiftUI's ProgressView on macOS is hosted AppKit (the layout-loop crash's context
+/// log names it: AppKitPlatformViewHost<…AppKitProgressView>). Animating a scale/blur
+/// transition over one — the connecting pill's glass morph, the sidebar row's
+/// .blurReplace — calls setFrameTransform: on the hosted view every frame, which
+/// changes its backing properties, invalidates intrinsic-size constraints MID-PASS,
+/// and re-enters layout until AppKit's guard throws ("more Update Constraints in
+/// Window passes than there are views"). Every crash (builds 50→63) happened at the
+/// .connecting transition where those spinners animate. A drawn spinner keeps the
+/// animated subtree free of platform views entirely.
+struct DrawnSpinner: View {
+    var size: CGFloat = 14
+    var lineWidth: CGFloat = 1.8
+    @State private var spinning = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Circle()
+            .trim(from: 0.15, to: 1)
+            .stroke(.secondary, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+            .frame(width: size, height: size)
+            .rotationEffect(.degrees(spinning ? 360 : 0))
+            .onAppear {
+                // Reduce Motion: a static open ring still reads as "busy"; no spin.
+                guard !reduceMotion else { return }
+                withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) {
+                    spinning = true
+                }
+            }
+            .accessibilityLabel("In progress")
     }
 }

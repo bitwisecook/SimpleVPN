@@ -24,6 +24,17 @@ struct TunnelStats: Codable, Sendable, Equatable {
     var dnsServers: [String]       // DNS servers pushed by the tunnel
     var proxies: [String]          // HTTP/HTTPS proxies or PAC URL pushed by the tunnel
 
+    // Dual-stack / transport detail for the connection-details panel. Optional so
+    // samples written by an older extension (or read by an older app) still decode.
+    var tunnelIPv6: String? = nil      // assigned in-tunnel IPv6 address
+    var gateway4: String? = nil        // in-tunnel IPv4 gateway
+    var gateway6: String? = nil        // in-tunnel IPv6 gateway
+    var serverIP: String? = nil        // resolved transport address
+    var serverPort: String? = nil      // transport port
+    var serverProto: String? = nil     // transport protocol ("udp"/"tcp"…)
+    var searchDomains: [String]? = nil // pushed DNS search domains
+    var mtu: Int? = nil                // tunnel MTU
+
     var uptime: TimeInterval { max(0, timestamp - connectedSince) }
 }
 

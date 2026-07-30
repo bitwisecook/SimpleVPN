@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Copyright 2026 James Deucker (bitwisecook)
+  SPDX-License-Identifier: GPL-3.0-only
+
+  Hand-authored keys only: the document type + UTI that make Finder
+  double-click / Dock drops open .ovpn files in SimpleVPN. Everything else
+  (bundle id, versions, display name…) is synthesized by Xcode via
+  GENERATE_INFOPLIST_FILE, same pattern as PacketTunnel/Info.plist.
+-->
+<plist version="1.0">
+<dict>
+    <!-- Shown in the macOS permission prompt, which only ever appears if the user turns
+         on Settings ▸ General ▸ Privacy ▸ "Use this Mac's location" (off by default).
+         See Core/LocationAuthority.swift. -->
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Shows where you are on SimpleVPN's maps and lets SimpleVPN read the name of the Wi-Fi network you're on, so it can warn you when a VPN has failed to connect from this network before. This stays on your Mac.</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>OpenVPN Configuration</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.bragi0.SimpleVPN.ovpn</string>
+            </array>
+        </dict>
+    </array>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.bragi0.SimpleVPN.sso</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>simplevpn-sso</string>
+            </array>
+        </dict>
+    </array>
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.bragi0.SimpleVPN.ovpn</string>
+            <key>UTTypeDescription</key>
+            <string>OpenVPN Configuration</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.plain-text</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>ovpn</string>
+                </array>
+                <key>public.mime-type</key>
+                <array>
+                    <string>application/x-openvpn-profile</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>

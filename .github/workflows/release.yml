@@ -1,0 +1,274 @@
+name: Release
+
+# Trigger: ONLY on pushing a tag matching v* (e.g. v0.2.0, v0.2.0-beta.1), plus
+# a manual workflow_dispatch escape hatch for rehearsal. Deliberately no
+# `branches:` / `pull_request:` trigger — this job decodes a Developer ID
+# private key onto the runner's disk (see Tools/ci/import-signing.sh), and a
+# pull_request trigger on this file would expose that to fork PRs. Keep it
+# tag-only.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Rehearse the full pipeline but skip `gh release create`"
+        type: boolean
+        default: false
+
+# Never cancel a release mid-notarization — a cancelled notarytool submission
+# can leave the DMG in a state that's neither notarized nor cleanly retryable.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# ---------------------------------------------------------------------------
+# Required repository secrets (Settings > Secrets and variables > Actions).
+# See Docs/Release.md for the exact commands to produce every one of these.
+#
+#   DEVID_APP_CERT_P12_BASE64     base64 of the exported "Developer ID
+#                                  Application: James Deucker (QVUFB5676H)"
+#                                  cert + private key, as a .p12
+#                                    base64 -i DeveloperIDApplication.p12 | pbcopy
+#   DEVID_APP_CERT_P12_PASSWORD   the password the .p12 was exported with
+#   CI_KEYCHAIN_PASSWORD          any strong random string — password for the
+#                                  throwaway keychain created fresh each run
+#   PROFILE_APP_BASE64            base64 of the "SimpleVPN App DirectDist"
+#                                  .provisionprofile
+#                                    base64 -i "SimpleVPN App DirectDist.provisionprofile" | pbcopy
+#   PROFILE_TUNNEL_BASE64         base64 of the "SimpleVPN Tunnel DirectDist"
+#                                  .provisionprofile
+#   ASC_API_KEY_P8_BASE64         base64 of the App Store Connect API .p8
+#                                  private key used for notarization
+#                                    base64 -i AuthKey_XXXXXXXXXX.p8 | pbcopy
+#   ASC_API_KEY_ID                that key's Key ID (from App Store Connect >
+#                                  Users and Access > Integrations)
+#   ASC_API_ISSUER_ID             that key's Issuer ID
+#
+# GH_TOKEN for `gh release create` is NOT a secret to configure — it uses the
+# workflow's own ${{ github.token }} via `permissions: contents: write` below.
+#
+# Third-party actions: none. Every `uses:` below is an official `actions/*`
+# action pinned to its major version tag (@v4) — GitHub's own convention for
+# these, and low-risk since they never see the signing secrets (imported via
+# our own Tools/ci/import-signing.sh, not an action). The GitHub Release
+# itself is created with the preinstalled `gh` CLI rather than a marketplace
+# action (e.g. softprops/action-gh-release) specifically so nothing from
+# outside github/actions/* ever executes in the job that (briefly) holds the
+# Developer ID private key. If tighter supply-chain pinning is ever wanted,
+# swap the @v4 tags for the actions' current release commit SHAs.
+# ---------------------------------------------------------------------------
+
+jobs:
+  # Job 1: build the third-party engine xcframeworks. Holds NO signing
+  # secrets at all — this is a deliberate security boundary, because this job
+  # runs freshly-cloned upstream build scripts (openvpn3, openconnect,
+  # libssh2) and the Developer ID private key must never be reachable from a
+  # job that executes third-party build scripts.
+  engines:
+    # Runner choice: `macos-26`, not `macos-15`/`macos-latest`. The app's
+    # deployment target is macOS 26.0 project-wide (project.yml ARCHS/SDK
+    # settings) and every engine is compiled -mmacosx-version-min=26.0, so a
+    # macos-15 image's Xcode (which predates the macOS 26 SDK) cannot build
+    # this project at all — picking an older runner to be "safe" would just
+    # fail every build the same way, later and less clearly. `macos-latest`
+    # is deliberately avoided too: it is a moving alias GitHub repoints over
+    # time, which is the opposite of the reproducibility this pipeline wants.
+    #
+    # REAL RISK, stated plainly: whether GitHub's hosted `macos-26` image
+    # ships an Xcode with the macOS 26 SDK could not be verified from outside
+    # CI when this workflow was authored (GitHub-hosted runner images
+    # historically lag new macOS/Xcode releases by weeks to months). If the
+    # "verify macOS 26 SDK" step below fails, that lag is the reason, and the
+    # fallback is a self-hosted runner on a Mac that already has the right
+    # Xcode — see the RISKS section of Docs/Release.md.
+    runs-on: macos-26
+    timeout-minutes: 90
+    outputs:
+      cache-hit: ${{ steps.cache.outputs.cache-hit }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fail fast and explicitly here rather than 20+ minutes later with a
+      # cryptic SDK-not-found compile error (this repo is developed against
+      # Xcode 26.6 — see the runner-choice comment above for the risk this
+      # step exists to catch).
+      - name: Select Xcode + verify macOS 26 SDK
+        id: xc
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+          if ! xcodebuild -showsdks | grep -qi "macosx26"; then
+            echo "FATAL: no macOS 26 SDK found on this runner image."
+            echo "       xcodebuild -showsdks output was:"
+            xcodebuild -showsdks
+            echo "SimpleVPN's deployment target is macOS 26.0 (project.yml) — see the"
+            echo "comment above this step in release.yml for what to do next."
+            exit 1
+          fi
+          echo "version=$(xcodebuild -version | awk '/^Xcode/{print $2}')" >> "$GITHUB_OUTPUT"
+
+      # Cache key deliberately has NO restore-keys fallback: a fuzzy restore
+      # could hand the build three xcframeworks built against different
+      # OpenSSL point releases, which is exactly the linker/ABI hazard the
+      # tripled OPENSSL_PIN guard in the three engine scripts exists to
+      # prevent (three statically-bundled OpenSSL copies land in one binary —
+      # see the comment in Tools/build-openconnect-xcframework.sh). Bump the
+      # key ingredients (any of the three script bodies, changed via
+      # hashFiles) and the runner Xcode version are both part of the key.
+      #
+      # NOTE: this key expression must stay byte-identical to the one in
+      # .github/workflows/engines-cache.yml, or that workflow's warm cache
+      # will silently miss for release.yml (and vice versa).
+      - name: Restore engines cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            Vendor/OpenVPNEngine.xcframework
+            Vendor/OpenConnectEngine.xcframework
+            Vendor/SSHEngine.xcframework
+            Vendor/openvpn3-include
+            Vendor/openconnect-include
+            Vendor/libssh2-include
+          key: engines-${{ runner.os }}-${{ runner.arch }}-xcode${{ steps.xc.outputs.version }}-${{ hashFiles('Tools/build-openvpn3-xcframework.sh', 'Tools/build-openconnect-xcframework.sh', 'Tools/build-libssh2-xcframework.sh') }}
+
+      - name: Install pinned OpenSSL (cache miss only)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: Tools/ci/install-pinned-openssl.sh
+
+      - name: Build OpenVPNEngine.xcframework (cache miss only)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: Tools/build-openvpn3-xcframework.sh
+
+      - name: Build OpenConnectEngine.xcframework (cache miss only)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: Tools/build-openconnect-xcframework.sh
+
+      - name: Build SSHEngine.xcframework (cache miss only)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: Tools/build-libssh2-xcframework.sh
+
+      - name: Assert all engine artifacts exist
+        run: |
+          set -euo pipefail
+          for p in Vendor/OpenVPNEngine.xcframework Vendor/OpenConnectEngine.xcframework \
+                   Vendor/SSHEngine.xcframework Vendor/openvpn3-include \
+                   Vendor/openconnect-include Vendor/libssh2-include; do
+            if [ ! -e "$p" ]; then echo "FATAL: missing $p"; exit 1; fi
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engines
+          path: |
+            Vendor/OpenVPNEngine.xcframework
+            Vendor/OpenConnectEngine.xcframework
+            Vendor/SSHEngine.xcframework
+            Vendor/openvpn3-include
+            Vendor/openconnect-include
+            Vendor/libssh2-include
+          retention-days: 1
+
+  # Job 2: signs, notarizes, and releases. Holds all the secrets, and never
+  # runs a freshly-cloned upstream build script — only this repo's own Tools/.
+  release:
+    needs: engines
+    runs-on: macos-26
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode + verify macOS 26 SDK
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+          if ! xcodebuild -showsdks | grep -qi "macosx26"; then
+            echo "FATAL: no macOS 26 SDK found on this runner image (see the engines job for detail)."
+            exit 1
+          fi
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: engines
+          path: Vendor
+
+      - name: Import signing identity + provisioning profiles
+        env:
+          DEVID_APP_CERT_P12_BASE64: ${{ secrets.DEVID_APP_CERT_P12_BASE64 }}
+          DEVID_APP_CERT_P12_PASSWORD: ${{ secrets.DEVID_APP_CERT_P12_PASSWORD }}
+          CI_KEYCHAIN_PASSWORD: ${{ secrets.CI_KEYCHAIN_PASSWORD }}
+          PROFILE_APP_BASE64: ${{ secrets.PROFILE_APP_BASE64 }}
+          PROFILE_TUNNEL_BASE64: ${{ secrets.PROFILE_TUNNEL_BASE64 }}
+          ASC_API_KEY_P8_BASE64: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+        run: Tools/ci/import-signing.sh
+
+      - name: Build, notarize, staple, package DMG
+        id: build
+        env:
+          # NOTARY_KEY / NOTARY_KEYID / NOTARY_ISSUER were exported into
+          # $GITHUB_ENV by import-signing.sh and are already in scope here.
+          CURRENT_PROJECT_VERSION: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          Tools/build-release-dmg.sh "$VERSION"
+          DMG="build/dist/SimpleVPN-${VERSION}-arm64.dmg"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+
+      # Upload unconditionally (even on a failed run's partial artifacts, via
+      # the always() below) so a failed release still leaves something to
+      # inspect rather than losing the whole run's output.
+      - name: Upload DMG artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimpleVPN-dmg
+          path: |
+            build/dist/*.dmg
+            build/dist/*.dmg.sha256
+          if-no-files-found: warn
+
+      # gh CLI is preinstalled on GitHub-hosted macOS runners — deliberately
+      # not a third-party action, so no third-party code ever runs in the job
+      # that held the signing key (that key is already gone by this point via
+      # cleanup-signing.sh, but keep the whole job's tool surface minimal on
+      # principle).
+      - name: Create GitHub Release
+        # github.event.inputs is only populated for workflow_dispatch; for a
+        # tag push it's null, and null.dry_run is null (not an error) in GHA
+        # expression syntax, so this is safe for both trigger types. Boolean
+        # dispatch inputs arrive as the string "true"/"false" here.
+        if: github.event.inputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${{ steps.build.outputs.version }}"
+          DMG="${{ steps.build.outputs.dmg }}"
+          EXTRA_ARGS=()
+          # v1.2.3-beta.1 / v1.2.3-rc1 etc. -> mark as a GitHub prerelease.
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(beta|rc) ]]; then
+            EXTRA_ARGS+=(--prerelease)
+          fi
+          gh release create "$TAG" \
+            --title "SimpleVPN $VERSION" \
+            --generate-notes \
+            "${EXTRA_ARGS[@]}" \
+            "$DMG" "$DMG.sha256"
+
+      - name: Clean up signing keychain + secrets
+        if: always()
+        run: Tools/ci/cleanup-signing.sh

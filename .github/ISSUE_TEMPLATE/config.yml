@@ -1,0 +1,6 @@
+# Copyright 2026 James Deucker (bitwisecook)
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Keep blank issues available — power users and maintainers shouldn't be forced
+# through a form — but steer everyone else to the structured templates.
+blank_issues_enabled: true

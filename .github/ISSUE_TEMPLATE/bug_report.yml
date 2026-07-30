@@ -1,0 +1,91 @@
+# Copyright 2026 James Deucker (bitwisecook)
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Bug report form. SimpleVPN ▸ About ▸ "Report an Issue…" opens this form with the
+# `diagnostics` field pre-filled (versions + VPN types only) via query-param
+# prefill, so field ids here are load-bearing — renaming one breaks the app link.
+# The `logs` field is where the scrubbed diagnostics bundle goes.
+name: Bug report
+description: Something in SimpleVPN doesn't work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug.
+
+        **Please don't paste credentials, one-time codes, private hostnames or full
+        VPN configuration.** If you attach a diagnostics bundle, use the one
+        SimpleVPN generates — it scrubs addresses, hostnames and usernames for you.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What went wrong, and what you were doing at the time.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect instead?
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of the app?
+      options:
+        - Not sure
+        - Connecting / authentication
+        - Staying connected (drops, reconnects)
+        - Menu bar
+        - Main window
+        - Network Tools
+        - Routing / divert rules
+        - Install / update / packaging
+        - Something else
+    validations:
+      required: false
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: >
+        Filled in automatically when you use SimpleVPN ▸ About ▸ "Report an Issue…".
+        Contains app / extension / macOS versions and which VPN *types* are
+        configured — no names, addresses or credentials.
+      placeholder: |
+        | App | |
+        | System extension | |
+        | macOS | |
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Diagnostics bundle (optional)
+      description: >
+        Paste (or attach) the scrubbed bundle from SimpleVPN ▸ About ▸
+        "Collect Diagnostics…". It contains recent app/extension log lines, the
+        routing table, interface MTUs and DNS/proxy configuration, with addresses,
+        hostnames and usernames replaced by stable placeholders. Please review it
+        before posting.
+      render: text
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Before you submit
+      options:
+        - label: I've checked this report contains no credentials, one-time codes, or private configuration I don't want public.
+          required: true
