@@ -69,8 +69,22 @@ curl -fsSL -o "$INTERMEDIATE_G2" "https://www.apple.com/certificateauthority/Dev
 # NOTE: the Apple Inc Root lives under /appleca/, NOT /certificateauthority/ —
 # the latter 404s (found by the first live run of this workflow).
 curl -fsSL -o "$APPLE_ROOT" "https://www.apple.com/appleca/AppleIncRootCertificate.cer"
-security import "$INTERMEDIATE_G2" -k "$KEYCHAIN" -T /usr/bin/codesign -T /usr/bin/security
-security import "$APPLE_ROOT" -k "$KEYCHAIN" -T /usr/bin/codesign -T /usr/bin/security
+# A trust anchor already being present is SUCCESS, not failure — macOS ships
+# some Apple roots, and `security import` reports the duplicate as an error
+# that set -e turns fatal (found by v0.1's second live run). Accept exactly
+# the duplicate case; any other import failure still stops the release.
+import_ca() {
+  local out
+  if out=$(security import "$1" -k "$KEYCHAIN" -T /usr/bin/codesign -T /usr/bin/security 2>&1); then
+    echo "$out"
+  elif [[ "$out" == *"already exists in the keychain"* ]]; then
+    echo "==> $(basename "$1"): already present, fine"
+  else
+    echo "$out" >&2; return 1
+  fi
+}
+import_ca "$INTERMEDIATE_G2"
+import_ca "$APPLE_ROOT"
 
 echo "==> allow codesign to use the imported key without a UI prompt"
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$CI_KEYCHAIN_PASSWORD" "$KEYCHAIN"
