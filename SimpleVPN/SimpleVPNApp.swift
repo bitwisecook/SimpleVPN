@@ -11,6 +11,18 @@
 
 import SwiftUI
 import AppKit
+import Sparkle
+
+/// Settings keys: which of the app's two icons exist. Both default ON. The
+/// Settings pane guards against turning both off (an invisible app).
+let dockIconDefaultsKey = "ui.dockIcon"
+let menuBarIconDefaultsKey = "ui.menuBarIcon"
+
+/// Read a BOOL default that should be true when the key was never written
+/// (UserDefaults.bool(forKey:) alone defaults to false).
+func defaultsBool(_ key: String, initially: Bool) -> Bool {
+    UserDefaults.standard.object(forKey: key) == nil ? initially : UserDefaults.standard.bool(forKey: key)
+}
 
 @main
 struct SimpleVPNApp: App {
@@ -23,6 +35,9 @@ struct SimpleVPNApp: App {
     @State private var manualRouter = ManualRouter()
     @State private var publicIP = PublicIPMonitor()
     @State private var endpointLocator = EndpointLocator()
+    /// Endpoint speed measurements, shared so every server list agrees (and so a
+    /// server is measured once, not once per surface).
+    @State private var endpointProbes = EndpointProbeStore()
     @State private var topology = TopologyMonitor()
     @State private var compositions = CompositionStore()
     @State private var tunnels = SubprocessTunnelStore()
@@ -32,6 +47,18 @@ struct SimpleVPNApp: App {
     @State private var reachability = ReachabilityMonitor()
     /// One derivation of "what is this connection doing", shared by every surface.
     @State private var linkState: LinkStateMonitor
+    /// Sparkle. Automatic checks are OFF via Info.plist (SUEnableAutomaticChecks)
+    /// until the Settings toggle turns them on, so starting the updater here
+    /// neither phones out nor prompts — it only enables the manual menu check.
+    private let updaterController = SPUStandardUpdaterController(
+        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+    /// Captured ONCE at launch: the menu-bar scene is included (or not) for
+    /// the process lifetime. The obvious MenuBarExtra(isInserted:) API loops
+    /// SwiftUI's menu builder on macOS 26 — makeMainMenu rebuilds forever, a
+    /// permanent beachball at launch — so the toggle applies on next start
+    /// instead (Settings says so). Do not "fix" this back to isInserted
+    /// without profiling a launch.
+    private let menuBarIconAtLaunch = defaultsBool(menuBarIconDefaultsKey, initially: true)
 
     init() {
         // First thing: make an AppKit exception crash nameable (the .ips drops the
@@ -54,6 +81,7 @@ struct SimpleVPNApp: App {
                 .environment(manualRouter)
                 .environment(publicIP)
                 .environment(endpointLocator)
+                .environment(endpointProbes)
                 .environment(topology)
                 .environment(compositions)
                 .environment(reachability)
@@ -65,8 +93,15 @@ struct SimpleVPNApp: App {
                 }
                 .task {
                     // Home (pre-VPN) vs egress (while connected) hinges on this.
-                    PublicIPMonitor.isVPNActive = { [weak vpn] in vpn?.anyConnected ?? false }
+                    // "Engaged", not "connected": the tunnel owns the default
+                    // route before it says it is up.
+                    PublicIPMonitor.isVPNActive = { [weak vpn] in vpn?.anyEngaged ?? false }
+                    // No VPN is speed-checked through its own tunnel.
+                    endpointProbes.isProfileEngaged = { [weak vpn] id in
+                        vpn?.isEngaged(id: id) ?? false
+                    }
                     publicIP.startMonitoring()          // launch + every ~5 min
+                    appDelegate.quitHandler = { reply in handleQuit(reply) }
                     // Wire the no-save (auth-nocache) policy at launch, before ANY
                     // surface — including the menu bar — can connect or persist
                     // credentials. Previously this was set lazily on the first
@@ -81,7 +116,7 @@ struct SimpleVPNApp: App {
         }
         .commands {
             CommandGroup(replacing: .newItem) {}   // no document "New"
-            VPNCommands(vpn: vpn)
+            VPNCommands(vpn: vpn, updater: updaterController)
             DiagnosticsCommands(vpn: vpn, tunnels: tunnels)
         }
 
@@ -95,12 +130,14 @@ struct SimpleVPNApp: App {
                 .environment(wireguard)
         }
         .windowResizability(.contentSize)
+        .commandsRemoved()
 
         Window("VPN Sign-In", id: "sso") {
             SSOAuthWindowView()
         }
         .defaultSize(width: 520, height: 680)
         .windowResizability(.contentSize)
+        .commandsRemoved()
 
         Window("Routes", id: "routes") {
             RouteGraphView(vpn: vpn)
@@ -110,6 +147,7 @@ struct SimpleVPNApp: App {
                 .environment(ext)
         }
         .defaultSize(width: 1000, height: 700)
+        .commandsRemoved()
 
         Window("Network Tools", id: "tools") {
             NetworkToolsView(vpn: vpn)
@@ -120,10 +158,14 @@ struct SimpleVPNApp: App {
                 .environment(topology)
         }
         .defaultSize(width: 680, height: 680)
+        .commandsRemoved()
 
         Window("Manage VPNs", id: "manage") {
             ManageVPNsView(vpn: vpn, labels: labels)
                 .environment(evaluator)
+                .environment(endpointLocator)
+                .environment(endpointProbes)
+                .environment(publicIP)
                 .environment(policy)
                 .environment(manualRouter)
                 .environment(compositions)
@@ -136,22 +178,35 @@ struct SimpleVPNApp: App {
                 .environment(ext)
         }
         .defaultSize(width: 560, height: 420)
+        .commandsRemoved()
 
         Window("SimpleVPN Help", id: "manual") {
             ManualWindow()
                 .environment(manualRouter)
         }
         .defaultSize(width: 720, height: 640)
+        .commandsRemoved()
 
         Settings {
-            SettingsView(ext: ext, labels: labels)
+            SettingsView(ext: ext, labels: labels, updater: updaterController.updater)
                 .environment(publicIP)
+                .environment(endpointProbes)
         }
 
-        MenuBarExtra {
+        menuBarScene
+    }
+
+    /// Included per the LAUNCH-TIME setting only, via a CONSTANT isInserted
+    /// binding. Two dead ends first: a live @AppStorage binding sends macOS 26's
+    /// menu builder into an infinite makeMainMenu loop (permanent beachball),
+    /// and SceneBuilder has no `if` at all ("failed to produce diagnostic").
+    /// A .constant binding gives the menu builder nothing reactive to cycle on.
+    private var menuBarScene: some Scene {
+        MenuBarExtra(isInserted: .constant(menuBarIconAtLaunch)) {
             MenuBarView(vpn: vpn, labels: labels)
                 .environment(publicIP)
                 .environment(endpointLocator)
+                .environment(endpointProbes)
                 .environment(topology)
                 .environment(compositions)
                 .environment(tunnels)
@@ -164,8 +219,58 @@ struct SimpleVPNApp: App {
         } label: {
             MenuBarLabel(vpn: vpn, reachability: reachability,
                          tunnelManager: tunnelManager, nativeVPN: nativeVPN)
+                // Menu-bar-only usage may never open the main window, so the
+                // label (alive whenever the icon is) wires the quit gate too.
+                .task { appDelegate.quitHandler = { reply in handleQuit(reply) } }
         }
         .menuBarExtraStyle(.window)
+    }
+
+    /// The quit gate (see AppDelegate.applicationShouldTerminate): a tunnel
+    /// lives in the system extension and would outlive the app, so quitting
+    /// ALWAYS disconnects first — after a confirmation when apps demonstrably
+    /// have live TCP connections riding the VPN (matched by their sockets'
+    /// local address == the tunnel's in-tunnel address; named for humans).
+    private func handleQuit(_ reply: @escaping (Bool) -> Void) {
+        let active = vpn.profiles.filter { UI.isActive($0.status) }
+        let nativeActive = nativeVPN.status == .connected || nativeVPN.status == .connecting
+        guard !active.isEmpty || tunnelManager.hasActive || nativeActive else {
+            reply(true); return
+        }
+
+        var tunnelAddrs: Set<String> = []
+        for p in active {
+            guard let s = reachability.stats(for: p.id) ?? TunnelStatsStore.read(profile: p.id) else { continue }
+            if !s.tunnelIPv4.isEmpty { tunnelAddrs.insert(s.tunnelIPv4) }
+            if let v6 = s.tunnelIPv6, !v6.isEmpty { tunnelAddrs.insert(v6) }
+        }
+        let apps = AppConnectionInspector.appsUsingTunnel(tunnelAddresses: tunnelAddrs)
+
+        let disconnectAndGo = {
+            Task {
+                await vpn.disconnectAllAndWait()
+                for id in tunnelManager.activeIDs { tunnelManager.disconnect(id) }
+                if nativeActive { nativeVPN.disconnect() }
+                reply(true)
+            }
+        }
+        guard !apps.isEmpty else { disconnectAndGo(); return }
+
+        let vpnName = active.count == 1 ? active[0].name : "your VPNs"
+        let lines = apps.map {
+            $0.connections > 1 ? "\u{2022}  \($0.name) (\($0.connections) connections)"
+                               : "\u{2022}  \($0.name)"
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Quit and disconnect \(vpnName)?"
+        alert.informativeText = "These apps are using the VPN right now:\n\n"
+            + lines.joined(separator: "\n")
+            + "\n\nQuitting disconnects the VPN, so whatever they\u{2019}re doing through it may be interrupted."
+        alert.addButton(withTitle: "Disconnect and Quit")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate()
+        if alert.runModal() == .alertFirstButtonReturn { disconnectAndGo() } else { reply(false) }
     }
 }
 
@@ -183,6 +288,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     let openBuffer = FileOpenBuffer()
+
+    /// Set by SimpleVPNApp once the stores exist. Called on every quit attempt;
+    /// must call the reply exactly once: true = go ahead (tunnels already
+    /// disconnected), false = the user cancelled.
+    var quitHandler: ((@escaping (Bool) -> Void) -> Void)?
+
+    /// True when THIS process is a second copy of an already-running SimpleVPN —
+    /// it exits immediately and must never run the quit handler (the tunnels
+    /// belong to the first copy).
+    private var isDuplicateInstance = false
+
+    /// Quitting must never leave a tunnel behind: the tunnel lives in the
+    /// system extension and would keep running after the app is gone. Every
+    /// quit path (⌘Q, Dock, last-window-close) funnels through here, where the
+    /// handler disconnects — after a confirmation if apps are mid-use.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !isDuplicateInstance, let quitHandler else { return .terminateNow }
+        quitHandler { proceed in
+            NSApp.reply(toApplicationShouldTerminate: proceed)
+        }
+        return .terminateLater
+    }
+
+    /// The menu-bar icon state THIS process launched with (the scene is fixed
+    /// per-launch — see menuBarIconAtLaunch in SimpleVPNApp). Behaviour must
+    /// track the icon that's actually visible, not a setting that only takes
+    /// effect next start.
+    private lazy var menuBarIconAtLaunch = defaultsBool(menuBarIconDefaultsKey, initially: true)
+
+    /// With a menu-bar icon, closing the window is just closing the window —
+    /// the app (and its menu-bar presence) stays. Without one, a closed window
+    /// would strand an invisible app, so closing the last window quits
+    /// (which flows through applicationShouldTerminate → disconnect).
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        !menuBarIconAtLaunch
+    }
+
+    /// Opening SimpleVPN while it's already running means "show me the
+    /// window" — the recovery path when both icons are off and the window was
+    /// minimised. Un-minimise what exists; if nothing does, returning true
+    /// lets SwiftUI recreate the main window.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        NSApp.activate()
+        var restored = false
+        for w in NSApp.windows where w.isMiniaturized { w.deminiaturize(nil); restored = true }
+        return !(restored || hasVisibleWindows)
+    }
 
     func application(_ application: NSApplication, open urls: [URL]) {
         // simplevpn-sso:// URLs are SAML sign-in hand-offs for the in-app webview;
@@ -205,6 +357,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // ONE copy of the app, ever: a second launch (open -n, a stray copy)
+        // must not fight the first over the tunnels. Hand focus to the running
+        // copy — its reopen handler brings the window back — and bow out
+        // without touching anything. EXCEPT as a unit-test host: the runner
+        // launches us with the same bundle id, and self-terminating because
+        // the real app happens to be open kills the whole test session.
+        let isTestHost = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil
+        let ourPID = ProcessInfo.processInfo.processIdentifier
+        if !isTestHost, let bundleID = Bundle.main.bundleIdentifier,
+           let other = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+               .first(where: { $0.processIdentifier != ourPID }) {
+            isDuplicateInstance = true
+            other.activate()
+            NSApp.terminate(nil)
+            return
+        }
+
+        // Dock icon preference (default: shown). Both icons off is allowed —
+        // Settings warns about it — because relaunching from Applications
+        // always brings the window back (see applicationShouldHandleReopen).
+        NSApp.setActivationPolicy(defaultsBool(dockIconDefaultsKey, initially: true) ? .regular : .accessory)
+
         // Invalid launch (e.g. run straight from a DMG/quarantine → App Translocation):
         // the system extension and keychain group can't work from a randomized path.
         // Tell the user plainly and quit normally instead of misbehaving.
@@ -236,11 +411,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 /// Menu-bar commands: a VPN menu with Manage… (⌘M-adjacent) and Disconnect (⇧⌘K).
 private struct VPNCommands: Commands {
     @Bindable var vpn: VPNController
+    let updater: SPUStandardUpdaterController
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
         CommandGroup(replacing: .appInfo) {
             Button("About SimpleVPN") { openWindow(id: "about") }
+            // The macOS-conventional home for updates: right under About.
+            Button("Check for Updates\u{2026}") { updater.checkForUpdates(nil) }
         }
         CommandMenu("VPN") {
             Button("Import Configuration…") {

@@ -2,12 +2,17 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 //  OnePasswordProvider.swift
-//  Fetch credentials from 1Password via its CLI (`op`). One `op item get
-//  --format json` returns username, password and any one-time-code field, so a
-//  single call satisfies the whole CredentialRequest. Unlock is handled by
-//  1Password itself: with the desktop-app CLI integration on, `op` prompts for
-//  Touch ID; the app never sees the vault password. Requires the `op` binary
-//  (Homebrew or the 1Password install) — isAvailable reports whether it's found.
+//  Fetch credentials from 1Password via the official SDK's local IPC to the
+//  1Password desktop app (OnePasswordNative → opnative-helper) — fully offline,
+//  no `op` CLI, no network dependency. Unlock stays 1Password's job: the app
+//  shows a Touch ID / authorization prompt naming SimpleVPN; the vault password
+//  never reaches this process. Requires 1Password 8+ with Settings ▸ Developer ▸
+//  "Integrate with other apps" enabled.
+//
+//  Two read shapes: explicit coordinates (vault + item + field names) resolve
+//  as op:// secret references — the narrowest possible grant; anything less
+//  explicit (no vault, a link-style reference, or default field-name guesses
+//  that missed) reads the whole item once and picks fields locally.
 //
 
 import Foundation
@@ -18,6 +23,11 @@ struct OnePasswordProvider: CredentialProvider {
     let displayName = "1Password"
     let itemReference: String
     let vault: String   // optional; "" = search all vaults
+    /// Which 1Password account to ask — sidebar name or UUID. Separate from
+    /// `vault`, and only optional in the sense that 1Password may still refuse:
+    /// its desktop integration answers an account it can't match (including "")
+    /// with "Account not found".
+    var account: String = ""
     /// Role → field label/id chosen by the user. Empty ⇒ auto-detect by purpose.
     var fieldMap: [String: String] = [:]
 
@@ -32,206 +42,189 @@ struct OnePasswordProvider: CredentialProvider {
 
     private static let log = Logger(subsystem: "com.bragi0.SimpleVPN", category: "1password")
 
-    /// Common install locations (the app has no inherited shell PATH).
-    private static let candidatePaths = [
-        "/opt/homebrew/bin/op",
-        "/usr/local/bin/op",
-        "/usr/bin/op",
-    ]
-
-    static var cliPath: String? {
-        candidatePaths.first { FileManager.default.isExecutableFile(atPath: $0) }
-    }
-
     func isAvailable(for profile: String) async -> Bool {
-        Self.cliPath != nil && !itemReference.trimmingCharacters(in: .whitespaces).isEmpty
+        guard !itemReference.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        return await OnePasswordNative.probe()
     }
 
     func resolve(profile: String, fields: Set<CredentialField>) async throws -> RawCredentials {
-        guard let op = Self.cliPath else { throw OPError.notInstalled }
         let ref = itemReference.trimmingCharacters(in: .whitespaces)
         guard !ref.isEmpty else { throw OPError.noReference }
 
-        var args = ["item", "get", ref, "--format", "json"]
-        if !vault.trimmingCharacters(in: .whitespaces).isEmpty {
-            args += ["--vault", vault]
+        // Narrow path first: when the item's coordinates are explicit enough to
+        // form `op://vault/item/field` secret references (a vault, a non-URL
+        // item reference, and a field map covering the wanted roles — the
+        // mapping sheet fills it on drag-in), ask 1Password for exactly those
+        // fields and nothing else. Roles the map doesn't name use a standard
+        // Login item's field names; a wrong guess is the one failure that
+        // quietly falls through to the full-item read below.
+        if let native = nativeSecretRefs(for: fields, item: ref) {
+            let refs = native.refs
+            // The key passphrase isn't a CredentialField (it rides alongside),
+            // but when the map names one, fetch it in the same authorization.
+            let passphraseRef = fieldMap[CredentialRole.privateKeyPassphrase.rawValue]
+                .flatMap { $0.isEmpty ? nil : "op://\(vault.trimmingCharacters(in: .whitespaces))/\(ref)/\($0)" }
+            do {
+                let values = try await OnePasswordNative.resolve(
+                    refs: Array(refs.values) + (passphraseRef.map { [$0] } ?? []),
+                    account: account.trimmingCharacters(in: .whitespaces))
+                return RawCredentials(
+                    username: refs[.username].flatMap { values[$0] },
+                    password: refs[.password].flatMap { values[$0] },
+                    otp: refs[.otp].flatMap { values[$0] },
+                    privateKeyPassphrase: passphraseRef.flatMap { values[$0] })
+            } catch let e as OnePasswordNativeError {
+                switch e {
+                case .userCancelled:
+                    throw CancellationError()
+                case .accountNotFound:
+                    // Nothing to retry with: the SDK offers no way to list
+                    // accounts and the sandbox can't read 1Password's config,
+                    // so an empty (or wrong) account can only be answered by
+                    // the user naming it. Surface it as-is — the friendly
+                    // error asks for exactly that.
+                    throw e
+                case .itemNotFound where native.usedDefaults:
+                    // Our guessed standard field names missed — the full-item
+                    // read auto-detects by purpose, so let it try.
+                    Self.log.log("native resolve: default field names missed — retrying via full-item read")
+                default:
+                    throw e
+                }
+            }
         }
-        let result = try await Self.run(op, args)
-        guard result.status == 0 else {
-            throw OPError.cli(Self.friendlyError(result.stderr))
+
+        // Full-item read: same IPC channel, one authorization, fields picked
+        // here — works with a bare title/UUID and no vault.
+        let item: OnePasswordNative.OPItem
+        do {
+            item = try await OnePasswordNative.getItem(
+                reference: ref,
+                vault: vault.trimmingCharacters(in: .whitespaces),
+                account: account.trimmingCharacters(in: .whitespaces))
+        } catch let e as OnePasswordNativeError {
+            if case .userCancelled = e { throw CancellationError() }
+            throw e
         }
-        return try Self.parse(json: result.stdout, want: fields, map: fieldMap)
+        return Self.credentials(from: item, map: fieldMap)
+    }
+
+    /// Secret references for the wanted roles, or nil when the native path
+    /// can't express this item (no vault, or a link-style reference). Roles the
+    /// field map doesn't name fall back to a standard Login item's field names
+    /// ("username" / "password" / "one-time password") — `usedDefaults` tells
+    /// the caller a wrong guess should quietly retry via the full-item read
+    /// rather than surface an error. OTP refs ask for the computed code via
+    /// `?attribute=otp` rather than the enrollment secret.
+    private func nativeSecretRefs(for fields: Set<CredentialField>, item: String)
+        -> (refs: [CredentialField: String], usedDefaults: Bool)? {
+        let v = vault.trimmingCharacters(in: .whitespaces)
+        guard !v.isEmpty, !item.contains("://") else { return nil }
+        var usedDefaults = false
+        func fieldName(_ role: CredentialRole, default defaultName: String) -> String {
+            if let mapped = fieldMap[role.rawValue], !mapped.isEmpty { return mapped }
+            usedDefaults = true
+            return defaultName
+        }
+        var out: [CredentialField: String] = [:]
+        for field in fields {
+            switch field {
+            case .username:
+                out[field] = "op://\(v)/\(item)/\(fieldName(.username, default: "username"))"
+            case .password:
+                out[field] = "op://\(v)/\(item)/\(fieldName(.password, default: "password"))"
+            case .otp:
+                // Optional either way: an item without a TOTP field serves none.
+                out[field] = "op://\(v)/\(item)/\(fieldName(.otp, default: "one-time password"))?attribute=otp"
+            case .passkey:
+                continue
+            }
+        }
+        return (out, usedDefaults)
     }
 
     /// List an item's fields so the user can map them to auth roles. Returns the
-    /// item title and its selectable fields (those that actually hold a value).
-    static func listFields(itemReference ref: String, vault: String) async throws
-        -> (title: String, fields: [OPField]) {
-        guard let op = cliPath else { throw OPError.notInstalled }
+    /// item title, the vault it turned out to live in, and its selectable fields
+    /// (those that actually hold a value). The vault id is the answer to "which
+    /// drawer was that in?" — known truth once the read succeeds, and what an
+    /// empty Vault field is quietly back-filled from.
+    static func listFields(itemReference ref: String, vault: String,
+                           account: String = "") async throws
+        -> (title: String, vaultID: String, fields: [OPField]) {
         let r = ref.trimmingCharacters(in: .whitespaces)
         guard !r.isEmpty else { throw OPError.noReference }
-        var args = ["item", "get", r, "--format", "json"]
-        let v = vault.trimmingCharacters(in: .whitespaces)
-        if !v.isEmpty { args += ["--vault", v] }
-        let result = try await run(op, args)
-        guard result.status == 0 else { throw OPError.cli(friendlyError(result.stderr)) }
-        guard let obj = try? JSONSerialization.jsonObject(with: result.stdout) as? [String: Any] else {
-            throw OPError.parse
+        let item = try await OnePasswordNative.getItem(
+            reference: r, vault: vault.trimmingCharacters(in: .whitespaces),
+            account: account.trimmingCharacters(in: .whitespaces))
+        let fields: [OPField] = item.fields.compactMap { f in
+            // Skip empty fields — a slot with nothing in it can't feed a role.
+            // (OTP fields carry their value as `otp`; `value` is always empty.)
+            guard !f.value.isEmpty || f.otp?.isEmpty == false else { return nil }
+            return OPField(id: f.id, label: f.label.isEmpty ? f.id : f.label,
+                           purpose: f.purpose, type: f.type)
         }
-        let title = (obj["title"] as? String) ?? r
-        let rawFields = (obj["fields"] as? [[String: Any]]) ?? []
-        let fields: [OPField] = rawFields.compactMap { f in
-            let type = (f["type"] as? String) ?? ""
-            let hasValue = (f["value"] as? String)?.isEmpty == false || (f["totp"] as? String) != nil
-            guard hasValue else { return nil }                 // skip empty fields
-            let id = (f["id"] as? String) ?? (f["label"] as? String) ?? UUID().uuidString
-            let label = (f["label"] as? String) ?? id
-            return OPField(id: id, label: label,
-                           purpose: (f["purpose"] as? String) ?? "", type: type)
-        }
-        return (title, fields)
+        return (item.title, item.vaultID, fields)
     }
 
-    // MARK: JSON parsing
+    // MARK: Field selection
 
-    /// 1Password item JSON: `fields[]` each with `purpose`/`type`/`label`/`id`/`value`
-    /// and, for OTP, a `totp` value. When `map` names a field for a role (by id or
-    /// label) that wins; otherwise fall back to purpose (USERNAME/PASSWORD) and
-    /// `type == "OTP"`.
-    static func parse(json: Data, want: Set<CredentialField>,
-                      map: [String: String] = [:]) throws -> RawCredentials {
-        guard let obj = try? JSONSerialization.jsonObject(with: json) as? [String: Any],
-              let fields = obj["fields"] as? [[String: Any]] else {
-            throw OPError.parse
-        }
-        // Value a role should take from an explicitly-mapped field (id or label match).
-        func mappedValue(for role: CredentialField) -> String? {
+    /// Pick credentials out of a full item read. Explicit mappings (by field id
+    /// or label) win; purposes (USERNAME/PASSWORD) cover the unmapped standard
+    /// case; label heuristics are the last resort for items built from custom
+    /// fields. The one-time code only ever comes from an OTP field's computed
+    /// current code — never a raw value, which would be the enrollment seed.
+    static func credentials(from item: OnePasswordNative.OPItem,
+                            map: [String: String] = [:]) -> RawCredentials {
+        let fields = item.fields
+        func mappedField(_ role: CredentialRole) -> OnePasswordNative.OPItemField? {
             guard let key = map[role.rawValue], !key.isEmpty else { return nil }
-            guard let f = fields.first(where: { ($0["id"] as? String) == key || ($0["label"] as? String) == key }) else { return nil }
-            // For an OTP field, only ever expose the current code (`totp`), NEVER
-            // fall back to `value` — that's the otpauth:// seed, and returning it
-            // as a username/password would exfiltrate the TOTP secret to the server.
-            if (f["type"] as? String) == "OTP" { return f["totp"] as? String }
-            return f["value"] as? String
+            return fields.first { $0.id == key || $0.label == key }
+        }
+        func value(_ f: OnePasswordNative.OPItemField?) -> String? {
+            guard let f else { return nil }
+            let v = f.type == "OTP" ? (f.otp ?? "") : f.value
+            return v.isEmpty ? nil : v
         }
 
         var raw = RawCredentials()
         // Explicit mappings first.
-        raw.username = mappedValue(for: .username)
-        raw.password = mappedValue(for: .password)
-        raw.otp = mappedValue(for: .otp)
-        // Private-key passphrase has no CredentialField; look it up by its role key.
-        if let key = map["privateKeyPassphrase"], !key.isEmpty,
-           let f = fields.first(where: { ($0["id"] as? String) == key || ($0["label"] as? String) == key }) {
-            raw.privateKeyPassphrase = f["value"] as? String
+        raw.username = value(mappedField(.username))
+        raw.password = value(mappedField(.password))
+        raw.otp = value(mappedField(.otp))
+        raw.privateKeyPassphrase = value(mappedField(.privateKeyPassphrase))
+
+        // Purposes cover the unmapped standard Login item.
+        for f in fields {
+            switch f.purpose {
+            case "USERNAME": if raw.username == nil { raw.username = value(f) }
+            case "PASSWORD": if raw.password == nil { raw.password = value(f) }
+            default:
+                if f.type == "OTP", raw.otp == nil { raw.otp = value(f) }
+            }
         }
 
-        // Auto-detect anything the map didn't cover.
-        for f in fields {
-            let purpose = (f["purpose"] as? String) ?? ""
-            let type = (f["type"] as? String) ?? ""
-            let value = f["value"] as? String
-            switch purpose {
-            case "USERNAME": if raw.username == nil { raw.username = value }
-            case "PASSWORD": if raw.password == nil { raw.password = value }
-            default:
-                if type == "OTP", raw.otp == nil {
-                    // `totp` is the current code; `value` is the otpauth:// secret.
-                    raw.otp = (f["totp"] as? String) ?? raw.otp
-                }
-            }
+        // Label heuristics last — items assembled from custom fields carry no
+        // purposes, but their labels usually still say what they are.
+        if raw.username == nil {
+            let names: Set<String> = ["username", "user", "login", "email"]
+            raw.username = value(fields.first {
+                $0.type != "CONCEALED" && $0.type != "OTP"
+                    && names.contains($0.label.lowercased())
+            })
+        }
+        if raw.password == nil {
+            raw.password = value(
+                fields.first { $0.label.lowercased() == "password" }
+                ?? fields.first { $0.type == "CONCEALED" && $0.label.lowercased().contains("pass") })
         }
         return raw
     }
 
-    static func friendlyError(_ stderr: String) -> String {
-        let s = stderr.lowercased()
-        // The whole family of "the CLI can't get a session from the desktop app" errors.
-        // Verified against the real failure: `op account list` happily lists the account
-        // while `op whoami` says "account is not signed in" and the connect attempt dies
-        // with "RequestDelegatedSession: cannot setup session". None of that tells a user
-        // anything, and the fix is a specific switch in another app that nobody would
-        // guess at — so name it, in order, and say what to do next.
-        if s.contains("requestdelegatedsession") || s.contains("cannot setup session")
-            || s.contains("error initializing client") || s.contains("not signed in")
-            || s.contains("not currently signed in") || s.contains("no account") {
-            return """
-            1Password didn't let SimpleVPN ask for your credentials.
-
-            Things that fix this, in order of likelihood:
-            1. If you JUST approved a 1Password prompt or Touch ID \u{2014} press Connect \
-            again. The first attempt after approving often fails while 1Password \
-            finishes setting up the link.
-            2. The link to the saved item can go stale \u{2014} open this VPN's \
-            credential settings and drag the 1Password item in again.
-            3. In 1Password: unlock it, then Settings \u{25B8} Developer \u{25B8} switch \
-            \u{201C}Integrate with 1Password CLI\u{201D} off and on again.
-            """
-        }
-        if s.contains("connect") && s.contains("refused") {
-            return "1Password doesn't seem to be running. Open it, unlock it, and try again."
-        }
-        if s.contains("more than one item") || s.contains("isn't unique") {
-            return "More than one 1Password item matches — use the item's UUID or a vault."
-        }
-        if s.contains("no item") || s.contains("not found") {
-            return "No 1Password item matches that reference."
-        }
-        return stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? "1Password CLI failed." : stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    // MARK: Process
-
-    struct RunResult { let status: Int32; let stdout: Data; let stderr: String }
-
-    static func run(_ path: String, _ args: [String], timeout: TimeInterval = 60) async throws -> RunResult {
-        // Cancellation must reach the SUBPROCESS: cancelling the Swift task alone
-        // leaves `op` running (possibly holding a 1Password prompt open) until the
-        // timeout reaps it. The lock hands the Process across the cancel boundary.
-        let running = OSAllocatedUnfairLock<Process?>(initialState: nil)
-        return try await withTaskCancellationHandler {
-            try await Task.detached(priority: .userInitiated) {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: path)
-            p.arguments = args
-            // No inherited config; force non-interactive so it never hangs on a prompt.
-            var env = ProcessInfo.processInfo.environment
-            env["OP_FORMAT"] = "json"
-            p.environment = env
-            let out = Pipe(), err = Pipe()
-            p.standardOutput = out
-            p.standardError = err
-            try p.run()
-            running.withLock { $0 = p }
-            // Kill-on-timeout: `op` can raise a Touch-ID / CLI-integration prompt.
-            // If the user never answers, waitUntilExit() would block forever — and
-            // this call is on the reconnect / "Applying…" path, so a hang wedges the
-            // UI. Bound it and terminate so the caller always makes progress.
-            let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
-            let outData = out.fileHandleForReading.readDataToEndOfFile()
-            let errData = err.fileHandleForReading.readDataToEndOfFile()
-            p.waitUntilExit()
-            killer.cancel()
-            // A cancel surfaces as a cancel — not as a weird op exit status.
-            try Task.checkCancellation()
-            return RunResult(status: p.terminationStatus, stdout: outData,
-                             stderr: String(data: errData, encoding: .utf8) ?? "")
-            }.value
-        } onCancel: {
-            running.withLock { $0?.terminate() }
-        }
-    }
-
     enum OPError: LocalizedError {
-        case notInstalled, noReference, parse, cli(String)
+        case noReference
         var errorDescription: String? {
             switch self {
-            case .notInstalled: "The 1Password command-line tool (op) isn't installed."
             case .noReference: "No 1Password item is configured for this VPN."
-            case .parse: "1Password returned an unexpected response."
-            case .cli(let m): m
             }
         }
     }

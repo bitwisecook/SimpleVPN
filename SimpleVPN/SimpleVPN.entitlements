@@ -24,5 +24,12 @@
 	<array>
 		<string>$(AppIdentifierPrefix)com.bragi0.SimpleVPN.shared</string>
 	</array>
+	<!-- NOTE (learned fatally): the app must NEVER carry hardened-runtime
+	     relaxation entitlements (e.g. com.apple.security.cs.disable-library-
+	     validation). AMFI kills any app embedding a System Extension that has
+	     one at launch: "Hardened Runtime relaxation entitlements disallowed on
+	     System Extensions" (build 87 was dead on arrival this way). The
+	     1Password SDK's cross-team dylib load therefore lives in the bundled
+	     opnative-helper, which carries the relaxation legally. -->
 </dict>
 </plist>

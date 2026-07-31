@@ -28,6 +28,17 @@ struct ConnectionIncidentCard: View {
     @State private var report: DiagnosticsReport?
     @State private var probing = false
     @State private var showPortalAlert = false
+    // Alternate-endpoint probing: when the configured location is unreachable
+    // and the VPN advertises others, check them AUTOMATICALLY and offer the
+    // switch — don't make the user discover the endpoint picker.
+    @State private var altProbing = false
+    @State private var reachableAlt: Endpoint?
+    @State private var altChecked = false
+    /// The network the last probe was STARTED on (not finished on): a probe that
+    /// never came back must still count as covering its own network, or a change
+    /// arriving mid-probe would be indistinguishable from no probe at all.
+    /// Empty means nothing has been probed yet.
+    @State private var probedNetworkKey = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -64,7 +75,13 @@ struct ConnectionIncidentCard: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             Divider()
+            // WHERE it broke, visually: the path from this Mac to a working
+            // tunnel with the failing hop marked. The checklist below carries
+            // the detail; this carries the understanding.
+            FailurePathDiagram(incident: incident, report: report, probing: probing,
+                               serverName: host.isEmpty ? "VPN server" : host)
             diagnosticsChecklist
+            suggestions
 
             HStack {
                 if report?.captivePortal == true {
@@ -82,6 +99,20 @@ struct ConnectionIncidentCard: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(presentation.color.opacity(0.5), lineWidth: 1))
         .task(id: incident.timestamp) { await probe() }
+        // The card stays until a connect SUCCEEDS — but the diagram must not
+        // keep blaming a network the user already left. Re-probe on every
+        // network change so a fixed path turns green (with "try again") by
+        // itself, per the probe-don't-ask rule.
+        .task(id: NetworkMemory.shared.current?.key) {
+            // Not "did the first probe finish" — a first probe still in flight
+            // (or one that failed to produce a report) left the diagram blaming
+            // the old network just the same. Only the very first run is skipped,
+            // because the incident task above already owns it.
+            guard !probedNetworkKey.isEmpty, probedNetworkKey != NetworkChange.key else { return }
+            altChecked = false          // other locations answer differently here
+            reachableAlt = nil
+            await probe()
+        }
         .alert("This Network Needs a Sign-in", isPresented: $showPortalAlert) {
             Button("Open Sign-in Page") { openPortal() }
             Button("Not Now", role: .cancel) {}
@@ -97,7 +128,7 @@ struct ConnectionIncidentCard: View {
         if probing {
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text("Checking what's wrong…").font(.callout).foregroundStyle(.secondary)
+                Text("Checking the VPN's availability…").font(.callout).foregroundStyle(.secondary)
             }
         } else if let report {
             VStack(alignment: .leading, spacing: 5) {
@@ -106,8 +137,8 @@ struct ConnectionIncidentCard: View {
                          badText: "\(host) doesn't resolve — DNS is failing on this network")
                 if let reachable = report.tcpReachable {
                     checkRow(ok: reachable,
-                             okText: "Server reachable" + (report.rttMilliseconds.map { " (\($0) ms)" } ?? ""),
-                             badText: "Server not reachable on port \(port) — it may be blocked here")
+                             okText: "The VPN answers" + (report.rttMilliseconds.map { " (\($0) ms)" } ?? ""),
+                             badText: "The VPN isn't answering on port \(port) — it may be blocked here")
                 }
                 if let subject = report.tlsSubject {
                     checkRow(ok: true, okText: "Presents certificate \u{201C}\(subject)\u{201D}", badText: "")
@@ -140,14 +171,107 @@ struct ConnectionIncidentCard: View {
     private func probe() async {
         guard !host.isEmpty else { return }
         probing = true
+        probedNetworkKey = NetworkChange.key
         let result = await ConnectionDiagnostics.run(
             host: host, port: port, tryTLS: speaksTLS,
-            baseline: ConnectionBaselineStore.load(profile: profile.id))
+            baseline: ConnectionBaselineStore.load(profile: profile.id),
+            networkKey: NetworkMemory.shared.current?.key)
         report = result
         probing = false
         vpn.captivePortalSuspected = result.captivePortal   // feeds the dot state
         vpn.setProbeResult(result, for: profile.id)         // feeds the Connection Doctor
         if result.captivePortal { showPortalAlert = true }
+        // The configured location is dead but the internet works → check the
+        // VPN's OTHER locations before the user has to think about it.
+        if result.tcpReachable == false, !result.captivePortal {
+            await probeAlternates()
+        }
+    }
+
+    // MARK: Suggestions ("what to try", from what the probes found)
+
+    private var endpoints: [Endpoint] {
+        vpn.ovpnText(id: profile.id).map { EndpointScanner.endpoints(in: $0) } ?? []
+    }
+    private var endpointPinned: Bool { vpn.overrides(for: profile.id).server != nil }
+
+    private func probeAlternates() async {
+        guard !altChecked, endpoints.count > 1 else { return }
+        altProbing = true
+        defer { altProbing = false; altChecked = true }
+        for e in endpoints.prefix(6) where e.host != host {
+            if Task.isCancelled { return }
+            let r = await ConnectionDiagnostics.run(host: e.host, port: e.port ?? port,
+                                                    tryTLS: false, baseline: nil)
+            if r.tcpReachable == true {
+                reachableAlt = e
+                return
+            }
+        }
+    }
+
+    @ViewBuilder private var suggestions: some View {
+        let wifiHistory = NetworkMemory.shared.knownUnreachableHere(profile: profile.id)
+        if wifiHistory != nil || altProbing || reachableAlt != nil {
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                Label("What to try", systemImage: "lightbulb")
+                    .font(.callout.weight(.semibold))
+                if let networkLabel = wifiHistory {
+                    Label("Try a different Wi-Fi network — \(networkLabel) has had trouble reaching this VPN before.",
+                          systemImage: "wifi.exclamationmark")
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if altProbing {
+                    HStack(spacing: 8) {
+                        DrawnSpinner()
+                        Text("Checking this VPN's other locations\u{2026}")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                } else if let alt = reachableAlt {
+                    Label("Good news — the \(alt.host) location answers from this network.",
+                          systemImage: "checkmark.circle")
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Button("Switch to \(alt.host) and Try Again") { switchAndRetry(alt) }
+                            .buttonStyle(.glassProminent).controlSize(.small)
+                        if endpointPinned {
+                            Button("Use Automatic Instead") { autoAndRetry() }
+                                .buttonStyle(.glass).controlSize(.small)
+                                .help("Automatic tries each of this VPN's locations until one answers")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func switchAndRetry(_ e: Endpoint) {
+        Task {
+            await vpn.applyDoctorFix(.overrides { o in
+                o.server = e.host
+                o.port = e.port
+                o.proto = e.proto.flatMap { OpenVPNOverrides.TransportProto(rawValue: $0) }
+            }, to: profile.id, undoLabel: "endpoint: \(e.host)")
+            vpn.dismissIncident(id: profile.id)
+            try? await vpn.connectUsingConfiguredSource(
+                id: profile.id, typedOTP: vpn.transientCredentials(for: profile.id).otp)
+        }
+    }
+
+    private func autoAndRetry() {
+        Task {
+            await vpn.applyDoctorFix(.overrides { o in
+                o.server = nil
+                o.port = nil
+                o.proto = nil
+            }, to: profile.id, undoLabel: "endpoint: Automatic")
+            vpn.dismissIncident(id: profile.id)
+            try? await vpn.connectUsingConfiguredSource(
+                id: profile.id, typedOTP: vpn.transientCredentials(for: profile.id).otp)
+        }
     }
 
     private func openPortal() {
@@ -225,48 +349,216 @@ struct ConnectionIncidentCard: View {
     }
 }
 
-// MARK: - Degraded-link banners (passive, while connected)
+// (The degraded-link banners — LinkInterruptionBanner / LinkStalledBanner — are
+// gone: connection state has ONE spot in the window, the header badge and its
+// plain-English problem chip. Details live in the opt-in Connection Manager.)
 
-/// Shown while the engine is reasserting (network changed / vanished) —
-/// the train-going-into-a-tunnel state.
-struct LinkInterruptionBanner: View {
-    let reconnects: Int
+// MARK: - Failure path diagram
 
-    var body: some View {
-        HStack(spacing: 10) {
-            ProgressView().controlSize(.small)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Connection interrupted — reconnecting…").font(.callout.weight(.medium))
-                Text("Your traffic is paused, not exposed. It resumes when the network comes back."
-                     + (reconnects > 1 ? " (\(reconnects) reconnects this session)" : ""))
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+/// The connection's journey as five hops — this Mac → this network → the
+/// internet → the VPN server → the sign-in — with the automatic probes' verdict
+/// drawn on each: green got through, red is where it broke, indigo is a sign-in
+/// page in the way, grey was never reached. Non-technical users read WHERE it
+/// failed at a glance; the checklist underneath carries the specifics.
+struct FailurePathDiagram: View {
+    let incident: TunnelIncident
+    let report: DiagnosticsReport?
+    let probing: Bool
+    let serverName: String
+
+    private enum HopState: Equatable {
+        case ok, failed, portal, unknown
+        var color: Color {
+            switch self {
+            case .ok: .green
+            case .failed: .red
+            case .portal: .indigo
+            case .unknown: Color.gray.opacity(0.45)
             }
-            Spacer(minLength: 0)
         }
-        .padding(10)
-        .background(.yellow.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
-        .accessibilityElement(children: .combine)
     }
-}
+    private struct Hop {
+        let icon: String
+        let label: String
+        var state: HopState = .unknown
+        var verdict: String? = nil   // plain-English, only on the failing hop
+    }
 
-/// Shown when passive traffic analysis says we're sending into the void.
-struct LinkStalledBanner: View {
-    let seconds: Int
+    private var hops: [Hop] {
+        var mac = Hop(icon: "laptopcomputer", label: "Your Mac", state: .ok)
+        var network = Hop(icon: "wifi", label: "This network")
+        var internet = Hop(icon: "globe", label: "Internet")
+        var server = Hop(icon: "server.rack", label: "The VPN")
+        var signIn = Hop(icon: "person.badge.key", label: "Sign-in")
+
+        func done(_ hops: [Hop]) -> [Hop] { hops }
+
+        if probing || (report == nil && incident.category == .unknown) {
+            return done([mac, network, internet, server, signIn])
+        }
+
+        if let report {
+            if report.captivePortal {
+                network.state = .ok
+                internet.state = .portal
+                internet.verdict = "A Wi-Fi sign-in page is blocking the way — sign in there first."
+                return done([mac, network, internet, server, signIn])
+            }
+            if report.dnsFailed, report.tcpReachable != true {
+                network.state = .ok
+                internet.state = .failed
+                internet.verdict = "This network isn't reaching the internet (name lookups fail)."
+                return done([mac, network, internet, server, signIn])
+            }
+            network.state = .ok
+            internet.state = .ok
+            if report.tcpReachable == false {
+                server.state = .failed
+                server.verdict = "The internet works here, but the VPN never answered."
+                return done([mac, network, internet, server, signIn])
+            }
+            server.state = .ok
+            // The failure was network-shaped and the path is CLEAR now (Wi-Fi
+            // changed, portal solved, outage over): say so, positively — the
+            // diagram's job includes announcing that the problem is gone.
+            let networkShaped: Set<IncidentCategory> = [.network, .timeout, .dns, .proxy]
+            if report.tcpReachable == true, !report.dnsFailed,
+               networkShaped.contains(incident.category) {
+                signIn.state = .unknown
+                server.verdict = "The path to the VPN looks clear from this network now — try connecting again."
+                return done([mac, network, internet, server, signIn])
+            }
+        }
+
+        // The wire worked (or was never probed) — the incident says the rest.
+        switch incident.category {
+        case .auth:
+            if report == nil { network.state = .ok; internet.state = .ok; server.state = .ok }
+            signIn.state = .failed
+            signIn.verdict = "The VPN answered but rejected the sign-in — wrong password or a stale one-time code."
+        case .dns:
+            internet.state = .failed
+            internet.verdict = "The VPN's address can't be looked up on this network."
+            server.state = .unknown
+        case .timeout, .network:
+            if report == nil { network.state = .ok }
+            server.state = server.state == .ok ? .failed : server.state
+            if server.state == .failed && server.verdict == nil {
+                server.verdict = "The VPN stopped answering partway through connecting."
+            } else if server.state == .unknown {
+                server.state = .failed
+                server.verdict = "The VPN couldn't be reached."
+            }
+        case .tlsIdentity, .cipher:
+            server.state = .failed
+            server.verdict = "Something answered, but it doesn't look like the right VPN (a certificate or security mismatch)."
+        case .proxy:
+            internet.state = .failed
+            internet.verdict = "The proxy between you and the internet refused the connection."
+        case .tunSetup, .conflict:
+            signIn.state = .ok
+            server.verdict = nil
+            mac.state = .failed
+            mac.verdict = incident.category == .conflict
+                ? "Another VPN on this Mac took over the connection."
+                : "macOS refused to apply the tunnel's network settings."
+        case .serverHalt:
+            server.state = .failed
+            server.verdict = "The VPN told SimpleVPN to disconnect."
+        case .unknown:
+            break
+        }
+        return done([mac, network, internet, server, signIn])
+    }
+
+    /// Aligns the connector lines to the CIRCLES' vertical centers, not the
+    /// centre of circle+caption (which put lines below the circles).
+    private struct HopCenter: AlignmentID {
+        static func defaultValue(in d: ViewDimensions) -> CGFloat { d[VerticalAlignment.center] }
+    }
+    private static let hopCenter = VerticalAlignment(HopCenter.self)
+    private static let circleSize: CGFloat = 38
+    private static let columnWidth: CGFloat = 76
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "wifi.exclamationmark").foregroundStyle(.orange)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Nothing is coming back from the VPN").font(.callout.weight(.medium))
-                Text("Your Mac has been sending for \(seconds) seconds with no reply — the network here may have silently dropped.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+        let hops = self.hops
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: Self.hopCenter, spacing: 0) {
+                ForEach(Array(hops.enumerated()), id: \.offset) { index, hop in
+                    if index > 0 {
+                        // The link INTO a hop carries that hop's verdict color.
+                        // Negative padding tucks the line ends under the fixed-
+                        // width columns so it visually meets each circle; the
+                        // circles' solid backing hides it underneath.
+                        Rectangle()
+                            .fill(hop.state.color.opacity(hop.state == .unknown ? 0.4 : 0.8))
+                            .frame(height: 2)
+                            .frame(maxWidth: .infinity)
+                            .alignmentGuide(Self.hopCenter) { $0[VerticalAlignment.center] }
+                            .padding(.horizontal, -(Self.columnWidth - Self.circleSize) / 2 + 3)
+                            .zIndex(-1)
+                    }
+                    node(hop)
+                }
             }
-            Spacer(minLength: 0)
+            if let verdict = hops.compactMap(\.verdict).first {
+                Label(verdict, systemImage: "arrow.up.right")
+                    .font(.callout.weight(.medium))
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if probing {
+                Text("Checking the VPN's availability\u{2026}").font(.callout).foregroundStyle(.secondary)
+            }
         }
-        .padding(10)
-        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
         .accessibilityElement(children: .combine)
+        .accessibilityLabel(hops.compactMap(\.verdict).first ?? "Connection path")
+    }
+
+    private func node(_ hop: Hop) -> some View {
+        VStack(spacing: 4) {
+            ZStack {
+                // Solid backing so the tucked-under connector line can't show
+                // through the translucent tint fill.
+                Circle().fill(.background)
+                Circle()
+                    .fill(hop.state.color.opacity(hop.state == .unknown ? 0.15 : 0.22))
+                Circle()
+                    .strokeBorder(hop.state.color, lineWidth: hop.verdict == nil ? 1.5 : 2.5)
+                Image(systemName: hop.icon)
+                    .font(.system(size: 15))
+                    .foregroundStyle(hop.state.color)
+            }
+            .frame(width: Self.circleSize, height: Self.circleSize)
+            .overlay(alignment: .topTrailing) {
+                switch hop.state {
+                case .failed:
+                    badge("xmark.circle.fill", .red)
+                case .portal:
+                    badge("exclamationmark.circle.fill", .indigo)
+                case .ok:
+                    badge("checkmark.circle.fill", .green)
+                case .unknown:
+                    EmptyView()
+                }
+            }
+            Text(hop.label)
+                .font(.caption2)
+                .foregroundStyle(hop.verdict == nil ? .secondary : .primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(width: Self.columnWidth)
+        }
+        // Every column the same width (captions no longer skew the gaps), and
+        // the alignment guide pins connectors to the circles' centre line.
+        .frame(width: Self.columnWidth)
+        .alignmentGuide(Self.hopCenter) { _ in Self.circleSize / 2 }
+        .zIndex(1)
+    }
+
+    private func badge(_ symbol: String, _ color: Color) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 12))
+            .foregroundStyle(color)
+            .background(Circle().fill(.background).padding(1))
+            .offset(x: 4, y: -3)
     }
 }

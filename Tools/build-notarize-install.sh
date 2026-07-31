@@ -13,7 +13,9 @@ DD="$REPO/build/dd"
 
 # Monotonic build number so you can confirm the running app is this build.
 mkdir -p "$REPO/build"
-BUILDNO_FILE="$REPO/build/buildnumber.txt"
+# Tracked at the repo root so release CI bakes the same number the dev loop
+# shows — "v0.2 (104)" in the UI must mean the same build everywhere.
+BUILDNO_FILE="$REPO/BUILDNUMBER"
 BUILDNO=$(( $(cat "$BUILDNO_FILE" 2>/dev/null || echo 0) + 1 ))
 echo "$BUILDNO" > "$BUILDNO_FILE"
 echo "==> build number $BUILDNO"
@@ -45,6 +47,9 @@ until build_once; do
   if [ "$n" -ge 3 ]; then echo "ERROR: Release build failed after $n attempts"; exit 1; fi
   echo "   build failed (likely transient TSA/codesign) — retry $n in 8s…"; sleep 8
 done
+
+echo "==> re-sign Sparkle nested executables (notary requires our Developer ID + timestamp)"
+"$REPO/Tools/resign-sparkle.sh" "$APP"
 
 echo "==> verify not debuggable (no get-task-allow)"
 if codesign -d --entitlements - --xml "$APP" 2>/dev/null | grep -q "get-task-allow"; then

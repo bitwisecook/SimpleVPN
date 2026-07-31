@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Copyright 2026 James Deucker (bitwisecook)
+  SPDX-License-Identifier: GPL-3.0-only
+
+  The ONE binary allowed to relax library validation: the 1Password SDK's
+  desktop-app integration dlopens the IPC client dylib out of the installed
+  1Password.app (AgileBits-signed, not our team). The APP can't carry this —
+  AMFI forbids hardened-runtime relaxations on anything embedding a System
+  Extension — so the load happens in this standalone helper instead. DYLD_*
+  injection stays blocked (no allow-dyld-environment-variables).
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>

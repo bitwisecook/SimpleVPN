@@ -87,7 +87,7 @@ struct DiscoverEndpointView: View {
             Spacer(minLength: 6)
             if c.kind != nil {
                 Button("Create") { onCreate(c); dismiss() }
-                    .buttonStyle(.borderedProminent).controlSize(.small)
+                    .buttonStyle(.glassProminent).controlSize(.small)
             }
         }
         .padding(.vertical, 2)

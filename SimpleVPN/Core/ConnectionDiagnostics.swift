@@ -25,6 +25,11 @@ struct ConnectionBaseline: Codable, Sendable, Equatable {
     var serverIP: String?          // transport address of the last good session
     var resolvedIPs: [String] = [] // DNS answers observed at that time (best effort)
     var tlsFingerprint: String?    // only when a TLS probe ever captured one
+    /// The network (NetworkFingerprint.key) this baseline was recorded on.
+    /// Optional: baselines written before this existed simply don't say, and a
+    /// baseline that can't say which network it came from can't support any
+    /// address comparison at all. Decoded leniently for exactly that reason.
+    var networkKey: String?
     var date: Date
 }
 
@@ -76,10 +81,27 @@ struct DiagnosticsReport: Sendable, Equatable {
 // MainActor-isolated under the app target's MainActor default.
 nonisolated enum ConnectionDiagnostics {
 
+    /// Whether "the server's address changed" is worth saying at all.
+    ///
+    /// Only on the SAME network as the baseline. Endpoints are commonly
+    /// split-horizon — one name, a private address inside and a public one
+    /// outside — so a different answer from a different network is the system
+    /// working, not a change worth alarming anyone about. A baseline that
+    /// predates network recording (or a fingerprint we don't have yet) can't
+    /// establish sameness, so it stays quiet too.
+    static func addressChangeIsMeaningful(baselineNetwork: String?,
+                                          currentNetwork: String?) -> Bool {
+        guard let baselineNetwork, let currentNetwork else { return false }
+        return baselineNetwork == currentNetwork
+    }
+
     /// Run the full failure-time probe sequence. `tryTLS` should be true only
     /// when the endpoint plausibly speaks TLS on `port` (TCP transport).
+    /// `networkKey` is the caller's NetworkFingerprint.key — passed in because
+    /// NetworkMemory is main-actor state and none of this is.
     static func run(host: String, port: Int, tryTLS: Bool,
-                    baseline: ConnectionBaseline?) async -> DiagnosticsReport {
+                    baseline: ConnectionBaseline?,
+                    networkKey: String? = nil) async -> DiagnosticsReport {
         var report = DiagnosticsReport(host: host, port: port)
 
         // 1. DNS
@@ -119,7 +141,9 @@ nonisolated enum ConnectionDiagnostics {
 
         // Baseline comparison
         if let baseline {
-            if let old = baseline.serverIP, !old.isEmpty, !report.resolvedIPs.isEmpty,
+            if addressChangeIsMeaningful(baselineNetwork: baseline.networkKey,
+                                         currentNetwork: networkKey),
+               let old = baseline.serverIP, !old.isEmpty, !report.resolvedIPs.isEmpty,
                !report.resolvedIPs.contains(old) {
                 report.baselineNotes.append(
                     "The server's address changed since your last successful connection (was \(old), now \(report.resolvedIPs.joined(separator: ", "))).")
@@ -278,7 +302,10 @@ nonisolated enum ConnectionDiagnostics {
     /// sign-in, exhausted data plan, expired day pass.
     static let captivePortalProbeURL = URL(string: "http://captive.apple.com/hotspot-detect.html")!
 
-    private static func captivePortalProbe() async -> (detected: Bool, url: URL?) {
+    /// Internal (not private) so a connect attempt can ask "is a sign-in page in
+    /// the way?" the moment it starts, instead of only after a 45 s timeout's
+    /// incident diagnostics. Runs solely as part of a user-initiated action.
+    static func captivePortalProbe() async -> (detected: Bool, url: URL?) {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 8
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData

@@ -110,7 +110,7 @@ struct WireGuardView: View {
                     Button("Cancel") { showPaste = false }
                     Spacer()
                     Button("Import") { applyParsed(pasteText); showPaste = false }
-                        .buttonStyle(.borderedProminent).disabled(pasteText.isEmpty)
+                        .buttonStyle(.glassProminent).disabled(pasteText.isEmpty)
                 }
             }
             .padding()

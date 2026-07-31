@@ -73,7 +73,15 @@ struct DiagnosticsCommands: Commands {
     @State private var capture = DiagnosticsCapture()
 
     var body: some Commands {
-        CommandGroup(after: .help) {
+        // ONE group anchored at .help — replacing the system item (which would
+        // look for a help book this app doesn't have) AND carrying the
+        // diagnostics entries. It used to be two groups, replacing(.help) plus
+        // after(.help): anchoring a second group to a placement the first had
+        // replaced sent SwiftUI's menu builder into an infinite invalidation
+        // loop — permanent beachball at launch.
+        CommandGroup(replacing: .help) {
+            Button("SimpleVPN Help") { openWindow(id: "manual") }
+                .keyboardShortcut("?", modifiers: [.command])
             Divider()
             Button("Capture Debug Log (Scrubbed)…") { save(.scrubbed) }
             Button("Capture Debug Log (Full)…") { save(.full) }

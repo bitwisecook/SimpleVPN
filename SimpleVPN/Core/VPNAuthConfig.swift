@@ -27,6 +27,16 @@ struct VPNAuthConfig: Codable, Sendable, Equatable {
     /// edit sheet). Ignored — treated as false — when the profile forbids saving.
     var rememberCredentials = true
 
+    /// Credentials live in a Touch ID-gated keychain item instead of the plain
+    /// keychain: connecting asks for a fingerprint (or Watch / account password)
+    /// to release them. Optional so blobs written by older builds still decode;
+    /// nil means off. Only meaningful for the manual/saved credential source.
+    var biometricProtection: Bool? = nil
+    var protectWithBiometrics: Bool {
+        get { biometricProtection ?? false }
+        set { biometricProtection = newValue ? true : nil }
+    }
+
     init() {}
 
     /// The credential request this configuration implies.
@@ -55,5 +65,34 @@ struct VPNAuthConfig: Codable, Sendable, Equatable {
     static func decode(from blob: Data?) -> VPNAuthConfig {
         guard let blob else { return VPNAuthConfig() }
         return (try? JSONDecoder().decode(VPNAuthConfig.self, from: blob)) ?? VPNAuthConfig()
+    }
+}
+
+/// Per-VPN interface preferences: which OPTIONAL controls this VPN shows.
+/// Advanced surfaces are opt-in per VPN so the default interface stays simple —
+/// most people never need to pause a tunnel or read a health panel. Stored as
+/// providerConfiguration["uiprefs"], same lenient blob pattern as above.
+struct VPNUIPrefs: Codable, Sendable, Equatable {
+
+    /// Show the Pause control (header, sidebar, menu bar). Pause keeps the
+    /// session signed in but routes traffic outside the VPN until resumed.
+    var allowPause = false
+
+    /// Show the Connection Manager panel (health checks + connection toggles)
+    /// on the connection page.
+    var showConnectionManager = false
+
+    init() {}
+
+    var isDefault: Bool { self == VPNUIPrefs() }
+
+    func encodedBlob() -> Data? {
+        guard !isDefault else { return nil }
+        return try? JSONEncoder().encode(self)
+    }
+
+    static func decode(from blob: Data?) -> VPNUIPrefs {
+        guard let blob else { return VPNUIPrefs() }
+        return (try? JSONDecoder().decode(VPNUIPrefs.self, from: blob)) ?? VPNUIPrefs()
     }
 }

@@ -289,7 +289,9 @@ enum GeoIP {
 /// Static ISO 3166-1 alpha-2 table (all assigned codes plus XK, which DB-IP and
 /// MaxMind both emit for Kosovo). Centroids are country-level approximations —
 /// exactly the fidelity a whole-world pin map needs, nothing more.
-enum CountryCentroids {
+// nonisolated: a static lookup table with no mutable state. The region
+// bucketing and the endpoint ranking are pure, off-actor code and need it.
+nonisolated enum CountryCentroids {
 
     static func coordinate(for isoCode: String) -> (lat: Double, lon: Double)? {
         table[isoCode.uppercased()].map { (lat: $0.lat, lon: $0.lon) }
@@ -569,7 +571,11 @@ enum CountryCentroids {
 /// the DB is missing) — the map shows only what it knows.
 struct EndpointLocation: Equatable, Sendable {
     var endpoint: Endpoint
+    /// Primary address (first A record) — the one the country lookup used.
     var ip: String?
+    /// Every address DNS gave for the host, `ip` first. A multi-homed endpoint
+    /// judged on one of its addresses is judged wrongly, so all of them are kept.
+    var addresses: [String] = []
     var countryCode: String?
     var countryName: String?
     var lat: Double?
@@ -580,36 +586,62 @@ struct EndpointLocation: Equatable, Sendable {
 /// misses kick off DNS → GeoIP in the background and the observable cache
 /// mutation re-renders whichever view asked. Cache persists across launches
 /// (UserDefaults, 7-day TTL) so the map is warm at startup.
+///
+/// Answers are remembered PER NETWORK, because endpoints are routinely
+/// split-horizon: the same name resolves to a private address on the office LAN
+/// and a public one from a café, and pinning the café's answer on the office map
+/// (or the other way round) is simply wrong. Each network's own answer is stable,
+/// so keeping them side by side beats both alternatives — never noticing, and
+/// throwing the whole cache away on every Wi-Fi hop.
 @Observable
 final class EndpointLocator {
 
-    private struct HostInfo: Codable, Equatable {
+    struct HostInfo: Codable, Equatable {
+        /// Primary answer (first A record), and what the country lookup used.
         var ip: String?
+        /// Every answer DNS gave, `ip` first. Optional only so an entry written
+        /// before multi-address caching still decodes.
+        var addresses: [String]?
         var countryCode: String?
         var timestamp: Double       // epoch seconds of resolution
+
+        var allAddresses: [String] { addresses ?? ip.map { [$0] } ?? [] }
     }
 
     private static let cacheKey = "geoip.hostCache"
     private static let ttl: TimeInterval = 7 * 24 * 3600
 
-    private var cache: [String: HostInfo]
+    /// network fingerprint key → host → what that network answered. Same nested
+    /// shape as NetworkMemory.failures, and for the same reason: a stale entry
+    /// stays inspectable (and deletable) in defaults.
+    private var cache: [String: [String: HostInfo]] = [:]
     @ObservationIgnored private var inFlight: Set<String> = []
+    @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let networkKey: @MainActor () -> String
 
-    init() {
-        if let data = UserDefaults.standard.data(forKey: Self.cacheKey),
-           let stored = try? JSONDecoder().decode([String: HostInfo].self, from: data) {
-            cache = stored
-        } else {
-            cache = [:]
+    init(defaults: UserDefaults = .standard,
+         networkKey: @escaping @MainActor () -> String = { NetworkChange.key }) {
+        self.defaults = defaults
+        self.networkKey = networkKey
+        if let data = defaults.data(forKey: Self.cacheKey),
+           let stored = try? JSONDecoder().decode([String: [String: HostInfo]].self, from: data) {
+            // Bound growth across launches: networks visited once, months ago,
+            // would otherwise accumulate for ever.
+            cache = Self.pruned(stored, now: Date().timeIntervalSince1970)
         }
+        // A cache written by a version that keyed by host alone fails to decode
+        // here, and that is the intended migration: those answers can't be
+        // attributed to a network, so they're dropped rather than guessed at.
     }
 
     func locations(for endpoints: [Endpoint]) -> [EndpointLocation] {
+        let network = networkKey()
         let now = Date().timeIntervalSince1970
         return endpoints.map { endpoint in
             var location = EndpointLocation(endpoint: endpoint)
-            if let info = cache[endpoint.host] {
+            if let info = cache[network]?[endpoint.host] {
                 location.ip = info.ip
+                location.addresses = info.allAddresses
                 if let code = info.countryCode {
                     location.countryCode = code
                     location.countryName = CountryCentroids.name(for: code)
@@ -619,44 +651,94 @@ final class EndpointLocator {
                     }
                 }
                 // Stale entries still pin immediately; a re-resolve refreshes them.
-                if now - info.timestamp > Self.ttl { resolveInBackground(host: endpoint.host) }
+                if now - info.timestamp > Self.ttl {
+                    resolveInBackground(host: endpoint.host, network: network)
+                }
             } else {
-                resolveInBackground(host: endpoint.host)
+                resolveInBackground(host: endpoint.host, network: network)
             }
             return location
         }
     }
 
-    private func resolveInBackground(host: String) {
-        guard inFlight.insert(host).inserted else { return }
+    /// What this network last answered for `host`, or nil if it never has.
+    func cached(host: String) -> HostInfo? { cache[networkKey()]?[host] }
+
+    /// Every network's remembered answer for `host`, this network's first and the
+    /// rest in a fixed order (so a re-render can't reshuffle whatever reads them).
+    ///
+    /// For DISPLAY only, and only where a cross-network answer stays true: which
+    /// address a split-horizon name resolves to changes when you walk into the
+    /// building, but the machine behind it does not move, so "that concentrator is
+    /// in GB" survives the walk. Never use this to decide what to CONNECT to —
+    /// that must always be the answer this network gives.
+    func cachedEverywhere(host: String) -> [HostInfo] {
+        let current = networkKey()
+        var out: [HostInfo] = []
+        if let mine = cache[current]?[host] { out.append(mine) }
+        for (network, hosts) in cache.sorted(by: { $0.key < $1.key })
+        where network != current {
+            if let info = hosts[host] { out.append(info) }
+        }
+        return out
+    }
+
+    /// Record an answer against the network it was learned on. Called by the
+    /// background resolve; also the seam tests drive.
+    func store(host: String, network: String, addresses: [String],
+               countryCode: String?, at when: Date = Date()) {
+        var forNetwork = cache[network] ?? [:]
+        forNetwork[host] = HostInfo(ip: addresses.first, addresses: addresses,
+                                    countryCode: countryCode,
+                                    timestamp: when.timeIntervalSince1970)
+        cache[network] = forNetwork
+        persist()
+    }
+
+    private func resolveInBackground(host: String, network: String) {
+        let token = "\(network)\u{1F}\(host)"
+        guard inFlight.insert(token).inserted else { return }
         Task { [weak self] in
-            let ip = await Self.resolve(host: host)
+            let addresses = await Self.resolve(host: host)
             guard let self else { return }
-            let code = ip.flatMap { GeoIP.shared?.countryCode(for: $0) }
-            cache[host] = HostInfo(ip: ip, countryCode: code,
-                                   timestamp: Date().timeIntervalSince1970)
-            inFlight.remove(host)
-            persist()
+            // The country comes from the primary answer: a multi-homed host's
+            // addresses sit in one place often enough, and the pin is
+            // country-level anyway.
+            let code = addresses.first.flatMap { GeoIP.shared?.countryCode(for: $0) }
+            store(host: host, network: network, addresses: addresses, countryCode: code)
+            inFlight.remove(token)
         }
     }
 
     private func persist() {
         guard let data = try? JSONEncoder().encode(cache) else { return }
-        UserDefaults.standard.set(data, forKey: Self.cacheKey)
+        defaults.set(data, forKey: Self.cacheKey)
     }
 
-    /// First numeric address for `host` (A preferred over AAAA). getaddrinfo
+    /// Drop everything past the TTL, on every network, and any network left with
+    /// nothing to say.
+    static func pruned(_ cache: [String: [String: HostInfo]],
+                       now: TimeInterval) -> [String: [String: HostInfo]] {
+        var out: [String: [String: HostInfo]] = [:]
+        for (network, hosts) in cache {
+            let live = hosts.filter { now - $0.value.timestamp <= ttl }
+            if !live.isEmpty { out[network] = live }
+        }
+        return out
+    }
+
+    /// Every numeric address for `host`, A records before AAAA. getaddrinfo
     /// blocks, so it runs on a detached task off the main actor.
-    nonisolated private static func resolve(host: String) async -> String? {
-        await Task.detached(priority: .utility) { () -> String? in
+    nonisolated private static func resolve(host: String) async -> [String] {
+        await Task.detached(priority: .utility) { () -> [String] in
             var hints = addrinfo()
             hints.ai_family = AF_UNSPEC
             hints.ai_socktype = SOCK_STREAM
             var list: UnsafeMutablePointer<addrinfo>?
-            guard getaddrinfo(host, nil, &hints, &list) == 0, let head = list else { return nil }
+            guard getaddrinfo(host, nil, &hints, &list) == 0, let head = list else { return [] }
             defer { freeaddrinfo(head) }
 
-            var firstV6: String?
+            var v4: [String] = [], v6: [String] = []
             var node: UnsafeMutablePointer<addrinfo>? = head
             while let ai = node?.pointee {
                 var buf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
@@ -664,12 +746,15 @@ final class EndpointLocator {
                                &buf, socklen_t(buf.count), nil, 0, NI_NUMERICHOST) == 0 {
                     let text = String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) },
                                       as: UTF8.self)
-                    if ai.ai_family == AF_INET { return text }
-                    if firstV6 == nil { firstV6 = text }
+                    if ai.ai_family == AF_INET {
+                        if !v4.contains(text) { v4.append(text) }
+                    } else if !v6.contains(text) {
+                        v6.append(text)
+                    }
                 }
                 node = ai.ai_next
             }
-            return firstV6
+            return v4 + v6
         }.value
     }
 }

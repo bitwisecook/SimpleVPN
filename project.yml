@@ -17,6 +17,14 @@ attributes:
   LastUpgradeCheck: "2660"
   LastSwiftUpdateCheck: "2660"
 
+# Sparkle: the app updater (feeds off the GitHub-release DMG via an appcast that
+# the release workflow generates and signs). Pinned exactly, same policy as the
+# SHA-pinned workflow actions — bump deliberately, never float.
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.9.4
+
 # Shared build settings. Developer ID manual signing (system extension requires it).
 settings:
   base:
@@ -90,9 +98,24 @@ targets:
           - "USE_OPENSSL=1"
           - "USE_TUN_BUILDER=1"
           - "FMT_HEADER_ONLY=1"
+    postBuildScripts:
+      # The 1Password SDK helper rides in Contents/MacOS (see OPNativeHelper/
+      # main.swift for WHY it must be a separate binary). It signs itself with
+      # its own entitlements; Xcode seals the app around it afterwards.
+      - name: Embed opnative-helper
+        script: |
+          # cp, not ditto: ditto stages a temp file the build sandbox denies.
+          cp -f "${BUILT_PRODUCTS_DIR}/opnative-helper" "${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/opnative-helper"
+        inputFiles:
+          - "$(BUILT_PRODUCTS_DIR)/opnative-helper"
+        outputFiles:
+          - "$(TARGET_BUILD_DIR)/$(EXECUTABLE_FOLDER_PATH)/opnative-helper"
     dependencies:
       - target: PacketTunnel
         embed: true
+      - target: OPNativeHelper
+        embed: false
+      - package: Sparkle
       - sdk: Security.framework
       - sdk: SystemConfiguration.framework
       - sdk: libresolv.tbd
@@ -161,6 +184,34 @@ targets:
       - sdk: libz.tbd
       - sdk: libiconv.tbd
 
+  # ---- 1Password SDK helper (the ONLY binary with the library-validation
+  # relaxation — AMFI forbids it on the sysext-embedding app; see
+  # OPNativeHelper/main.swift). One-shot stdin/stdout JSON tool. ----
+  OPNativeHelper:
+    type: tool
+    platform: macOS
+    sources: [OPNativeHelper]
+    settings:
+      base:
+        PRODUCT_NAME: opnative-helper
+        SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
+        SWIFT_OBJC_BRIDGING_HEADER: "OPNativeHelper/OPNativeHelper-Bridging-Header.h"
+        CODE_SIGN_ENTITLEMENTS: OPNativeHelper/OPNativeHelper.entitlements
+        # No provisioning profile: the relaxation entitlement isn't restricted.
+        PROVISIONING_PROFILE_SPECIFIER: ""
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/Vendor/onepassword-native/include"
+        # Go runtime needs CoreFoundation + Security; verified empirically.
+        LIBRARY_SEARCH_PATHS:
+          - "$(SRCROOT)/Vendor/onepassword-native"
+        OTHER_LDFLAGS:
+          - "-lopnative"
+          - "-framework"
+          - "CoreFoundation"
+          - "-framework"
+          - "Security"
+        SKIP_INSTALL: YES
+
   # ---- Tests ----
   SimpleVPNTests:
     type: bundle.unit-test
@@ -172,6 +223,10 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.bragi0.SimpleVPNTests
         GENERATE_INFOPLIST_FILE: YES
+        # @testable import SimpleVPN re-scans the app's bridging header, which
+        # now includes opnative.h (in-process 1Password SDK).
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/Vendor/onepassword-native/include"
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "Apple Development"
         PROVISIONING_PROFILE_SPECIFIER: ""

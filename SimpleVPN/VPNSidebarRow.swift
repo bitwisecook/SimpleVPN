@@ -19,13 +19,13 @@ struct VPNSidebarRow: View {
     let dotState: DotState
 
     @Environment(EndpointLocator.self) private var locator: EndpointLocator?
+    @Environment(EndpointProbeStore.self) private var probes: EndpointProbeStore?
+    @Environment(PublicIPMonitor.self) private var publicIP: PublicIPMonitor?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var stateEase: Animation? { reduceMotion ? nil : .smooth(duration: 0.3) }
 
-    private var endpoints: [Endpoint] {
-        vpn.ovpnText(id: profile.id).map { EndpointScanner.endpoints(in: $0) } ?? []
-    }
-    private var pauseMode: VPNController.PauseMode? { vpn.pausedProfiles[profile.id] }
+    private var endpoints: [VPNEndpoint] { vpn.endpoints(for: profile.id) }
+    private var isPaused: Bool { vpn.pausedProfiles.contains(profile.id) }
     private var reconfiguring: Bool { vpn.isReconfiguring(profile.id) }
 
     var body: some View {
@@ -38,6 +38,12 @@ struct VPNSidebarRow: View {
                 Text(profile.name).lineLimit(1).truncationMode(.tail)
                 if endpoints.count > 1 {
                     endpointPicker
+                    // The picker replaces the status line, but "waiting on you"
+                    // must still be said — it's the reason Play is dimmed.
+                    if missingTypedInput != nil,
+                       profile.status == .disconnected || profile.status == .invalid {
+                        Text(statusText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
                 } else {
                     Text(statusText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
@@ -63,7 +69,7 @@ struct VPNSidebarRow: View {
         }
         .animation(stateEase, value: profile.status)
         .animation(stateEase, value: reconfiguring)
-        .animation(stateEase, value: pauseMode)
+        .animation(stateEase, value: isPaused)
     }
 
     @ViewBuilder private var controlsContent: some View {
@@ -73,10 +79,11 @@ struct VPNSidebarRow: View {
         } else {
             switch profile.status {
             case .connected, .reasserting:
-                if pauseMode != nil {
+                if isPaused {
                     circle("play.fill", tint: .green, help: "Resume") { Task { await vpn.resume(id: profile.id) } }
                         .transition(.blurReplace)
-                } else {
+                } else if vpn.uiPrefs(for: profile.id).allowPause {
+                    // Opt-in per VPN — the default row is just stop.
                     pauseControl
                         .transition(.blurReplace)
                 }
@@ -99,6 +106,17 @@ struct VPNSidebarRow: View {
                         Task { await ext?.activate() }
                     }
                     .transition(.blurReplace)
+                } else if let missing = missingTypedInput {
+                    // Same rule as macOS permission above: a green Play that can only
+                    // fail is a lie. Dim it — but a click still helps: it opens this
+                    // VPN and shakes the field that needs filling in.
+                    circle("play.fill", tint: .gray,
+                           help: missing == .code ? "Enter your verification code first"
+                                                  : "Enter your sign-in first") {
+                        vpn.nudgeCredentials(id: profile.id)
+                    }
+                    .transition(.blurReplace)
+                    .accessibilityLabel("Connect \(profile.name) — needs \(missing == .code ? "your verification code" : "your sign-in") first")
                 } else {
                     circle("play.fill", tint: .green, help: "Connect") { play() }
                         .transition(.blurReplace)
@@ -107,14 +125,12 @@ struct VPNSidebarRow: View {
         }
     }
 
-    // Sidebar affordance is deliberately a single direct action, not a menu: this
-    // is the leaky/risky choice (traffic leaves the Mac outside the VPN), so it
-    // gets its own loud, unmistakable control rather than being buried behind a
-    // tap-to-reveal picker. Anyone who wants the "block" choice instead opens the
-    // connection detail pane, where PauseControl still offers both.
+    // Sidebar affordance is a single direct action: pause keeps the session
+    // signed in but sends traffic outside the VPN, so the icon is the loud
+    // lane-diversion sign, not a calm pause glyph.
     private var pauseControl: some View {
         Button {
-            Task { await vpn.pause(id: profile.id, mode: .bypass) }
+            Task { await vpn.pause(id: profile.id) }
         } label: {
             // A lane-diversion road sign: traffic being routed AROUND something. A
             // shield said "protected", which is the opposite of what bypass does.
@@ -144,7 +160,39 @@ struct VPNSidebarRow: View {
 
     private func play() {
         vpn.selectedID = profile.id                 // focus it if it needs input
-        Task { await vpn.connectWithSavedCredentials(id: profile.id) }
+        Task {
+            // If saved credentials can't do it after all (a manager item went
+            // missing, a code became required), don't fail silently — walk the
+            // user to the form like the dimmed play button would have.
+            if await !vpn.connectWithSavedCredentials(id: profile.id), vpn.lastError == nil {
+                vpn.nudgeCredentials(id: profile.id)
+            }
+        }
+    }
+
+    /// What still has to be typed before this VPN can connect, mirroring the
+    /// detail pane's `canConnect`. nil ⇒ a tap on Play can genuinely connect.
+    private enum MissingInput { case signIn, code }
+    private var missingTypedInput: MissingInput? {
+        let auth = vpn.authConfig(for: profile.id)
+        let kind = vpn.credentialSource(for: profile.id).kind
+        let c = vpn.transientCredentials(for: profile.id)
+        let otpEmpty = c.otp.trimmingCharacters(in: .whitespaces).isEmpty
+        if kind != .manual {
+            // A manager supplies username/password; only a code it can't provide
+            // (Apple Passwords can't; 1Password can) blocks the button.
+            return (auth.requiresOTP && kind != .onePassword && otpEmpty) ? .code : nil
+        }
+        // Touch ID-protected sign-in: the fingerprint supplies everything the
+        // store holds; only an uncovered one-time code can still block.
+        if auth.protectWithBiometrics {
+            let info = BiometricCredentialStore.info(profile: profile.id)
+            if info.exists {
+                return (auth.requiresOTP && !info.hasTOTP && otpEmpty) ? .code : nil
+            }
+        }
+        if c.username.trimmingCharacters(in: .whitespaces).isEmpty || c.password.isEmpty { return .signIn }
+        return (auth.requiresOTP && otpEmpty) ? .code : nil
     }
 
     // MARK: Endpoint picker (multi-endpoint VPNs)
@@ -154,9 +202,21 @@ struct VPNSidebarRow: View {
             Button { selectEndpoint(nil) } label: {
                 Label("Automatic", systemImage: selectedID == nil ? "checkmark" : "")
             }
-            ForEach(locations, id: \.endpoint.id) { loc in
-                Button { selectEndpoint(loc.endpoint) } label: {
-                    Label(endpointLabel(loc), systemImage: selectedID == loc.endpoint.id ? "checkmark" : "")
+            // Grouped by region so a forty-server provider list is scannable;
+            // within a group, quickest first (or nearest, when speed checks are
+            // off — see EndpointRanking).
+            ForEach(groups) { group in
+                Section(group.region.name) {
+                    ForEach(group.endpoints) { item in
+                        Button { selectEndpoint(item.endpoint) } label: {
+                            // The server we're actually on says "Connected"
+                            // rather than a timing — see EndpointRowLabel.
+                            Label(EndpointRowLabel.oneLine(
+                                item,
+                                connected: selectedID == item.id && vpn.isEngaged(id: profile.id)),
+                                  systemImage: selectedID == item.id ? "checkmark" : "")
+                        }
+                    }
                 }
             }
         } label: {
@@ -170,7 +230,15 @@ struct VPNSidebarRow: View {
         .fixedSize()
     }
 
-    private var locations: [EndpointLocation] { locator?.locations(for: endpoints) ?? [] }
+    /// Ordered with whatever measurements already exist — this row never starts
+    /// a probe of its own. A menu opening is not something SwiftUI tells us
+    /// about, and probing on every sidebar redraw would be exactly the timerless
+    /// background sweep the app promises not to do. Selecting the VPN (which
+    /// shows EndpointSection) is what measures its servers.
+    private var groups: [RegionGroup] {
+        EndpointRegions.groups(endpoints, locator: locator, probes: probes,
+                               home: EndpointRegions.home(publicIP: publicIP))
+    }
 
     private var selectedID: String? {
         let o = vpn.overrides(for: profile.id)
@@ -182,29 +250,17 @@ struct VPNSidebarRow: View {
     }
 
     private var currentEndpointLabel: String {
-        guard let id = selectedID, let loc = locations.first(where: { $0.endpoint.id == id }) else {
+        guard let id = selectedID,
+              let item = groups.flatMap(\.endpoints).first(where: { $0.id == id }) else {
             return "Automatic"
         }
-        return shortLabel(loc)
-    }
-
-    private func shortLabel(_ loc: EndpointLocation) -> String {
-        if let code = loc.countryCode { return CountryCentroids.flag(for: code) + " " + (loc.countryName ?? loc.endpoint.host) }
-        return loc.endpoint.host
-    }
-
-    private func endpointLabel(_ loc: EndpointLocation) -> String {
-        var s = ""
-        if let code = loc.countryCode { s += CountryCentroids.flag(for: code) + " " }
-        s += loc.endpoint.host
-        if let port = loc.endpoint.port { s += ":\(port)" }
-        if let country = loc.countryName { s += " — \(country)" }
-        return s
+        let flag = item.flag.isEmpty ? "" : item.flag + " "
+        return flag + (item.endpoint.label ?? item.countryName ?? item.endpoint.host)
     }
 
     /// Change endpoint through the smooth apply path (reconnects if connected,
     /// records an undo). Writes the server/port/proto overrides.
-    private func selectEndpoint(_ endpoint: Endpoint?) {
+    private func selectEndpoint(_ endpoint: VPNEndpoint?) {
         let label = endpoint.map { $0.host } ?? "Automatic"
         Task {
             await vpn.applyDoctorFix(.overrides { o in
@@ -216,7 +272,17 @@ struct VPNSidebarRow: View {
     }
 
     private var statusText: String {
-        if let pauseMode { return pauseMode == .bypass ? "Paused — traffic outside VPN" : "Paused" }
+        if isPaused { return "Paused — traffic outside VPN" }
+        // "Disconnected" is true but useless when the real story is "waiting on
+        // you" — say what's needed instead, in non-technical words ("verification
+        // code" is Apple's name for a one-time code).
+        if profile.status == .disconnected || profile.status == .invalid {
+            switch missingTypedInput {
+            case .code: return "Verification code needed"
+            case .signIn: return "Sign-in needed"
+            case nil: break
+            }
+        }
         return VPNController.statusText(profile.status)
     }
 }

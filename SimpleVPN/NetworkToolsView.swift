@@ -27,20 +27,50 @@ final class LatencyMonitor {
     private var task: Task<Void, Never>?
     private var seq = 0
 
+    /// How long an address is trusted before the name is asked again. Plain DNS
+    /// changes (short TTLs, failover) don't move the network fingerprint, so the
+    /// only way to follow them is to re-ask.
+    static let reresolveAfter: TimeInterval = 60
+
+    /// Whether the address being pinged should be looked up again: either the
+    /// machine moved network (split-horizon DNS gives a different answer there)
+    /// or the answer is simply old. Pure, so the policy is testable without a
+    /// live network or a real path monitor.
+    static func shouldReresolve(networkKey: String?, resolvedOn: String?,
+                                age: TimeInterval) -> Bool {
+        networkKey != resolvedOn || age >= reresolveAfter
+    }
+
     func start(host: String) {
         stop()
         task = Task { [weak self] in
             // Ping the first IPv4 (unprivileged ICMP is v4 here).
-            let v4 = await NetworkProbes.resolve(host: host).v4.first ?? host
+            var target = await NetworkProbes.resolve(host: host).v4.first ?? host
             guard let self, !Task.isCancelled else { return }   // a restart may have superseded us
-            self.targetIP = v4
+            var resolvedOn = NetworkMemory.shared.current?.key
+            var resolvedAt = Date()
+            self.targetIP = target
             while !Task.isCancelled {
-                let r = await NetworkProbes.pingOnce(host: v4, seq: UInt16(truncatingIfNeeded: self.seq))
+                let r = await NetworkProbes.pingOnce(host: target, seq: UInt16(truncatingIfNeeded: self.seq))
                 // stop() may have fired (and cleared samples) while we were awaiting
                 // the ping — don't append a stale sample into a cleared/next session.
                 guard !Task.isCancelled else { return }
                 self.tick(r)
                 try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled else { return }
+
+                let key = NetworkMemory.shared.current?.key
+                guard Self.shouldReresolve(networkKey: key, resolvedOn: resolvedOn,
+                                           age: Date().timeIntervalSince(resolvedAt)) else { continue }
+                resolvedOn = key
+                resolvedAt = Date()
+                // Keep pinging the old address if the name stops resolving —
+                // losing the graph tells the user less than stale packet loss.
+                if let fresh = await NetworkProbes.resolve(host: host).v4.first, fresh != target {
+                    guard !Task.isCancelled else { return }
+                    target = fresh
+                    self.targetIP = fresh
+                }
             }
         }
     }
@@ -77,6 +107,7 @@ struct NetworkToolsView: View {
     @Environment(PublicIPMonitor.self) private var publicIP
     @Environment(ReachabilityMonitor.self) private var reach: ReachabilityMonitor?
     @Environment(TopologyMonitor.self) private var topo: TopologyMonitor?
+    @Environment(ProfileEvaluator.self) private var evaluator: ProfileEvaluator?
 
     @State private var target = ""
     @State private var request = NetworkToolsRequest.shared
@@ -109,10 +140,25 @@ struct NetworkToolsView: View {
     @State private var mtuRunning = false
     @State private var mtuTask: Task<Void, Never>?
 
+    // VPN protocol fingerprint + captive portal. Both run on every test: "what is
+    // actually answering there" and "is something intercepting my traffic" are the
+    // two questions that make every other number meaningless when they go wrong.
+    @State private var probeKind: VPNKind?
+    @State private var probeTransport: VPNProbe.Transport = .auto
+    @State private var probePortText = ""
+    @State private var fingerprint: VPNProbe.Fingerprint?
+    @State private var probeRunning = false
+    @State private var probeTask: Task<Void, Never>?
+    @State private var portal: PortalCheck?
+    @State private var portalTask: Task<Void, Never>?
+
+    struct PortalCheck: Equatable { var detected: Bool; var url: URL? }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 targetBar
+                vpnProbeCard
                 if hasResults {
                     flowRailroad
                     latencyCard
@@ -129,6 +175,16 @@ struct NetworkToolsView: View {
         // Opened from the connect-failure toast: adopt the host it was trying to reach.
         // `initial: true` matters — the request is set before this window exists.
         .onChange(of: request.generation, initial: true) { adoptRequest() }
+        // Every number on this page — the resolved node, which resolver answered,
+        // the hops, the MTU — belongs to the network it was measured on, and a
+        // split-horizon name resolves somewhere else entirely on the next one.
+        // One re-run per settle (the fingerprint is already debounced), and only
+        // when there is something on screen to invalidate.
+        .onChange(of: NetworkMemory.shared.current?.key) { _, _ in
+            guard !target.trimmingCharacters(in: .whitespaces).isEmpty,
+                  running || hasResults else { return }
+            run()
+        }
         .onAppear { topo?.startWatching() }      // need the routing table to classify the path
         .onDisappear { topo?.stopWatching(); stop() }   // + cancel latency/traceroute/DNS/resolve/MTU
     }
@@ -136,6 +192,133 @@ struct NetworkToolsView: View {
     private var hasResults: Bool {
         latency.targetIP != nil || !hops.isEmpty || !dnsAnswers.isEmpty
             || mtuRunning || pathMTU != nil || transportMTU != nil
+    }
+
+    // MARK: VPN probe (what kind of VPN answers there) + captive portal
+
+    private var vpnProbeCard: some View {
+        GroupBox("VPN Probe") {
+            VStack(alignment: .leading, spacing: 10) {
+                probeControls
+                if probeRunning {
+                    Label("Asking \(target) what it speaks…", systemImage: "waveform.path.ecg")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                if let f = fingerprint {
+                    probeVerdict(f)
+                    if f.findings.count > 1 || f.best == nil {
+                        DisclosureGroup("What each test found (\(f.findings.count))") {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(f.findings) { probeFindingRow($0) }
+                            }
+                            .padding(.top, 4)
+                        }
+                        .font(.caption)
+                    }
+                }
+                captivePortalRow
+                Text("The probe sends one harmless hello in each protocol's own language and reads the answer. Nothing is logged in and no session is made.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }.padding(6)
+        }
+    }
+
+    private var probeControls: some View {
+        HStack {
+            TextField("Port", text: $probePortText, prompt: Text("\(defaultProbePort)"))
+                .textFieldStyle(.roundedBorder).frame(width: 70)
+                .onSubmit { restartVPNProbe() }
+            Picker("Transport", selection: $probeTransport) {
+                ForEach(VPNProbe.Transport.allCases) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented).labelsHidden().fixedSize()
+            Picker("Kind", selection: $probeKind) {
+                Text("Auto-detect").tag(VPNKind?.none)
+                ForEach(VPNKind.allCases, id: \.self) { Text($0.displayName).tag(VPNKind?.some($0)) }
+            }
+            .labelsHidden().fixedSize()
+            .help("Narrows the probe to one protocol. Auto-detect tries a small battery.")
+            Spacer()
+            Button("Probe") { restartVPNProbe() }
+                .disabled(target.trimmingCharacters(in: .whitespaces).isEmpty)
+        }
+    }
+
+    /// The plain-language headline. `best` is a positive protocol answer; without one
+    /// the summary explains what silence does and doesn't mean.
+    @ViewBuilder
+    private func probeVerdict(_ f: VPNProbe.Fingerprint) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: f.best?.kind?.systemImage ?? (f.best != nil ? "checkmark.seal" : "questionmark.circle"))
+                .foregroundStyle(f.best != nil ? Color.green : .secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(f.best.map { "VPN detected: \($0.label)" } ?? f.summary)
+                    .font(.callout.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                if let best = f.best {
+                    Text(best.detail).font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private func probeFindingRow(_ finding: VPNProbe.Finding) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: finding.detected ? "checkmark.circle.fill" : "minus.circle")
+                .foregroundStyle(finding.detected ? Color.green : .secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(finding.probe).font(.caption.weight(.medium))
+                Text(finding.label).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(finding.detail).font(.caption2).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            if finding.detected {
+                Text(finding.confidence.label).font(.caption2)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(.green.opacity(0.15), in: Capsule())
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var captivePortalRow: some View {
+        if let portal {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: portal.detected ? "wifi.exclamationmark" : "checkmark.shield")
+                    .foregroundStyle(portal.detected ? Color.orange : .green)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(portal.detected
+                         ? "Something is intercepting traffic — a Wi-Fi sign-in page."
+                         : "No sign-in page in the way.")
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if portal.detected {
+                        Text("Until you sign in to this network, a VPN can't connect through it.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 8)
+                if portal.detected, let url = portal.url {
+                    Link("Open Sign-In Page", destination: url).font(.caption)
+                }
+            }
+        }
+    }
+
+    /// Port the probe uses when the field is empty: whatever the chosen kind lives on.
+    private var defaultProbePort: Int {
+        switch probeKind {
+        case .openVPN: 1194
+        case .wireGuard: VPNProbe.wireGuardDefaultPort
+        case .ikev2, .ipsec, .l2tp: VPNProbe.ikeDefaultPort
+        case .ssh: 22
+        case .some(let k) where k.isSSLVPN: 443
+        default: 443
+        }
     }
 
     private var targetBar: some View {
@@ -498,9 +681,34 @@ struct NetworkToolsView: View {
     /// Adopt a target handed over by something that already knows it (the connect
     /// timeout toast). Put on the view root by `.networkToolsRequests()`.
     private func adoptRequest() {
-        guard !request.target.isEmpty else { return }
+        guard !request.target.isEmpty else {
+            // Opened cold with nothing to investigate: if there's exactly one VPN
+            // and it isn't connected, the user almost certainly came here to test
+            // IT — prefill and probe its endpoint rather than showing a blank form.
+            if target.isEmpty { assumeSingleVPN() }
+            return
+        }
         target = request.target
+        // A Probe request also carries the endpoint a connect would dial, so the
+        // fingerprint asks the right port in the right protocol instead of guessing.
+        probePortText = request.port.map(String.init) ?? ""
+        probeTransport = VPNProbe.Transport(hint: request.proto)
+        probeKind = request.vpnKind
         if request.autoRun { run() }
+    }
+
+    /// One VPN configured and not connected → that's what the user came to test.
+    /// Fills the form from what a connect would actually dial and runs everything.
+    private func assumeSingleVPN() {
+        guard vpn.profiles.count == 1, let profile = vpn.profiles.first,
+              !UI.isActive(profile.status) else { return }
+        let t = VPNProbeTarget.resolve(profile: profile, vpn: vpn, evaluator: evaluator)
+        guard !t.host.isEmpty else { return }
+        target = t.host
+        probePortText = String(t.port)
+        probeTransport = VPNProbe.Transport(hint: t.proto)
+        probeKind = t.kind
+        run()
     }
 
     private func run() {
@@ -519,6 +727,7 @@ struct NetworkToolsView: View {
             Task { await runDNS(host) },
         ]
         mtuTask = Task { await runMTU(host) }
+        restartVPNProbe()
     }
 
     private func stop() {
@@ -528,6 +737,37 @@ struct NetworkToolsView: View {
         probeTasks = []
         mtuTask?.cancel(); mtuTask = nil
         mtuRunning = false
+        probeTask?.cancel(); probeTask = nil
+        portalTask?.cancel(); portalTask = nil
+        probeRunning = false
+    }
+
+    /// The VPN fingerprint + captive-portal check. Separate from `run()`'s other
+    /// probes so the port/transport/kind pickers can re-ask without restarting the
+    /// latency graph, and so the Probe button works on its own.
+    private func restartVPNProbe() {
+        let host = target.trimmingCharacters(in: .whitespaces)
+        probeTask?.cancel(); portalTask?.cancel()
+        fingerprint = nil; portal = nil
+        guard !host.isEmpty else { probeRunning = false; return }
+        let port = Int(probePortText.trimmingCharacters(in: .whitespaces)) ?? defaultProbePort
+        let transport = probeTransport
+        let kind = probeKind
+        probeTask = Task {
+            probeRunning = true
+            defer { if !Task.isCancelled { probeRunning = false } }
+            let result = await VPNProbe.fingerprint(host: host, port: port,
+                                                    proto: transport, hint: kind)
+            guard !Task.isCancelled else { return }
+            fingerprint = result
+        }
+        // Always, alongside every probe: a sign-in page in the way makes every other
+        // result here a lie about the real network.
+        portalTask = Task {
+            let result = await ConnectionDiagnostics.captivePortalProbe()
+            guard !Task.isCancelled else { return }
+            portal = PortalCheck(detected: result.detected, url: result.url)
+        }
     }
 
     /// Re-run only the MTU probe (protocol or port changed) against the current

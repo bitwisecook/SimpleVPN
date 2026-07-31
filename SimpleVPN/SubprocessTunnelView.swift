@@ -21,6 +21,12 @@ struct SubprocessTunnelView: View {
     @State private var jumpPassword = ""
     @State private var remember = true
     @State private var loaded = false
+    // SSH import (drop well) state.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var importTargeted = false
+    @State private var importFeedback: (text: String, ok: Bool)?
+    @State private var feedbackClearTask: Task<Void, Never>?
+    @State private var hostPicker: HostPickerPayload?
 
     private var live: SubprocessTunnelManager.Live? { manager.live[draft.id] }
     private var active: Bool { manager.isActive(draft.id) }
@@ -109,6 +115,7 @@ struct SubprocessTunnelView: View {
     }
 
     @ViewBuilder private var sshCommon: some View {
+        sshImportSection
         Section("Target") {
             TextField("Host", text: $draft.server, prompt: Text("ssh.example.com")).autocorrectionDisabled()
             portField
@@ -131,6 +138,161 @@ struct SubprocessTunnelView: View {
             if draft.useJumpHost {
                 Text("SSH first connects to the jump host, then hops to the target. The jump host uses its own key and password above — independent of the target's.")
             }
+        }
+    }
+
+    // MARK: SSH import (drop your config / keys in)
+
+    /// A dropped ssh_config, private key, or certificate configures the tunnel
+    /// instead of retyping what ssh already knows. Config drops discover the
+    /// endpoint's tunnels automatically: every LocalForward/RemoteForward/
+    /// DynamicForward defined for the matching Host lands as this tunnel's
+    /// forwards/SOCKS, plus jump chain, key, port and user.
+    @ViewBuilder private var sshImportSection: some View {
+        Section {
+            VStack(spacing: 8) {
+                Image(systemName: importTargeted ? "arrow.down.doc.fill" : "arrow.down.doc")
+                    .font(.system(size: 26))
+                    .foregroundStyle(importTargeted ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                    .contentTransition(.symbolEffect(.replace))
+                    .symbolEffect(.wiggle, options: .repeat(.periodic(delay: 6)),
+                                  isActive: !reduceMotion && !importTargeted)
+                Text("Drag your SSH config, a key, or a certificate here")
+                    .font(.callout).foregroundStyle(.secondary)
+                Text("Forwards, jump hosts and keys defined for this endpoint are picked up automatically.")
+                    .font(.caption).foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 14)
+            .background {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+                    .foregroundStyle(importTargeted ? AnyShapeStyle(.tint) : AnyShapeStyle(.quaternary))
+            }
+            .animation(.snappy(duration: 0.2), value: importTargeted)
+            .dropDestination(for: URL.self) { urls, _ in
+                for url in urls { handleDrop(url) }
+                return true
+            } isTargeted: { importTargeted = $0 }
+            .accessibilityLabel("Drop zone for SSH configs, keys and certificates")
+
+            if SSHConfigImport.userConfigExists, !draft.server.trimmingCharacters(in: .whitespaces).isEmpty {
+                Button {
+                    findInUserConfig()
+                } label: {
+                    Label("Find \(draft.server) in my SSH config", systemImage: "text.page.badge.magnifyingglass")
+                }
+                .help("Reads ~/.ssh/config (only when you click) and fills this tunnel from the matching Host entry.")
+            }
+
+            if let feedback = importFeedback {
+                Label(feedback.text, systemImage: feedback.ok ? "checkmark.circle.fill" : "info.circle")
+                    .font(.callout)
+                    .foregroundStyle(feedback.ok ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
+                    .transition(.opacity)
+            }
+        }
+        .sheet(item: $hostPicker) { payload in
+            hostPickerSheet(payload)
+        }
+    }
+
+    private struct HostPickerPayload: Identifiable {
+        let id = UUID()
+        let hosts: [SSHConfigHost]
+    }
+
+    /// Several Hosts in the dropped config and none matching the endpoint:
+    /// let the user pick which one this tunnel is.
+    private func hostPickerSheet(_ payload: HostPickerPayload) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Which host is this tunnel for?").font(.headline)
+            List(payload.hosts) { host in
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(host.alias).font(.body.weight(.medium))
+                        Text(host.summary).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Use") {
+                        applyHost(host)
+                        hostPicker = nil
+                    }
+                    .buttonStyle(.glassProminent).controlSize(.small)
+                }
+                .padding(.vertical, 2)
+            }
+            .frame(minHeight: 220)
+            HStack { Spacer(); Button("Cancel") { hostPicker = nil }.buttonStyle(.glass) }
+        }
+        .padding(16)
+        .frame(width: 440, height: 340)
+    }
+
+    private func handleDrop(_ url: URL) {
+        switch SSHConfigImport.classify(url: url) {
+        case .config(let hosts):
+            // Prefer the Host that matches the endpoint being configured.
+            let matching = SSHConfigImport.hosts(hosts, matching: draft.server)
+            if let host = matching.first ?? (hosts.count == 1 ? hosts[0] : nil) {
+                applyHost(host)
+            } else if hosts.isEmpty {
+                showFeedback("No Host entries found in that config.", ok: false)
+            } else {
+                hostPicker = HostPickerPayload(hosts: hosts)
+            }
+        case .privateKey(let path):
+            // Fill the empty slot: target key first, then the jump host's.
+            if draft.identityFile.trimmingCharacters(in: .whitespaces).isEmpty || !draft.useJumpHost {
+                draft.identityFile = path
+                showFeedback("Using \((path as NSString).lastPathComponent) as the target's key.", ok: true)
+            } else if draft.jumpIdentityFile.isEmpty {
+                draft.jumpIdentityFile = path
+                showFeedback("Using \((path as NSString).lastPathComponent) as the jump host's key.", ok: true)
+            } else {
+                draft.identityFile = path
+                showFeedback("Replaced the target's key with \((path as NSString).lastPathComponent).", ok: true)
+            }
+        case .certificate(let path):
+            let opt = "CertificateFile \(path)"
+            if !draft.sshExtraOptions.contains(opt) { draft.sshExtraOptions.append(opt) }
+            showFeedback("Added the SSH certificate \((path as NSString).lastPathComponent).", ok: true)
+        case .publicKey:
+            showFeedback("That's the public half of a key — drop the private key (the file without .pub).", ok: false)
+        case .unrecognized:
+            showFeedback("That didn't look like an SSH config, key or certificate.", ok: false)
+        }
+    }
+
+    private func findInUserConfig() {
+        guard let text = try? String(contentsOf: SSHConfigImport.userConfigURL, encoding: .utf8) else {
+            showFeedback("Couldn't read ~/.ssh/config.", ok: false)
+            return
+        }
+        let hosts = SSHConfigImport.parse(text)
+        let matching = SSHConfigImport.hosts(hosts, matching: draft.server)
+        if let host = matching.first {
+            applyHost(host)
+        } else if hosts.isEmpty {
+            showFeedback("No Host entries found in ~/.ssh/config.", ok: false)
+        } else {
+            showFeedback("Nothing in ~/.ssh/config matches \(draft.server) — drop the file here to pick a host by hand.", ok: false)
+        }
+    }
+
+    private func applyHost(_ host: SSHConfigHost) {
+        let applied = SSHConfigImport.apply(host, to: &draft)
+        showFeedback("Filled from Host \u{201C}\(host.alias)\u{201D}: \(applied.summary).", ok: true)
+    }
+
+    private func showFeedback(_ text: String, ok: Bool) {
+        withAnimation(.snappy(duration: 0.25)) { importFeedback = (text, ok) }
+        feedbackClearTask?.cancel()
+        feedbackClearTask = Task {
+            try? await Task.sleep(for: .seconds(ok ? 12 : 8))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.4)) { importFeedback = nil }
         }
     }
 

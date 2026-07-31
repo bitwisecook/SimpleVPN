@@ -31,7 +31,78 @@ final class VPNController {
 
     private(set) var profiles: [Profile] = []
     var selectedID: Profile.ID?
-    var lastError: String?
+
+    /// The current failure, already turned into something a person can act on
+    /// (see UserFacingError). Every path that reports a problem lands here.
+    private(set) var failure: UserFacingError?
+    /// Which VPN the failure belongs to, so "Try Again" knows what to re-run.
+    private(set) var failureProfileID: String?
+
+    /// The plain-string face of `failure`, kept because a dozen call sites (and
+    /// the sidebar's "did anything get reported?" check) speak in strings.
+    /// Assigning one classifies it; assigning nil clears the failure entirely.
+    var lastError: String? {
+        get { failure?.technicalDetail }
+        set {
+            guard let newValue else { failure = nil; failureProfileID = nil; return }
+            failure = UserFacingError.classify(message: newValue)
+            failureProfileID = nil
+        }
+    }
+
+    /// Report a thrown error against a VPN — the preferred path: it keeps the
+    /// retry target, and hands the profile's live secrets to the redactor so a
+    /// typed password can never reach the details disclosure.
+    func report(_ error: Error, profile id: String? = nil) {
+        let secrets: [String] = id.map {
+            let c = transientCredentials(for: $0)
+            return [c.password, c.otp].filter { $0.count >= 4 }
+        } ?? []
+        let classified = UserFacingError.classify(error, secrets: secrets)
+        assert(secrets.allSatisfy { !classified.technicalDetail.contains($0) },
+               "a credential reached the error detail")
+        failure = classified
+        failureProfileID = id
+    }
+
+    func clearFailure() {
+        failure = nil
+        failureProfileID = nil
+    }
+
+    /// The failure worth putting a sheet up for. A tunnel failure that already
+    /// has an incident card (with its own diagram, advice and Try Again) must
+    /// not be reported twice — but only while the two are the same event, so a
+    /// stale incident can never swallow a later problem.
+    var presentedFailure: UserFacingError? {
+        guard let failure else { return nil }
+        // Only the failures the incident card actually explains (the tunnel and
+        // the network) can be withheld — a 1Password or credential problem is
+        // invisible to the extension, so a coincident incident must never
+        // silence it.
+        guard failure.category == .generic || failure.category == .network else { return failure }
+        if let id = failureProfileID, let incident = incidents[id] {
+            let gap = abs(incident.timestamp - failure.occurred.timeIntervalSince1970)
+            if gap < 30 { return nil }
+        }
+        return failure
+    }
+
+    /// Re-run the connect a failure came from (the sheet's Try Again). Clearing
+    /// first is also what dismisses the sheet, so the caller passes the id it
+    /// captured rather than reading it back out of the failure.
+    func retryConnect(id: String) async {
+        clearFailure()
+        do {
+            try await connectUsingConfiguredSource(
+                id: id, typedOTP: transientCredentials(for: id).otp)
+        } catch is CancellationError {
+            // The user backed out — an outcome, not a failure.
+        } catch {
+            Self.log.error("retry failed for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            report(error, profile: id)
+        }
+    }
     /// Bumped by the File ▸ Import menu command; the UI presents the importer in response.
     var importRequested = false
     /// A duplicate/invalid import result awaiting user acknowledgement (see ImportUI).
@@ -59,11 +130,60 @@ final class VPNController {
     /// sign-in page. Network-wide (not per-profile); drives the captive-portal
     /// dot state until a connect succeeds or the incident is dismissed.
     var captivePortalSuspected = false
+    /// Where the sign-in page actually lives (from the probe's redirect), so
+    /// "Open Sign-In Page" lands on the portal rather than the probe URL.
+    var captivePortalURL: URL?
+
+    /// Bumped when a surface (sidebar play, menu bar) wants the credential form
+    /// to draw the eye to what's missing: the detail pane focuses the first
+    /// empty required field and gives it a little shake.
+    private(set) var credentialNudge: [String: Int] = [:]
+    func nudgeCredentials(id: String) {
+        selectedID = id                                   // bring the form on screen
+        credentialNudge[id, default: 0] += 1
+    }
+    /// One-shot claim: true exactly once per nudge. Lets the detail view react
+    /// both to bumps while it's showing AND to a nudge that arrived just before
+    /// it appeared (sidebar click on a different VPN switches the selection).
+    func consumeCredentialNudge(id: String) -> Bool {
+        guard (credentialNudge[id] ?? 0) > 0 else { return false }
+        credentialNudge[id] = 0
+        return true
+    }
+
+    /// Re-probe the network for a captive portal (user-initiated: connect
+    /// attempts and the banner's "Check Again"). Updates the suspicion flag
+    /// both ways so signing in clears the banner on recheck.
+    func recheckCaptivePortal() async {
+        let portal = await ConnectionDiagnostics.captivePortalProbe()
+        captivePortalSuspected = portal.detected
+        captivePortalURL = portal.url
+        if portal.detected {
+            Self.log.log("captive portal detected, sign-in at \(portal.url?.absoluteString ?? "unknown", privacy: .public)")
+        }
+    }
 
     /// Latest active-probe report per profile (path MTU, TCP-443 reachability,
     /// captive portal). Populated on connection failure and when a live stall is
     /// detected; read by the Connection Doctor to size mssfix and spot UDP blocks.
+    ///
+    /// Every field in it is a property of ONE network — the path MTU, whether
+    /// TCP 443 gets out, what the name resolved to — so the reports are dropped
+    /// wholesale when the Mac moves, rather than letting the Doctor prescribe an
+    /// mssfix measured in a café for the office LAN.
     private(set) var probeResults: [String: DiagnosticsReport] = [:]
+
+    /// Held for the object's lifetime: drops network-scoped state when the Mac
+    /// moves. Rides the app's one path monitor — no timer of its own.
+    @ObservationIgnored private var networkWatch: Task<Void, Never>?
+
+    init() {
+        networkWatch = NetworkChange.observe { [weak self] _ in
+            self?.probeResults.removeAll()
+        }
+    }
+
+    deinit { networkWatch?.cancel() }
 
     /// Store a fresh probe report for a profile (from the incident view's probe).
     func setProbeResult(_ report: DiagnosticsReport, for id: String) {
@@ -89,6 +209,21 @@ final class VPNController {
 
     var selected: Profile? { profiles.first { $0.id == selectedID } }
     var anyConnected: Bool { profiles.contains { $0.status == .connected } }
+
+    /// Up, or on its way up. The tunnel owns the default route for the whole of
+    /// the connecting/reasserting window, so anything that would be wrong while
+    /// connected (a "home" snapshot, a probe to the server we're dialling) is
+    /// equally wrong here — `connected` alone is a signal that arrives too late.
+    func isEngaged(id: String) -> Bool {
+        guard let s = profiles.first(where: { $0.id == id })?.status else { return false }
+        return Self.isEngaged(s)
+    }
+
+    nonisolated static func isEngaged(_ status: NEVPNStatus) -> Bool {
+        status == .connected || status == .connecting || status == .reasserting
+    }
+
+    var anyEngaged: Bool { profiles.contains { isEngaged(id: $0.id) } }
 
     static func statusText(_ s: NEVPNStatus) -> String {
         switch s {
@@ -119,6 +254,8 @@ final class VPNController {
                 managers[id] = mgr
                 authConfigs[id] = VPNAuthConfig.decode(from: proto?.providerConfiguration?["auth"] as? Data)
                 overridesCache[id] = OpenVPNOverrides.decode(from: proto?.providerConfiguration?["overrides"] as? Data)
+                uiPrefsCache[id] = VPNUIPrefs.decode(from: proto?.providerConfiguration?["uiprefs"] as? Data)
+                endpointsCache[id] = VPNEndpointList.decode(from: proto?.providerConfiguration?["endpoints"] as? Data)
                 credentialSources[id] = CredentialSource.decode(from: proto?.providerConfiguration?["credsource"] as? Data)
                 let kind = (proto?.providerConfiguration?["vpnType"] as? String)
                     .flatMap(VPNKind.init(rawValue:)) ?? .openVPN
@@ -127,8 +264,8 @@ final class VPNController {
                                     server: proto?.serverAddress ?? "",
                                     status: mgr.connection.status,
                                     kind: kind))
-                observe(id: id, connection: mgr.connection)
             }
+            observeStatusChanges()
             profiles = list.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             if selectedID == nil || !profiles.contains(where: { $0.id == selectedID }) {
                 selectedID = profiles.first?.id
@@ -192,8 +329,10 @@ final class VPNController {
         KeychainCredentialStore.deleteCredentials(profile: id)
         KeychainCredentialStore.deleteProfileSecrets(profile: id)
         KeychainCredentialStore.clearSession(profile: id)
+        BiometricCredentialStore.delete(profile: id)
         appliedOverrides[id] = nil
         appliedOVPN[id] = nil
+        endpointsCache[id] = nil
         await loadAll()
     }
 
@@ -245,6 +384,104 @@ final class VPNController {
         Self.log.log("overrides saved for \(id, privacy: .public): \(normalized.logDescription, privacy: .public)")
     }
 
+    // MARK: Display name (deliberately NOT the connection host)
+
+    /// What the user calls this VPN. Held by the manager's localizedDescription,
+    /// which is also what macOS shows in Network settings — the addresses it
+    /// dials live in the endpoint list below, so renaming a VPN never touches
+    /// the connection and moving to a new server never renames it.
+    func displayName(for id: String) -> String {
+        profiles.first { $0.id == id }?.name ?? managers[id]?.localizedDescription ?? id
+    }
+
+    /// Rename with the display-name meaning made explicit at the call site.
+    func setDisplayName(_ name: String, for id: String) async throws {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }       // an unnamed VPN is unfindable
+        try await rename(id: id, to: trimmed)
+    }
+
+    // MARK: Endpoints (the hosts this VPN can be reached at)
+
+    /// Observable mirror of the persisted "endpoints" blobs (see overridesCache).
+    private(set) var endpointsCache: [String: VPNEndpointList] = [:]
+
+    /// What the user has SAID about this VPN's endpoints (labels, corrected
+    /// countries, hand-added addresses). Not the addresses themselves — those
+    /// still come from the profile, so a re-import picks up new servers.
+    func endpointList(for id: String) -> VPNEndpointList {
+        if let cached = endpointsCache[id] { return cached }
+        let proto = managers[id]?.protocolConfiguration as? NETunnelProviderProtocol
+        return VPNEndpointList.decode(from: proto?.providerConfiguration?["endpoints"] as? Data)
+    }
+
+    /// Every endpoint to offer for a VPN: the profile's own `remote` lines wearing
+    /// the user's annotations, then anything they added by hand. Profiles with no
+    /// .ovpn (SSH, the SSL-VPN kinds, WireGuard) fall back to the single server
+    /// address the manager holds, so those get a one-entry list rather than none.
+    func endpoints(for id: String) -> [VPNEndpoint] {
+        var scanned = ovpnText(id: id).map { EndpointScanner.endpoints(in: $0) } ?? []
+        if scanned.isEmpty, let profile = profiles.first(where: { $0.id == id }),
+           !profile.server.isEmpty {
+            let split = VPNProbeTarget.splitHostPort(profile.server)
+            scanned = [Endpoint(host: split.host, port: split.port, proto: nil)]
+        }
+        return VPNEndpointList.merged(scanned: scanned, stored: endpointList(for: id))
+    }
+
+    func setEndpointList(_ list: VPNEndpointList, for id: String) async {
+        guard let mgr = managers[id],
+              let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { return }
+        var conf = proto.providerConfiguration ?? [:]
+        if let blob = list.encodedBlob() { conf["endpoints"] = blob }
+        else { conf.removeValue(forKey: "endpoints") }
+        proto.providerConfiguration = conf
+        mgr.protocolConfiguration = proto
+        try? await mgr.saveToPreferences()
+        try? await mgr.loadFromPreferences()
+        endpointsCache[id] = list
+    }
+
+    /// Store one endpoint's annotations, replacing any it already had.
+    func updateEndpoint(_ endpoint: VPNEndpoint, for id: String) async {
+        var list = endpointList(for: id)
+        list.endpoints.removeAll { $0.id == endpoint.id }
+        if endpoint.hasAnnotations { list.endpoints.append(endpoint) }
+        await setEndpointList(list, for: id)
+    }
+
+    /// Forget a hand-added endpoint (or an annotation). An address the profile
+    /// itself advertises comes straight back — the .ovpn is the source of truth.
+    func removeEndpoint(id endpointID: String, for id: String) async {
+        var list = endpointList(for: id)
+        list.endpoints.removeAll { $0.id == endpointID }
+        await setEndpointList(list, for: id)
+    }
+
+    // MARK: Interface preferences (per-VPN optional controls)
+
+    /// Observable mirror of the persisted "uiprefs" blobs (see overridesCache).
+    private(set) var uiPrefsCache: [String: VPNUIPrefs] = [:]
+
+    func uiPrefs(for id: String) -> VPNUIPrefs {
+        if let cached = uiPrefsCache[id] { return cached }
+        let proto = managers[id]?.protocolConfiguration as? NETunnelProviderProtocol
+        return VPNUIPrefs.decode(from: proto?.providerConfiguration?["uiprefs"] as? Data)
+    }
+
+    func setUIPrefs(_ prefs: VPNUIPrefs, for id: String) async {
+        guard let mgr = managers[id],
+              let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { return }
+        var conf = proto.providerConfiguration ?? [:]
+        if let blob = prefs.encodedBlob() { conf["uiprefs"] = blob }
+        else { conf.removeValue(forKey: "uiprefs") }
+        proto.providerConfiguration = conf
+        mgr.protocolConfiguration = proto
+        try? await mgr.saveToPreferences()
+        try? await mgr.loadFromPreferences()
+        uiPrefsCache[id] = prefs
+    }
+
     // MARK: Transient credentials (menu-bar inline entry)
 
     /// Credentials mid-typing in the menu-bar dropdown. Memory only — they
@@ -291,6 +528,10 @@ final class VPNController {
         guard authConfig(for: id).rememberCredentials,
               allowsPasswordSave(id: id),
               !c.username.isEmpty, !c.password.isEmpty else { return }
+        // Typing an OTP also lands here — don't rewrite an unchanged
+        // username/password to the keychain on every pause in typing.
+        if let saved = savedCredentials(id: id),
+           saved.username == c.username, saved.password == c.password { return }
         do {
             try KeychainCredentialStore.saveCredentials(profile: id, .init(username: c.username, password: c.password))
         } catch {
@@ -329,12 +570,93 @@ final class VPNController {
         let source = credentialSource(for: id)
         switch source.kind {
         case .manual:
+            // Touch ID-protected saved credentials act as a manager: one
+            // fingerprint releases username + password (+ the one-time code,
+            // when a TOTP secret is stored).
+            if authConfig(for: id).protectWithBiometrics, BiometricCredentialStore.exists(profile: id) {
+                let name = profiles.first { $0.id == id }?.name ?? "the VPN"
+                return BiometricCredentialProvider(reason: "unlock the sign-in for \(name)")
+            }
             return nil
         case .onePassword:
-            return OnePasswordProvider(itemReference: source.reference, vault: source.account,
-                                       fieldMap: source.fieldMap)
+            // A blank account falls back to the one that has worked before:
+            // 1Password refuses to answer without one, and the name belongs to
+            // the person, not to this VPN. What the VPN names still wins.
+            return OnePasswordProvider(
+                itemReference: source.reference, vault: source.vault,
+                account: OnePasswordAccountMemory.effectiveAccount(profile: source.account),
+                fieldMap: source.fieldMap)
         case .applePasswords:
             return ApplePasswordsProvider(server: source.reference, account: source.account)
+        }
+    }
+
+    /// Whether the Touch ID store can satisfy this profile's whole sign-in
+    /// unattended (creds present; the code too when one is required).
+    func biometricCanServe(id: String) -> Bool {
+        guard authConfig(for: id).protectWithBiometrics else { return false }
+        let info = BiometricCredentialStore.info(profile: id)
+        guard info.exists else { return false }
+        return !authConfig(for: id).requiresOTP || info.hasTOTP
+    }
+
+    /// Set or replace the authenticator (TOTP) secret inside an existing
+    /// protected item. Reading the current username/password back takes one
+    /// Touch ID prompt — changing what the fingerprint guards should cost one.
+    func updateProtectedTOTP(id: String, secret: String?) async throws {
+        guard BiometricCredentialStore.exists(profile: id) else { return }
+        let name = profiles.first { $0.id == id }?.name ?? "the VPN"
+        let provider = BiometricCredentialProvider(reason: "update the sign-in for \(name)")
+        let raw = try await provider.resolve(profile: id, fields: [.username, .password])
+        try BiometricCredentialStore.save(profile: id, .init(
+            username: raw.username ?? "", password: raw.password ?? "",
+            totpSecret: secret?.isEmpty == true ? nil : secret))
+        Self.log.log("protected TOTP secret \(secret == nil ? "cleared" : "updated", privacy: .public) for \(id, privacy: .public)")
+    }
+
+    /// Flip Touch ID protection for a profile's saved credentials, migrating the
+    /// secret between the plain and protected stores. Turning protection OFF
+    /// needs the secret back, which itself takes one Touch ID prompt (unless the
+    /// live session state already has it).
+    func setBiometricProtection(_ on: Bool, for id: String, totpSecret: String? = nil) async throws {
+        var auth = authConfig(for: id)
+        let name = profiles.first { $0.id == id }?.name ?? "the VPN"
+        if on {
+            // Source the secret from what's live (typed) or saved.
+            let c = transientCredentials(for: id)
+            let saved = savedCredentials(id: id)
+            let username = !c.username.isEmpty ? c.username : (saved?.username ?? "")
+            let password = !c.password.isEmpty ? c.password : (saved?.password ?? "")
+            guard !username.isEmpty, !password.isEmpty else {
+                throw err("Enter (or save) the username and password first, then turn on Touch ID protection.")
+            }
+            try BiometricCredentialStore.save(profile: id, .init(
+                username: username, password: password, totpSecret: totpSecret))
+            // The plain-keychain copy would defeat the point of the gate.
+            KeychainCredentialStore.deleteCredentials(profile: id)
+            auth.protectWithBiometrics = true
+            try await setAuthConfig(auth, for: id)
+            Self.log.log("biometric protection ON for \(id, privacy: .public)")
+        } else {
+            guard BiometricCredentialStore.exists(profile: id) else {
+                auth.protectWithBiometrics = false
+                try await setAuthConfig(auth, for: id)
+                return
+            }
+            let provider = BiometricCredentialProvider(reason: "move the sign-in for \(name) out of Touch ID protection")
+            let raw = try await provider.resolve(profile: id, fields: [.username, .password])
+            if auth.rememberCredentials, allowsPasswordSave(id: id) {
+                try? KeychainCredentialStore.saveCredentials(profile: id, .init(
+                    username: raw.username ?? "", password: raw.password ?? ""))
+            }
+            var live = transientCredentials(for: id)
+            live.username = raw.username ?? live.username
+            live.password = raw.password ?? live.password
+            transientCreds[id] = live
+            BiometricCredentialStore.delete(profile: id)
+            auth.protectWithBiometrics = false
+            try await setAuthConfig(auth, for: id)
+            Self.log.log("biometric protection OFF for \(id, privacy: .public)")
         }
     }
 
@@ -371,8 +693,7 @@ final class VPNController {
     /// True while a session started with different overrides than are now saved —
     /// the "changes take effect on reconnect" signal.
     func hasPendingSettings(id: String) -> Bool {
-        guard let p = profiles.first(where: { $0.id == id }),
-              p.status == .connected || p.status == .connecting || p.status == .reasserting else { return false }
+        guard isEngaged(id: id) else { return false }
         if let applied = appliedOverrides[id], applied != overrides(for: id) { return true }
         if let appliedText = appliedOVPN[id], appliedText != (ovpnText(id: id) ?? "") { return true }
         return false
@@ -425,9 +746,50 @@ final class VPNController {
         if ManagedPolicy.disableDivertRules { options["policyNoDiverts"] = true as NSNumber }
 
         mgr.isEnabled = true
-        try await mgr.saveToPreferences()
-        try await mgr.loadFromPreferences()
-        try (mgr.connection as? NETunnelProviderSession)?.startTunnel(options: options)
+        do {
+            try await mgr.saveToPreferences()
+            try await mgr.loadFromPreferences()
+        } catch {
+            // A silent stop here looked identical to "nothing happened" in the
+            // 15:08 diagnostics — every stage failure must name itself.
+            Self.log.error("connect prefs save/load failed for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            throw error
+        }
+        guard let session = mgr.connection as? NETunnelProviderSession else {
+            Self.log.error("connect: no NETunnelProviderSession for \(id, privacy: .public)")
+            throw err("The VPN configuration isn't ready — try removing and re-importing it.")
+        }
+        do {
+            try session.startTunnel(options: options)
+            Self.log.log("startTunnel dispatched for \(id, privacy: .public) (status now \(Self.statusText(mgr.connection.status), privacy: .public))")
+        } catch {
+            // Without this line a failed start is invisible in a log capture —
+            // the error only reaches the UI alert.
+            Self.log.error("startTunnel failed for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            throw error
+        }
+        // The notification observer is matched at fire time, but the transition to
+        // .connecting can precede this line — pull current statuses now so the
+        // watchdog is guaranteed to start counting.
+        resyncStatuses()
+        // Part of this connect attempt: is a Wi-Fi sign-in page in the way? The
+        // engine would otherwise retry silently against a network that answers
+        // every request with a login page. Tell the user in seconds, not after
+        // the 45 s watchdog. (Probe runs only on user-initiated connects.)
+        Task { [weak self] in
+            guard let self else { return }
+            await self.recheckCaptivePortal()
+            guard self.captivePortalSuspected,
+                  self.profiles.first(where: { $0.id == id })?.status != .connected else { return }
+            let name = self.profiles.first { $0.id == id }?.name ?? "The VPN"
+            ToastCenter.shared.post(
+                "This Wi-Fi wants you to sign in before \(name) can connect.",
+                symbol: "wifi.exclamationmark", tint: .indigo, seconds: 12,
+                actionTitle: "Open Sign-In Page") { [weak self] in
+                    guard let self else { return }
+                    NSWorkspace.shared.open(self.captivePortalURL ?? ConnectionDiagnostics.captivePortalProbeURL)
+                }
+        }
         appliedOverrides[id] = overrides(for: id)   // what this session runs with
         appliedOVPN[id] = ovpnText(id: id) ?? ""
     }
@@ -459,16 +821,18 @@ final class VPNController {
         let auth = authConfig(for: id)
 
         // A password manager can auto-connect when the profile needs no OTP, or
-        // when it can supply the OTP itself (1Password TOTP). Apple Passwords
-        // can't provide an OTP, so an OTP profile still needs the form.
+        // when it can supply the OTP itself (1Password TOTP; the Touch ID store
+        // with a saved authenticator secret). Apple Passwords can't provide an
+        // OTP, so an OTP profile still needs the form.
         if let provider = managerProvider(for: id) {
             let canServeOTP = credentialSource(for: id).kind == .onePassword
+                || biometricCanServe(id: id)
             guard !auth.requiresOTP || canServeOTP else { return false }
             do {
                 try await connect(id: id, using: provider, request: auth.request, remember: false)
                 return true
             } catch {
-                lastError = error.localizedDescription
+                report(error, profile: id)
                 return false
             }
         }
@@ -480,7 +844,7 @@ final class VPNController {
             try await connect(id: id, using: provider, request: .usernamePassword, remember: false)
             return true
         } catch {
-            lastError = error.localizedDescription
+            report(error, profile: id)
             return false
         }
     }
@@ -631,26 +995,26 @@ final class VPNController {
     // The engine pauses under a kept TLS session (resume needs no re-auth), so
     // NEVPNStatus stays .connected throughout — paused is app-side state.
 
-    enum PauseMode: String, Sendable {
-        case hold     // routes kept: traffic blackholes while paused (safe default)
-        case bypass   // routes/DNS removed: traffic uses the physical interface (deliberate leak)
-    }
+    // ONE pause behaviour (the old "hold/block" mode is gone): the tunnel stays
+    // signed in, its routes/DNS come out so traffic uses the physical interface,
+    // and resume puts them back. The extension still speaks "pause:<mode>", so
+    // the wire format is unchanged — the app just only ever asks for bypass.
 
-    /// Profiles currently paused, and how. UI derives DotState.paused from this.
-    private(set) var pausedProfiles: [String: PauseMode] = [:]
+    /// Profiles currently paused. UI derives DotState.paused from this.
+    private(set) var pausedProfiles: Set<String> = []
 
-    func pause(id: String, mode: PauseMode) async {
-        guard let reply = await sendMessage("pause:\(mode.rawValue)", to: id), reply == "ok" else {
+    func pause(id: String) async {
+        guard let reply = await sendMessage("pause:bypass", to: id), reply == "ok" else {
             lastError = "Pause failed — the tunnel didn't acknowledge."
             return
         }
-        pausedProfiles[id] = mode
-        Self.log.log("paused \(id, privacy: .public) mode=\(mode.rawValue, privacy: .public)")
+        pausedProfiles.insert(id)
+        Self.log.log("paused \(id, privacy: .public)")
     }
 
     func resume(id: String) async {
         let acknowledged = (await sendMessage("resume", to: id)) == "ok"
-        pausedProfiles[id] = nil
+        pausedProfiles.remove(id)
         guard acknowledged else {
             await recoverFailedResume(id: id, why: "the tunnel didn't acknowledge resuming")
             return
@@ -897,9 +1261,11 @@ final class VPNController {
         return false
     }
 
-    /// Menu-bar "Disconnect and Quit": stop every active tunnel, wait (bounded)
-    /// for teardown so the extension isn't cut off mid-stop, then quit.
-    func disconnectAllAndQuit() async {
+    /// Stop every active tunnel and wait (bounded) for teardown, so the
+    /// extension isn't cut off mid-stop. The quit path calls this — a tunnel
+    /// lives in the system extension and would happily outlive the app, which
+    /// is how "I quit and it was still connected" happened.
+    func disconnectAllAndWait() async {
         for p in profiles where p.status != .disconnected && p.status != .invalid {
             disconnect(id: p.id)
         }
@@ -908,6 +1274,12 @@ final class VPNController {
             if !stillActive { break }
             try? await Task.sleep(for: .milliseconds(100))
         }
+    }
+
+    /// Menu-bar "Disconnect and Quit". Termination then flows through the app
+    /// delegate's quit handler, which finds nothing left active and proceeds.
+    func disconnectAllAndQuit() async {
+        await disconnectAllAndWait()
         NSApplication.shared.terminate(nil)
     }
 
@@ -1015,45 +1387,78 @@ final class VPNController {
         connectWatchdogs[id] = nil
     }
 
-    private func observe(id: String, connection: NEVPNConnection) {
+    /// ONE process-wide status observer, matched against the CURRENT managers at
+    /// fire time. It used to be one observer per connection object — but every
+    /// saveToPreferences/loadFromPreferences (connect, overrides, routing rules)
+    /// can replace `mgr.connection`, and an observer bound to the old object goes
+    /// permanently silent. That's how a connect on a captive-portal network showed
+    /// nothing at all: no status change, so no watchdog, no incident, no
+    /// diagnostics. Matching by identity at fire time can't go stale; anything
+    /// unmatched falls back to a full resync.
+    private func observeStatusChanges() {
         let obs = NotificationCenter.default.addObserver(
-            forName: .NEVPNStatusDidChange, object: connection, queue: .main) { [weak self] _ in
+            forName: .NEVPNStatusDidChange, object: nil, queue: .main) { [weak self] note in
+                // Only the object's identity crosses into the isolated region —
+                // Notification (and NEVPNConnection) aren't Sendable.
+                let objID = note.object.map { ObjectIdentifier($0 as AnyObject) }
                 MainActor.assumeIsolated {
-                    guard let self, let mgr = self.managers[id] else { return }
-                    let s = mgr.connection.status
-                    if let i = self.profiles.firstIndex(where: { $0.id == id }) { self.profiles[i].status = s }
-                    Self.log.log("status[\(id, privacy: .public)] → \(Self.statusText(s), privacy: .public)")
-                    // A connect that can never succeed (wrong network, unreachable
-                    // gateway) is retried by the engine for ever, so the app has to
-                    // impose its own deadline — otherwise "Connecting…" is permanent.
-                    if s == .connecting {
-                        self.startConnectWatchdog(id: id)
+                    guard let self else { return }
+                    if let objID,
+                       let (id, mgr) = self.managers.first(where: { ObjectIdentifier($0.value.connection) == objID }) {
+                        self.handleStatusChange(id: id, status: mgr.connection.status)
                     } else {
-                        self.cancelConnectWatchdog(id: id)
-                    }
-                    if s == .connected {
-                        // Back up for real, so the resume watch has nothing to report.
-                        self.cancelResumeWatchdog(id: id)
-                        // It works here after all — clear any "unreachable on this
-                        // network" memory so a one-off outage can't warn for ever.
-                        Task {
-                            await NetworkMemory.shared.refresh()
-                            NetworkMemory.shared.forgetFailure(profile: id)
-                        }
-                        self.queryExtensionVersion(id: id)
-                        self.incidents[id] = nil
-                        self.lastConnectedAt[id] = Date()
-                        self.captivePortalSuspected = false   // we're clearly through it
-                        self.recordBaseline(id: id)
-                    } else if s == .disconnected {
-                        self.extensionVersion = "unavailable"
-                        self.pausedProfiles[id] = nil       // pause never outlives its session
-                        self.incidents[id] = TunnelIncidentStore.read(profile: id)
-                        self.explainOTPReuseIfLikely(id: id)
+                        self.resyncStatuses()
                     }
                 }
             }
         observers.append(obs)
+    }
+
+    /// Pull every profile's status straight from its manager, routing any changes
+    /// through the normal handler. Safety net for notifications about connection
+    /// objects we no longer hold (and cheap enough to run on suspicion).
+    func resyncStatuses() {
+        for (id, mgr) in managers {
+            let s = mgr.connection.status
+            guard profiles.first(where: { $0.id == id })?.status != s else { continue }
+            handleStatusChange(id: id, status: s)
+        }
+    }
+
+    private func handleStatusChange(id: String, status s: NEVPNStatus) {
+        if let i = profiles.firstIndex(where: { $0.id == id }) { profiles[i].status = s }
+        Self.log.log("status[\(id, privacy: .public)] → \(Self.statusText(s), privacy: .public)")
+        // A connect that can never succeed (wrong network, unreachable
+        // gateway) is retried by the engine for ever, so the app has to
+        // impose its own deadline — otherwise "Connecting…" is permanent.
+        if s == .connecting {
+            self.startConnectWatchdog(id: id)
+        } else {
+            self.cancelConnectWatchdog(id: id)
+        }
+        if s == .connected {
+            // Back up for real, so the resume watch has nothing to report.
+            cancelResumeWatchdog(id: id)
+            // It works here after all — clear any "unreachable on this
+            // network" memory so a one-off outage can't warn for ever.
+            Task {
+                await NetworkMemory.shared.refresh()
+                NetworkMemory.shared.forgetFailure(profile: id)
+            }
+            queryExtensionVersion(id: id)
+            incidents[id] = nil
+            // Clear the persisted copy too, or the previous failure would
+            // resurface as "the incident" after the next clean disconnect.
+            TunnelIncidentStore.clear(profile: id)
+            lastConnectedAt[id] = Date()
+            captivePortalSuspected = false   // we're clearly through it
+            recordBaseline(id: id)
+        } else if s == .disconnected {
+            extensionVersion = "unavailable"
+            pausedProfiles.remove(id)      // pause never outlives its session
+            incidents[id] = TunnelIncidentStore.read(profile: id)
+            explainOTPReuseIfLikely(id: id)
+        }
     }
 
     /// Record what a *working* connection looks like (server transport address
@@ -1067,6 +1472,12 @@ final class VPNController {
             var baseline = ConnectionBaselineStore.load(profile: id)
                 ?? ConnectionBaseline(serverIP: nil, date: .now)
             if let ip = stats?.serverIP, !ip.isEmpty { baseline.serverIP = ip }
+            // Sampled here, with the tunnel already up, and that is safe: the
+            // fingerprint describes the PHYSICAL network whether or not a tunnel
+            // owns the default route (see NetworkFingerprint.key). This used to
+            // have to be captured back at .connecting to dodge the tunnel's own
+            // route — the invariant makes that dance unnecessary.
+            baseline.networkKey = NetworkMemory.shared.current?.key
             baseline.date = .now
             ConnectionBaselineStore.save(baseline, profile: id)
         }

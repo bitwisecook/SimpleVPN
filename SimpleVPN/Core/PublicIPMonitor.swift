@@ -36,11 +36,17 @@ final class PublicIPMonitor {
     private(set) var homeLat: Double?
     private(set) var homeLon: Double?
 
-    /// The app tells the monitor whether any VPN is currently carrying traffic, so
-    /// it knows when a fresh lookup represents home vs egress. Default: not active.
+    /// The app tells the monitor whether any VPN is carrying traffic OR is on its
+    /// way to (connecting/reconnecting), so it knows when a fresh lookup represents
+    /// home vs egress. Connecting has to count: the tunnel takes the default route
+    /// several seconds before its status says "connected", and a lookup that lands
+    /// in that window answers with the tunnel's country — which is precisely how
+    /// "home" once got re-stamped onto the far end of the VPN. Default: not active.
     static var isVPNActive: @Sendable () -> Bool = { false }
 
     @ObservationIgnored private var monitorTask: Task<Void, Never>?
+    /// Runs only while monitoring: nothing here may touch the network at init.
+    @ObservationIgnored private var networkWatch: Task<Void, Never>?
 
     // Free, keyless, plain-text "what's my IP" services. Where a service offers
     // family-specific hosts, each family is probed independently (a v4-only or
@@ -97,11 +103,26 @@ final class PublicIPMonitor {
         lon = centroid?.lon
 
         // With no VPN carrying traffic, "where we appear from" IS home. Snapshot it
-        // so that once a VPN is up, the map still knows the pre-VPN origin.
-        if !Self.isVPNActive() {
+        // so that once a VPN is up, the map still knows the pre-VPN origin. The
+        // egress fields above keep updating either way — that IS the egress pin.
+        // Detached: reading the routing table is a sysctl dump, not main-thread work.
+        let egressIsTunnelled = await Task.detached(priority: .utility) {
+            NetworkIdentity.defaultRouteIsVirtual()
+        }.value
+        if Self.homeSnapshotIsTrustworthy(vpnEngaged: Self.isVPNActive(),
+                                          egressIsTunnelled: egressIsTunnelled) {
             homeCountryCode = countryCode; homeCountryName = countryName
             homeLat = lat; homeLon = lon
         }
+    }
+
+    /// Two independent reasons not to believe a lookup describes home, because
+    /// either one on its own has a hole: one of our profiles can own the default
+    /// route before it reports `connected`, and a tunnel we don't manage
+    /// (Tailscale with an exit node) never reports to us at all. If the system's
+    /// default route is a tunnel's, egress ≠ home by definition.
+    static func homeSnapshotIsTrustworthy(vpnEngaged: Bool, egressIsTunnelled: Bool) -> Bool {
+        !vpnEngaged && !egressIsTunnelled
     }
 
     /// Refresh now, then every `interval`. Safe to call repeatedly — the previous
@@ -116,11 +137,35 @@ final class PublicIPMonitor {
                 try? await Task.sleep(for: .seconds(interval))
             }
         }
+        // Moving network is the one event that reliably changes the answer to
+        // "where does the internet see me?" — waiting up to five minutes for the
+        // timer to notice shows the previous café's country on the map. Gated by
+        // the same privacy switch as everything else here: lookups off, no call.
+        networkWatch = NetworkChange.observe { [weak self] _ in
+            guard Self.lookupEnabled else { return }
+            self?.scheduleNetworkRefresh()
+        }
     }
 
     func stopMonitoring() {
         monitorTask?.cancel()
         monitorTask = nil
+        networkWatch?.cancel()
+        networkWatch = nil
+    }
+
+    /// One lookup per move. The fingerprint is already settled for 700 ms before
+    /// it changes, but a hop can produce a fingerprint before DHCP has finished
+    /// handing out a usable route — so give it a moment, and collapse a burst of
+    /// changes into the last one.
+    @ObservationIgnored private var networkRefreshTask: Task<Void, Never>?
+    private func scheduleNetworkRefresh() {
+        networkRefreshTask?.cancel()
+        networkRefreshTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            await self?.refresh()
+        }
     }
 
     /// Plain-text body → trimmed address string; nil on any failure (or no URL).

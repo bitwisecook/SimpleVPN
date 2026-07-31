@@ -214,6 +214,23 @@ jobs:
           name: engines
           path: Vendor
 
+      # In-process 1Password (Go SDK as a static c-archive). Built fresh each
+      # release — it's ~1 minute and go.sum pins every module hash, so the
+      # output is reproducible without caching machinery. The macos-26 runner
+      # image ships NO Go toolchain (verified: v0.2's first run died here), so
+      # install it with GitHub's own setup-go, SHA-pinned like every other
+      # action, at the exact version the module's go directive names.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: Vendor/onepassword-native/src/go.mod
+          cache: false
+      - name: Build 1Password SDK archive
+        run: |
+          set -euo pipefail
+          go version
+          Tools/build-onepassword-sdk.sh
+
       - name: Import signing identity + provisioning profiles
         env:
           DEVID_APP_CERT_P12_BASE64: ${{ secrets.DEVID_APP_CERT_P12_BASE64 }}
@@ -228,17 +245,65 @@ jobs:
 
       - name: Build, notarize, staple, package DMG
         id: build
-        env:
-          # NOTARY_KEY / NOTARY_KEYID / NOTARY_ISSUER were exported into
-          # $GITHUB_ENV by import-signing.sh and are already in scope here.
-          CURRENT_PROJECT_VERSION: ${{ github.run_number }}
         run: |
           set -euo pipefail
+          # NOTARY_KEY / NOTARY_KEYID / NOTARY_ISSUER were exported into
+          # $GITHUB_ENV by import-signing.sh and are already in scope here.
+          # Build number comes from the committed BUILDNUMBER (the dev loop's
+          # counter), so the released app reports the same "v0.2 (104)" the
+          # local build did. It only ever increments, which is exactly what
+          # Sparkle's version comparison needs (and 104 > every run_number a
+          # past release ever shipped).
+          CURRENT_PROJECT_VERSION="$(cat BUILDNUMBER)"
+          export CURRENT_PROJECT_VERSION
+          echo "buildno=$CURRENT_PROJECT_VERSION" >> "$GITHUB_OUTPUT"
           VERSION="${GITHUB_REF_NAME#v}"
           Tools/build-release-dmg.sh "$VERSION"
           DMG="build/dist/SimpleVPN-${VERSION}-arm64.dmg"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+
+      # Sparkle appcast: sign the DMG with the EdDSA key and write the feed the
+      # app polls (SUFeedURL → releases/latest/download/appcast.xml — "latest"
+      # always serves the newest release's copy, so each release only has to
+      # describe itself). Sparkle's tools come from its own release tarball,
+      # pinned by version AND sha256 — same no-floating-third-party-code policy
+      # as the SHA-pinned actions. sparkle:version is the committed BUILDNUMBER,
+      # matching the CURRENT_PROJECT_VERSION baked into this very build.
+      - name: Generate Sparkle appcast
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          SPARKLE_VER=2.9.4
+          SPARKLE_SHA256=ce89daf967db1e1893ed3ebd67575ed82d3902563e3191ca92aaec9164fbdef9
+          curl -sL -o /tmp/sparkle.tar.xz \
+            "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VER}/Sparkle-${SPARKLE_VER}.tar.xz"
+          echo "${SPARKLE_SHA256}  /tmp/sparkle.tar.xz" | shasum -a 256 -c -
+          mkdir -p /tmp/sparkle && tar -xf /tmp/sparkle.tar.xz -C /tmp/sparkle
+
+          VERSION="${{ steps.build.outputs.version }}"
+          DMG="${{ steps.build.outputs.dmg }}"
+          SIG_AND_LEN="$(printf '%s' "$SPARKLE_ED_PRIVATE_KEY" | /tmp/sparkle/bin/sign_update --ed-key-file - "$DMG")"
+          # sign_update prints: sparkle:edSignature="…" length="…"
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/$(basename "$DMG")"
+          cat > build/dist/appcast.xml <<APPCAST
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+            <channel>
+              <title>SimpleVPN</title>
+              <item>
+                <title>SimpleVPN ${VERSION}</title>
+                <link>https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}</link>
+                <sparkle:version>${{ steps.build.outputs.buildno }}</sparkle:version>
+                <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
+                <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+                <enclosure url="${URL}" ${SIG_AND_LEN} type="application/octet-stream"/>
+              </item>
+            </channel>
+          </rss>
+          APPCAST
+          echo "appcast written:" && cat build/dist/appcast.xml
 
       # Upload unconditionally (even on a failed run's partial artifacts, via
       # the always() below) so a failed release still leaves something to
@@ -251,6 +316,7 @@ jobs:
           path: |
             build/dist/*.dmg
             build/dist/*.dmg.sha256
+            build/dist/appcast.xml
           if-no-files-found: warn
 
       # gh CLI is preinstalled on GitHub-hosted macOS runners — deliberately
@@ -280,7 +346,7 @@ jobs:
             --title "SimpleVPN $VERSION" \
             --generate-notes \
             ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
-            "$DMG" "$DMG.sha256"
+            "$DMG" "$DMG.sha256" build/dist/appcast.xml
 
       - name: Clean up signing keychain + secrets
         if: always()

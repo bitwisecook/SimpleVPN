@@ -256,7 +256,7 @@ private struct DoctorCard: View {
                             if applying { ProgressView().controlSize(.small) }
                             else { Text(label) }
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.glassProminent)
                         .tint(finding.risky ? .orange : .accentColor)
                         .controlSize(.small)
                         .disabled(applying)

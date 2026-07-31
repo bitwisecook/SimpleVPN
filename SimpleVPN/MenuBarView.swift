@@ -36,7 +36,7 @@ struct MenuBarLabel: View {
     // reflects ALL backends, not just OpenVPN.
     var tunnelManager: SubprocessTunnelManager
     var nativeVPN: NativeVPNManager
-    @AppStorage(menuBarGraphDefaultsKey) private var showGraph = true
+    @AppStorage(menuBarGraphDefaultsKey) private var showGraph = false
 
     private var activeID: String? {
         vpn.profiles.first { UI.isActive($0.status) }?.id
@@ -63,7 +63,7 @@ struct MenuBarLabel: View {
         // Reachability across ALL connected tunnels (not just this one): if any
         // is stalled, the menu-bar dot goes amber.
         let anyStalled: Bool = { if case .stalled = reachability.worst { return true }; return false }()
-        let paused = vpn.pausedProfiles[id] != nil
+        let paused = vpn.pausedProfiles.contains(id)
         return .from(status: p.status, stalled: anyStalled && !paused, paused: paused)
     }
 
@@ -469,15 +469,15 @@ struct MenuBarView: View {
             Divider().padding(.vertical, 4)
 
             if let p = connected {
-                if vpn.pausedProfiles[p.id] != nil {
+                if vpn.pausedProfiles.contains(p.id) {
                     menuButton("Resume \(p.name)", systemImage: "play.circle") {
                         Task { await vpn.resume(id: p.id) }
                     }
-                } else {
-                    // Hold mode only from the menu — the bypass (leaky) variant is a
-                    // deliberate act, made in the main window where it can be loud.
+                } else if vpn.uiPrefs(for: p.id).allowPause {
+                    // Opt-in per VPN. Pause keeps the session signed in but sends
+                    // traffic outside the VPN until resumed.
                     menuButton("Pause \(p.name)", systemImage: "pause.circle") {
-                        Task { await vpn.pause(id: p.id, mode: .hold) }
+                        Task { await vpn.pause(id: p.id) }
                     }
                 }
             }
@@ -509,7 +509,7 @@ struct MenuBarView: View {
     /// The whole row is the menu item (hover-highlighted, one click):
     /// disconnected → connect (or open the window for OTP entry); active → disconnect.
     @ViewBuilder private func row(_ p: VPNController.Profile) -> some View {
-        let paused = vpn.pausedProfiles[p.id] != nil
+        let paused = vpn.pausedProfiles.contains(p.id)
         let dotState = DotState.from(
             status: p.status,
             stalled: (reachability?.isStalled(p.id) ?? false) && !paused,
@@ -532,7 +532,7 @@ struct MenuBarView: View {
     private func rowAction(_ p: VPNController.Profile) {
         switch p.status {
         case .connected, .reasserting:
-            if vpn.pausedProfiles[p.id] != nil {
+            if vpn.pausedProfiles.contains(p.id) {
                 Task { await vpn.resume(id: p.id) }   // paused row click = resume
                 return
             }
@@ -572,7 +572,7 @@ struct MenuBarView: View {
     @ViewBuilder private func trailingGlyph(_ p: VPNController.Profile) -> some View {
         switch p.status {
         case .connected, .reasserting:
-            Image(systemName: vpn.pausedProfiles[p.id] != nil ? "play.circle.fill" : "stop.circle.fill")
+            Image(systemName: vpn.pausedProfiles.contains(p.id) ? "play.circle.fill" : "stop.circle.fill")
         case .connecting, .disconnecting:
             DrawnSpinner()
         default:
@@ -639,8 +639,8 @@ struct MenuBarView: View {
                 RailroadView(topology: topo.topology,
                              ourTunnelIPv4: stats?.tunnelIPv4,
                              serverEndpoint: stats?.serverEndpoint ?? "",
-                             paused: vpn.pausedProfiles[p.id] != nil,
-                             bypassing: vpn.pausedProfiles[p.id] == .bypass,
+                             paused: vpn.pausedProfiles.contains(p.id),
+                             bypassing: vpn.pausedProfiles.contains(p.id),
                              compact: true)
                     .onAppear { topo.startWatching() }
                     .onDisappear { topo.stopWatching() }
@@ -776,13 +776,11 @@ private struct MenuCredentialEntry: View {
                 Spacer()
                 if busy {
                     DrawnSpinner()
-                } else if #available(macOS 26, *) {
+                } else {
+                    // (No #available fallback: the deployment target IS macOS 26,
+                    // so the bordered branch was dead code.)
                     Button("Connect", action: connectIfReady)
                         .buttonStyle(.glassProminent).controlSize(.small)
-                        .disabled(!canConnect)
-                } else {
-                    Button("Connect", action: connectIfReady)
-                        .buttonStyle(.borderedProminent).controlSize(.small)
                         .disabled(!canConnect)
                 }
             }
@@ -809,7 +807,9 @@ private struct MenuCredentialEntry: View {
                 try await vpn.connectWithTransientCredentials(id: profile.id)
                 onDone()
             } catch {
-                vpn.lastError = error.localizedDescription
+                // Carries the profile so the main window's sheet can offer a
+                // retry (the menu bar has no room to explain a failure itself).
+                vpn.report(error, profile: profile.id)
             }
         }
     }

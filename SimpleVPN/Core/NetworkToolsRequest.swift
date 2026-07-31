@@ -25,10 +25,32 @@ final class NetworkToolsRequest {
     /// immediately rather than waiting to be told again.
     private(set) var autoRun = false
 
+    /// Everything the VPN fingerprint needs beyond the host, when the caller knows it
+    /// (the sidebar's Probe command does; the connect-failure toast does not). All
+    /// optional, and cleared by a plain `request(_:)` so a later bare request can
+    /// never inherit the previous VPN's port and be probed as the wrong protocol.
+    private(set) var port: Int?
+    private(set) var proto: String?
+    private(set) var vpnKind: VPNKind?
+
     func request(_ host: String, autoRun: Bool = true) {
+        submit(host, port: nil, proto: nil, vpnKind: nil, autoRun: autoRun)
+    }
+
+    /// "Probe this VPN": prefill the target and run the whole battery, including the
+    /// protocol fingerprint aimed at the endpoint a connect would actually dial.
+    func probe(host: String, port: Int?, proto: String?, vpnKind: VPNKind?) {
+        submit(host, port: port, proto: proto, vpnKind: vpnKind, autoRun: true)
+    }
+
+    private func submit(_ host: String, port: Int?, proto: String?,
+                        vpnKind: VPNKind?, autoRun: Bool) {
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         target = trimmed
+        self.port = port
+        self.proto = proto
+        self.vpnKind = vpnKind
         self.autoRun = autoRun
         generation += 1
     }

@@ -17,7 +17,7 @@
 #     produces a sensibly-named DMG instead of erroring out).
 #   BUILDNO resolves from $CURRENT_PROJECT_VERSION env, else the same local
 #     build/buildnumber.txt monotonic counter build-notarize-install.sh uses.
-#     CI must set CURRENT_PROJECT_VERSION (release.yml passes github.run_number)
+#     CI must set CURRENT_PROJECT_VERSION (release.yml passes the committed BUILDNUMBER)
 #     because an ephemeral runner's own counter would always read back as 1.
 #
 # Notarization credentials: set NOTARY_KEY/NOTARY_KEYID/NOTARY_ISSUER (CI path)
@@ -103,6 +103,9 @@ until build_once; do
   if [ "$n" -ge 3 ]; then echo "ERROR: Release build failed after $n attempts"; exit 1; fi
   echo "   build failed (likely transient TSA/codesign) — retry $n in 8s…"; sleep 8
 done
+
+echo "==> re-sign Sparkle nested executables (notary requires our Developer ID + timestamp)"
+"$REPO/Tools/resign-sparkle.sh" "$APP"
 
 echo "==> verify not debuggable (no get-task-allow)"
 if codesign -d --entitlements - --xml "$APP" 2>/dev/null | grep -q "get-task-allow"; then

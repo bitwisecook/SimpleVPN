@@ -3,7 +3,7 @@
 //
 //  CredentialSource.swift
 //  Per-VPN choice of WHERE credentials come from: typed manually (stored in the
-//  login keychain when Remember is on), fetched from 1Password via its CLI, or
+//  login keychain when Remember is on), fetched from the 1Password app, or
 //  read from Apple Passwords / the login keychain. Stored (no secrets — only a
 //  reference to the item) as a JSON blob in providerConfiguration["credsource"],
 //  same lenient pattern as VPNAuthConfig / OpenVPNOverrides.
@@ -38,16 +38,48 @@ struct CredentialSource: Codable, Sendable, Equatable {
     /// 1Password: item name or UUID (optionally "vault/item"). Apple Passwords:
     /// the service/server to match (e.g. "tig-vpn.grlab.co.uk"). Unused for manual.
     var reference = ""
-    /// Optional disambiguator: 1Password account/vault, or the Apple Passwords
-    /// account (username) when a service has several saved logins.
+    /// 1Password: WHICH ACCOUNT to ask — the name shown at the top of
+    /// 1Password's sidebar, or its UUID. Not cosmetic: the SDK's desktop-app
+    /// integration refuses to build a client without it ("Account not found")
+    /// whenever it can't pick one on its own. Apple Passwords: the account
+    /// (username) when a service has several saved logins.
     var account = ""
+    /// 1Password only: which vault holds the item ("" = search them all).
+    /// Separate from `account` — a vault names a drawer inside an account, and
+    /// conflating the two is what made every 1Password fetch fail.
+    var vault = ""
 
     /// Which of the source item's fields feed which auth role, keyed by
     /// `CredentialField.rawValue` (username/password/otp). Empty ⇒ auto-detect
     /// from the item's field purposes/types (1Password's USERNAME/PASSWORD/OTP).
     var fieldMap: [String: String] = [:]
 
-    var isDefault: Bool { kind == .manual && reference.isEmpty && account.isEmpty && fieldMap.isEmpty }
+    var isDefault: Bool {
+        kind == .manual && reference.isEmpty && account.isEmpty && vault.isEmpty && fieldMap.isEmpty
+    }
+
+    init() {}
+
+    /// Every key optional: blobs written by older builds are missing whichever
+    /// fields hadn't been invented yet, and a strict decode would throw the
+    /// whole source away (dropping the user's item choice, not just the new
+    /// field). Legacy 1Password blobs carry only `account`, which the app then
+    /// used AS THE VAULT — so it is migrated into `vault` while being left in
+    /// `account` too: it may equally have been typed into the field labelled
+    /// "Account", and the two can't be told apart after the fact. Whichever it
+    /// was, it now reaches the side that understands it.
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try c.decodeIfPresent(CredentialSourceKind.self, forKey: .kind) ?? .manual
+        reference = try c.decodeIfPresent(String.self, forKey: .reference) ?? ""
+        account = try c.decodeIfPresent(String.self, forKey: .account) ?? ""
+        fieldMap = try c.decodeIfPresent([String: String].self, forKey: .fieldMap) ?? [:]
+        if let stored = try c.decodeIfPresent(String.self, forKey: .vault) {
+            vault = stored
+        } else {
+            vault = kind == .onePassword ? account : ""
+        }
+    }
 
     func encodedBlob() -> Data? {
         guard !isDefault else { return nil }

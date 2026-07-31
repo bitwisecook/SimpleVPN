@@ -9,3 +9,9 @@
 #import "OVPNProfileEvaluator.h"
 #import "SSHBridge.h"
 #import "ExceptionPreprocessor.h"
+
+// libproc socket enumeration (AppConnectionInspector): which processes hold
+// established TCP connections over a tunnel. Real kernel APIs — never lsof/
+// netstat text parsing.
+#include <libproc.h>
+#include <sys/proc_info.h>

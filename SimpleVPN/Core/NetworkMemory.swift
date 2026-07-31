@@ -13,6 +13,10 @@
 //  available to any process. That's also a BETTER identity than an SSID: it tells two
 //  different networks both called "Home" apart, and survives a rename.
 //
+//  It is built from the PHYSICAL default route, never a tunnel's — see
+//  `NetworkIdentity.underlayDefaultRoute`. Both the routing table and the ARP cache
+//  are read straight from the kernel (RouteTableSource), so no subprocess runs.
+//
 //  The SSID is used for WORDING ONLY, and only when the user has opted into location
 //  (see LocationAuthority) — it is deliberately excluded from `key`, so granting or
 //  revoking that permission can never orphan already-remembered failures.
@@ -24,8 +28,9 @@ import OSLog
 
 nonisolated struct NetworkFingerprint: Codable, Hashable, Sendable {
     var interface: String          // en0, en6…
-    /// May be empty: a point-to-point default route (Tailscale/utun) has an interface
-    /// but no gateway, which is exactly the case that used to make fingerprinting fail
+    /// May be empty: a link can have an interface and no next-hop address (a
+    /// point-to-point default, or no physical default route at all while DHCP is
+    /// still thinking). Requiring one is what used to make fingerprinting fail
     /// outright and silently drop the whole memory.
     var gatewayIP: String
     var gatewayMAC: String?        // the strong part of the identity
@@ -39,6 +44,22 @@ nonisolated struct NetworkFingerprint: Codable, Hashable, Sendable {
     /// Stable key — deliberately excludes the SSID so identity doesn't change when the
     /// user grants or revokes location, or when a network is renamed. The gateway MAC
     /// alone is enough when we have it; otherwise fall back to the weaker IP+interface.
+    ///
+    /// INVARIANT — bringing a tunnel UP IS NOT A NETWORK MOVE. The key describes the
+    /// physical network this Mac is attached to, so it must not change when a VPN (or
+    /// Tailscale, or anything else that owns a utun) takes over the default route.
+    /// Everything that reacts to a key change — re-probing endpoints, re-snapshotting
+    /// "home", re-resolving hosts — would otherwise fire at exactly the moment its
+    /// answers are measured through the tunnel and are therefore worthless. The
+    /// physical-only route pick in `NetworkIdentity.underlayDefaultRoute` is what
+    /// upholds this; anything else deriving identity must uphold it too.
+    ///
+    /// Known ceiling: signing in to a captive portal does NOT change this key — same
+    /// gateway, same MAC, so "behind the sign-in page" and "through it" are the same
+    /// network by this identity. That is deliberate (the network really is the same
+    /// one), and it means nothing keyed off `key` may be relied on to notice a portal
+    /// being cleared. Captive-portal resolution is handled separately, by the
+    /// ConnectionView captive rechecks (see VPNController.recheckCaptivePortal).
     var key: String {
         if let mac = gatewayMAC, !mac.isEmpty { return "mac:\(mac.lowercased())" }
         if let net = localNetwork, !net.isEmpty { return "net:\(interface)|\(net)" }
@@ -59,43 +80,123 @@ nonisolated struct NetworkFingerprint: Codable, Hashable, Sendable {
 nonisolated enum NetworkIdentity {
     private static let log = Logger(subsystem: "com.bragi0.SimpleVPN", category: "netmemory")
 
+    /// Interface names that carry a TUNNEL rather than a link. Whatever happens on
+    /// the far side of one of these, the Mac has not moved: same Wi-Fi, same cable,
+    /// same gateway. `utun` covers our own VPNs *and* Tailscale — which this app's
+    /// author runs permanently, so a Tailscale utun must never be allowed to become
+    /// the identity either, or the "network" would be whatever Tailscale did last.
+    static let virtualInterfacePrefixes = ["utun", "tun", "tap", "gif", "stf", "ipsec", "ppp", "feth"]
+
+    static func isVirtualInterface(_ name: String) -> Bool {
+        // Zone suffixes ("utun4%utun4") and empty names both answer correctly here.
+        let bare = name.split(separator: "%").first.map(String.init) ?? name
+        return virtualInterfacePrefixes.contains { bare.hasPrefix($0) }
+    }
+
+    /// The default route the fingerprint is taken from: the best PHYSICAL one.
+    ///
+    /// A full tunnel flips the system default route to a utun but LEAVES the
+    /// underlying one in the table, interface-scoped (`UGScIg en0`) — so the
+    /// physical network is still there to be described, and describing it is what
+    /// keeps `NetworkFingerprint.key` still while a VPN comes up and goes down.
+    /// Unscoped candidates come first (that is the route the kernel would use with
+    /// no tunnel in the way), then the scoped leftovers, then kernel order.
+    static func underlayDefaultRoute(in snapshot: RouteTableSnapshot) -> RouteRecord? {
+        let candidates = snapshot.routes.filter {
+            $0.isDefault && !$0.isReject && !$0.interfaceName.isEmpty
+                && $0.interfaceName != "lo0" && !isVirtualInterface($0.interfaceName)
+        }
+        func best(_ family: IPFamily) -> RouteRecord? {
+            candidates.filter { $0.family == family }
+                .min { a, b in rank(a) < rank(b) }
+        }
+        // IPv4 first: the rest of the fingerprint (ARP MAC, local network) is v4.
+        return best(.v4) ?? best(.v6)
+    }
+
+    private static func rank(_ route: RouteRecord) -> (Int, Int, Int) {
+        (route.isScoped ? 1 : 0, route.hasRealGateway ? 0 : 1, route.order)
+    }
+
+    /// Where the internet actually leaves this Mac right now — tunnel included.
+    /// The opposite question to `underlayDefaultRoute`, and the one worth asking
+    /// before believing a public-address lookup describes home.
+    static func activeDefaultRoute(in snapshot: RouteTableSnapshot) -> RouteRecord? {
+        snapshot.routes.filter {
+            $0.isDefault && !$0.isReject && !$0.isScoped && !$0.interfaceName.isEmpty
+        }
+        .min { a, b in
+            (a.family == .v4 ? 0 : 1, a.order) < (b.family == .v4 ? 0 : 1, b.order)
+        }
+    }
+
+    /// True when traffic is currently leaving through a tunnel, so "where does the
+    /// internet see me?" is the tunnel's answer and not this network's.
+    static func defaultRouteIsVirtual(in snapshot: RouteTableSnapshot) -> Bool {
+        guard let route = activeDefaultRoute(in: snapshot) else { return false }
+        return isVirtualInterface(route.interfaceName)
+    }
+
+    /// Live version, straight from the kernel (one sysctl, no subprocess).
+    static func defaultRouteIsVirtual() -> Bool {
+        guard let snapshot = try? RouteTableSource.snapshot() else { return false }
+        return defaultRouteIsVirtual(in: snapshot)
+    }
+
     /// The network this Mac is currently attached to, or nil when genuinely offline.
     static func current() async -> NetworkFingerprint? {
-        var gateway = "", iface = ""
-        if let routeOut = await run("/sbin/route", ["-n", "get", "default"]) {
-            for line in routeOut.split(whereSeparator: \.isNewline) {
-                let parts = line.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-                guard parts.count == 2 else { continue }
-                if parts[0] == "gateway" { gateway = parts[1] }
-                if parts[0] == "interface" { iface = parts[1] }
-            }
-        }
-        // A gateway is a bonus, not a requirement: a point-to-point default route
-        // (Tailscale and friends) reports an interface and no gateway at all. Requiring
-        // both is what made this return nil and lose the memory silently.
-        if iface.isEmpty { iface = primaryIPv4Interface() ?? "" }
-        guard !iface.isEmpty else {
-            log.error("no network fingerprint: no default-route interface and no candidate from getifaddrs")
-            return nil
-        }
-        // ARP gives the gateway's MAC: "? (192.168.87.10) at 0:8:a2:e:dc:c7 on en0 …"
-        var mac: String?
-        if !gateway.isEmpty, let arp = await run("/usr/sbin/arp", ["-n", gateway]),
-           let atRange = arp.range(of: " at ") {
-            let rest = arp[atRange.upperBound...]
-            let candidate = String(rest.prefix { !$0.isWhitespace })
-            if candidate.contains(":"), candidate != "(incomplete)" { mac = candidate }
-        }
+        // Both read as binary from the kernel — see RouteTableSource. Detached
+        // because a nonisolated async function now runs on its CALLER's actor
+        // (NonisolatedNonsendingByDefault), and the caller is the main one: two
+        // sysctl dumps of a large routing table do not belong there.
+        let (routes, arp) = await Task.detached(priority: .utility) {
+            ((try? RouteTableSource.snapshot()) ?? .empty,
+             (try? RouteTableSource.arpTable()) ?? [])
+        }.value
         // Only non-nil if the user opted into location; see LocationAuthority.
         let ssid = await MainActor.run {
             LocationAuthority.shared.refreshSSID()
             return LocationAuthority.shared.ssid
         }
-        let fp = NetworkFingerprint(interface: iface, gatewayIP: gateway,
-                                    gatewayMAC: mac, localNetwork: ipv4Network(of: iface),
-                                    ssid: ssid)
+        guard let fp = fingerprint(routes: routes, arp: arp, ssid: ssid) else {
+            log.error("no network fingerprint: no physical default route and no candidate from getifaddrs")
+            return nil
+        }
         log.debug("network fingerprint key=\(fp.key, privacy: .public)")
         return fp
+    }
+
+    /// The fingerprint for a given routing table and ARP cache — pure, so the
+    /// "a tunnel is not a network move" invariant is testable from fixtures.
+    static func fingerprint(routes: RouteTableSnapshot,
+                            arp: [RouteTableSource.ARPEntry],
+                            ssid: String? = nil,
+                            localNetwork: (String) -> String? = { ipv4Network(of: $0) },
+                            fallbackInterface: () -> String? = { primaryIPv4Interface() })
+        -> NetworkFingerprint? {
+        let route = underlayDefaultRoute(in: routes)
+        // A gateway is a bonus, not a requirement: a point-to-point default route
+        // reports an interface and no next-hop address at all. Requiring both is
+        // what made this return nil and lose the memory silently.
+        var iface = route?.interfaceName ?? ""
+        var gateway = route.flatMap { $0.hasRealGateway ? $0.gateway : nil } ?? ""
+        if iface.isEmpty {
+            // No physical default in the table — a tunnel-only default, or DHCP
+            // hasn't finished. The interface holding our address still names the
+            // network we're plugged into, which is the whole point.
+            iface = fallbackInterface() ?? ""
+            gateway = ""
+        }
+        guard !iface.isEmpty else { return nil }
+
+        var mac: String?
+        if !gateway.isEmpty {
+            let matches = arp.filter { $0.ip == gateway }
+            mac = (matches.first { $0.interface == iface } ?? matches.first)?.mac
+        }
+        return NetworkFingerprint(interface: iface, gatewayIP: gateway,
+                                  gatewayMAC: mac, localNetwork: localNetwork(iface),
+                                  ssid: ssid)
     }
 
     /// The IPv4 network the given interface sits on, e.g. "192.168.87.0/24".
@@ -119,9 +220,9 @@ nonisolated enum NetworkIdentity {
         return nil
     }
 
-    /// Last-resort interface pick when there's no usable default route: the first
-    /// non-loopback, non-tunnel interface carrying an IPv4 address.
-    private static func primaryIPv4Interface() -> String? {
+    /// Last-resort interface pick when there's no usable PHYSICAL default route:
+    /// the first non-loopback, non-tunnel interface carrying an IPv4 address.
+    static func primaryIPv4Interface() -> String? {
         var head: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&head) == 0, let start = head else { return nil }
         defer { freeifaddrs(head) }
@@ -130,7 +231,7 @@ nonisolated enum NetworkIdentity {
             guard let namePtr = e.ifa_name,
                   let addr = e.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) else { continue }
             let name = String(cString: namePtr)
-            guard name != "lo0", !name.hasPrefix("utun"), !name.hasPrefix("ipsec") else { continue }
+            guard name != "lo0", !isVirtualInterface(name) else { continue }
             return name
         }
         return nil
@@ -144,26 +245,6 @@ nonisolated enum NetworkIdentity {
 
     static func logMissedRemember(profile id: String) {
         log.error("cannot remember unreachable network for \(id, privacy: .public): no fingerprint")
-    }
-
-    private static func run(_ tool: String, _ args: [String]) async -> String? {
-        await withCheckedContinuation { cont in
-            DispatchQueue.global(qos: .utility).async {
-                guard FileManager.default.isExecutableFile(atPath: tool) else {
-                    cont.resume(returning: nil); return
-                }
-                let p = Process()
-                p.executableURL = URL(fileURLWithPath: tool)
-                p.arguments = args
-                let out = Pipe()
-                p.standardOutput = out
-                p.standardError = Pipe()
-                do { try p.run() } catch { cont.resume(returning: nil); return }
-                let data = out.fileHandleForReading.readDataToEndOfFile()
-                p.waitUntilExit()
-                cont.resume(returning: String(data: data, encoding: .utf8))
-            }
-        }
     }
 }
 
@@ -254,5 +335,54 @@ final class NetworkMemory {
     func clear(profile id: String) {
         failures[id] = nil
         persist()
+    }
+}
+
+/// Riding the network-identity signal from code that isn't a view.
+///
+/// Views say `.task(id: NetworkMemory.shared.current?.key)` and SwiftUI does the
+/// rest; stores and controllers have no body to re-evaluate, so they take one of
+/// these instead and hold it for as long as they care. Nothing here starts a
+/// timer or a lookup — it is purely a relay of the one NWPathMonitor the app
+/// already runs.
+@MainActor
+enum NetworkChange {
+
+    /// Placeholder identity for "we don't know what network this is yet" — used
+    /// where a cache must be keyed by network before the first fingerprint lands.
+    /// It becomes a real key moments later, which reads as an ordinary change.
+    static let unknownKey = "net:unknown"
+
+    /// The network we're on, or `unknownKey` before the first fingerprint.
+    static var key: String { NetworkMemory.shared.current?.key ?? unknownKey }
+
+    /// Calls `body` on every genuine identity change, never for the value that
+    /// was already current when observation started. `current` is reassigned on
+    /// every refresh — most of which land on the same network — so the key, not
+    /// the assignment, is what counts as a change.
+    ///
+    /// Returns the driving task: cancel it (or drop the property holding it) to
+    /// stop observing.
+    static func observe(_ body: @escaping @MainActor (String?) -> Void) -> Task<Void, Never> {
+        Task { @MainActor in
+            var last = NetworkMemory.shared.current?.key
+            while !Task.isCancelled {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    // onChange fires during the willSet, so the new value is only
+                    // readable once the continuation has resumed us back onto the
+                    // main actor — which is why the read happens after the await.
+                    withObservationTracking {
+                        _ = NetworkMemory.shared.current?.key
+                    } onChange: {
+                        continuation.resume()
+                    }
+                }
+                guard !Task.isCancelled else { return }
+                let now = NetworkMemory.shared.current?.key
+                guard now != last else { continue }
+                last = now
+                body(now)
+            }
+        }
     }
 }

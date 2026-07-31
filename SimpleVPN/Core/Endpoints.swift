@@ -11,7 +11,7 @@ import Foundation
 
 /// One `remote` from a profile, with top-level `port`/`proto` defaults applied.
 /// nil port/proto = the profile left it to the engine default (1194/udp).
-struct Endpoint: Identifiable, Equatable, Sendable {
+nonisolated struct Endpoint: Identifiable, Equatable, Sendable {
     var host: String
     var port: Int?
     var proto: String?      // "udp"/"tcp" (prefix-normalized: "tcp-client" → "tcp")
@@ -19,7 +19,9 @@ struct Endpoint: Identifiable, Equatable, Sendable {
     var id: String { "\(host):\(port.map(String.init) ?? "*"):\(proto ?? "*")" }
 }
 
-enum EndpointScanner {
+// nonisolated: pure text scanning, no state — callable from the off-actor
+// endpoint model as well as from the UI.
+nonisolated enum EndpointScanner {
 
     /// All `remote <host> [port] [proto]` endpoints in an .ovpn. Honors top-level
     /// `port`/`proto` directives as defaults (wherever they appear — OpenVPN

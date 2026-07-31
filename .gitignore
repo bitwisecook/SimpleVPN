@@ -12,3 +12,13 @@ Vendor/
 
 # Python tool cache
 __pycache__/
+
+# 1Password native SDK bridge: track the Go source, lockfiles and stable header
+# (the built libopnative.a stays untracked — Tools/build-onepassword-sdk.sh and
+# CI rebuild it reproducibly from the pinned go.mod/go.sum).
+!Vendor/
+Vendor/*
+!Vendor/onepassword-native/
+Vendor/onepassword-native/*
+!Vendor/onepassword-native/src/
+!Vendor/onepassword-native/include/

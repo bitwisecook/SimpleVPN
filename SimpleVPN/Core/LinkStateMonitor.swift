@@ -30,7 +30,7 @@ final class LinkStateMonitor {
         case connecting
         case disconnecting
         case connected
-        case paused(VPNController.PauseMode)
+        case paused
         /// Connected, but nothing is coming back — the train-tunnel case. Seconds
         /// quiet when we know it.
         case stalled(seconds: Int?)
@@ -81,7 +81,7 @@ final class LinkStateMonitor {
     func state(for id: String) -> State {
         guard let profile = vpn.profiles.first(where: { $0.id == id }) else { return .disconnected }
         if vpn.captivePortalSuspected, vpn.incidents[id] != nil { return .captivePortal }
-        if let mode = vpn.pausedProfiles[id] { return .paused(mode) }
+        if vpn.pausedProfiles.contains(id) { return .paused }
         switch profile.status {
         case .connecting: return .connecting
         case .disconnecting: return .disconnecting

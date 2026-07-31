@@ -258,24 +258,81 @@ struct LogoWell: View {
     }
 }
 
-/// Live reachability chip: is the tunnel actually passing traffic right now?
-/// Reachable (green) · Idle (dim, no traffic either way) · No response (amber,
-/// we're sending but nothing comes back).
-struct ReachabilityPill: View {
-    let health: ThroughputMonitor.LinkHealth
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    var body: some View {
-        HStack(spacing: 5) {
-            StatusDot(state: health.reachabilityDot, size: 7)
-            Text(health.reachabilityLabel).font(.callout).foregroundStyle(.secondary)
+// (ReachabilityPill is gone: a healthy connection no longer announces itself.
+// The header shows ProblemPill — ConnectionView — only when something is wrong.)
+
+/// AppKit-backed credential field that participates in system Password AutoFill.
+///
+/// Why AppKit: SwiftUI's `.textContentType` is a documented no-op for AutoFill on
+/// macOS (dev-forums 809587) — only NSTextField/NSSecureTextField with
+/// `contentType` set get the key-icon suggestions. With these, items from Apple
+/// Passwords AND every credential provider the user enabled in System Settings ▸
+/// AutoFill (Strongbox, KeePassium, 1Password's provider as it ships…) can fill
+/// our fields, each provider handling its own Touch ID. Focus is bridged to a
+/// plain SwiftUI state token so the shake/nudge machinery keeps working.
+struct AutoFillField<Focus: Hashable>: NSViewRepresentable {
+    enum Kind { case username, password, oneTimeCode }
+
+    let kind: Kind
+    let placeholder: String
+    @Binding var text: String
+    @Binding var focus: Focus?
+    let focusValue: Focus
+    var onSubmit: () -> Void = {}
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field: NSTextField = kind == .password ? NSSecureTextField() : NSTextField()
+        field.placeholderString = placeholder
+        field.bezelStyle = .roundedBezel
+        field.font = .systemFont(ofSize: NSFont.systemFontSize)
+        field.delegate = context.coordinator
+        field.lineBreakMode = .byTruncatingTail
+        field.cell?.usesSingleLineMode = true
+        switch kind {
+        case .username: field.contentType = .username
+        case .password: field.contentType = .password
+        case .oneTimeCode: field.contentType = .oneTimeCode
         }
-        .padding(.horizontal, 10).padding(.vertical, 5)
-        // Glass pill tinted by health; the tint cross-fades green→amber as the link
-        // stalls/recovers, so a reachability change is felt, not just re-labelled.
-        .glassEffect(.regular.tint(health.reachabilityDot.color.opacity(0.18)), in: .capsule)
-        .animation(reduceMotion ? nil : .smooth(duration: 0.4), value: health)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(health.reachabilityLabel)
+        // Fill the grid column like the SwiftUI fields these replace.
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        return field
+    }
+
+    func updateNSView(_ field: NSTextField, context: Context) {
+        context.coordinator.parent = self
+        // Don't clobber composition mid-edit: only push model→view when the
+        // view isn't the one being typed into or the values genuinely differ.
+        if field.stringValue != text, field.currentEditor() == nil {
+            field.stringValue = text
+        }
+        if focus == focusValue, field.window != nil, field.currentEditor() == nil {
+            DispatchQueue.main.async { [weak field] in
+                guard let field, field.window?.firstResponder !== field.currentEditor() else { return }
+                field.window?.makeFirstResponder(field)
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: AutoFillField
+        init(parent: AutoFillField) { self.parent = parent }
+
+        func controlTextDidChange(_ note: Notification) {
+            guard let field = note.object as? NSTextField else { return }
+            parent.text = field.stringValue
+        }
+        func controlTextDidBeginEditing(_ note: Notification) {
+            parent.focus = parent.focusValue
+        }
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            if selector == #selector(NSResponder.insertNewline(_:)) {
+                parent.onSubmit()
+                return true
+            }
+            return false
+        }
     }
 }
 

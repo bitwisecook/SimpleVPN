@@ -18,7 +18,14 @@ struct ManageVPNsView: View {
     @Environment(SubprocessTunnelManager.self) private var tunnelManager
     @Environment(NativeVPNManager.self) private var nativeVPN
     @Environment(WireGuardStore.self) private var wireguard
+    @Environment(\.dismiss) private var dismissWindow
     @State private var selection: String?
+
+    /// Every configured VPN across all backends — "only one VPN" for the
+    /// save-closes-the-window behaviour.
+    private var totalVPNCount: Int {
+        vpn.profiles.count + tunnels.tunnels.count + nativeVPN.configs.count + wireguard.configs.count
+    }
 
     /// Sidebar selection is tagged so rows never collide with NE profile ids.
     private static let tunnelTag = "tunnel:"
@@ -156,7 +163,8 @@ struct ManageVPNsView: View {
                 WireGuardView(store: wireguard, draft: w)
                     .id(id)
             } else if let id = selection, vpn.profiles.contains(where: { $0.id == id }) {
-                EditVPNView(vpn: vpn, labels: labels, profileID: id, embedded: true)
+                EditVPNView(vpn: vpn, labels: labels, profileID: id, embedded: true,
+                            onSaved: { if totalVPNCount <= 1 { dismissWindow() } })
                     .id(id)   // fresh editor state per VPN
             } else {
                 ContentUnavailableView("No VPN Selected", systemImage: "network",

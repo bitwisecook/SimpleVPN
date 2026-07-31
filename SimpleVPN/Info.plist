@@ -14,6 +14,19 @@
     <!-- Shown in the macOS permission prompt, which only ever appears if the user turns
          on Settings ▸ General ▸ Privacy ▸ "Use this Mac's location" (off by default).
          See Core/LocationAuthority.swift. -->
+    <!-- Sparkle updater. The appcast is generated and EdDSA-signed by the release
+         workflow and attached to every GitHub release; "latest/download" always
+         serves the newest release's copy. Automatic checking is OFF by default
+         (SUEnableAutomaticChecks) per the app's no-lookups-unless-asked rule —
+         users turn it on in Settings, or check manually from the SimpleVPN menu. -->
+    <key>SUFeedURL</key>
+    <string>https://github.com/bitwisecook/SimpleVPN/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>YO+66GnOhBFeOt8Wi4afYoUuTHNYVRjWR4+XP2/rJos=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <false/>
+    <key>SUAutomaticallyUpdate</key>
+    <false/>
     <key>NSLocationWhenInUseUsageDescription</key>
     <string>Shows where you are on SimpleVPN's maps and lets SimpleVPN read the name of the Wi-Fi network you're on, so it can warn you when a VPN has failed to connect from this network before. This stays on your Mac.</string>
     <key>CFBundleDocumentTypes</key>

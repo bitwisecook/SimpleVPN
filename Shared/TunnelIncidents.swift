@@ -100,32 +100,49 @@ struct TunnelIncident: Codable, Sendable, Equatable {
 /// world-readable path: the extension (root) writes files under
 /// /Library/Application Support/SimpleVPN, the app just reads them.
 enum TunnelIncidentStore {
-    private static let dir = URL(fileURLWithPath: "/Library/Application Support/SimpleVPN", isDirectory: true)
+    /// Extension-side home (root-writable, world-readable).
+    private static let systemDir = URL(fileURLWithPath: "/Library/Application Support/SimpleVPN", isDirectory: true)
+    /// App-side home. The app CANNOT write into the system dir (root-owned
+    /// 0755) — its `try?` writes failed silently for months, which is why
+    /// watchdog incidents (CONNECT_TIMEOUT / RESUME_FAILED) never produced an
+    /// incident card. App-side incidents live in the user's own tree instead.
+    private static let userDir = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/SimpleVPN", isDirectory: true)
 
-    private static func url(_ profile: String) -> URL {
+    private static func url(in dir: URL, _ profile: String) -> URL {
         let safe = profile.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "profile"
         return dir.appendingPathComponent("incident-\(safe).json")
     }
 
-    /// Extension-side (root). 0755 dir / 0644 file so the user-side app can read.
+    /// Root (the extension) writes to the shared system dir; the app to its own.
     static func write(_ incident: TunnelIncident) {
         guard let data = try? JSONEncoder().encode(incident) else { return }
+        let dir = geteuid() == 0 ? systemDir : userDir
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
-                                                 attributes: [.posixPermissions: 0o755])
-        try? data.write(to: url(incident.profile), options: .atomic)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o644],
-                                               ofItemAtPath: url(incident.profile).path)
+                                                 attributes: geteuid() == 0 ? [.posixPermissions: 0o755] : nil)
+        let target = url(in: dir, incident.profile)
+        try? data.write(to: target, options: .atomic)
+        if geteuid() == 0 {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: target.path)
+        }
     }
 
+    /// Newest incident across both homes — the extension's account of an engine
+    /// failure and the app's account of a timeout can both exist; the most
+    /// recent one is the story of the LAST attempt.
     static func read(profile: String) -> TunnelIncident? {
-        guard let data = try? Data(contentsOf: url(profile)),
-              let i = try? JSONDecoder().decode(TunnelIncident.self, from: data) else { return nil }
-        return i
+        let candidates = [systemDir, userDir].compactMap { dir -> TunnelIncident? in
+            guard let data = try? Data(contentsOf: url(in: dir, profile)) else { return nil }
+            return try? JSONDecoder().decode(TunnelIncident.self, from: data)
+        }
+        return candidates.max { $0.timestamp < $1.timestamp }
     }
 
-    /// Both sides may clear: the extension on a clean connect (as root it owns
-    /// the file); the app's attempt is a harmless no-op if permissions deny it.
+    /// Both sides may clear: each removes what it can; denied removals are
+    /// harmless no-ops (the extension clears the system file on clean connect,
+    /// the app clears its own).
     static func clear(profile: String) {
-        try? FileManager.default.removeItem(at: url(profile))
+        try? FileManager.default.removeItem(at: url(in: systemDir, profile))
+        try? FileManager.default.removeItem(at: url(in: userDir, profile))
     }
 }

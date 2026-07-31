@@ -12,6 +12,10 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+import os
+
+/// Settings key: open the live-details (inspector) pane when the window opens.
+let inspectorDefaultsKey = "ui.inspectorOpenByDefault"
 
 struct ConnectionView: View {
     @Bindable var vpn: VPNController
@@ -23,11 +27,22 @@ struct ConnectionView: View {
     @Environment(SubprocessTunnelManager.self) private var tunnelManager: SubprocessTunnelManager?
     @Environment(SubprocessTunnelStore.self) private var tunnels: SubprocessTunnelStore?
     @Environment(NativeVPNManager.self) private var nativeVPN: NativeVPNManager?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showImporter = false
     @State private var sso = SSOAuthModel.shared
+    /// The right-hand live-details pane. Closed by default (simple window);
+    /// the Settings toggle changes the launch state, the toolbar button the moment.
+    @AppStorage(inspectorDefaultsKey) private var inspectorOpenByDefault = false
+    @State private var showInspector = false
+    /// Sidebar visibility — starts closed when there's only one VPN (a list of
+    /// one is noise); the standard sidebar toolbar button reopens it.
+    @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
     /// Crashes found at launch, offered once (see CrashDiagnostics).
     @State private var pendingCrashes: [CrashReport] = []
     @State private var showCrashReport = false
+    /// The failure currently explained by the error sheet (mirror of
+    /// VPNController.presentedFailure — see the .onChange below).
+    @State private var shownFailure: UserFacingError?
 
     /// Sidebar dot — from the ONE shared derivation, so it can never disagree with
     /// the header pill, the menu bar or the route graph (they all used to compute
@@ -146,9 +161,38 @@ struct ConnectionView: View {
                 // content exists; without it the flag would stick and go dead.
                 if vpn.importRequested { vpn.importRequested = false; showImporter = true }
             }
-            .alert("Error", isPresented: .constant(vpn.lastError != nil)) {
-                Button("OK") { vpn.lastError = nil }
-            } message: { Text(vpn.lastError ?? "") }
+            // Failures get a real explanation, not a raw string in an alert box:
+            // title, one sentence, the numbered steps that fix it, and the
+            // underlying text behind a disclosure (see UserFacingErrorSheet).
+            // `presentedFailure` withholds it when the incident card is already
+            // reporting the same event, so nothing is ever said twice.
+            //
+            // Mirrored into @State rather than bound straight through: reading
+            // the controller inside onChange is what registers the observation
+            // dependency, and `initial` catches a failure raised from the menu
+            // bar before this window's content existed.
+            .onChange(of: vpn.presentedFailure, initial: true) { _, failure in
+                shownFailure = failure
+            }
+            .sheet(item: Binding(get: { shownFailure },
+                                 set: { new in
+                                     // Only a dismissal of the error STILL being
+                                     // reported clears it — a retry that already
+                                     // failed again must keep its new one.
+                                     if new == nil, let shown = shownFailure, vpn.failure?.id == shown.id {
+                                         vpn.clearFailure()
+                                     }
+                                     shownFailure = new
+                                 })) { failure in
+                UserFacingErrorSheet(
+                    error: failure,
+                    // The id is captured now: retrying clears the failure (which
+                    // is what dismisses this sheet), so it can't be looked up later.
+                    retry: vpn.failureProfileID.map { id in
+                        { Task { await vpn.retryConnect(id: id) } }
+                    },
+                    openWindow: { openWindow(id: $0) })
+            }
     }
 
     @ViewBuilder private var content: some View {
@@ -156,19 +200,32 @@ struct ConnectionView: View {
         // "System Extension Required", which is a demand made before the user has any
         // reason to care; approval is now asked for at the first connect, and only a
         // PENDING approval (one the user has already been shown) is worth a banner.
-        if ext.needsApproval && !ext.isActivated {
-            ActivationPrompt(ext: ext)
-        } else if vpn.profiles.isEmpty && !(tunnelManager?.hasActive ?? false) && !nativeBackendActive {
-            EmptyVPNsPrompt(importAction: { showImporter = true },
-                            manageAction: { openWindow(id: "manage") },
-                            dropAction: { vpn.handleImport(of: $0) })
-        } else {
-            splitView
+        // The three startup states cross-fade into each other (dropping a config
+        // morphs the empty page into the real window) rather than hard-cutting.
+        Group {
+            if ext.needsApproval && !ext.isActivated {
+                ActivationPrompt(ext: ext)
+                    .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
+            } else if vpn.profiles.isEmpty && !(tunnelManager?.hasActive ?? false) && !nativeBackendActive {
+                EmptyVPNsPrompt(importAction: { showImporter = true },
+                                manageAction: { openWindow(id: "manage") },
+                                dropAction: { vpn.handleImport(of: $0) })
+                    .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
+            } else {
+                splitView
+                    .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
+            }
         }
+        .animation(reduceMotion ? nil : .smooth(duration: 0.4), value: vpn.profiles.isEmpty)
+        .animation(reduceMotion ? nil : .smooth(duration: 0.4), value: ext.isActivated)
     }
 
     private var splitView: some View {
-        NavigationSplitView {
+        // Two columns + a real inspector (not a third split column): the live
+        // telemetry pane is optional detail, closed by default to keep the window
+        // simple. Its trailing home and content are unchanged — only whether it's
+        // open is new.
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             List(selection: $vpn.selectedID) {
                 Section("VPNs") {
                     ForEach(vpn.profiles) { p in
@@ -186,23 +243,42 @@ struct ConnectionView: View {
                         .help("Manage VPNs")
                 }
             }
-        } content: {
-            if let p = vpn.selected {
-                ConnectionDetailView(vpn: vpn, profile: p).id(p.id)
-                    .navigationSplitViewColumnWidth(min: 360, ideal: 400)
-            } else {
-                ContentUnavailableView("Select a VPN", systemImage: "network")
-            }
         } detail: {
-            if let p = vpn.selected {
-                ConnectionInspectorView(vpn: vpn, profile: p).id(p.id)
-                    .navigationSplitViewColumnWidth(min: 320, ideal: 380)
-            } else {
-                ContentUnavailableView("Live Details", systemImage: "chart.line.uptrend.xyaxis",
-                    description: Text("Connect a VPN to see live traffic, the map and connection details."))
+            Group {
+                if let p = vpn.selected {
+                    ConnectionDetailView(vpn: vpn, profile: p).id(p.id)
+                } else {
+                    ContentUnavailableView("Select a VPN", systemImage: "network")
+                }
+            }
+            .inspector(isPresented: $showInspector) {
+                Group {
+                    if let p = vpn.selected {
+                        ConnectionInspectorView(vpn: vpn, profile: p).id(p.id)
+                    } else {
+                        ContentUnavailableView("Live Details", systemImage: "chart.line.uptrend.xyaxis",
+                            description: Text("Connect a VPN to see live traffic, the map and connection details."))
+                    }
+                }
+                .inspectorColumnWidth(min: 320, ideal: 380)
+            }
+            .toolbar {
+                ToolbarItem {
+                    Button { showInspector.toggle() } label: { Image(systemName: "sidebar.trailing") }
+                        .help(showInspector ? "Hide live details" : "Show live details — traffic, map and connection info")
+                }
             }
         }
-        .navigationSubtitle("app \(UI.appVersion) · ext \(vpn.extensionVersion)")
+        // No version subtitle: "ext unavailable" read as a problem when it just
+        // means disconnected, and versions live in About + every diagnostic capture.
+        .task {
+            // Startup shape, applied once: the inspector follows its setting, and
+            // a lone VPN doesn't need a list of one — the sidebar starts closed
+            // (the toolbar button still opens it). Never touched again after
+            // launch, so the user's own toggling always wins.
+            showInspector = inspectorOpenByDefault
+            if vpn.profiles.count <= 1 { columnVisibility = .detailOnly }
+        }
     }
 
     private func importConfig(_ result: Result<URL, Error>) {
@@ -213,10 +289,10 @@ struct ConnectionView: View {
     /// Right-click actions on a sidebar VPN: the whole lifecycle plus settings.
     @ViewBuilder private func sidebarMenu(_ p: VPNController.Profile) -> some View {
         if UI.isActive(p.status) {
-            if vpn.pausedProfiles[p.id] != nil {
+            if vpn.pausedProfiles.contains(p.id) {
                 Button("Resume") { Task { await vpn.resume(id: p.id) } }
-            } else if p.status == .connected {
-                Button("Pause") { Task { await vpn.pause(id: p.id, mode: .hold) } }
+            } else if p.status == .connected, vpn.uiPrefs(for: p.id).allowPause {
+                Button("Pause") { Task { await vpn.pause(id: p.id) } }
             }
             Button("Disconnect") { vpn.disconnect(id: p.id) }
         } else if p.status == .disconnected || p.status == .invalid {
@@ -230,6 +306,7 @@ struct ConnectionView: View {
             }
         }
         Divider()
+        ProbeVPNMenuItem(vpn: vpn, profile: p)
         Button("Settings…") {
             vpn.selectedID = p.id
             openWindow(id: "manage")
@@ -252,7 +329,7 @@ private struct ActivationPrompt: View {
             }
         } actions: {
             Button("Activate Extension") { Task { await ext.activate() } }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.glassProminent)
             if ext.needsApproval {
                 Button("Open Login Items & Extensions") {
                     if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") {
@@ -265,6 +342,7 @@ private struct ActivationPrompt: View {
 }
 
 private struct EmptyVPNsPrompt: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let importAction: () -> Void
     let manageAction: () -> Void
     /// The shared import pipeline (same one the open panel and Dock drops use), so a
@@ -279,10 +357,12 @@ private struct EmptyVPNsPrompt: View {
             ContentUnavailableView {
                 Label("No VPNs Configured", systemImage: "network.slash")
             } description: {
-                Text("Drop a configuration file here, import one, or add a VPN by hand.")
+                // No format lecture up front: the import pipeline detects the
+                // type itself (ConfigDetector — OpenVPN / WireGuard / Cisco).
+                Text("Drop a configuration file here, import one, or add a VPN by hand. The type is worked out automatically.")
             } actions: {
-                Button("Import .ovpn…", action: importAction).buttonStyle(.borderedProminent)
-                Button("Add VPN…", action: manageAction)
+                Button("Import Configuration…", action: importAction).buttonStyle(.glassProminent)
+                Button("Add VPN…", action: manageAction).buttonStyle(.glass)
             }
 
             // The whole window already accepts drops (see .ovpnDropTarget), but with an
@@ -294,9 +374,13 @@ private struct EmptyVPNsPrompt: View {
                     .font(.system(size: 38))
                     .foregroundStyle(targeted ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
                     .contentTransition(.symbolEffect(.replace))
+                    // A tiny periodic wiggle hints "this is a live target" the same
+                    // way the OTP shake hints "type here" — quiet, not looping motion.
+                    .symbolEffect(.wiggle, options: .repeat(.periodic(delay: 5)),
+                                  isActive: !reduceMotion && !targeted)
                 Text("Drag a VPN configuration here")
                     .font(.callout).foregroundStyle(.secondary)
-                Text("OpenVPN (.ovpn / .conf), WireGuard (.conf), or a 1Password item")
+                Text("OpenVPN (.ovpn / .conf), WireGuard (.conf), Cisco (.xml / .pcf), or a 1Password item")
                     .font(.caption).foregroundStyle(.tertiary)
                     .multilineTextAlignment(.center)
             }
@@ -335,6 +419,17 @@ private struct ConnectionDetailView: View {
     @State private var connectTask: Task<Void, Never>?
     @State private var loaded = false
     @State private var submitAttempted = false
+    /// Bumped to shake the still-empty required fields (Connect clicked too
+    /// early, or the sidebar/menu asked us to show what's missing).
+    @State private var nudgeTick = 0
+    /// First-connect hand-holding: true until a successful connect writes a
+    /// baseline (persisted — survives restarts until the setup is PROVEN).
+    @State private var neverConnected = false
+    @State private var setupDismissed = false
+    /// The big green "Connected" banner shrinks to a compact chip beside the
+    /// stop button 5s after connecting — the reassurance, then out of the way.
+    @State private var bannerCollapsed = false
+    @Namespace private var connectedBannerNS
 
     /// Shared namespace so the cancel ✕ and the stop ■ are the same glass element
     /// morphing, not two controls swapping.
@@ -349,14 +444,18 @@ private struct ConnectionDetailView: View {
     private var stateEase: Animation? { reduceMotion ? nil : .smooth(duration: 0.35) }
 
     private enum CredentialField { case username, password, otp }
-    @FocusState private var focusedField: CredentialField?
+    /// Plain state (not @FocusState): focus is bridged into the AppKit-backed
+    /// AutoFillFields, which SwiftUI focus can't reach.
+    @State private var focusedField: CredentialField?
 
     private var requiresOTP: Bool { vpn.authConfig(for: profile.id).requiresOTP }
     private var allowPasswordSave: Bool {
         vpn.ovpnText(id: profile.id).map { evaluator.evaluation(for: $0).allowPasswordSave } ?? true
     }
-    private var pauseMode: VPNController.PauseMode? { vpn.pausedProfiles[profile.id] }
+    private var isPaused: Bool { vpn.pausedProfiles.contains(profile.id) }
     private var isStalled: Bool { reach?.isStalled(profile.id) == true }
+    /// This VPN's opt-in advanced controls (pause button, Connection Manager).
+    private var uiPrefs: VPNUIPrefs { vpn.uiPrefs(for: profile.id) }
     @Environment(TopologyMonitor.self) private var topo: TopologyMonitor?
 
     /// Snapshot of live telemetry the Connection Manager + Doctor read.
@@ -408,6 +507,29 @@ private struct ConnectionDetailView: View {
                 set: { var c = vpn.transientCredentials(for: profile.id); c.otp = $0
                        vpn.setTransientCredentials(c, for: profile.id) })
     }
+    /// Protection can only start once there's a sign-in to protect.
+    private var canEnableProtection: Bool {
+        let c = vpn.transientCredentials(for: profile.id)
+        if !c.username.isEmpty && !c.password.isEmpty { return true }
+        if let saved = KeychainCredentialStore.loadCredentials(profile: profile.id),
+           !saved.username.isEmpty, !saved.password.isEmpty { return true }
+        return vpn.authConfig(for: profile.id).protectWithBiometrics
+    }
+
+    /// The Touch ID toggle: flipping it MOVES the secret between stores (see
+    /// VPNController.setBiometricProtection), so the write happens on change,
+    /// not on some later save.
+    private var protectBinding: Binding<Bool> {
+        Binding(get: { vpn.authConfig(for: profile.id).protectWithBiometrics },
+                set: { on in
+                    Task {
+                        do { try await vpn.setBiometricProtection(on, for: profile.id) }
+                        catch is CancellationError {}
+                        catch { vpn.lastError = error.localizedDescription }
+                    }
+                })
+    }
+
     /// The shared Remember preference (persisted with the profile's auth config).
     private var remember: Binding<Bool> {
         Binding(get: { vpn.authConfig(for: profile.id).rememberCredentials },
@@ -419,11 +541,24 @@ private struct ConnectionDetailView: View {
                 })
     }
 
+    /// Touch ID-protected saved credentials (manual source only).
+    private var biometricInfo: (exists: Bool, hasTOTP: Bool) {
+        guard !usesManager, vpn.authConfig(for: profile.id).protectWithBiometrics else { return (false, false) }
+        return BiometricCredentialStore.info(profile: profile.id)
+    }
+    private var isProtected: Bool { biometricInfo.exists }
+
     private var canConnect: Bool {
         if usesManager {
             // The manager supplies username/password; only gate on a typed OTP
             // when the manager can't provide one.
             return !managerNeedsTypedOTP
+                || !vpn.transientCredentials(for: profile.id).otp.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+        if isProtected {
+            // The fingerprint releases username+password (and the code, when an
+            // authenticator secret is stored); a typed code covers the gap.
+            return !requiresOTP || biometricInfo.hasTOTP
                 || !vpn.transientCredentials(for: profile.id).otp.trimmingCharacters(in: .whitespaces).isEmpty
         }
         let c = vpn.transientCredentials(for: profile.id)
@@ -438,6 +573,35 @@ private struct ConnectionDetailView: View {
         ScrollView {
             VStack(spacing: 20) {
                 header
+                // Sign-in comes FIRST, directly under the Connect row it feeds —
+                // username/password/OTP are what the button is waiting for, so they
+                // must not sit below the fold behind panels and pickers.
+                if !UI.isActive(profile.status), !vpn.isReconfiguring(profile.id) {
+                    // A fresh import knows how to REACH the VPN but nothing about
+                    // how you SIGN IN (a gresearch.conf import defaults to plain
+                    // username/password — wrong for an OTP gateway, and the user
+                    // has no way to know that yet). Hold their hand right here
+                    // until the first successful connect proves the setup.
+                    if neverConnected, !setupDismissed {
+                        FirstConnectSetupCard(vpn: vpn, profile: profile,
+                                              dismissed: $setupDismissed.animation(.snappy(duration: 0.25)))
+                            .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
+                    }
+                    if usesManager { managerForm } else { credentialForm }
+                    if let incident = vpn.incidents[profile.id] {
+                        ConnectionIncidentCard(vpn: vpn, profile: profile, incident: incident,
+                                               host: probeHost, port: probePort, speaksTLS: probeSpeaksTLS)
+                    }
+                }
+                // A sign-in page is holding this network's traffic hostage — nothing
+                // can connect until the user gets through it, so it outranks the
+                // softer "couldn't reach it here before" memory below.
+                if !UI.isActive(profile.status), !vpn.isReconfiguring(profile.id),
+                   vpn.captivePortalSuspected {
+                    CaptivePortalBanner(vpn: vpn)
+                        .transition(reduceMotion ? AnyTransition.opacity
+                                                 : AnyTransition(.blurReplace))
+                }
                 // Directly under the Connect row it's warning about — a pre-emptive
                 // "this network couldn't reach it last time" is useless below the fold.
                 // Hidden once a session is live: the warning is about STARTING one, and
@@ -455,22 +619,31 @@ private struct ConnectionDetailView: View {
                 if vpn.hasPendingSettings(id: profile.id) {
                     PendingSettingsNotice(vpn: vpn, profileID: profile.id)
                 }
-                ConnectionManagerPanel(vpn: vpn, profileID: profile.id, vpnName: profile.name,
-                                       snapshot: doctorSnapshot, findings: doctorFindings)
+                // Advanced surface, opt-in per VPN (Manage VPNs ▸ this VPN):
+                // health checks and connection toggles most people never touch.
+                if uiPrefs.showConnectionManager {
+                    ConnectionManagerPanel(vpn: vpn, profileID: profile.id, vpnName: profile.name,
+                                           snapshot: doctorSnapshot, findings: doctorFindings)
+                }
+                // Say "connected" in WORDS, not just the dot — a lone red stop
+                // button next to a green dot asks the user to know the iconography.
+                // Sits above the map; deliberately makes no claims about which
+                // traffic is protected (that's the tunnel-mode toggle's story).
+                if profile.status == .connected, !vpn.isReconfiguring(profile.id), !isPaused,
+                   !bannerCollapsed {
+                    ConnectedBanner(vpnName: profile.name, server: profile.server,
+                                    uptime: reach?.stats(for: profile.id)?.uptime)
+                        .matchedGeometryEffect(id: "connectedChip", in: connectedBannerNS)
+                        .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
+                }
                 // The endpoint picker (and its little map) lives HERE, always — one
                 // fixed home below the Connection Manager. It used to appear in the
                 // middle column when disconnected and in the inspector when live, which
                 // put a second world map under the topology one.
                 EndpointSection(vpn: vpn, profile: profile)
-                Divider()
                 if UI.isActive(profile.status) || vpn.isReconfiguring(profile.id) {
+                    Divider()
                     connectedBody
-                } else {
-                    if let incident = vpn.incidents[profile.id] {
-                        ConnectionIncidentCard(vpn: vpn, profile: profile, incident: incident,
-                                               host: probeHost, port: probePort, speaksTLS: probeSpeaksTLS)
-                    }
-                    if usesManager { managerForm } else { credentialForm }
                 }
             }
             .padding(24)
@@ -502,6 +675,39 @@ private struct ConnectionDetailView: View {
             try? await Task.sleep(for: .seconds(20))
             if !Task.isCancelled, profile.status == .connecting { connectingTooLong = true }
         }
+        // The sidebar play button (and menu bar) land here when this VPN still
+        // needs typing: focus the first empty field and shake it. `initial` +
+        // consume: a nudge that switched the selection lands before this view
+        // exists, so check on appearance too — the one-shot claim keeps a later
+        // revisit from replaying it.
+        .onChange(of: vpn.credentialNudge[profile.id] ?? 0, initial: true) { _, _ in
+            if vpn.consumeCredentialNudge(id: profile.id) { nudgeMissingInput() }
+        }
+        // A different network means the sign-in-page verdict is stale — drop the
+        // banner rather than accusing the new Wi-Fi of the old one's portal.
+        .onChange(of: netMemory.current?.key) { _, _ in
+            vpn.captivePortalSuspected = false
+            vpn.captivePortalURL = nil
+        }
+        // First-success detection for the setup card: the baseline is written a
+        // few seconds after .connected, so re-check on status changes too.
+        .task(id: profile.id) {
+            neverConnected = ConnectionBaselineStore.load(profile: profile.id) == nil
+        }
+        .onChange(of: profile.status) { _, new in
+            if new == .connected { neverConnected = false }
+        }
+        // The big "Connected" banner shows for 5s on connect, then shrinks to
+        // the header chip. Reset the moment the tunnel isn't cleanly connected.
+        .task(id: profile.status) {
+            guard profile.status == .connected, !isPaused else {
+                bannerCollapsed = false
+                return
+            }
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled, profile.status == .connected, !isPaused else { return }
+            withAnimation(reduceMotion ? nil : .smooth(duration: 0.45)) { bannerCollapsed = true }
+        }
     }
 
     /// Stall/captive-portal/pause aware dot state for this VPN's header badge.
@@ -509,9 +715,9 @@ private struct ConnectionDetailView: View {
         if let link { return link.dot(for: profile.id) }
         let stalled = reach?.isStalled(profile.id) == true
         return .from(status: profile.status,
-                     stalled: stalled && pauseMode == nil,   // paused stall is expected
+                     stalled: stalled && !isPaused,   // paused stall is expected
                      captive: vpn.captivePortalSuspected && vpn.incidents[profile.id] != nil,
-                     paused: pauseMode != nil)
+                     paused: isPaused)
     }
 
     // Connect/disconnect lives here, in the header, local to this VPN — not a global button.
@@ -521,22 +727,63 @@ private struct ConnectionDetailView: View {
                 .scaleEffect(1.6).frame(width: 40, height: 40)
             VStack(alignment: .leading, spacing: 3) {
                 Text(profile.name).font(.title2).bold()
-                if UI.isActive(profile.status) && pauseMode == nil {
-                    // Show the app-wide reachability judgement (same source the
-                    // sidebar dot and menu bar use) so they never disagree; fall
-                    // back to the local monitor before the app-wide one has sampled.
-                    ReachabilityPill(health: reach?.health(for: profile.id) ?? .healthy)
+                // A healthy connection says nothing here — good news is the dot's
+                // job. The line under the name speaks only when something is
+                // wrong (plain English), or shows the server while disconnected.
+                if UI.isActive(profile.status) && !isPaused {
+                    if let problem = connectionProblem {
+                        ProblemPill(text: problem.text, dot: problem.dot)
+                    }
                 } else if !profile.server.isEmpty {
                     Text(profile.server).foregroundStyle(.secondary)
                 }
             }
             Spacer()
-            connectControl
+            VStack(alignment: .trailing, spacing: 4) {
+                connectControl
+                // Say WHY Connect is dimmed, pointing at the form directly below.
+                if let hint = missingInputHint {
+                    Text(hint).font(.caption).foregroundStyle(.secondary)
+                }
+            }
         }
         // Ease the whole header (badge state, reachability pill ⇄ server line) when
         // the connection or pause state flips, so nothing pops.
         .animation(stateEase, value: UI.isActive(profile.status))
-        .animation(stateEase, value: pauseMode)
+        .animation(stateEase, value: isPaused)
+    }
+
+    /// The only states worth a label while connected, in plain English. nil when
+    /// everything is fine — the pill disappears rather than saying "Reachable".
+    private var connectionProblem: (text: String, dot: DotState)? {
+        switch link?.state(for: profile.id) {
+        case .captivePortal:
+            return ("A sign-in page is in the way", .captivePortal)
+        case .stalled(let seconds):
+            return (seconds == nil ? "Reconnecting…" : "Not responding", .degraded)
+        default:
+            // Fallback before LinkStateMonitor exists in the environment.
+            if case .stalled = reach?.health(for: profile.id) ?? .healthy {
+                return ("Not responding", .degraded)
+            }
+            return nil
+        }
+    }
+
+    /// Non-nil while the Connect button is waiting on typed input (and is the
+    /// thing on screen). "Verification code" is deliberate — it's the word Apple
+    /// uses for one-time codes, so non-technical users recognise it.
+    private var missingInputHint: String? {
+        guard !busy, !canConnect,
+              !UI.isActive(profile.status), profile.status != .connecting,
+              profile.status != .disconnecting, !vpn.isReconfiguring(profile.id),
+              !(ext?.needsApproval == true && ext?.isActivated == false) else { return nil }
+        let c = vpn.transientCredentials(for: profile.id)
+        if !usesManager, !isProtected,
+           c.username.trimmingCharacters(in: .whitespaces).isEmpty || c.password.isEmpty {
+            return "Enter your sign-in below first"
+        }
+        return "Enter your verification code below first"
     }
 
     // The whole connect lifecycle lives in one Liquid-Glass control that morphs
@@ -550,7 +797,7 @@ private struct ConnectionDetailView: View {
         }
         .animation(stateEase, value: profile.status)
         .animation(stateEase, value: vpn.isReconfiguring(profile.id))
-        .animation(stateEase, value: pauseMode)
+        .animation(stateEase, value: isPaused)
     }
 
     @ViewBuilder private var connectControlContent: some View {
@@ -567,14 +814,22 @@ private struct ConnectionDetailView: View {
         switch profile.status {
         case .connected, .reasserting:
             HStack(spacing: 8) {
-                if pauseMode != nil {
+                // The shrunk-down "Connected" chip lands here once the big banner
+                // has retired (matchedGeometry morphs one into the other).
+                if bannerCollapsed, !isPaused, profile.status == .connected {
+                    ConnectedChip()
+                        .matchedGeometryEffect(id: "connectedChip", in: connectedBannerNS)
+                        .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
+                }
+                if isPaused {
                     Button("Resume") { Task { await vpn.resume(id: profile.id) } }
                         .buttonStyle(.glassProminent).controlSize(.large)
                         .transition(.blurReplace)
-                } else {
+                } else if uiPrefs.allowPause {
+                    // Opt-in per VPN (Manage VPNs ▸ this VPN): most people never
+                    // pause a tunnel, so the default header is just Disconnect.
                     PauseControl(height: 32,
-                                 onBlock: { Task { await vpn.pause(id: profile.id, mode: .hold) } },
-                                 onRouteAround: { Task { await vpn.pause(id: profile.id, mode: .bypass) } })
+                                 onPause: { Task { await vpn.pause(id: profile.id) } })
                         .transition(.blurReplace)
                 }
                 trailingStopButton
@@ -603,18 +858,22 @@ private struct ConnectionDetailView: View {
     /// appearing. Both do the same thing (stopVPNTunnel), which is why it's one view.
     private var trailingStopButton: some View {
         let connecting = profile.status == .connecting
+        // Red-TINTED, not red: a small bright-red capsule read as an alarm. This is
+        // the sidebar circles' language at header scale — a 40pt round glass button
+        // (matching the 40pt logo badge across the row), softly red-tinted glass
+        // with a red glyph. Filled glyphs both: a bare "xmark" reads as the LETTER
+        // x rather than a cancel control.
+        let tint: Color = connecting ? UI.cancelRed : .red
         return Button { vpn.disconnect(id: profile.id) } label: {
-            // Filled glyphs both: a bare "xmark" in a glass capsule reads as the LETTER
-            // x rather than a cancel control.
             Image(systemName: connecting ? "xmark.circle.fill" : "stop.fill")
+                .font(.title3)
                 .contentTransition(.symbolEffect(.replace))
+                .frame(width: 40, height: 40)
+                .foregroundStyle(tint)
+                .contentShape(Circle())
         }
-        .buttonStyle(.glass).controlSize(.large)
-        // Red-ish, not red: full-saturation red read as "destructive/danger" on a glass
-        // capsule this size, but plain grey lost the signal that this button stops
-        // something. A softened red keeps the meaning without the alarm. The real stop
-        // (once connected) keeps full red, matching its stop glyph.
-        .tint(connecting ? UI.cancelRed : .red)
+        .buttonStyle(.plain)
+        .glassEffect(.regular.tint(tint.opacity(0.25)).interactive(), in: Circle())
         .glassEffectID("trailing-stop", in: connectGlass)
         .help(connecting ? "Cancel connecting" : "Disconnect")
         .accessibilityLabel(connecting ? "Cancel connecting" : "Disconnect")
@@ -665,10 +924,26 @@ private struct ConnectionDetailView: View {
                 .help("macOS needs your permission before SimpleVPN can make VPN connections")
             )
         }
+        // NOT `.disabled(!canConnect)`: a dead button teaches nothing. It LOOKS
+        // disabled while input is missing, but a click walks the user to the fix —
+        // focus lands on the first empty required field and it gets a little shake.
         return AnyView(
-            Button("Connect") { connectTask = Task { await connect() } }
-                .buttonStyle(.glassProminent).controlSize(.large).disabled(!canConnect)
+            Button("Connect") {
+                if canConnect { connectTask = Task { await connect() } } else { nudgeMissingInput() }
+            }
+                .buttonStyle(.glassProminent).controlSize(.large)
+                .tint(canConnect ? nil : .gray)
+                .opacity(canConnect ? 1 : 0.6)
+                .accessibilityHint(canConnect ? "" : (missingInputHint ?? ""))
         )
+    }
+
+    /// Draw the eye to what's missing: ring + focus + a soft shake.
+    private func nudgeMissingInput() {
+        submitAttempted = true
+        focusedField = firstMissingField
+        if reduceMotion { return }   // the focus ring + accent ring carry the message
+        withAnimation(.easeInOut(duration: 0.4)) { nudgeTick += 1 }
     }
 
     /// Effective probe target with overrides applied (what a connect would use).
@@ -700,13 +975,13 @@ private struct ConnectionDetailView: View {
                     vpn.disconnect(id: profile.id)
                 }
             }
-            if let mode = pauseMode {
-                PausedBanner(mode: mode) { Task { await vpn.resume(id: profile.id) } }
-            } else if profile.status == .reasserting {
-                LinkInterruptionBanner(reconnects: reach?.stats(for: profile.id)?.reconnects ?? 0)
-            } else if case .stalled(let seconds) = reach?.health(for: profile.id) {
-                LinkStalledBanner(seconds: seconds)
+            if isPaused {
+                PausedBanner { Task { await vpn.resume(id: profile.id) } }
             }
+            // No stalled/reconnecting banners here any more: connection state has
+            // ONE spot in the window (the header badge + its problem chip). The
+            // paused banner stays because it's a safety warning about traffic
+            // outside the VPN, not a state duplicate — and pause is opt-in anyway.
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -722,11 +997,10 @@ private struct ConnectionDetailView: View {
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
                     GridRow {
                         Text("OTP").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
-                        TextField("One-time passcode", text: otp)
-                            .textContentType(.oneTimeCode)
-                            .focused($focusedField, equals: .otp)
-                            .requiredEmphasis(missing: otp.wrappedValue.isEmpty, attempted: submitAttempted)
-                            .onSubmit(attemptConnect)
+                        AutoFillField(kind: .oneTimeCode, placeholder: "One-time passcode",
+                                      text: otp, focus: $focusedField, focusValue: .otp,
+                                      onSubmit: attemptConnect)
+                            .requiredEmphasis(missing: otp.wrappedValue.isEmpty, attempted: submitAttempted, nudge: nudgeTick)
                     }
                 }
                 .textFieldStyle(.roundedBorder)
@@ -742,33 +1016,89 @@ private struct ConnectionDetailView: View {
     }
 
     // Inline credentials so you can connect straight from here (Remember saves them).
-    private var credentialForm: some View {
+    @ViewBuilder private var credentialForm: some View {
+        if isProtected { protectedForm } else { typedCredentialForm }
+    }
+
+    /// The steady state of the fingerprint flow: no fields at all, just the
+    /// promise of the prompt. The only field that can appear is the code, and
+    /// only for an OTP profile with no stored authenticator secret.
+    private var protectedForm: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: "touchid")
+                    .font(.title2)
+                    .foregroundStyle(.pink)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Sign-in protected by Touch ID").font(.callout.weight(.semibold))
+                    Text(requiresOTP && biometricInfo.hasTOTP
+                         ? "Connecting asks for your fingerprint, which unlocks the username, password and one-time code in one go."
+                         : "Connecting asks for your fingerprint to unlock the saved sign-in.")
+                        .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                Menu {
+                    Button("Remove Touch ID Protection…") {
+                        Task {
+                            do { try await vpn.setBiometricProtection(false, for: profile.id) }
+                            catch is CancellationError {}
+                            catch { vpn.lastError = error.localizedDescription }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Change how these credentials are stored")
+            }
+            .padding(12)
+            .background(.pink.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+
+            if requiresOTP && !biometricInfo.hasTOTP {
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+                    GridRow {
+                        Text("Code").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
+                        AutoFillField(kind: .oneTimeCode, placeholder: "One-time code",
+                                      text: otp, focus: $focusedField, focusValue: .otp,
+                                      onSubmit: attemptConnect)
+                            .requiredEmphasis(missing: otp.wrappedValue.isEmpty, attempted: submitAttempted, nudge: nudgeTick)
+                    }
+                }
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 380)
+                Text("Add your authenticator's setup key in Manage VPNs and the fingerprint will cover the code too.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var typedCredentialForm: some View {
         VStack(alignment: .leading, spacing: 14) {
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
                 GridRow {
                     Text("Username").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
-                    TextField("Username", text: username)
-                        .textContentType(.username)
-                        .focused($focusedField, equals: .username)
-                        .requiredEmphasis(missing: username.wrappedValue.isEmpty, attempted: submitAttempted)
-                        .onSubmit(attemptConnect)
+                    AutoFillField(kind: .username, placeholder: "Username",
+                                  text: username, focus: $focusedField, focusValue: .username,
+                                  onSubmit: attemptConnect)
+                        .requiredEmphasis(missing: username.wrappedValue.isEmpty, attempted: submitAttempted, nudge: nudgeTick)
                 }
                 GridRow {
                     Text("Password").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
-                    SecureField("Password", text: password)
-                        .textContentType(.password)
-                        .focused($focusedField, equals: .password)
-                        .requiredEmphasis(missing: password.wrappedValue.isEmpty, attempted: submitAttempted)
-                        .onSubmit(attemptConnect)
+                    AutoFillField(kind: .password, placeholder: "Password",
+                                  text: password, focus: $focusedField, focusValue: .password,
+                                  onSubmit: attemptConnect)
+                        .requiredEmphasis(missing: password.wrappedValue.isEmpty, attempted: submitAttempted, nudge: nudgeTick)
                 }
                 if requiresOTP {
                     GridRow {
                         Text("OTP").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
-                        TextField("One-time passcode", text: otp)
-                            .textContentType(.oneTimeCode)
-                            .focused($focusedField, equals: .otp)
-                            .requiredEmphasis(missing: otp.wrappedValue.isEmpty, attempted: submitAttempted)
-                            .onSubmit(attemptConnect)
+                        AutoFillField(kind: .oneTimeCode, placeholder: "One-time passcode",
+                                      text: otp, focus: $focusedField, focusValue: .otp,
+                                      onSubmit: attemptConnect)
+                            .requiredEmphasis(missing: otp.wrappedValue.isEmpty, attempted: submitAttempted, nudge: nudgeTick)
                     }
                 }
             }
@@ -778,6 +1108,17 @@ private struct ConnectionDetailView: View {
             if allowPasswordSave {
                 Toggle("Remember username & password", isOn: remember)
                     .toggleStyle(.checkbox)
+                // The fingerprint upgrade: saved credentials move into a Touch
+                // ID-gated keychain item; the plain copy is destroyed. Only
+                // offered once there's something to protect.
+                Toggle("Protect them with Touch ID", isOn: protectBinding)
+                    .toggleStyle(.checkbox)
+                    .disabled(!canEnableProtection)
+                    .help("Connecting will ask for your fingerprint (or Apple Watch, or your password) to unlock the sign-in.")
+                if requiresOTP, vpn.authConfig(for: profile.id).protectWithBiometrics {
+                    Text("Tip: add your authenticator's setup key in Manage VPNs so the fingerprint covers the one-time code too.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             } else {
                 Label("This VPN's administrator doesn't allow saving the password.",
                       systemImage: "key.slash")
@@ -807,9 +1148,7 @@ private struct ConnectionDetailView: View {
         if canConnect {
             Task { await connect() }
         } else {
-            // Draw the eye to what's missing, and put the cursor there.
-            submitAttempted = true
-            focusedField = firstMissingField
+            nudgeMissingInput()
         }
     }
 
@@ -831,7 +1170,14 @@ private struct ConnectionDetailView: View {
                 typedOTP: vpn.transientCredentials(for: profile.id).otp)
         } catch is CancellationError {
             // The user backed out — that's an outcome, not an error to report.
-        } catch { vpn.lastError = error.localizedDescription }
+        } catch {
+            // Log AND alert: an alert can be missed/dismissed, and a connect
+            // that dies without a trace is undiagnosable from a capture.
+            VPNController.log.error("connect failed for \(profile.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            // report(profile:) — not lastError — so the sheet's Try Again knows
+            // which VPN to re-run, and the redactor knows this profile's secrets.
+            vpn.report(error, profile: profile.id)
+        }
     }
 }
 
@@ -848,7 +1194,7 @@ private struct ConnectionInspectorView: View {
     @Environment(ReachabilityMonitor.self) private var reach: ReachabilityMonitor?
     @State private var showTrafficLog = false
 
-    private var pauseMode: VPNController.PauseMode? { vpn.pausedProfiles[profile.id] }
+    private var isPaused: Bool { vpn.pausedProfiles.contains(profile.id) }
     private var live: Bool { UI.isActive(profile.status) || vpn.isReconfiguring(profile.id) }
 
     var body: some View {
@@ -873,8 +1219,8 @@ private struct ConnectionInspectorView: View {
                     Divider()
                     ConnectionInfoPanel(stats: reach?.stats(for: profile.id), clientLabel: profile.server,
                                         publicIP: publicIP,
-                                        paused: pauseMode != nil,
-                                        bypassing: pauseMode == .bypass)
+                                        paused: isPaused,
+                                        bypassing: isPaused)
                 }
                 .padding(20)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -896,6 +1242,332 @@ private struct ConnectionInspectorView: View {
 /// we're on now, so say so BEFORE the user clicks Connect and waits out the timeout
 /// again. Cleared automatically the moment it does connect from here (see
 /// NetworkMemory), and dismissable by hand for when the network has been fixed.
+/// First-connect hand-holding. An imported config describes the TRANSPORT, not
+/// the sign-in — so until this VPN has connected successfully once, the main
+/// window itself asks the two questions that otherwise ambush people at connect
+/// time: "do you also enter a one-time code?" and "where does your sign-in
+/// live?" — with the password-manager choice (and its drag-in) right here, no
+/// trip to Manage VPNs. Disappears forever after the first proven connect.
+private struct FirstConnectSetupCard: View {
+    @Bindable var vpn: VPNController
+    let profile: VPNController.Profile
+    @Binding var dismissed: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Marching-ants phase for the drop well (pure Shape drawing — safe).
+    @State private var dashPhase: CGFloat = 0
+    @State private var apServer = ""
+    /// A multi-selection drag, waiting to be narrowed to the one item this VPN
+    /// signs in with. Empty = nothing pending.
+    @State private var choices: [OnePasswordDrop] = []
+    /// The 1Password setup check — run when 1Password is CHOSEN here, never on
+    /// appear, and skipped once the integration has been proven to work.
+    @State private var preflight = OnePasswordPreflightModel()
+    /// Collapses the several deliveries macOS makes of one drag into one apply.
+    @State private var drops = OnePasswordDropCollector()
+
+    private var auth: VPNAuthConfig { vpn.authConfig(for: profile.id) }
+    private var source: CredentialSource { vpn.credentialSource(for: profile.id) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("Before your first connect", systemImage: "hand.wave")
+                    .font(.callout.weight(.semibold))
+                Spacer()
+                Button { dismissed = true } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.borderless)
+                    .help("Hide until next launch — this card comes back until a connect succeeds")
+            }
+            Text("The configuration file says how to reach \(profile.name) — but not how you sign in. Two quick questions:")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Toggle(isOn: otpBinding) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("I also enter a one-time code")
+                    Text("A short code from an authenticator app, a key fob, or a text message.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.checkbox)
+
+            Picker("My sign-in is kept", selection: sourceKindBinding) {
+                Text("I'll type it in").tag(CredentialSourceKind.manual)
+                Text("in 1Password").tag(CredentialSourceKind.onePassword)
+                Text("in Apple Passwords").tag(CredentialSourceKind.applePasswords)
+            }
+            .pickerStyle(.menu)
+            .fixedSize()
+
+            switch source.kind {
+            case .manual:
+                EmptyView()   // the credential form directly below IS the answer
+            case .onePassword:
+                // Same walkthrough as the editor, in the smaller type this card
+                // uses — with the account asked for here, since this card has no
+                // Account field of its own to point at.
+                OnePasswordSetupCard(model: preflight, compact: true, asksForAccount: true,
+                                     onAccount: { useAccount($0) },
+                                     onCheckAgain: { checkOnePassword(force: true) })
+                onePasswordWell
+                Text("Dragging the item itself fills in everything SimpleVPN needs. Dragging one of its fields fills in less.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .applePasswords:
+                HStack {
+                    TextField("Website or server the password is saved for", text: $apServer)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        .onSubmit(saveApplePasswords)
+                    Button("Use") { saveApplePasswords() }.buttonStyle(.glass)
+                        .disabled(apServer.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                .onAppear {
+                    apServer = source.reference.isEmpty ? profile.server : source.reference
+                }
+            }
+        }
+        .padding(14)
+        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityElement(children: .contain)
+    }
+
+    /// The drag-in target, with a quiet "things can be dropped here" rhythm:
+    /// slowly marching dashes and an occasional key wiggle (both suppressed
+    /// under Reduce Motion, and both stop once an item is linked).
+    private var onePasswordWell: some View {
+        let linked = !source.reference.isEmpty
+        return RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [5], dashPhase: dashPhase))
+            .foregroundStyle(linked ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.tint))
+            .frame(height: 52)
+            .overlay {
+                Label(linked ? "Linked to \(linkedName) — drag another item to change"
+                             : "Drag the item from 1Password here",
+                      systemImage: linked ? "checkmark.circle.fill" : "key.fill")
+                    .font(.callout)
+                    .foregroundStyle(linked ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
+                    .symbolEffect(.wiggle, options: .repeat(.periodic(delay: 4)),
+                                  isActive: !reduceMotion && !linked)
+            }
+            .contentShape(Rectangle())
+            // 1Password's own drag payload first (it names account, vault AND
+            // item), then a link, then op://, then the bare title — see
+            // OnePasswordDropItem.
+            .onDrop(of: OnePasswordDropItem.acceptedContentTypes, isTargeted: nil) { providers, _ in
+                guard OnePasswordDropItem.canAccept(providers) else { return false }
+                Task {
+                    // Through the collector: macOS delivers one drag more than
+                    // once, and applying each delivery turned a single dropped
+                    // item into a "which one?" chooser.
+                    guard let dropped = await drops.collect(providers),
+                          let first = dropped.first else { return }
+                    // A VPN signs in with one item; several were dragged, so ask.
+                    if dropped.count > 1 { choices = dropped; return }
+                    link(first)
+                }
+                return true
+            }
+            .popover(isPresented: Binding(get: { !choices.isEmpty },
+                                          set: { if !$0 { choices = [] } })) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Which item is this VPN\u{2019}s sign-in?").font(.callout.weight(.semibold))
+                    ForEach(Array(choices.enumerated()), id: \.element.id) { index, drop in
+                        Button(drop.displayName(position: index + 1)) { link(drop) }
+                            .buttonStyle(.link)
+                    }
+                }
+                .padding(12)
+                .frame(minWidth: 220)
+            }
+            .task(id: linked) {
+                guard !reduceMotion, !linked else { return }
+                dashPhase = 0
+                withAnimation(.linear(duration: 1.8).repeatForever(autoreverses: false)) {
+                    dashPhase = -10   // one full dash+gap cycle → seamless march
+                }
+            }
+    }
+
+    private var otpBinding: Binding<Bool> {
+        Binding(get: { auth.requiresOTP },
+                set: { on in
+                    var a = auth
+                    a.requiresOTP = on
+                    Task { try? await vpn.setAuthConfig(a, for: profile.id) }
+                })
+    }
+
+    private var sourceKindBinding: Binding<CredentialSourceKind> {
+        Binding(get: { source.kind },
+                set: { kind in
+                    var s = source
+                    s.kind = kind
+                    Task { try? await vpn.setCredentialSource(s, for: profile.id) }
+                    // Choosing 1Password is the first genuine need for a
+                    // 1Password lookup — and the only moment this card is
+                    // allowed to raise its approval prompt.
+                    if kind == .onePassword { checkOnePassword(force: false) }
+                })
+    }
+
+    /// The setup check. `force` is the Check Again button, which re-checks even
+    /// a verified integration — the way back from "it worked yesterday".
+    private func checkOnePassword(force: Bool) {
+        let account = OnePasswordAccountMemory.effectiveAccount(profile: source.account)
+        Task {
+            if force { await preflight.check(account: account) }
+            else { await preflight.checkIfNeeded(account: account) }
+        }
+    }
+
+    /// The account name typed into the card's prompt: kept for this VPN, and
+    /// checked straight away so the answer lands where the question was asked.
+    private func useAccount(_ name: String) {
+        var s = source
+        s.account = name
+        Task {
+            try? await vpn.setCredentialSource(s, for: profile.id)
+            // A name is only remembered app-wide once it has actually worked —
+            // the check itself does that.
+            await preflight.check(account: name)
+        }
+    }
+
+    /// A dragged item is linked by its 1Password id — exact, and immune to
+    /// renaming, but not something to read back at anyone.
+    private var linkedName: String {
+        OnePasswordDrop.looksLikeItemID(source.reference)
+            ? "your 1Password item"
+            : "\u{201C}\(source.reference)\u{201D}"
+    }
+
+    /// Point this VPN's sign-in at a dropped item. The 1Password payload carries
+    /// account and vault UUIDs as well as the item's, which is what keeps this
+    /// card a one-drag setup — 1Password won't answer without knowing which
+    /// account to ask.
+    private func link(_ dropped: OnePasswordDrop) {
+        choices = []
+        var s = source
+        s.kind = .onePassword
+        s.reference = dropped.reference
+        if !dropped.vault.isEmpty { s.vault = dropped.vault }
+        if !dropped.account.isEmpty {
+            s.account = dropped.account
+            // The dragged item names its account, and the SDK takes that UUID as
+            // readily as the sidebar name — so one drag answers "which account?"
+            // for every other VPN too.
+            OnePasswordAccountMemory.seed(dropped.account)
+        }
+        Task { try? await vpn.setCredentialSource(s, for: profile.id) }
+    }
+
+    private func saveApplePasswords() {
+        var s = source
+        s.kind = .applePasswords
+        s.reference = apServer.trimmingCharacters(in: .whitespaces)
+        Task { try? await vpn.setCredentialSource(s, for: profile.id) }
+    }
+}
+
+/// The state, in words: a green "you are connected" banner above the map, for
+/// everyone who doesn't speak dot-and-stop-button. Makes no claims about WHICH
+/// traffic is protected — that's the tunnel-mode toggle's story.
+private struct ConnectedBanner: View {
+    let vpnName: String
+    let server: String
+    let uptime: TimeInterval?
+
+    private var detail: String {
+        var bits: [String] = []
+        if !server.isEmpty { bits.append(server) }
+        if let uptime, uptime >= 1 {
+            let d = Duration.seconds(Int(uptime))
+            bits.append("connected for \(d.formatted(.units(allowed: [.hours, .minutes, .seconds], width: .abbreviated, maximumUnitCount: 2)))")
+        }
+        return bits.joined(separator: " \u{00B7} ")
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.circle.fill").font(.title3).foregroundStyle(.green)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Connected to \(vpnName)").font(.callout.weight(.semibold))
+                if !detail.isEmpty {
+                    Text(detail).font(.callout).foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// What the big ConnectedBanner shrinks INTO after 5s: a compact green
+/// "Connected" pill living beside the stop button, so the header still says in
+/// words what the dot says in colour.
+private struct ConnectedChip: View {
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "checkmark.circle.fill").font(.callout)
+            Text("Connected").font(.callout.weight(.medium))
+        }
+        .foregroundStyle(.green)
+        .padding(.horizontal, 12).frame(height: 34)
+        .glassEffect(.regular.tint(.green.opacity(0.22)), in: .capsule)
+        .accessibilityLabel("Connected")
+    }
+}
+
+/// A Wi-Fi sign-in page is intercepting this network's traffic — the VPN cannot
+/// get through until the user is past it. Indigo (matching the captive-portal
+/// dot language everywhere else), with the two actions that actually move things
+/// forward: open the page, and re-check after signing in.
+private struct CaptivePortalBanner: View {
+    @Bindable var vpn: VPNController
+    @Environment(\.openURL) private var openURL
+    @State private var checking = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "wifi.exclamationmark").font(.title3).foregroundStyle(.indigo)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("This Wi-Fi wants you to sign in first")
+                    .font(.callout.weight(.semibold))
+                Text("A sign-in page is answering instead of the internet — hotel or guest Wi-Fi usually does this. Sign in there, then connect. The VPN can't get through until you do.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 6) {
+                Button("Open Sign-In Page") {
+                    openURL(vpn.captivePortalURL ?? ConnectionDiagnostics.captivePortalProbeURL)
+                }
+                .buttonStyle(.glassProminent).tint(.indigo)
+                Button {
+                    checking = true
+                    Task { await vpn.recheckCaptivePortal(); checking = false }
+                } label: {
+                    if checking {
+                        HStack(spacing: 5) { DrawnSpinner(); Text("Checking\u{2026}") }
+                    } else {
+                        Text("Check Again")
+                    }
+                }
+                .buttonStyle(.glass)
+                .disabled(checking)
+                .help("Re-check whether the sign-in page is still in the way")
+            }
+        }
+        .padding(12)
+        .background(.indigo.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
+    }
+}
+
 private struct UnreachableHereBanner: View {
     let vpnName: String
     let networkLabel: String
@@ -949,47 +1621,69 @@ private struct StuckConnectingBanner: View {
     }
 }
 
-/// Paused state banner. Hold is calm; bypass is deliberately loud — traffic is
-/// leaving the Mac outside the VPN and the user must never forget it.
+/// Paused state banner — deliberately loud: paused means traffic is leaving the
+/// Mac outside the VPN, and the user must never forget it. (There is only one
+/// pause behaviour now; the old calm "blocked" variant is gone with hold mode.)
 private struct PausedBanner: View {
-    let mode: VPNController.PauseMode
     let resume: () -> Void
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: mode == .bypass ? "road.lane.arrowtriangle.2.inward" : "pause.circle.fill")
+            Image(systemName: "road.lane.arrowtriangle.2.inward")
                 .font(.title3)
-                .foregroundStyle(mode == .bypass ? .white : Color.accentColor)
+                .foregroundStyle(.white)
             VStack(alignment: .leading, spacing: 2) {
-                Text(mode == .bypass ? "Paused — traffic is NOT going through the VPN"
-                                     : "Paused — traffic is blocked until you resume")
+                Text("Paused — traffic is NOT going through the VPN")
                     .bold()
-                    .foregroundStyle(mode == .bypass ? .white : .primary)
-                Text(mode == .bypass
-                     ? "Everything uses your normal connection and is visible to the local network."
-                     : "The secure session is kept, so resuming won't ask you to sign in again.")
+                    .foregroundStyle(.white)
+                Text("Everything uses your normal connection and is visible to the local network. You're still signed in — resuming won't ask again.")
                     .font(.callout)
-                    .foregroundStyle(mode == .bypass ? .white.opacity(0.9) : .secondary)
+                    .foregroundStyle(.white.opacity(0.9))
             }
             Spacer()
             Button("Resume", action: resume)
                 .buttonStyle(.borderedProminent)
-                .tint(mode == .bypass ? .white : .accentColor)
-                .foregroundStyle(mode == .bypass ? .red : .white)
+                .tint(.white)
+                .foregroundStyle(.red)
         }
         .padding(12)
-        .background(mode == .bypass ? AnyShapeStyle(Color.red) : AnyShapeStyle(.quaternary),
-                    in: RoundedRectangle(cornerRadius: 10))
+        .background(Color.red, in: RoundedRectangle(cornerRadius: 10))
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// The header's problem chip: appears ONLY when something is wrong (a healthy
+/// connection shows nothing here). Plain-English text + the shared dot language.
+private struct ProblemPill: View {
+    let text: String
+    let dot: DotState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(spacing: 5) {
+            StatusDot(state: dot, size: 7)
+            Text(text).font(.callout).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 5)
+        .glassEffect(.regular.tint(dot.color.opacity(0.18)), in: .capsule)
+        .animation(reduceMotion ? nil : .smooth(duration: 0.4), value: text)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(text)
     }
 }
 
 /// The "fill in this required field" emphasis: quiet until the user actually
 /// tries to connect, then a soft accent ring around each still-empty required
 /// field (the closest native idiom — no dedicated Liquid Glass component exists).
+/// `nudge` adds the kinetic half: each bump gives every still-empty field a
+/// small sideways shake — the "no, over here" gesture for a click on a Connect
+/// button that's waiting on input. Reduce Motion suppresses the shake; the ring
+/// and focus placement carry the message alone.
 private struct RequiredFieldEmphasis: ViewModifier {
     let missing: Bool
     let attempted: Bool
+    var nudge: Int = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var active: Bool { missing && attempted }
 
     func body(content: Content) -> some View {
@@ -999,12 +1693,23 @@ private struct RequiredFieldEmphasis: ViewModifier {
                     .strokeBorder(Color.accentColor.opacity(active ? 0.8 : 0), lineWidth: 2)
                     .animation(.easeInOut(duration: 0.25), value: active)
             )
+            .modifier(ShakeEffect(animatableData: CGFloat((missing && !reduceMotion) ? nudge : 0)))
             .accessibilityValue(active ? "Required" : "")
     }
 }
 
+/// Three quick 4pt side-to-side cycles per nudge unit — enough to catch the eye,
+/// small enough not to read as an error condition.
+private struct ShakeEffect: GeometryEffect {
+    var animatableData: CGFloat
+    func effectValue(size: CGSize) -> ProjectionTransform {
+        ProjectionTransform(CGAffineTransform(
+            translationX: 4 * sin(animatableData * .pi * 6), y: 0))
+    }
+}
+
 private extension View {
-    func requiredEmphasis(missing: Bool, attempted: Bool) -> some View {
-        modifier(RequiredFieldEmphasis(missing: missing, attempted: attempted))
+    func requiredEmphasis(missing: Bool, attempted: Bool, nudge: Int = 0) -> some View {
+        modifier(RequiredFieldEmphasis(missing: missing, attempted: attempted, nudge: nudge))
     }
 }

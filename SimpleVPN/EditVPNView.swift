@@ -23,6 +23,10 @@ struct EditVPNView: View {
     /// true when hosted as the Manage window's detail pane (no sheet chrome:
     /// flexible size, Revert instead of Cancel, Save doesn't dismiss).
     var embedded = false
+    /// Called after a successful embedded save. `dismiss()` is a no-op in a
+    /// split-view detail, so the parent (Manage VPNs) decides what "done"
+    /// means — e.g. close the window when it holds only this one VPN.
+    var onSaved: (() -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
     @Environment(ProfileEvaluator.self) private var evaluator
@@ -54,13 +58,26 @@ struct EditVPNView: View {
 
     // Authentication shape (OTP requirement + template)
     @State private var requiresOTP = false
+    // Optional interface controls (VPNUIPrefs) — advanced surfaces are per-VPN opt-in.
+    @State private var allowPause = false
+    @State private var showConnectionManager = false
+    /// Authenticator (TOTP) setup key destined for the Touch ID-locked item.
+    /// Loaded EMPTY even when one is stored (reading it back would cost a
+    /// fingerprint prompt just to open the editor); saving a non-empty value
+    /// replaces the stored secret, leaving it empty keeps whatever is there.
+    @State private var totpSecretInput = ""
     @State private var passwordTemplate = VPNAuthConfig.defaultTemplate
     @State private var otpAdvancedExpanded = false
 
     // Credential source (manual / 1Password / Apple Passwords)
     @State private var credentialKind: CredentialSourceKind = .manual
     @State private var sourceReference = ""
+    /// 1Password: which account to ask. Apple Passwords: which saved login.
     @State private var sourceAccount = ""
+    /// 1Password only — a vault is a drawer inside an account, so it gets its
+    /// own field; sharing one with `sourceAccount` is what left every 1Password
+    /// fetch asking for an account nobody had ever been able to enter.
+    @State private var sourceVault = ""
     @State private var sourceTest: SourceTestState = .idle
 
     // 1Password field mapping (which item field feeds which auth role)
@@ -70,6 +87,43 @@ struct EditVPNView: View {
     @State private var showFieldMap = false
     @State private var loadingOPFields = false
     @State private var opFieldError: String?
+    /// Whether a 1Password app with SDK support is installed (prompt-free
+    /// probe via the bundled helper). Starts optimistic so the warning never
+    /// flashes while the probe is in flight.
+    @State private var opAvailable = true
+    /// The setup check behind the walkthrough card. Runs ONLY when 1Password is
+    /// newly chosen here (or Check Again is clicked) — never on open, which for
+    /// an already-configured VPN would be an unasked-for lookup.
+    @State private var opPreflight = OnePasswordPreflightModel()
+    /// Collapses the several deliveries macOS makes of one drag into one apply.
+    @State private var opDrops = OnePasswordDropCollector()
+
+    // 1Password browsing (vault/item pickers). Every list is fetched ONLY on an
+    // explicit click: the first one can raise 1Password's authorization prompt,
+    // and this app never makes a lookup the user didn't ask for.
+    @State private var opVaults: [OnePasswordNative.OPVaultOverview] = []
+    @State private var opItems: [OnePasswordNative.OPItemInVault] = []
+    /// Which vault `opItems` was loaded from ("" = every vault) — changing vault
+    /// invalidates it, so the picker can never offer one drawer's contents under
+    /// another's name.
+    @State private var opItemsVault = ""
+    /// Whether `opItemsVault` describes a list we actually hold; an empty vault
+    /// is a real scope ("all of them"), so it can't double as "nothing loaded".
+    @State private var opItemsLoaded = false
+    @State private var loadingOPVaults = false
+    @State private var loadingOPItems = false
+    @State private var opBrowseError: String?
+    @State private var showItemBrowser = false
+    @State private var showVaultBrowser = false
+    @State private var dropTargeted = false
+    /// A multi-selection drag: several items arrived and a VPN uses one, so the
+    /// choice is offered rather than guessed. Empty = nothing pending.
+    @State private var droppedChoices: [OnePasswordDrop] = []
+    @State private var showDropChooser = false
+    /// A lookup reached 1Password and was told it doesn't know the account.
+    /// Deliberately NOT an error: the drop/pick worked, only the account name
+    /// is missing, so it shows as a nudge at the Account field.
+    @State private var opNeedsAccount = false
 
     private enum SourceTestState: Equatable {
         case idle, testing, ok(String), failed(String)
@@ -86,6 +140,10 @@ struct EditVPNView: View {
                     .tabItem { Label("General", systemImage: "info.circle") }
                 credentialsTab
                     .tabItem { Label("Credentials", systemImage: "person.badge.key") }
+                // Saves as it goes (see EndpointsEditor) — no draft to reconcile
+                // with this sheet's Save button.
+                EndpointsEditor(vpn: vpn, profileID: profileID)
+                    .tabItem { Label("Servers", systemImage: "mappin.and.ellipse") }
                 OpenVPNOptionsForm(draft: $draft,
                                    proxyPassword: $proxyPassword,
                                    privateKeyPassword: $privateKeyPassword,
@@ -104,7 +162,13 @@ struct EditVPNView: View {
             // effect overlays its top pixels.
             .padding(.top, 10)
             .navigationTitle(embedded ? name : "Edit VPN")
-            .task { load() }
+            .task {
+                load()
+                opAvailable = await OnePasswordNative.probe()
+                // Prompt-free, so this much can be said without anyone asking:
+                // no 1Password on this Mac is a setup state, not a failure.
+                if !opAvailable { opPreflight.note(.notInstalled) }
+            }
             // Reload from the persisted config when it changes underneath us
             // (Doctor fix, undo, another editor) — but only for a field group the
             // user hasn't touched, so in-progress edits are never lost.
@@ -160,7 +224,14 @@ struct EditVPNView: View {
 
     private var generalTab: some View {
         Form {
-            Section("Name") { TextField("Name", text: $name) }
+            // The name is purely what YOU call this VPN — the addresses it
+            // connects to live on the Servers tab, so renaming never changes
+            // the connection and changing server never renames the VPN.
+            Section("Name") {
+                TextField("Name", text: $name, prompt: Text("Work, Home, Mum's house…"))
+                Text("Just a name for you. The addresses this VPN connects to are on the Servers tab.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
 
             Section("Logo") {
                 HStack(spacing: 14) {
@@ -180,6 +251,17 @@ struct EditVPNView: View {
                         }
                     }.padding(.vertical, 2)
                 }
+            }
+
+            // Advanced controls are per-VPN opt-in so the default interface stays
+            // simple — most people only ever connect and disconnect.
+            Section("Optional Controls") {
+                Toggle("Show a Pause button", isOn: $allowPause)
+                Text("Pause keeps the VPN signed in but sends traffic outside it (using your normal connection) until you resume.")
+                    .font(.callout).foregroundStyle(.secondary)
+                Toggle("Show the Connection Manager", isOn: $showConnectionManager)
+                Text("An advanced panel on the connection page with health checks and connection toggles.")
+                    .font(.callout).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -212,6 +294,26 @@ struct EditVPNView: View {
                             Label("This VPN's administrator doesn't allow saving the password.",
                                   systemImage: "key.slash")
                                 .font(.callout).foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if evaluation?.allowPasswordSave ?? true {
+                        Section("Touch ID") {
+                            Toggle("Protect the sign-in with Touch ID", isOn: protectBinding)
+                            Text("The saved username and password move into a fingerprint-locked keychain item; connecting asks for Touch ID (or your Apple Watch, or the account password) to release them.")
+                                .font(.callout).foregroundStyle(.secondary)
+                            if requiresOTP && vpn.authConfig(for: profileID).protectWithBiometrics {
+                                SecureField("Authenticator setup key (otpauth:// link or secret)",
+                                            text: $totpSecretInput)
+                                    .autocorrectionDisabled()
+                                Text("Paste the setup key your authenticator was enrolled with and the fingerprint covers the one-time code too — no more typing codes. Saved only inside the Touch ID-locked item.")
+                                    .font(.callout).foregroundStyle(.secondary)
+                                if !totpSecretInput.isEmpty && TOTPConfiguration.canonicalStorageString(from: totpSecretInput) == nil {
+                                    Label("That doesn't look like a valid setup key (otpauth:// link or base32 secret).",
+                                          systemImage: "exclamationmark.triangle.fill")
+                                        .font(.callout).foregroundStyle(.orange)
+                                }
+                            }
                         }
                     }
                 }
@@ -296,7 +398,7 @@ struct EditVPNView: View {
                     Button(mapped == nil ? "Choose Field\u{2026}" : "Change\u{2026}") {
                         Task { await loadOPFieldsAndShowSheet() }
                     }
-                    .disabled(OnePasswordProvider.cliPath == nil || loadingOPFields)
+                    .disabled(!opAvailable || loadingOPFields)
                 }
             }
         }
@@ -310,7 +412,7 @@ struct EditVPNView: View {
         guard requiresOTP, credentialKind == .onePassword,
               (fieldMap["otp"] ?? "").isEmpty,
               !sourceReference.trimmingCharacters(in: .whitespaces).isEmpty,
-              OnePasswordProvider.cliPath != nil,
+              opAvailable,
               !loadingOPFields, !showFieldMap
         else { return }
         Task { await loadOPFieldsAndShowSheet() }
@@ -325,8 +427,13 @@ struct EditVPNView: View {
                     Label(kind.displayName, systemImage: kind.systemImage).tag(kind)
                 }
             }
-            .onChange(of: credentialKind) {
+            .onChange(of: credentialKind) { _, kind in
                 sourceTest = .idle
+                prefillRememberedAccount()
+                // Choosing 1Password is the first genuine need for a 1Password
+                // lookup — the one moment this app is allowed to raise its
+                // approval prompt. Skipped once the integration has been proven.
+                if kind == .onePassword { runOnePasswordPreflight(force: false) }
                 // Arriving at 1Password with OTP already on needs the same ask.
                 promptForOTPFieldIfNeeded()
             }
@@ -352,15 +459,45 @@ struct EditVPNView: View {
     /// 1Password source: reference/vault fields, a drop well for dragging an item
     /// straight in from 1Password, and the field-role mapping.
     @ViewBuilder private var onePasswordSource: some View {
-        if OnePasswordProvider.cliPath == nil {
-            Label("The 1Password command-line tool (op) isn't installed. Install it, then enable Developer ▸ CLI in the 1Password app.",
-                  systemImage: "exclamationmark.triangle.fill")
-                .font(.callout).foregroundStyle(.orange)
+        // Says which of the setup steps is actually missing, and offers the
+        // button that fixes it — the old static warning said all of them at
+        // once, whether or not any of it was true. The account state is left to
+        // the nudge beside the Account field below: one ask, in one place.
+        OnePasswordSetupCard(model: opPreflight,
+                             onCheckAgain: { runOnePasswordPreflight(force: true) })
+        // Typing stays the base: the pickers need 1Password running, approved
+        // and reachable, and none of that is true offline or before the first
+        // approval — so a typed item/vault must always be enough on its own.
+        HStack(spacing: 6) {
+            TextField("Item name or link", text: $sourceReference, prompt: Text("GR Lab VPN"))
+                .autocorrectionDisabled()
+            opItemBrowseButton
         }
-        TextField("Item name or link", text: $sourceReference, prompt: Text("GR Lab VPN"))
+        // A dragged item is linked by its 1Password id, which is exact but says
+        // nothing to a human — so the readable name is stated beside it.
+        if !opItemTitle.isEmpty, opItemTitle != sourceReference.trimmingCharacters(in: .whitespaces) {
+            Text("This is \u{201C}\(opItemTitle)\u{201D} \u{2014} linked by its 1Password id, so renaming it won\u{2019}t break this VPN.")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        HStack(spacing: 6) {
+            TextField("Vault (optional)", text: $sourceVault)
+                .autocorrectionDisabled()
+            opVaultBrowseButton
+        }
+        TextField("Account (optional \u{2014} only needed if you have more than one)",
+                  text: $sourceAccount)
             .autocorrectionDisabled()
-        TextField("Vault (optional)", text: $sourceAccount)
-            .autocorrectionDisabled()
+            // Enter re-runs the lookup that was waiting on this name, so filling
+            // it in finishes the job instead of just sitting there.
+            .onSubmit {
+                guard opNeedsAccount else { return }
+                Task { await loadOPFieldsAndShowSheet() }
+            }
+        Text("The name at the top of 1Password\u{2019}s sidebar. SimpleVPN remembers it for your other VPNs.")
+            .font(.callout).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        opBrowseStatus
 
         // Drop well — drag an item from the 1Password app onto here.
         onePasswordDropWell
@@ -376,7 +513,7 @@ struct EditVPNView: View {
                 Task { await loadOPFieldsAndShowSheet() }
             }
             .disabled(sourceReference.trimmingCharacters(in: .whitespaces).isEmpty
-                      || OnePasswordProvider.cliPath == nil || loadingOPFields)
+                      || !opAvailable || loadingOPFields)
             if loadingOPFields { ProgressView().controlSize(.small) }
             if let err = opFieldError {
                 Label(err, systemImage: "xmark.circle.fill").foregroundStyle(.red).font(.callout).lineLimit(2)
@@ -389,54 +526,374 @@ struct EditVPNView: View {
         sourceTestRow
     }
 
-    private var onePasswordDropWell: some View {
+    /// Item browse. A labelled button, not a bare ⟳ icon: testing put someone in
+    /// front of the icons who then reported there was no way to search for an
+    /// item at all. Clicking fetches (1Password may ask for approval the first
+    /// time) and opens a search box over the results — never fetched on its own.
+    private var opItemBrowseButton: some View {
+        Button {
+            showItemBrowser = true
+            if !opItemsLoaded || opItemsVault != itemBrowseScope {
+                Task { await loadOPItems() }
+            }
+        } label: {
+            Label("Browse\u{2026}", systemImage: "magnifyingglass")
+        }
+        .buttonStyle(.bordered)
+        .disabled(!opAvailable)
+        .help(itemBrowseScope.isEmpty
+              ? "Search the items in your 1Password vaults"
+              : "Search the items in \u{201C}\(itemBrowseScope)\u{201D}")
+        .popover(isPresented: $showItemBrowser) {
+            OnePasswordBrowsePopover(
+                searchPrompt: "Search items",
+                rows: opItems.map {
+                    OnePasswordBrowseRow(
+                        id: $0.id, title: $0.title,
+                        subtitle: [$0.vaultTitle, $0.category]
+                            .filter { !$0.isEmpty }.joined(separator: " \u{00B7} "))
+                },
+                loading: loadingOPItems,
+                status: opBrowseError,
+                needsAccount: opNeedsAccount,
+                onAccount: { name in
+                    sourceAccount = name
+                    Task { await loadOPItems() }
+                },
+                onPick: { row in
+                    guard let item = opItems.first(where: { $0.id == row.id }) else { return }
+                    showItemBrowser = false
+                    chooseOPItem(item)
+                },
+                onRefresh: { Task { await loadOPItems() } })
+        }
+    }
+
+    /// Which vault the item browser is showing — "" means every vault, which is
+    /// a real answer here even though 1Password itself only lists one at a time.
+    private var itemBrowseScope: String {
+        sourceVault.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Vault browse — same shape as the item one.
+    private var opVaultBrowseButton: some View {
+        Button {
+            showVaultBrowser = true
+            if opVaults.isEmpty { Task { await loadOPVaults() } }
+        } label: {
+            Label("Browse\u{2026}", systemImage: "magnifyingglass")
+        }
+        .buttonStyle(.bordered)
+        .disabled(!opAvailable)
+        .help("Search the vaults in your 1Password account")
+        .popover(isPresented: $showVaultBrowser) {
+            OnePasswordBrowsePopover(
+                searchPrompt: "Search vaults",
+                rows: opVaults.map { OnePasswordBrowseRow(id: $0.id, title: $0.title) },
+                loading: loadingOPVaults,
+                status: opBrowseError,
+                needsAccount: opNeedsAccount,
+                onAccount: { name in
+                    sourceAccount = name
+                    Task { await loadOPVaults() }
+                },
+                onPick: { row in
+                    guard let vault = opVaults.first(where: { $0.id == row.id }) else { return }
+                    showVaultBrowser = false
+                    chooseOPVault(vault)
+                },
+                onRefresh: { Task { await loadOPVaults() } })
+        }
+    }
+
+    /// One shared line for everything the pickers and the drop well can say.
+    /// A missing account is a nudge, not a failure — the drop/pick itself
+    /// worked, and calling it an error sent people looking for the wrong bug.
+    @ViewBuilder private var opBrowseStatus: some View {
+        if opNeedsAccount {
+            Label(accountNudgeText, systemImage: "person.crop.circle.badge.questionmark")
+                .font(.callout).foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if let err = opBrowseError {
+            Label(err, systemImage: "xmark.circle.fill")
+                .font(.callout).foregroundStyle(.red).lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var accountNudgeText: String { OnePasswordPreflight.accountNudge }
+
+    /// The setup check, from the two actions allowed to start one: choosing
+    /// 1Password as this VPN's source, and clicking Check Again. `force` is the
+    /// button — it re-checks even when the integration is already verified,
+    /// which is the only way back from "it worked yesterday".
+    private func runOnePasswordPreflight(force: Bool) {
+        Task {
+            let state = force
+                ? await opPreflight.check(account: sourceAccount)
+                : await opPreflight.checkIfNeeded(account: sourceAccount)
+            switch state {
+            case .ready(let vaults):
+                // The check already paid for this list; the vault picker would
+                // otherwise ask 1Password for it a second time.
+                if !vaults.isEmpty, opVaults.isEmpty { opVaults = vaults }
+                opNeedsAccount = false
+            case .needsAccount:
+                // The integration works — only the name is missing, which the
+                // nudge beside the Account field already asks for.
+                opNeedsAccount = true
+            default:
+                break
+            }
+        }
+    }
+
+    /// A blank 1Password account starts from the one that has worked before: it
+    /// names WHO to ask, which is a property of the person, not of a VPN. Only
+    /// ever fills a blank — a name typed here is an explicit choice and wins.
+    private func prefillRememberedAccount() {
+        guard credentialKind == .onePassword,
+              sourceAccount.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        sourceAccount = OnePasswordAccountMemory.remembered()
+    }
+
+    /// Run a 1Password lookup on the account this VPN names, and — when the only
+    /// thing wrong is that 1Password doesn't know that account — retry ONCE with
+    /// the name that has worked before. The retry rides a lookup the user
+    /// already asked for, so it adds no unasked-for traffic, and it turns the
+    /// commonest failure ("which account?" on every new VPN) into a non-event.
+    /// A name that works is remembered for every other VPN.
+    private func withAccountFallback<T>(_ body: (String) async throws -> T) async throws -> T {
+        let typed = sourceAccount.trimmingCharacters(in: .whitespaces)
+        do {
+            let result = try await body(typed)
+            OnePasswordAccountMemory.remember(typed)
+            return result
+        } catch let error as OnePasswordNativeError where isMissingAccount(error) {
+            guard let fallback = OnePasswordAccountMemory.retryAccount(after: typed) else {
+                throw error
+            }
+            let result = try await body(fallback)
+            sourceAccount = fallback
+            return result
+        }
+    }
+
+    private func loadOPVaults() async {
+        opBrowseError = nil
+        loadingOPVaults = true
+        defer { loadingOPVaults = false }
+        do {
+            opVaults = try await withAccountFallback {
+                try await OnePasswordNative.listVaults(account: $0)
+            }
+            opNeedsAccount = false
+            if opVaults.isEmpty {
+                opBrowseError = "That 1Password account has no vaults SimpleVPN can see."
+            }
+        } catch {
+            noteBrowseFailure(error)
+        }
+    }
+
+    /// Items for the browser. With a vault named, that vault's items; without
+    /// one, everything across every vault — the SDK still asks one vault at a
+    /// time, but the person searching gets a single list.
+    private func loadOPItems() async {
+        let vault = itemBrowseScope
+        opBrowseError = nil
+        loadingOPItems = true
+        defer { loadingOPItems = false }
+        do {
+            opItems = try await withAccountFallback { account in
+                if vault.isEmpty {
+                    return try await OnePasswordNative.listItemsAcrossVaults(account: account)
+                }
+                return try await OnePasswordNative.listItems(vault: vault, account: account)
+                    .map {
+                        OnePasswordNative.OPItemInVault(
+                            itemID: $0.id, title: $0.title, category: $0.category,
+                            vaultID: vault, vaultTitle: vault)
+                    }
+            }
+            opItemsVault = vault
+            opItemsLoaded = true
+            opNeedsAccount = false
+            if opItems.isEmpty {
+                opBrowseError = vault.isEmpty
+                    ? "1Password didn\u{2019}t show SimpleVPN any items."
+                    : "There are no items in \u{201C}\(vault)\u{201D}."
+            }
+        } catch {
+            opItems = []
+            opItemsLoaded = false
+            noteBrowseFailure(error)
+        }
+    }
+
+    private func chooseOPVault(_ vault: OnePasswordNative.OPVaultOverview) {
+        // The TITLE, not the UUID: it's what the user reads in 1Password, and
+        // the helper accepts either.
+        sourceVault = vault.title
+        // Items belong to the vault they were listed from.
+        opItems = []
+        opItemsLoaded = false
+        opItemsVault = ""
+        opBrowseError = nil
+        sourceTest = .idle
+    }
+
+    private func chooseOPItem(_ item: OnePasswordNative.OPItemInVault) {
+        sourceReference = item.title
+        opItemTitle = item.title
+        // Picking from the everything list also answers "which vault?" — it was
+        // listed from one, so there's nothing to guess.
+        if itemBrowseScope.isEmpty, !item.vaultTitle.isEmpty { sourceVault = item.vaultTitle }
+        opBrowseError = nil
+        sourceTest = .idle
+        // Straight on to "which field is which" — the pick is explicit, the
+        // authorization has just been granted, and this is what finishes setup.
+        Task { await loadOPFieldsAndShowSheet() }
+    }
+
+    /// Turn a lookup failure into one short line — or, for a missing account,
+    /// into the nudge. Classified rather than raw so an account problem says
+    /// "account name" instead of blaming the item.
+    private func noteBrowseFailure(_ error: Error) {
+        if let native = error as? OnePasswordNativeError {
+            switch native {
+            case .accountNotFound:
+                opNeedsAccount = true
+                opBrowseError = nil
+                return
+            case .userCancelled:
+                opBrowseError = "1Password is waiting for your approval \u{2014} click Browse again after approving."
+                return
+            default:
+                break
+            }
+        }
+        opBrowseError = UserFacingError.classify(error).title
+    }
+
+    @ViewBuilder private var onePasswordDropWell: some View {
         RoundedRectangle(cornerRadius: 8, style: .continuous)
             .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [5]))
-            .foregroundStyle(.tertiary)
+            .foregroundStyle(dropTargeted ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
             .frame(height: 52)
             .overlay {
                 Label(opItemTitle.isEmpty ? "Drag a 1Password item here" : "Item: \(opItemTitle)",
                       systemImage: "square.and.arrow.down")
                     .font(.callout).foregroundStyle(.secondary)
             }
-            .dropDestination(for: String.self) { items, _ in
-                guard let raw = items.first else { return false }
-                return handleOnePasswordDrop(raw)
+            // Four flavours, read by NSItemProvider rather than Transferable:
+            // the one that matters (1Password's own payload) travels under
+            // Chromium's private type identifier, which isn't a UTType on a Mac
+            // and so can only be asked for by name. See OnePasswordDropItem.
+            .onDrop(of: OnePasswordDropItem.acceptedContentTypes, isTargeted: $dropTargeted) {
+                providers, _ in
+                guard OnePasswordDropItem.canAccept(providers) else { return false }
+                // Through the collector: macOS delivers one drag more than
+                // once, and applying each delivery turned a single dropped item
+                // into a "which one?" chooser.
+                Task { if let drops = await opDrops.collect(providers) { applyDrops(drops) } }
+                return true
             }
             .contentShape(Rectangle())
+            .popover(isPresented: $showDropChooser) {
+                dropChooser
+            }
+        // Says what a drag really does — the old well implied it did everything,
+        // and for a FIELD drag (op://, no account) it doesn't.
+        Text("Dragging an item straight from 1Password fills in everything. Dragging one of its fields fills in less \u{2014} Browse, or type your account name once, covers the rest.")
+            .font(.callout).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
-    /// A 1Password drag delivers text: a secret reference (op://vault/item/field),
-    /// a deep link (onepassword://…?i=item&v=vault), or a plain item name/UUID.
-    /// Extract a reference + vault, then load the item's fields for mapping.
-    private func handleOnePasswordDrop(_ raw: String) -> Bool {
-        guard let (ref, vault) = Self.parseOnePasswordDrop(raw) else { return false }
-        sourceReference = ref
-        if !vault.isEmpty { sourceAccount = vault }
+    /// Several items were dragged at once. A VPN signs in with exactly one, so
+    /// the choice is asked rather than guessed — and never treated as an error.
+    @ViewBuilder private var dropChooser: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Which item is this VPN\u{2019}s sign-in?").font(.callout.weight(.semibold))
+            ForEach(Array(droppedChoices.enumerated()), id: \.element.id) { index, drop in
+                Button(drop.displayName(position: index + 1)) {
+                    showDropChooser = false
+                    apply(drop)
+                }
+                .buttonStyle(.link)
+            }
+        }
+        .padding(12)
+        .frame(minWidth: 220)
+    }
+
+    /// A 1Password drag delivers its own payload (account + vault + item, for
+    /// each item dragged), a secret reference (op://vault/item/field), a link
+    /// (onepassword://…?a=account&v=vault&i=item, or the same query on a
+    /// start.1password.com share URL), or a plain item title. Whatever it
+    /// carried is applied to the fields FIRST and unconditionally: the follow-up
+    /// field lookup can still fail (1Password locked, approval dismissed) and
+    /// that must never throw away a drop that was itself perfectly good.
+    private func applyDrops(_ drops: [OnePasswordDrop]) {
+        guard let first = drops.first else { return }
+        guard drops.count == 1 else {
+            droppedChoices = drops
+            showDropChooser = true
+            return
+        }
+        apply(first)
+    }
+
+    private func apply(_ dropped: OnePasswordDrop) {
+        sourceReference = dropped.reference
+        // Never clear a typed value with an absent one — a field drag names no
+        // account, and the account already there may be the right one.
+        if !dropped.vault.isEmpty { sourceVault = dropped.vault }
+        if !dropped.account.isEmpty {
+            sourceAccount = dropped.account
+            // A dragged item names the account it came from, and the SDK takes
+            // that UUID as readily as the sidebar name — so one drag answers
+            // "which account?" for every other VPN too.
+            OnePasswordAccountMemory.seed(dropped.account)
+        }
+        opItemTitle = dropped.title.isEmpty ? dropped.reference : dropped.title
+        droppedChoices = []
+        // The listed items no longer describe this vault.
+        opItems = []
+        opItemsLoaded = false
+        sourceTest = .idle
         Task { await loadOPFieldsAndShowSheet() }
-        return true
     }
 
-    static func parseOnePasswordDrop(_ raw: String) -> (reference: String, vault: String)? {
+    static func parseOnePasswordDrop(_ raw: String)
+        -> (reference: String, vault: String, account: String)? {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { return nil }
         if s.hasPrefix("op://") {
-            // op://<vault>/<item>[/<section>/<field>] — keep vault + item.
+            // op://<vault>/<item>[/<section>/<field>] — keep vault + item. A
+            // secret reference never names the account.
             let parts = s.dropFirst("op://".count).split(separator: "/").map(String.init)
-            if parts.count >= 2 { return (parts[1], parts[0]) }
-            if parts.count == 1 { return (parts[0], "") }
+            if parts.count >= 2 { return (parts[1], parts[0], "") }
+            if parts.count == 1 { return (parts[0], "", "") }
             return nil
         }
-        if s.hasPrefix("onepassword://"), let comps = URLComponents(string: s) {
+        // Deep link and share link carry the same query: a=<account UUID>,
+        // v=<vault UUID>, i=<item UUID>. The account UUID is as good as the
+        // sidebar name to the SDK, and it's the one thing users can't guess.
+        if s.hasPrefix("onepassword://")
+            || (s.hasPrefix("https://") && s.contains("1password.com/open")),
+           let comps = URLComponents(string: s) {
             let q = comps.queryItems ?? []
-            let item = q.first { $0.name == "i" || $0.name == "item" }?.value
-            let vault = q.first { $0.name == "v" || $0.name == "vault" }?.value ?? ""
-            if let item, !item.isEmpty { return (item, vault) }
-            return nil
+            func param(_ names: Set<String>) -> String {
+                q.first { names.contains($0.name) }?.value ?? ""
+            }
+            let item = param(["i", "item"])
+            guard !item.isEmpty else { return nil }
+            return (item, param(["v", "vault"]), param(["a", "account"]))
         }
         // Plain text: the item's name or UUID. First line only.
         let firstLine = s.split(whereSeparator: \.isNewline).first.map(String.init) ?? s
-        return (firstLine, "")
+        return (firstLine, "", "")
     }
 
     /// The auth roles this VPN uses — the sheet renders exactly these.
@@ -446,13 +903,18 @@ struct EditVPNView: View {
 
     private func loadOPFieldsAndShowSheet() async {
         opFieldError = nil
+        opBrowseError = nil
         loadingOPFields = true
         defer { loadingOPFields = false }
         do {
-            let (title, fields) = try await OnePasswordProvider.listFields(
-                itemReference: sourceReference, vault: sourceAccount)
+            let (title, vaultID, fields) = try await withAccountFallback { account in
+                try await OnePasswordProvider.listFields(
+                    itemReference: sourceReference, vault: sourceVault, account: account)
+            }
             opItemTitle = title
             opFields = fields
+            opNeedsAccount = false
+            await backfillVault(from: vaultID)
             // Seed only the roles this VPN uses, from the item's field purposes/types.
             let roles = Set(applicableRoles)
             if roles.contains(.username), fieldMap["username"] == nil,
@@ -462,9 +924,39 @@ struct EditVPNView: View {
             if roles.contains(.otp), fieldMap["otp"] == nil,
                let f = fields.first(where: { $0.isOTP }) { fieldMap["otp"] = f.id }
             showFieldMap = true
+        } catch let error as OnePasswordNativeError where isMissingAccount(error) {
+            // The drop/pick was fine; only the account name is missing. Say so
+            // gently at the Account field instead of reporting a failure the
+            // user would go looking for in the wrong place.
+            opNeedsAccount = true
         } catch {
             opFieldError = error.localizedDescription
         }
+    }
+
+    /// After a successful read the item's home vault is known truth, so an empty
+    /// Vault field is filled in silently. Only the readable NAME is written: a
+    /// UUID in a field labelled "Vault" tells the user nothing, and leaving it
+    /// blank still works (the whole-item read searches every vault). Rides the
+    /// authorization the successful read just used.
+    private func backfillVault(from vaultID: String) async {
+        let id = vaultID.trimmingCharacters(in: .whitespaces)
+        let current = sourceVault.trimmingCharacters(in: .whitespaces)
+        // Fill a blank — or swap the id a drag left behind for the name it turns
+        // out to mean. Anything the user typed themselves is left alone.
+        guard !id.isEmpty, current.isEmpty || current == id else { return }
+        if opVaults.isEmpty {
+            opVaults = (try? await OnePasswordNative.listVaults(
+                account: OnePasswordAccountMemory.effectiveAccount(profile: sourceAccount))) ?? []
+        }
+        if let title = OnePasswordNative.vaultTitle(forID: vaultID, in: opVaults) {
+            sourceVault = title
+        }
+    }
+
+    private func isMissingAccount(_ error: OnePasswordNativeError) -> Bool {
+        if case .accountNotFound = error { return true }
+        return false
     }
 
     /// Human summary of the current role→field mapping ("Username → email"),
@@ -516,7 +1008,9 @@ struct EditVPNView: View {
         source.kind = credentialKind
         source.reference = sourceReference.trimmingCharacters(in: .whitespaces)
         source.account = sourceAccount.trimmingCharacters(in: .whitespaces)
-        // Field mapping only applies to 1Password; drop it otherwise.
+        // Vault and field mapping only apply to 1Password; drop them otherwise.
+        source.vault = credentialKind == .onePassword
+            ? sourceVault.trimmingCharacters(in: .whitespaces) : ""
         source.fieldMap = credentialKind == .onePassword ? fieldMap : [:]
         try? await vpn.setCredentialSource(source, for: profileID)
     }
@@ -573,6 +1067,26 @@ struct EditVPNView: View {
         .animation(.snappy(duration: 0.2), value: savedTick)
     }
 
+    /// Touch ID protection toggle. The migration sources the secret from the
+    /// shared credential state, so what's typed in THIS form is pushed there
+    /// first — otherwise a fresh entry wouldn't be seen.
+    private var protectBinding: Binding<Bool> {
+        Binding(get: { vpn.authConfig(for: profileID).protectWithBiometrics },
+                set: { on in
+                    var live = vpn.transientCredentials(for: profileID)
+                    if !username.isEmpty { live.username = username }
+                    if !password.isEmpty { live.password = password }
+                    vpn.transientCreds[profileID] = live
+                    let totp = totpSecretInput.isEmpty ? nil
+                        : TOTPConfiguration.canonicalStorageString(from: totpSecretInput)
+                    Task {
+                        do { try await vpn.setBiometricProtection(on, for: profileID, totpSecret: totp) }
+                        catch is CancellationError {}
+                        catch { saveError = error.localizedDescription }
+                    }
+                })
+    }
+
     // MARK: Load / save
 
     private func load() {
@@ -601,7 +1115,12 @@ struct EditVPNView: View {
         credentialKind = source.kind
         sourceReference = source.reference
         sourceAccount = source.account
+        sourceVault = source.vault
+        prefillRememberedAccount()
         fieldMap = source.fieldMap
+        let prefs = vpn.uiPrefs(for: profileID)
+        allowPause = prefs.allowPause
+        showConnectionManager = prefs.showConnectionManager
     }
 
     private func save() async {
@@ -613,7 +1132,10 @@ struct EditVPNView: View {
         // and surface any real failure instead of dismissing as if it saved.
         if !ManagedPolicy.lockConfiguration {
             let server = evaluation?.remoteHostOrNil ?? name
-            var auth = VPNAuthConfig()
+            // Start from the CURRENT auth config, not a fresh one — a fresh
+            // VPNAuthConfig() silently wiped fields this form doesn't edit
+            // (biometricProtection: saving the editor turned Touch ID off).
+            var auth = vpn.authConfig(for: profileID)
             auth.requiresOTP = requiresOTP
             auth.passwordTemplate = passwordTemplate.trimmingCharacters(in: .whitespaces).isEmpty
                 ? VPNAuthConfig.defaultTemplate : passwordTemplate
@@ -630,6 +1152,28 @@ struct EditVPNView: View {
         }
 
         await saveCredentialSource()
+
+        // A newly-entered authenticator secret goes into the Touch ID item
+        // (one fingerprint prompt — changing what the fingerprint guards
+        // should cost one). Empty input means "keep what's stored".
+        if vpn.authConfig(for: profileID).protectWithBiometrics, !totpSecretInput.isEmpty,
+           let canonical = TOTPConfiguration.canonicalStorageString(from: totpSecretInput) {
+            do {
+                try await vpn.updateProtectedTOTP(id: profileID, secret: canonical)
+                totpSecretInput = ""
+            } catch is CancellationError {
+            } catch {
+                saveError = error.localizedDescription
+                return
+            }
+        }
+
+        // Interface preferences aren't configuration — they persist even under
+        // an MDM configuration lock (they only show/hide optional controls).
+        var prefs = VPNUIPrefs()
+        prefs.allowPause = allowPause
+        prefs.showConnectionManager = showConnectionManager
+        await vpn.setUIPrefs(prefs, for: profileID)
 
         // Push into the shared credential state so the main window and menu bar
         // immediately see what was typed here.
@@ -650,9 +1194,10 @@ struct EditVPNView: View {
             privateKeyPassword: privateKeyPassword.isEmpty ? nil : privateKeyPassword))
         if embedded {
             savedTick = true
-            // Long enough to SEE the tick, then done means done: close. (dismiss()
-            // closes the standalone editor, or the containing Manage window.)
-            Task { try? await Task.sleep(for: .seconds(0.7)); dismiss() }
+            // Long enough to SEE the tick, then done. dismiss() is a no-op in a
+            // split-view detail, so ALSO tell the parent — it closes the window
+            // when this is the only VPN.
+            Task { try? await Task.sleep(for: .seconds(0.7)); dismiss(); onSaved?() }
         } else {
             dismiss()
         }
