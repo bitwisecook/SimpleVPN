@@ -25,6 +25,10 @@ struct ConnectionIncidentCard: View {
     let speaksTLS: Bool
 
     @Environment(\.openURL) private var openURL
+    @Environment(\.openWindow) private var openWindow
+    /// The last staged check for this VPN, when one has been run. It doesn't
+    /// run itself: the card offers it, the user asks for it.
+    @State private var ladders = ProbeLadderStore.shared
     @State private var report: DiagnosticsReport?
     @State private var probing = false
     @State private var showPortalAlert = false
@@ -79,8 +83,10 @@ struct ConnectionIncidentCard: View {
             // tunnel with the failing hop marked. The checklist below carries
             // the detail; this carries the understanding.
             FailurePathDiagram(incident: incident, report: report, probing: probing,
-                               serverName: host.isEmpty ? "VPN server" : host)
+                               serverName: host.isEmpty ? "VPN server" : host,
+                               ladder: ladder)
             diagnosticsChecklist
+            ladderSummary
             suggestions
 
             HStack {
@@ -88,6 +94,10 @@ struct ConnectionIncidentCard: View {
                     Button("Open Sign-in Page") { openPortal() }
                         .buttonStyle(.glassProminent)
                 }
+                Button(ladder == nil ? "Check Step by Step\u{2026}" : "Check Again\u{2026}") {
+                    openStagedCheck()
+                }
+                .help("Runs each step of this VPN's own handshake in order and shows exactly where it stops")
                 Spacer()
                 Button("Try Again") {
                     vpn.dismissIncident(id: profile.id)
@@ -155,6 +165,41 @@ struct ConnectionIncidentCard: View {
                 }
             }
         }
+    }
+
+    // MARK: The staged check
+
+    private var ladder: ProbeLadder? { ladders.ladder(for: profile.id) }
+
+    /// The one line the detailed check adds here: which rung stopped, in its own
+    /// words. The full ladder lives in Network Tools; this card stays a summary.
+    @ViewBuilder private var ladderSummary: some View {
+        if let ladder, ladder.isComplete {
+            Divider()
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: ladder.firstFailure == nil ? "checkmark.seal.fill" : "list.bullet.indent")
+                    .foregroundStyle(ladder.firstFailure == nil ? Color.green : .orange)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Step-by-step check").font(.callout.weight(.semibold))
+                    Text(ladder.summary)
+                        .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    /// Hand Network Tools this VPN and let it run the ladder there — one place
+    /// for the detail, rather than a second copy of it inside the card.
+    private func openStagedCheck() {
+        let target = host.isEmpty ? profile.server : host
+        guard !target.isEmpty else { return }
+        NetworkToolsRequest.shared.probe(
+            host: target, port: port, proto: nil, vpnKind: profile.kind,
+            ladderKey: ProbeLadderKey.make(kind: profile.kind, id: profile.id))
+        openWindow(id: "tools")
     }
 
     private func checkRow(ok: Bool, okText: String, badText: String) -> some View {
@@ -365,6 +410,11 @@ struct FailurePathDiagram: View {
     let report: DiagnosticsReport?
     let probing: Bool
     let serverName: String
+    /// A completed step-by-step check, when one has been run. It OUTRANKS the
+    /// generic probes below: the ladder actually tried this VPN's own keys and
+    /// certificates, so where it stopped is a better answer than "the port
+    /// answered". Absent (the default), the diagram behaves exactly as before.
+    var ladder: ProbeLadder? = nil
 
     private enum HopState: Equatable {
         case ok, failed, portal, unknown
@@ -392,6 +442,37 @@ struct FailurePathDiagram: View {
         var signIn = Hop(icon: "person.badge.key", label: "Sign-in")
 
         func done(_ hops: [Hop]) -> [Hop] { hops }
+
+        // The staged check ran and knows precisely where it stopped — say that,
+        // and leave every hop before it green because they were all proved.
+        if let ladder, ladder.isComplete {
+            network.state = .ok
+            internet.state = .ok
+            if let failure = ladder.firstFailure {
+                switch failure.stage.diagramHop {
+                case .network:
+                    network.state = .failed; network.verdict = failure.detail
+                    internet.state = .unknown
+                case .internet:
+                    internet.state = .failed; internet.verdict = failure.detail
+                case .server:
+                    server.state = .failed; server.verdict = failure.detail
+                case .signIn:
+                    server.state = .ok
+                    signIn.state = .failed; signIn.verdict = failure.detail
+                }
+                return done([mac, network, internet, server, signIn])
+            }
+            server.state = .ok
+            // Nothing failed, and the ladder stops short of the sign-in on
+            // purpose — so the sign-in hop stays grey rather than claiming a
+            // pass it never tested.
+            if !ladder.hasUntestedSignIn { signIn.state = .ok }
+            server.verdict = ladder.hasUntestedSignIn
+                ? "Everything up to the sign-in checks out. The sign-in itself wasn\u{2019}t tested."
+                : "Every step checked out \u{2014} try connecting again."
+            return done([mac, network, internet, server, signIn])
+        }
 
         if probing || (report == nil && incident.category == .unknown) {
             return done([mac, network, internet, server, signIn])
@@ -477,7 +558,9 @@ struct FailurePathDiagram: View {
         static func defaultValue(in d: ViewDimensions) -> CGFloat { d[VerticalAlignment.center] }
     }
     private static let hopCenter = VerticalAlignment(HopCenter.self)
-    private static let circleSize: CGFloat = 38
+    // nonisolated: alignment guides are evaluated by the layout engine off the
+    // main actor, so the metric it reads must not be actor-isolated.
+    nonisolated private static let circleSize: CGFloat = 38
     private static let columnWidth: CGFloat = 76
 
     var body: some View {

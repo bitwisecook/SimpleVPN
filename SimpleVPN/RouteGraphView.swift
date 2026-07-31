@@ -427,11 +427,13 @@ struct RouteGraphView: View {
                         .frame(width: 132, alignment: .leading)
                     Text("→").font(.caption).foregroundStyle(.tertiary)
                     if let iface = line.interface {
-                        Text(iface).font(.caption.weight(.medium))
-                            + Text(line.route.map { " via \($0)" } ?? "")
-                                .font(.caption.monospaced()).foregroundStyle(.secondary)
-                            + Text(line.note.map { " (\($0))" } ?? "")
-                                .font(.caption).foregroundStyle(.secondary)
+                        // Interpolated Text, not an HStack: the three parts are one
+                        // run of text that wraps and baselines together.
+                        let via = Text(line.route.map { " via \($0)" } ?? "")
+                            .font(.caption.monospaced()).foregroundStyle(.secondary)
+                        let note = Text(line.note.map { " (\($0))" } ?? "")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Text("\(Text(iface).font(.caption.weight(.medium)))\(via)\(note)")
                     } else {
                         Text(line.note ?? "nowhere").font(.caption).foregroundStyle(.secondary)
                     }

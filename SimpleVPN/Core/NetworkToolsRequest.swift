@@ -33,24 +33,36 @@ final class NetworkToolsRequest {
     private(set) var proto: String?
     private(set) var vpnKind: VPNKind?
 
+    /// Which SAVED VPN this is, when the caller knows — the key the staged
+    /// probe needs to gather certificates, keys and host-key settings from.
+    ///
+    /// Deliberately only an identifier: this object is a long-lived singleton,
+    /// and key material must never live in one. The window looks the VPN up in
+    /// the live stores at the moment it runs, and drops what it read when the
+    /// run ends.
+    private(set) var ladderKey: String?
+
     func request(_ host: String, autoRun: Bool = true) {
-        submit(host, port: nil, proto: nil, vpnKind: nil, autoRun: autoRun)
+        submit(host, port: nil, proto: nil, vpnKind: nil, ladderKey: nil, autoRun: autoRun)
     }
 
     /// "Probe this VPN": prefill the target and run the whole battery, including the
     /// protocol fingerprint aimed at the endpoint a connect would actually dial.
-    func probe(host: String, port: Int?, proto: String?, vpnKind: VPNKind?) {
-        submit(host, port: port, proto: proto, vpnKind: vpnKind, autoRun: true)
+    func probe(host: String, port: Int?, proto: String?, vpnKind: VPNKind?,
+               ladderKey: String? = nil) {
+        submit(host, port: port, proto: proto, vpnKind: vpnKind,
+               ladderKey: ladderKey, autoRun: true)
     }
 
     private func submit(_ host: String, port: Int?, proto: String?,
-                        vpnKind: VPNKind?, autoRun: Bool) {
+                        vpnKind: VPNKind?, ladderKey: String?, autoRun: Bool) {
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         target = trimmed
         self.port = port
         self.proto = proto
         self.vpnKind = vpnKind
+        self.ladderKey = ladderKey
         self.autoRun = autoRun
         generation += 1
     }

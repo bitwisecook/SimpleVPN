@@ -159,6 +159,23 @@ targets:
         HEADER_SEARCH_PATHS:
           - "$(SRCROOT)/Vendor/openvpn3-include"
           - "$(SRCROOT)/Vendor/openconnect-include"
+          - "$(SRCROOT)/Vendor/tailscale-engine/include"
+        # Tailscale / Headscale engine: the tailscale.com stack as a Go
+        # c-archive (Tools/build-tailscale-engine.sh). Unlike the 1Password Go
+        # archive it is linked DIRECTLY into this binary and needs no
+        # hardened-runtime relaxation: it dlopens nothing, so library
+        # validation is satisfied by ordinary static linking. CoreFoundation +
+        # Security are the Go runtime's own darwin dependencies (crypto/x509
+        # system roots, net's resolver).
+        LIBRARY_SEARCH_PATHS:
+          - "$(SRCROOT)/Vendor/tailscale-engine"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-ltsengine"
+          - "-framework"
+          - "CoreFoundation"
+          - "-framework"
+          - "Security"
         GCC_PREPROCESSOR_DEFINITIONS:
           - "$(inherited)"
           - "ASIO_STANDALONE=1"

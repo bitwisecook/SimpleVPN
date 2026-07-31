@@ -865,7 +865,9 @@ struct EditVPNView: View {
         Task { await loadOPFieldsAndShowSheet() }
     }
 
-    static func parseOnePasswordDrop(_ raw: String)
+    /// Pure string parsing, no view state — `nonisolated` so the drop pipeline
+    /// (which deliberately runs off the main actor) can call it directly.
+    nonisolated static func parseOnePasswordDrop(_ raw: String)
         -> (reference: String, vault: String, account: String)? {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { return nil }

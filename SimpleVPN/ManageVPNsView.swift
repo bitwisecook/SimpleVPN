@@ -126,26 +126,7 @@ struct ManageVPNsView: View {
             .navigationSplitViewColumnWidth(min: 200, ideal: 240)
             .toolbar {
                 ToolbarItemGroup {
-                    Menu {
-                        Button("OpenVPN") { Task { await newEmpty() } }
-                        Button("WireGuard") { newWireGuard() }
-                        Button("IKEv2") { newNative(.ikev2) }
-                        Button("IPsec (IKEv1)") { newNative(.ipsec) }
-                        Button("L2TP / IPsec") { newNative(.l2tp) }
-                        Button("SSH (SOCKS, forwards, tunnel)") { newTunnel(.ssh) }
-                        Button("FortiGate SSL VPN") { newTunnel(.fortinet) }
-                        Button("F5 BIG-IP APM") { newTunnel(.f5apm) }
-                        Button("Cisco AnyConnect") { newTunnel(.ciscoAnyConnect) }
-                        Button("Palo Alto GlobalProtect") { newTunnel(.globalProtect) }
-                        Button("Juniper Network Connect") { newTunnel(.juniper) }
-                        Button("Pulse Connect Secure") { newTunnel(.pulse) }
-                        Button("Array Networks SSL VPN") { newTunnel(.arrayNetworks) }
-                        Button("Composition (multiple VPNs)…") { editingComposition = VPNComposition() }
-                            .disabled(vpn.profiles.count < 2)
-                        Divider()
-                        Button("Import…") { showImporter = true }
-                        Button("Discover from Address…") { showDiscover = true }
-                    } label: { Image(systemName: "plus") }
+                    Menu { addMenu } label: { Image(systemName: "plus") }
                         .help("Add a connection, or import a config file (any supported type)")
                     Button { if let id = selection { Task { try? await vpn.remove(id: id) } } } label: { Image(systemName: "minus") }
                         .disabled(selection == nil || !vpn.profiles.contains { $0.id == selection })
@@ -153,23 +134,7 @@ struct ManageVPNsView: View {
                 }
             }
         } detail: {
-            if let id = selection, let t = tunnelBinding(for: id) {
-                SubprocessTunnelView(store: tunnels, manager: tunnelManager, draft: t)
-                    .id(id)
-            } else if let id = selection, let c = nativeBinding(for: id) {
-                NativeVPNView(manager: nativeVPN, draft: c)
-                    .id(id)
-            } else if let id = selection, let w = wgBinding(for: id) {
-                WireGuardView(store: wireguard, draft: w)
-                    .id(id)
-            } else if let id = selection, vpn.profiles.contains(where: { $0.id == id }) {
-                EditVPNView(vpn: vpn, labels: labels, profileID: id, embedded: true,
-                            onSaved: { if totalVPNCount <= 1 { dismissWindow() } })
-                    .id(id)   // fresh editor state per VPN
-            } else {
-                ContentUnavailableView("No VPN Selected", systemImage: "network",
-                                       description: Text("Select a VPN, or use + to import or create one."))
-            }
+            detailPane
         }
         .frame(minWidth: 760, minHeight: 560)
         .navigationTitle("Manage VPNs")
@@ -411,6 +376,59 @@ struct ManageVPNsView: View {
         guard selection.hasPrefix(Self.wgTag) else { return nil }
         let id = String(selection.dropFirst(Self.wgTag.count))
         return wireguard.configs.first { $0.id == id }
+    }
+
+    /// The "+" menu. Extracted from the toolbar closure: SwiftUI's result
+    /// builders type-check the whole thing as one expression, and this list
+    /// alone is past what the compiler will do in reasonable time inline.
+    @ViewBuilder private var addMenu: some View {
+        Button("OpenVPN") { Task { await newEmpty() } }
+        Button("WireGuard") { newWireGuard() }
+        Button("Tailscale / Headscale") { Task { await newTailscale() } }
+        Button("IKEv2") { newNative(.ikev2) }
+        Button("IPsec (IKEv1)") { newNative(.ipsec) }
+        Button("L2TP / IPsec") { newNative(.l2tp) }
+        Button("SSH (SOCKS, forwards, tunnel)") { newTunnel(.ssh) }
+        Button("FortiGate SSL VPN") { newTunnel(.fortinet) }
+        Button("F5 BIG-IP APM") { newTunnel(.f5apm) }
+        Button("Cisco AnyConnect") { newTunnel(.ciscoAnyConnect) }
+        Button("Palo Alto GlobalProtect") { newTunnel(.globalProtect) }
+        Button("Juniper Network Connect") { newTunnel(.juniper) }
+        Button("Pulse Connect Secure") { newTunnel(.pulse) }
+        Button("Array Networks SSL VPN") { newTunnel(.arrayNetworks) }
+        Button("Composition (multiple VPNs)…") { editingComposition = VPNComposition() }
+            .disabled(vpn.profiles.count < 2)
+        Divider()
+        Button("Import…") { showImporter = true }
+        Button("Discover from Address…") { showDiscover = true }
+    }
+
+    /// Which editor the selected row gets. Tag prefixes route the non-NE
+    /// stores; among NE profiles the VPNKind decides, because a Tailscale
+    /// profile shares the transport with OpenVPN but nothing in the OpenVPN
+    /// editor (raw .ovpn, certificates, engine overrides) applies to it.
+    @ViewBuilder private var detailPane: some View {
+        if let id = selection, let t = tunnelBinding(for: id) {
+            SubprocessTunnelView(store: tunnels, manager: tunnelManager, draft: t).id(id)
+        } else if let id = selection, let c = nativeBinding(for: id) {
+            NativeVPNView(manager: nativeVPN, draft: c).id(id)
+        } else if let id = selection, let w = wgBinding(for: id) {
+            WireGuardView(store: wireguard, draft: w).id(id)
+        } else if let id = selection, vpn.isTailscale(id) {
+            TailscaleView(vpn: vpn, profileID: id).id(id)
+        } else if let id = selection, vpn.profiles.contains(where: { $0.id == id }) {
+            EditVPNView(vpn: vpn, labels: labels, profileID: id, embedded: true,
+                        onSaved: { if totalVPNCount <= 1 { dismissWindow() } })
+                .id(id)   // fresh editor state per VPN
+        } else {
+            ContentUnavailableView("No VPN Selected", systemImage: "network",
+                                   description: Text("Select a VPN, or use + to import or create one."))
+        }
+    }
+
+    private func newTailscale() async {
+        do { selection = try await vpn.createTailscale() }
+        catch { vpn.lastError = error.localizedDescription }
     }
 
     private func newEmpty() async {

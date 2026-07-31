@@ -93,6 +93,36 @@ per `openvpn/tun/tunio.hpp`). `NEPacketTunnelFlow` deals in *raw* IP packets (pr
 so the socketpair pump in `OpenVPN3Bridge.mm` **must prepend that header** when writing app→engine and
 **strip it** when reading engine→app. Without it the tunnel connects but silently carries zero traffic.
 
+## Tailscale / Headscale engine (`Vendor/tailscale-engine`)
+
+The **open-source tailscale.com client stack** (BSD-3-Clause, pinned in `src/go.mod`) compiled as a Go
+**c-archive** and linked straight into `PacketTunnel` — the second Go-as-c-archive in the tree after the
+1Password SDK, and the same shape (pinned `go.mod`/`go.sum`, hand-written stable header, build script
+with a symbol cross-check).
+
+- Rebuild: `./Tools/build-tailscale-engine.sh` (needs the Go toolchain; runs `gofmt -l`, `go vet`,
+  `go test` before producing the archive). Outputs the gitignored `Vendor/tailscale-engine/libtsengine.a`;
+  `src/` + `include/` are tracked. **Run it after a fresh clone before building in Xcode.**
+- **Not tsnet.** tsnet is a dial-only netstack; a real TUN VPN needs the packet path, so
+  `src/main.go` composes what tailscaled composes (`tsd.System` + `wgengine.NewUserspaceEngine` +
+  `ipnlocal.LocalBackend`) with two substitutions: a custom `tun.Device` whose Read/Write cross the C
+  boundary, and `router.CallbackRouter` (Tailscale's own shim for "Mac, iOS, Android") standing in for
+  both the OS router and the DNS configurator, so the extension never mutates the host network stack
+  behind NetworkExtension's back.
+- **One `VPNKind`.** Headscale is `.tailscale` with a custom `controlURL` — never a second kind.
+- **No PF header on this boundary** (contrast the openvpn3 pump above): the Go TUN deals in raw IP
+  packets both ways. `TailscaleEngine.deliver` picks the protocol number from the packet's own IP
+  version nibble; nothing is prepended or stripped.
+- **Codesigning:** the archive is statically linked, dlopens nothing, and therefore needs **no**
+  hardened-runtime relaxation — unlike the 1Password SDK, which is why that one lives in the separate
+  `opnative-helper` binary. No entitlement changed for this engine, and none may be added to the app.
+- **Node state** lives at `/Library/Application Support/SimpleVPN/tailscale/<profile>` (root, 0700) so
+  the node key survives relaunches. The app cannot delete it (root-owned); `remove(id:)` asks the
+  extension to shred it via the `tsforget` IPC message, which only works while a session exists.
+- Auth keys ride `startTunnel(options:)` in memory like every other credential; they are never in
+  `providerConfiguration`, never logged (`TailscaleStartConfig.redactedJSONString()` is the only
+  loggable form), and never echoed back in `TSStatus`.
+
 ### Creds path (M3)
 
 `auth-user-pass` creds are provided programmatically via `ProvideCreds`; GR Lab's OTP is the password field

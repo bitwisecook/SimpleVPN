@@ -49,6 +49,13 @@ static NSError *sshErr(NSString *m) {
     return [NSError errorWithDomain:kSSHErrorDomain code:1 userInfo:@{ NSLocalizedDescriptionKey: m }];
 }
 
+// Compare only the hex tail after any "sha256:"/"pin-sha256:" prefix, lowercased,
+// as exact equality (a suffix compare would let a truncated pin match).
+static NSString *hexTail(NSString *s) {
+    NSRange c = [s rangeOfString:@":" options:NSBackwardsSearch];
+    return [(c.location == NSNotFound ? s : [s substringFromIndex:c.location + 1]) lowercaseString];
+}
+
 @interface SSHChannel ()
 @property (assign) LIBSSH2_CHANNEL *chan;
 @end
@@ -145,11 +152,104 @@ static NSError *sshErr(NSString *m) {
 
 - (NSString *)hostKeyFingerprintSHA256 { return _fp; }
 
-// Compare only the hex tail after any "sha256:"/"pin-sha256:" prefix, lowercased,
-// as exact equality (a suffix compare would let a truncated pin match).
-static NSString *hexTail(NSString *s) {
-    NSRange c = [s rangeOfString:@":" options:NSBackwardsSearch];
-    return [(c.location == NSNotFound ? s : [s substringFromIndex:c.location + 1]) lowercaseString];
+static NSString *hostKeyTypeName(int ktype) {
+    switch (ktype) {
+        case LIBSSH2_HOSTKEY_TYPE_RSA:       return @"ssh-rsa";
+        case LIBSSH2_HOSTKEY_TYPE_DSS:       return @"ssh-dss";
+        case LIBSSH2_HOSTKEY_TYPE_ECDSA_256: return @"ecdsa-sha2-nistp256";
+        case LIBSSH2_HOSTKEY_TYPE_ECDSA_384: return @"ecdsa-sha2-nistp384";
+        case LIBSSH2_HOSTKEY_TYPE_ECDSA_521: return @"ecdsa-sha2-nistp521";
+        case LIBSSH2_HOSTKEY_TYPE_ED25519:   return @"ssh-ed25519";
+        default: return nil;
+    }
+}
+
+- (NSString *)hostKeyType {
+    if (!_session) return nil;
+    size_t klen = 0; int ktype = 0;
+    if (!libssh2_session_hostkey(_session, &klen, &ktype)) return nil;
+    return hostKeyTypeName(ktype) ?: [NSString stringWithFormat:@"key type %d", ktype];
+}
+
+- (NSInteger)hostKeyLength {
+    if (!_session) return 0;
+    size_t klen = 0; int ktype = 0;
+    if (!libssh2_session_hostkey(_session, &klen, &ktype)) return 0;
+    return (NSInteger)klen;
+}
+
+- (NSDictionary<NSString *, NSString *> *)negotiatedMethods {
+    if (!_session) return @{};
+    NSMutableDictionary *out = [NSMutableDictionary dictionary];
+    struct { NSString *name; int method; } wanted[] = {
+        { @"kex",         LIBSSH2_METHOD_KEX },
+        { @"hostkey",     LIBSSH2_METHOD_HOSTKEY },
+        { @"cipher",      LIBSSH2_METHOD_CRYPT_CS },
+        { @"mac",         LIBSSH2_METHOD_MAC_CS },
+        { @"compression", LIBSSH2_METHOD_COMP_CS },
+    };
+    for (size_t i = 0; i < sizeof(wanted) / sizeof(wanted[0]); i++) {
+        const char *value = libssh2_session_methods(_session, wanted[i].method);
+        if (value) out[wanted[i].name] = @(value);
+    }
+    return out;
+}
+
+- (SSHHostKeyStatus)checkHostKeyWithKnownHosts:(NSString *)knownHostsPath
+                                           pin:(NSString *)pinSHA256 {
+    if (!_session) return SSHHostKeyStatusUnavailable;
+
+    if (pinSHA256.length) {
+        if (!_fp.length) return SSHHostKeyStatusUnavailable;
+        return [hexTail(_fp) isEqualToString:hexTail(pinSHA256)]
+            ? SSHHostKeyStatusMatch : SSHHostKeyStatusMismatch;
+    }
+
+    size_t klen = 0; int ktype = 0;
+    const char *hostkey = libssh2_session_hostkey(_session, &klen, &ktype);
+    if (!hostkey) return SSHHostKeyStatusUnavailable;
+
+    LIBSSH2_KNOWNHOSTS *kh = libssh2_knownhost_init(_session);
+    if (!kh) return SSHHostKeyStatusUnavailable;
+    if (knownHostsPath.length) {
+        libssh2_knownhost_readfile(kh, knownHostsPath.UTF8String, LIBSSH2_KNOWNHOST_FILE_OPENSSH);
+    }
+    int typemask = LIBSSH2_KNOWNHOST_TYPE_PLAIN | LIBSSH2_KNOWNHOST_KEYENC_RAW;
+    struct libssh2_knownhost *known = NULL;
+    int check = libssh2_knownhost_checkp(kh, _host.UTF8String, _port, hostkey, klen,
+                                         typemask, &known);
+    // Deliberately no libssh2_knownhost_addc/writefile here: see SSHHostKeyStatus.
+    libssh2_knownhost_free(kh);
+
+    switch (check) {
+        case LIBSSH2_KNOWNHOST_CHECK_MATCH:    return SSHHostKeyStatusMatch;
+        case LIBSSH2_KNOWNHOST_CHECK_MISMATCH: return SSHHostKeyStatusMismatch;
+        case LIBSSH2_KNOWNHOST_CHECK_NOTFOUND: return SSHHostKeyStatusNotFound;
+        default:                               return SSHHostKeyStatusUnavailable;
+    }
+}
+
+- (NSArray<NSString *> *)authMethodsForUser:(NSString *)user error:(NSError **)error {
+    if (!_session) {
+        if (error) *error = sshErr(@"No SSH session to ask.");
+        return nil;
+    }
+    const char *list = libssh2_userauth_list(_session, user.UTF8String,
+                                             (unsigned int)strlen(user.UTF8String));
+    if (!list) {
+        // A NULL list with the session marked authenticated means the server
+        // accepted "none" — an open server, which is worth reporting as such.
+        if (libssh2_userauth_authenticated(_session)) return @[];
+        if (error) *error = sshErr(@"The server didn't say how it wants you to sign in.");
+        return nil;
+    }
+    NSArray<NSString *> *methods = [@(list) componentsSeparatedByString:@","];
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    for (NSString *m in methods) {
+        NSString *t = [m stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (t.length) [out addObject:t];
+    }
+    return out;
 }
 
 - (BOOL)verifyHostKeyWithKnownHosts:(NSString *)knownHostsPath

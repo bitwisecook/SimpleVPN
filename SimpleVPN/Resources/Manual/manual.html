@@ -203,6 +203,16 @@
   <a href="#native-include-all">Send All Traffic</a>
   <a href="#native-exclude-local">Allow Local Network</a>
   <a href="#native-disconnect-sleep">Disconnect on Sleep</a>
+
+  <h2>Tailscale &amp; Headscale</h2>
+  <a href="#ts-what-is-it">What This Is</a>
+  <a href="#ts-control-url">Server Address</a>
+  <a href="#ts-hostname">Name on the Network</a>
+  <a href="#ts-auth-key">Setup Key</a>
+  <a href="#ts-accept-routes">Use Shared Networks</a>
+  <a href="#ts-accept-dns">Use This Network&rsquo;s DNS</a>
+  <a href="#ts-exit-node">Send Internet Traffic Elsewhere</a>
+  <a href="#ts-advertise-routes">Share Networks From This Mac</a>
 </nav>
 
 <main>
@@ -603,8 +613,52 @@
 <p class="default">Default: off.</p>
 <p>Tear the VPN down when the Mac sleeps rather than resuming it on wake. Leave off to have the tunnel come straight back after sleep.</p>
 
+<!-- ══════════════ Tailscale &amp; Headscale ══════════════ -->
+
+<h2 id="ts-what-is-it">What This Is</h2>
+<p class="default">One VPN type, two services.</p>
+<p>Most VPNs connect you to <em>one</em> server, and everything you reach goes through it. Tailscale is different: it joins your Macs, PCs, phones and servers into a single private network, and they talk to each other directly wherever they happen to be. There is no central server carrying your traffic — which is why the connection details show your own address on the network rather than a server address.</p>
+<p><strong>Headscale</strong> is the same thing with a server you run yourself: an open-source, Tailscale-compatible coordination server. SimpleVPN uses one engine for both. Choosing &ldquo;Headscale (self-hosted)&rdquo; only tells SimpleVPN to ask you for that server&rsquo;s address instead of using Tailscale&rsquo;s.</p>
+<p>The first time you connect, this Mac has to be added to the network. After that its membership is remembered and connecting is instant.</p>
+
+<h2 id="ts-control-url">Server Address</h2>
+<p class="default">Headscale only. Tailscale uses its own.</p>
+<p>The web address of your self-hosted server, for example <code>https://vpn.example.com</code>. It must start with <code>https://</code> — the request that adds this Mac to the network carries its identity, and plain <code>http</code> would expose it.</p>
+<p>Leave the service set to &ldquo;Tailscale&rdquo; and this field disappears, because there is only one address and typing it yourself is only a way to get it wrong.</p>
+
+<h2 id="ts-hostname">Name on the Network</h2>
+<p class="default">Default: your Mac&rsquo;s name.</p>
+<p>What the other machines call this Mac — in their machine lists, and as a name you can connect to directly if &ldquo;Use this network&rsquo;s DNS&rdquo; is on. Change it if your Mac&rsquo;s name is unhelpful (&ldquo;MacBook-Pro-3&rdquo;) or if two machines would otherwise share a name.</p>
+
+<h2 id="ts-auth-key">Setup Key</h2>
+<p class="default">Optional.</p>
+<p>There are two ways to add this Mac to the network:</p>
+<p><strong>Sign in with a browser</strong> (leave this field empty). The first time you connect, SimpleVPN opens a sign-in page; you approve this Mac there and the connection completes on its own. This is the normal way, and you only do it once.</p>
+<p><strong>Use a setup key.</strong> Your network&rsquo;s admin page can issue a key (it starts with <code>tskey-auth-</code>) that adds a machine without anyone signing in. Useful for a Mac that has to reconnect unattended, or where opening a browser isn&rsquo;t practical. Paste it here and it is kept in your Keychain, never in the VPN&rsquo;s settings file.</p>
+<div class="warn">A setup key is a credential: anyone holding it can add a machine to your network. Prefer a key that is single-use and expires, and remove it from this field once this Mac is signed in — it isn&rsquo;t needed again.</div>
+
+<h2 id="ts-accept-routes">Use Shared Networks</h2>
+<p class="default">Default: on.</p>
+<p>Some machines on the network offer a whole network they sit on — an office LAN, a home network, a cloud subnet — so the others can reach it. With this on, those networks are reachable through this VPN as well as the individual machines. Turn it off if you only want to reach the machines themselves.</p>
+
+<h2 id="ts-accept-dns">Use This Network&rsquo;s DNS</h2>
+<p class="default">Default: on.</p>
+<p>Lets you use machine names instead of addresses (<code>fileserver</code> rather than <code>100.92.4.17</code>), and uses whatever DNS servers your network specifies. If the network only claims certain name suffixes, only those go to it and everything else keeps using your Mac&rsquo;s normal DNS.</p>
+<p>Turn it off if a name your network publishes clashes with one you need locally.</p>
+
+<h2 id="ts-exit-node">Send Internet Traffic Elsewhere</h2>
+<p class="default">Default: off.</p>
+<p>Normally only traffic to your own machines goes through this VPN; everything else takes its usual route. Turn this on to send <em>all</em> internet traffic through another machine on the network — the way a traditional VPN works. Useful for appearing to be somewhere else, or for using a trusted connection from an untrusted network.</p>
+<p>The machine has to be offering to do this and be approved on the admin page; SimpleVPN lists the ones that are, and it can only list them while the VPN is connected. <strong>Keep using my local network</strong> leaves printers and file shares on the network you are physically on reachable; turn it off for the strictest isolation.</p>
+
+<h2 id="ts-advertise-routes">Share Networks From This Mac</h2>
+<p class="default">Optional.</p>
+<p>The reverse of &ldquo;Use shared networks&rdquo;: offer a network <em>this</em> Mac can reach — typically the LAN it is on — to the other machines, so they can reach it too. Enter networks in address/length form, separated by commas: <code>192.168.1.0/24, 10.0.0.0/8</code>.</p>
+<p>An offer isn&rsquo;t enough on its own: someone has to approve it on the network&rsquo;s admin page before the others will use it.</p>
+<div class="warn">Sharing a network exposes everything on it to everyone on your private network. Share the narrowest range that does the job.</div>
+
 <hr style="border: none; border-top: 1px solid var(--border); margin-top: 48px">
-<p class="muted" style="font-size: 13px">SimpleVPN uses the OpenVPN 3 engine. <a href="https://db-ip.com">IP Geolocation by DB-IP</a>, licensed CC BY 4.0.</p>
+<p class="muted" style="font-size: 13px">SimpleVPN uses the OpenVPN 3, OpenConnect, libssh2 and Tailscale engines. <a href="https://db-ip.com">IP Geolocation by DB-IP</a>, licensed CC BY 4.0.</p>
 </main>
 </body>
 </html>

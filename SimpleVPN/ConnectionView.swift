@@ -414,6 +414,7 @@ private struct ConnectionDetailView: View {
     @Environment(LinkStateMonitor.self) private var link: LinkStateMonitor?
     @Environment(ExtensionController.self) private var ext: ExtensionController?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.openWindow) private var openWindow
     @State private var busy = false
     /// The in-flight connect, so the busy pill's ✕ can cancel the credential lookup.
     @State private var connectTask: Task<Void, Never>?
@@ -582,12 +583,19 @@ private struct ConnectionDetailView: View {
                     // username/password — wrong for an OTP gateway, and the user
                     // has no way to know that yet). Hold their hand right here
                     // until the first successful connect proves the setup.
-                    if neverConnected, !setupDismissed {
-                        FirstConnectSetupCard(vpn: vpn, profile: profile,
-                                              dismissed: $setupDismissed.animation(.snappy(duration: 0.25)))
-                            .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
+                    // Tailscale has nothing to type: it signs itself in with a
+                    // setup key or a browser, so neither the credential form nor
+                    // the first-connect credential coaching applies.
+                    if profile.kind == .tailscale {
+                        tailscalePanel
+                    } else {
+                        if neverConnected, !setupDismissed {
+                            FirstConnectSetupCard(vpn: vpn, profile: profile,
+                                                  dismissed: $setupDismissed.animation(.snappy(duration: 0.25)))
+                                .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
+                        }
+                        if usesManager { managerForm } else { credentialForm }
                     }
-                    if usesManager { managerForm } else { credentialForm }
                     if let incident = vpn.incidents[profile.id] {
                         ConnectionIncidentCard(vpn: vpn, profile: profile, incident: incident,
                                                host: probeHost, port: probePort, speaksTLS: probeSpeaksTLS)
@@ -983,6 +991,39 @@ private struct ConnectionDetailView: View {
             // paused banner stays because it's a safety warning about traffic
             // outside the VPN, not a state duplicate — and pause is opt-in anyway.
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// What stands in for the credential form on a Tailscale/Headscale VPN.
+    /// Says what will happen rather than asking for something that doesn't
+    /// exist, and points at the one place a setup key can be entered.
+    @ViewBuilder private var tailscalePanel: some View {
+        let status = vpn.tailscaleStatuses[profile.id]
+        VStack(alignment: .leading, spacing: 8) {
+            if let status, status.backendState.needsUserAction {
+                Label(status.backendState == .needsMachineAuth
+                      ? "Waiting for someone to approve this Mac on your network."
+                      : "Waiting for you to sign in. The sign-in page should have opened.",
+                      systemImage: "person.badge.key")
+                    .foregroundStyle(.orange)
+                if status.backendState == .needsLogin {
+                    Button("Open Sign-In Page") { openWindow(id: "sso") }
+                }
+            } else if let status, status.backendState == .running {
+                Label("This Mac is on the network as \(status.selfDNSName.isEmpty ? status.primaryIPv4 : status.selfDNSName).",
+                      systemImage: "checkmark.circle")
+                    .foregroundStyle(.secondary)
+                if status.peerCount > 0 {
+                    Text("\(status.peersOnline) of \(status.peerCount) machines online.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+            } else {
+                Label("This VPN signs itself in — with a setup key, or by opening a sign-in page the first time.",
+                      systemImage: "point.3.connected.trianglepath.dotted")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .font(.callout)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 

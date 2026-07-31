@@ -105,13 +105,18 @@ nonisolated enum BiometricCredentialStore {
     /// control (only the data is), so the label tells the UI whether the
     /// fingerprint will also cover the one-time code.
     static func info(profile: String) -> (exists: Bool, hasTOTP: Bool) {
+        // The prompt-free guarantee: an LAContext that refuses interaction is the
+        // replacement for kSecUseAuthenticationUIFail — a lookup that would need
+        // the fingerprint fails with errSecInteractionNotAllowed instead of asking.
+        let noPrompt = LAContext()
+        noPrompt.interactionNotAllowed = true
         let q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: profile,
             kSecAttrAccessGroup as String: accessGroup,
             kSecUseDataProtectionKeychain as String: true,
-            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
+            kSecUseAuthenticationContext as String: noPrompt,
             kSecReturnAttributes as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]

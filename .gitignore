@@ -22,3 +22,16 @@ Vendor/*
 Vendor/onepassword-native/*
 !Vendor/onepassword-native/src/
 !Vendor/onepassword-native/include/
+
+# Tailscale/Headscale engine (the same Go-as-c-archive deal): track the shim
+# source, the pinned lockfiles and the stable header; the ~50 MB libtsengine.a
+# is rebuilt by Tools/build-tailscale-engine.sh from the pinned tailscale.com
+# version, so it never belongs in git.
+!Vendor/tailscale-engine/
+Vendor/tailscale-engine/*
+!Vendor/tailscale-engine/src/
+!Vendor/tailscale-engine/include/
+# `go build ./...` in the shim directory drops an executable named after the
+# module; the archive build never produces it, but a stray one must not be
+# committed.
+Vendor/tailscale-engine/src/tsengine

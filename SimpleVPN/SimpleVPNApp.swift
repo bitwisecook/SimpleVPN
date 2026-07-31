@@ -156,6 +156,12 @@ struct SimpleVPNApp: App {
                 .environment(linkState)
                 .environment(ext)
                 .environment(topology)
+                // The staged check reads a saved VPN's own certificates, keys
+                // and host-key settings, which live in these four stores.
+                .environment(evaluator)
+                .environment(tunnels)
+                .environment(nativeVPN)
+                .environment(wireguard)
         }
         .defaultSize(width: 680, height: 680)
         .commandsRemoved()
@@ -246,7 +252,9 @@ struct SimpleVPNApp: App {
         }
         let apps = AppConnectionInspector.appsUsingTunnel(tunnelAddresses: tunnelAddrs)
 
-        let disconnectAndGo = {
+        // Explicitly Void-returning: the reply is delivered from inside the task,
+        // and quitting outlives it, so there is nothing to await or cancel.
+        let disconnectAndGo: () -> Void = {
             Task {
                 await vpn.disconnectAllAndWait()
                 for id in tunnelManager.activeIDs { tunnelManager.disconnect(id) }

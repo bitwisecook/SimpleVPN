@@ -65,8 +65,22 @@ struct VPNProbeTarget: Sendable, Equatable {
     }
 }
 
+/// How Network Tools names a saved VPN across the four places they're kept
+/// (NetworkExtension profiles, subprocess tunnels, WireGuard, native IPsec).
+/// A string so it can ride in NetworkToolsRequest without dragging a store —
+/// and, crucially, without dragging any key material into a singleton.
+nonisolated enum ProbeLadderKey {
+    static func make(kind: VPNKind, id: String) -> String { "\(kind.rawValue)/\(id)" }
+    static func split(_ key: String) -> (kind: VPNKind, id: String)? {
+        guard let slash = key.firstIndex(of: "/"),
+              let kind = VPNKind(rawValue: String(key[key.startIndex..<slash])) else { return nil }
+        return (kind, String(key[key.index(after: slash)...]))
+    }
+}
+
 /// "Probe" — opens Network Tools already pointed at this VPN's endpoint, with every
-/// test (ping, traceroute, DNS, protocol fingerprint, captive portal) already running.
+/// test (ping, traceroute, DNS, protocol fingerprint, captive portal) already running,
+/// AND the staged step-by-step check for this VPN's own certificates and keys.
 struct ProbeVPNMenuItem: View {
     @Bindable var vpn: VPNController
     let profile: VPNController.Profile
@@ -77,10 +91,12 @@ struct ProbeVPNMenuItem: View {
         Button("Probe\u{2026}", systemImage: "stethoscope") {
             let target = VPNProbeTarget.resolve(profile: profile, vpn: vpn, evaluator: evaluator)
             guard !target.host.isEmpty else { return }
-            NetworkToolsRequest.shared.probe(host: target.host, port: target.port,
-                                             proto: target.proto, vpnKind: target.kind)
+            NetworkToolsRequest.shared.probe(
+                host: target.host, port: target.port,
+                proto: target.proto, vpnKind: target.kind,
+                ladderKey: ProbeLadderKey.make(kind: profile.kind, id: profile.id))
             openWindow(id: "tools")
         }
-        .help("Find out what's actually answering at this VPN's address — and whether this network is holding traffic behind a sign-in page")
+        .help("Check this VPN step by step — the address, the way through this network, its shared key and certificates — and see exactly where it stops")
     }
 }

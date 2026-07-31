@@ -28,25 +28,29 @@ final class InstalledExtensionTests: XCTestCase {
     private static let bundleID = "com.bragi0.SimpleVPN"
     private static let installedPath = "/Applications/SimpleVPN.app"
 
-    private var app: XCUIApplication!
-
     override func setUpWithError() throws {
         continueAfterFailure = false
 
         try XCTSkipUnless(FileManager.default.fileExists(atPath: Self.installedPath),
                           "SimpleVPN isn't installed in /Applications — run Tools/build-notarize-install.sh. "
                           + "A DerivedData build cannot activate the system extension.")
+    }
 
-        app = XCUIApplication(bundleIdentifier: Self.bundleID)
+    /// The installed app, launched and frontmost. XCUIApplication is main-actor
+    /// only and XCTest calls setUp/tearDown without isolation, so the launch (and
+    /// the matching quit) belong to the test itself.
+    @MainActor
+    private func launchInstalledApp() -> XCUIApplication {
+        let app = XCUIApplication(bundleIdentifier: Self.bundleID)
         app.launch()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 30),
                       "The installed app didn't come to the foreground — check the Automation permission prompt.")
-    }
-
-    override func tearDownWithError() throws {
         // Leave the machine as we found it: the app is a menu-bar app, so quitting
         // it is the polite end state rather than leaving windows open.
-        if app?.state == .runningForeground { app.terminate() }
+        addTeardownBlock { @MainActor in
+            if app.state == .runningForeground { app.terminate() }
+        }
+        return app
     }
 
     /// The extension activated: the app is NOT showing its "System Extension
@@ -54,6 +58,7 @@ final class InstalledExtensionTests: XCTestCase {
     /// .isActivated), so its absence is a real signal, not a guess.
     @MainActor
     func testExtensionIsActivatedNotPrompting() throws {
+        let app = launchInstalledApp()
         let prompt = app.staticTexts["System Extension Required"]
         // Give activation a moment: on a fresh install the OS may still be loading it.
         let appeared = prompt.waitForExistence(timeout: 8)
@@ -68,7 +73,8 @@ final class InstalledExtensionTests: XCTestCase {
     /// round-trip failed even though the extension may be registered.
     @MainActor
     func testExtensionVersionRoundTripsOverIPC() throws {
-        openAbout()
+        let app = launchInstalledApp()
+        openAbout(in: app)
 
         let about = app.windows["About SimpleVPN"]
         XCTAssertTrue(about.waitForExistence(timeout: 10), "About window didn't open")
@@ -86,6 +92,7 @@ final class InstalledExtensionTests: XCTestCase {
     /// target keeps it off the network and away from anything we don't own.
     @MainActor
     func testNetworkToolsRunsAgainstLoopback() throws {
+        let app = launchInstalledApp()
         app.typeKey("t", modifierFlags: [.command, .shift])   // VPN ▸ Network Tools…
 
         let tools = app.windows["Network Tools"]
@@ -107,7 +114,7 @@ final class InstalledExtensionTests: XCTestCase {
     /// About lives under the app menu; use the menu rather than a private URL so the
     /// test exercises the same path a user takes.
     @MainActor
-    private func openAbout() {
+    private func openAbout(in app: XCUIApplication) {
         let appMenu = app.menuBars.menuBarItems.element(boundBy: 1)   // 0 is Apple
         appMenu.click()
         // firstMatch: "About SimpleVPN" appears both in the app menu and (as the

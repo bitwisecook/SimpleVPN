@@ -18,11 +18,16 @@ Tunnelblick replacement. The tunnel runs in a Network Extension **system extensi
 
 ## Building
 
-Requires Xcode 26+, [XcodeGen](https://github.com/yonaskolb/XcodeGen), and Homebrew
-(`cmake`, `openssl@3`, `lz4`) for the engine build.
+Requires Xcode 26+, [XcodeGen](https://github.com/yonaskolb/XcodeGen), Homebrew
+(`cmake`, `openssl@3`, `lz4`) for the C engine builds, and a Go toolchain for the two
+Go static archives (1Password SDK, Tailscale/Headscale engine).
 
 ```sh
 ./Tools/build-openvpn3-xcframework.sh   # one-time: builds Vendor/OpenVPNEngine.xcframework
+./Tools/build-openconnect-xcframework.sh
+./Tools/build-libssh2-xcframework.sh
+./Tools/build-onepassword-sdk.sh        # Go: Vendor/onepassword-native/libopnative.a
+./Tools/build-tailscale-engine.sh       # Go: Vendor/tailscale-engine/libtsengine.a
 xcodegen generate                       # project.yml is the source of truth
 open SimpleVPN.xcodeproj
 ```

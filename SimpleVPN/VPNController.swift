@@ -259,6 +259,9 @@ final class VPNController {
                 credentialSources[id] = CredentialSource.decode(from: proto?.providerConfiguration?["credsource"] as? Data)
                 let kind = (proto?.providerConfiguration?["vpnType"] as? String)
                     .flatMap(VPNKind.init(rawValue:)) ?? .openVPN
+                if kind == .tailscale {
+                    tailscaleConfigs[id] = TailscaleConfig.decode(from: proto?.providerConfiguration?["tailscale"] as? Data)
+                }
                 list.append(Profile(id: id,
                                     name: mgr.localizedDescription ?? id,
                                     server: proto?.serverAddress ?? "",
@@ -325,15 +328,226 @@ final class VPNController {
 
     func remove(id: String) async throws {
         guard let mgr = managers[id] else { return }
+        // A Tailscale node key is this Mac's identity on that network and lives
+        // in the extension's root-owned tree, which the app cannot touch — ask
+        // the extension to shred it while there is still a session to ask.
+        if profiles.first(where: { $0.id == id })?.kind == .tailscale {
+            _ = await sendMessageData("tsforget", to: id, timeout: 4)
+        }
         try await mgr.removeFromPreferences()
         KeychainCredentialStore.deleteCredentials(profile: id)
         KeychainCredentialStore.deleteProfileSecrets(profile: id)
         KeychainCredentialStore.clearSession(profile: id)
+        KeychainCredentialStore.deleteCredentials(profile: Self.tailscaleKeyProfile(id))
         BiometricCredentialStore.delete(profile: id)
+        tailscaleConfigs[id] = nil
+        tailscaleStatuses[id] = nil
+        tailscaleSignInWatch[id]?.cancel()
+        tailscaleSignInWatch[id] = nil
         appliedOverrides[id] = nil
         appliedOVPN[id] = nil
         endpointsCache[id] = nil
         await loadAll()
+    }
+
+    // MARK: Tailscale / Headscale
+    //
+    // A Tailscale VPN is an ordinary packet-tunnel profile — that is what buys
+    // it the sidebar, status dots, telemetry, map and compositions for free.
+    // Only the settings blob and the connect flow differ, and both live here.
+
+    /// Keychain namespace for a network's auth key. Its own item, so deleting
+    /// the VPN can delete the key without touching the generic credentials.
+    private static func tailscaleKeyProfile(_ id: String) -> String { "tailscale.\(id)" }
+
+    /// Observable mirror of the persisted Tailscale settings.
+    private(set) var tailscaleConfigs: [String: TailscaleConfig] = [:]
+    /// Latest engine status per profile, refreshed while connected.
+    private(set) var tailscaleStatuses: [String: TailscaleStatus] = [:]
+
+    func isTailscale(_ id: String) -> Bool {
+        profiles.first { $0.id == id }?.kind == .tailscale
+    }
+
+    func tailscaleConfig(for id: String) -> TailscaleConfig {
+        if let c = tailscaleConfigs[id] { return c }
+        let proto = managers[id]?.protocolConfiguration as? NETunnelProviderProtocol
+        return TailscaleConfig.decode(from: proto?.providerConfiguration?["tailscale"] as? Data)
+    }
+
+    /// Create a new Tailscale/Headscale VPN. `serverAddress` is only what macOS
+    /// shows in Network settings; the real control server rides the settings
+    /// blob, because for the Tailscale preset there is nothing to show.
+    @discardableResult
+    func createTailscale(name: String = "Tailscale") async throws -> String {
+        guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
+        let id = UUID().uuidString
+        var config = TailscaleConfig()
+        config.hostname = Self.defaultTailscaleHostname()
+        let mgr = NETunnelProviderManager()
+        let proto = NETunnelProviderProtocol()
+        proto.providerBundleIdentifier = Self.providerBundleID
+        // serverAddress is what macOS shows in Network settings AND what the
+        // probe/endpoint machinery dials. The coordination server is the honest
+        // answer: it IS what this VPN talks to. What carries the traffic is the
+        // peers themselves, which is why TunnelStats.serverEndpoint stays empty.
+        proto.serverAddress = Self.tailscaleServerAddress(config)
+        var conf: [String: Any] = ["profile": id, "vpnType": VPNKind.tailscale.rawValue]
+        if let blob = config.encodedBlob() { conf["tailscale"] = blob }
+        proto.providerConfiguration = conf
+        mgr.protocolConfiguration = proto
+        mgr.localizedDescription = name
+        mgr.isEnabled = true
+        try await mgr.saveToPreferences()
+        try await mgr.loadFromPreferences()
+        await loadAll()
+        selectedID = id
+        Self.log.log("created tailscale profile id=\(id, privacy: .public)")
+        return id
+    }
+
+    /// The coordination server this VPN registers with, as a bare host.
+    nonisolated static func tailscaleServerAddress(_ config: TailscaleConfig) -> String {
+        guard config.preset == .headscale else { return "controlplane.tailscale.com" }
+        let url = config.controlURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        return URL(string: url)?.host ?? url
+    }
+
+    /// The Mac's own name, which is what a person expects this machine to be
+    /// called on their network.
+    nonisolated static func defaultTailscaleHostname() -> String {
+        let raw = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+        // Tailscale sanitises hostnames anyway, but a name full of spaces and
+        // apostrophes reads badly in every peer's machine list.
+        let cleaned = raw.replacingOccurrences(of: "'", with: "")
+            .replacingOccurrences(of: ".local", with: "")
+            .map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "-" }
+        return String(cleaned).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+
+    func setTailscaleConfig(_ config: TailscaleConfig, for id: String) async throws {
+        guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
+        guard let mgr = managers[id],
+              let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { return }
+        var conf = proto.providerConfiguration ?? [:]
+        conf["profile"] = id
+        conf["vpnType"] = VPNKind.tailscale.rawValue
+        if let blob = config.encodedBlob() { conf["tailscale"] = blob }
+        proto.providerConfiguration = conf
+        proto.serverAddress = Self.tailscaleServerAddress(config)
+        mgr.protocolConfiguration = proto
+        try await mgr.saveToPreferences()
+        try await mgr.loadFromPreferences()
+        tailscaleConfigs[id] = config
+        await loadAll()
+    }
+
+    /// The saved auth key, if the user chose to keep one.
+    func tailscaleAuthKey(for id: String) -> String {
+        KeychainCredentialStore.loadCredentials(profile: Self.tailscaleKeyProfile(id))?.password ?? ""
+    }
+
+    func setTailscaleAuthKey(_ key: String, for id: String) {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            KeychainCredentialStore.deleteCredentials(profile: Self.tailscaleKeyProfile(id))
+        } else {
+            try? KeychainCredentialStore.saveCredentials(
+                profile: Self.tailscaleKeyProfile(id),
+                .init(username: "authkey", password: trimmed))
+        }
+    }
+
+    /// Connect a Tailscale/Headscale VPN. There is no username/password to
+    /// collect: either a stored auth key registers this Mac silently, or the
+    /// engine asks for a browser sign-in and `watchTailscaleSignIn` surfaces it.
+    func connectTailscale(id: String) async throws {
+        guard let mgr = managers[id],
+              mgr.protocolConfiguration is NETunnelProviderProtocol else { throw err("no such profile") }
+        if let ensureExtensionReady, !(await ensureExtensionReady()) {
+            throw err("SimpleVPN needs its network extension approved before it can connect. Open System Settings ▸ General ▸ Login Items & Extensions ▸ Network Extensions and allow SimpleVPN.")
+        }
+        let config = tailscaleConfig(for: id)
+        if let problem = config.controlURLProblem { throw err(problem) }
+        if let problem = TailscaleConfig.routesProblem(config.advertiseRoutes) { throw err(problem) }
+
+        // The auth key is a credential: it goes through startTunnel options in
+        // memory, never through providerConfiguration.
+        var options: [String: NSObject] = [:]
+        let key = tailscaleAuthKey(for: id)
+        if !key.isEmpty { options["tailscaleAuthKey"] = key as NSString }
+
+        mgr.isEnabled = true
+        try await mgr.saveToPreferences()
+        try await mgr.loadFromPreferences()
+        guard let session = mgr.connection as? NETunnelProviderSession else {
+            throw err("The VPN configuration isn't ready — try removing and re-creating it.")
+        }
+        try session.startTunnel(options: options)
+        Self.log.log("tailscale startTunnel dispatched for \(id, privacy: .public)")
+        resyncStatuses()
+        watchTailscaleSignIn(id: id)
+    }
+
+    /// Poll the extension for a sign-in URL and hand it to the existing "VPN
+    /// Sign-In" window. The extension cannot push across the root/user boundary
+    /// (see TunnelIncidentStore's note), so this is a short, bounded poll that
+    /// stops as soon as the node is authorized.
+    private func watchTailscaleSignIn(id: String) {
+        tailscaleSignInWatch[id]?.cancel()
+        tailscaleSignInWatch[id] = Task { [weak self] in
+            // Five minutes is longer than any legitimate registration (the user
+            // has to read a consent page) and short enough that a wedged session
+            // doesn't poll forever.
+            for _ in 0..<300 {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, !Task.isCancelled else { return }
+                guard self.profiles.contains(where: { $0.id == id }) else { return }
+                // Keep the status fresh for the whole registration: it is what
+                // dismisses the sign-in page once the control plane completes
+                // the login on its own, and what the editor shows meanwhile.
+                if await self.refreshTailscaleStatus(id: id)?.backendState == .running { return }
+                guard self.tailscaleSignInURL[id] == nil,
+                      let data = await self.sendMessageData("tsauth", to: id, timeout: 4),
+                      let text = String(data: data, encoding: .utf8), !text.isEmpty,
+                      let url = URL(string: text) else { continue }
+                self.tailscaleSignInURL[id] = url
+                SSOAuthModel.shared.request(url)
+            }
+        }
+    }
+
+    @ObservationIgnored private var tailscaleSignInWatch: [String: Task<Void, Never>] = [:]
+    /// The sign-in page we sent this VPN's user to, so the window can be cleared
+    /// once the node registers — without clobbering another VPN's live sign-in.
+    @ObservationIgnored private var tailscaleSignInURL: [String: URL] = [:]
+
+    /// Refresh (and publish) the engine status for a connected Tailscale VPN.
+    @discardableResult
+    func refreshTailscaleStatus(id: String) async -> TailscaleStatus? {
+        guard let data = await sendMessageData("tsstatus", to: id),
+              let status = try? JSONDecoder().decode(TailscaleStatus.self, from: data) else { return nil }
+        tailscaleStatuses[id] = status
+        // Once the node is registered there is nothing left to sign in to. The
+        // control plane completed the sign-in on its own — the browser never
+        // redirects anywhere this app can see — so the stale page has to be
+        // dismissed from this side.
+        if status.backendState == .running {
+            tailscaleSignInWatch[id]?.cancel()
+            if let url = tailscaleSignInURL[id], SSOAuthModel.shared.pending == url {
+                SSOAuthModel.shared.finish()
+            }
+            tailscaleSignInURL[id] = nil
+        }
+        return status
+    }
+
+    /// Apply a settings change to a *running* session so the user doesn't have
+    /// to reconnect to switch exit node. Returns an error message, or nil.
+    func pushTailscalePrefs(_ patch: TailscalePrefsPatch, id: String) async -> String? {
+        guard let data = await sendMessageData("tsprefs:\(patch.jsonString())", to: id),
+              let text = String(data: data, encoding: .utf8) else { return "The VPN didn't answer." }
+        return text == "ok" ? nil : String(text.dropFirst("error: ".count))
     }
 
     // MARK: Engine overrides (per-VPN OpenVPN settings)
@@ -375,7 +589,11 @@ final class VPNController {
         } else {
             conf.removeValue(forKey: "overrides")
         }
-        conf["vpnType"] = VPNKind.openVPN.rawValue
+        // Only ever *stamp* the kind onto a profile that has none (pre-vpnType
+        // configs default to OpenVPN). Writing it unconditionally re-branded
+        // every non-OpenVPN packet-tunnel profile as OpenVPN the first time
+        // anything touched its overrides.
+        if conf["vpnType"] == nil { conf["vpnType"] = VPNKind.openVPN.rawValue }
         proto.providerConfiguration = conf
         mgr.protocolConfiguration = proto
         try await mgr.saveToPreferences()
@@ -704,7 +922,7 @@ final class VPNController {
     func connect(id: String, using provider: CredentialProvider,
                  request: CredentialRequest, remember: Bool) async throws {
         guard let mgr = managers[id],
-              let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else {
+              mgr.protocolConfiguration is NETunnelProviderProtocol else {
             throw err("no such profile")
         }
         Self.log.log("connect: \(id, privacy: .public) source=\(provider.id, privacy: .public)")
@@ -798,6 +1016,10 @@ final class VPNController {
     /// edits). Persists username+password iff the shared Remember preference is on
     /// and the profile allows saving; the OTP is consumed and cleared.
     func connectWithTransientCredentials(id: String) async throws {
+        // Tailscale has no username/password to collect — it signs in with a
+        // setup key or a browser. Every connect entry point funnels here or to
+        // one of the two below, so the branch belongs at each of them.
+        if isTailscale(id) { try await connectTailscale(id: id); return }
         let c = transientCredentials(for: id)
         let auth = authConfig(for: id)
         let provider = ManualCredentialProvider(username: c.username, password: c.password, otp: c.otp)
@@ -818,6 +1040,10 @@ final class VPNController {
     /// the caller then sends the user to the credential form.
     @discardableResult
     func connectWithSavedCredentials(id: String) async -> Bool {
+        if isTailscale(id) {
+            do { try await connectTailscale(id: id); return true }
+            catch { report(error, profile: id); return false }
+        }
         let auth = authConfig(for: id)
 
         // A password manager can auto-connect when the profile needs no OTP, or
@@ -854,6 +1080,7 @@ final class VPNController {
     /// manager sees fit) and overlays the typed OTP only if the manager didn't
     /// supply one. Manual sources fall back to the shared credential state.
     func connectUsingConfiguredSource(id: String, typedOTP: String) async throws {
+        if isTailscale(id) { try await connectTailscale(id: id); return }
         let auth = authConfig(for: id)
         guard let provider = managerProvider(for: id) else {
             try await connectWithTransientCredentials(id: id)
@@ -1250,6 +1477,9 @@ final class VPNController {
     /// Whether `reconnect` can bring the profile back without user interaction —
     /// used to avoid dropping a live tunnel we couldn't restore.
     private func canReconnectUnattended(id: String) -> Bool {
+        // Once a Tailscale node is registered its key is on disk, so a
+        // reconnect never needs the user.
+        if isTailscale(id) { return true }
         let auth = authConfig(for: id)
         if managerProvider(for: id) != nil {
             // 1Password can serve an OTP itself; Apple Passwords can't.

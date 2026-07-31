@@ -173,7 +173,7 @@ nonisolated enum ConnectionDiagnostics {
                 var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                 if getnameinfo(info.pointee.ai_addr, info.pointee.ai_addrlen,
                                &buffer, socklen_t(buffer.count), nil, 0, NI_NUMERICHOST) == 0 {
-                    let ip = String(cString: buffer)
+                    let ip = String(cBuffer: buffer)
                     if !out.contains(ip) { out.append(ip) }
                 }
                 node = info.pointee.ai_next

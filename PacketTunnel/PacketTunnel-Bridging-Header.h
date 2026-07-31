@@ -3,8 +3,10 @@
 
 //
 //  PacketTunnel-Bridging-Header.h
-//  Exposes the Objective-C++ OpenVPN 3 bridge to the Swift provider.
+//  Exposes the Objective-C++ OpenVPN 3 bridge to the Swift provider, plus the
+//  Tailscale/Headscale Go engine's stable C interface.
 //
 
 #import "OpenVPN3Bridge.h"
 #import "OpenConnectBridge.h"
+#import "tsengine.h"

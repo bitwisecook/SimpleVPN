@@ -108,6 +108,11 @@ struct NetworkToolsView: View {
     @Environment(ReachabilityMonitor.self) private var reach: ReachabilityMonitor?
     @Environment(TopologyMonitor.self) private var topo: TopologyMonitor?
     @Environment(ProfileEvaluator.self) private var evaluator: ProfileEvaluator?
+    // The other three places a saved VPN can live. Optional so the window still
+    // works when it's opened somewhere they aren't injected.
+    @Environment(SubprocessTunnelStore.self) private var tunnels: SubprocessTunnelStore?
+    @Environment(WireGuardStore.self) private var wireguard: WireGuardStore?
+    @Environment(NativeVPNManager.self) private var nativeVPN: NativeVPNManager?
 
     @State private var target = ""
     @State private var request = NetworkToolsRequest.shared
@@ -154,10 +159,17 @@ struct NetworkToolsView: View {
 
     struct PortalCheck: Equatable { var detected: Bool; var url: URL? }
 
+    // The staged, authenticated check. Separate from the anonymous fingerprint
+    // above it on purpose: the fingerprint asks "what is that?", the ladder asks
+    // "would MY configuration get in?", and both answers are worth having.
+    @State private var ladderRunner = ProbeLadderRunner()
+    @State private var ladderKey: String = ""
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 targetBar
+                ladderSection
                 vpnProbeCard
                 if hasResults {
                     flowRailroad
@@ -186,12 +198,97 @@ struct NetworkToolsView: View {
             run()
         }
         .onAppear { topo?.startWatching() }      // need the routing table to classify the path
-        .onDisappear { topo?.stopWatching(); stop() }   // + cancel latency/traceroute/DNS/resolve/MTU
+        .onDisappear {
+            topo?.stopWatching()
+            stop()                          // cancel latency/traceroute/DNS/resolve/MTU
+            ladderRunner.cancel()           // …and drop whatever key material it held
+        }
     }
 
     private var hasResults: Bool {
         latency.targetIP != nil || !hops.isEmpty || !dnsAnswers.isEmpty
             || mtuRunning || pathMTU != nil || transportMTU != nil
+    }
+
+    // MARK: The staged check
+
+    /// Every saved VPN, from all four stores, as (key, menu label). Built from
+    /// names only — nothing is read out of a profile until one is chosen.
+    private var ladderChoices: [(key: String, label: String)] {
+        var out: [(String, String)] = []
+        for p in vpn.profiles {
+            out.append((ProbeLadderKey.make(kind: p.kind, id: p.id), "\(p.name) \u{2014} \(p.kind.displayName)"))
+        }
+        for t in tunnels?.tunnels ?? [] {
+            out.append((ProbeLadderKey.make(kind: t.kind, id: t.id), "\(t.name) \u{2014} \(t.kind.displayName)"))
+        }
+        for w in wireguard?.configs ?? [] {
+            out.append((ProbeLadderKey.make(kind: .wireGuard, id: w.id), "\(w.name) \u{2014} WireGuard"))
+        }
+        for n in nativeVPN?.configs ?? [] {
+            out.append((ProbeLadderKey.make(kind: n.kind, id: n.id), "\(n.name) \u{2014} \(n.kind.displayName)"))
+        }
+        return out
+    }
+
+    /// Read the chosen VPN's material, at the moment of the click and no sooner.
+    private func ladderFacts(for key: String) -> ProbeTargetFacts? {
+        guard let (kind, id) = ProbeLadderKey.split(key) else { return nil }
+        if let profile = vpn.profiles.first(where: { $0.id == id && $0.kind == kind }) {
+            return .resolve(profile: profile, vpn: vpn, evaluator: evaluator)
+        }
+        if let tunnel = tunnels?.tunnels.first(where: { $0.id == id }) {
+            return .resolve(tunnel: tunnel)
+        }
+        if kind == .wireGuard, let config = wireguard?.configs.first(where: { $0.id == id }) {
+            return .resolve(wireGuard: config)
+        }
+        if let native = nativeVPN?.configs.first(where: { $0.id == id }) {
+            return .resolve(native: native)
+        }
+        return nil
+    }
+
+    @ViewBuilder private var ladderSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ladderControls
+            if let problem = ladderRunner.signInProblem {
+                Label("\(problem.title). \(problem.explanation)", systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let ladder = ladderRunner.ladder {
+                ProbeLadderCard(
+                    ladder: ladder,
+                    isRunning: ladderRunner.isRunning,
+                    testSignIn: ladderRunner.facts.map { facts in
+                        { ladderRunner.runIncludingSignIn(facts, vpn: vpn) }
+                    },
+                    rerun: { runLadder() })
+            }
+        }
+    }
+
+    @ViewBuilder private var ladderControls: some View {
+        let choices = ladderChoices
+        if !choices.isEmpty {
+            HStack {
+                Picker("Check a saved VPN", selection: $ladderKey) {
+                    Text("Choose a VPN\u{2026}").tag("")
+                    ForEach(choices, id: \.key) { Text($0.label).tag($0.key) }
+                }
+                .labelsHidden().fixedSize()
+                .help("Runs each step of this VPN's own handshake in order \u{2014} its address, this network, its shared key and certificates \u{2014} and shows exactly where it stops.")
+                Button("Check Step by Step") { runLadder() }
+                    .disabled(ladderKey.isEmpty || ladderRunner.isRunning)
+                Spacer()
+            }
+        }
+    }
+
+    private func runLadder() {
+        guard let facts = ladderFacts(for: ladderKey) else { return }
+        ladderRunner.run(facts)
     }
 
     // MARK: VPN probe (what kind of VPN answers there) + captive portal
@@ -694,6 +791,12 @@ struct NetworkToolsView: View {
         probePortText = request.port.map(String.init) ?? ""
         probeTransport = VPNProbe.Transport(hint: request.proto)
         probeKind = request.vpnKind
+        // …and, when it came from a saved VPN, which one — so the staged check
+        // runs against that VPN's own keys rather than waiting to be told again.
+        if let key = request.ladderKey, ladderFacts(for: key) != nil {
+            ladderKey = key
+            if request.autoRun { runLadder() }
+        }
         if request.autoRun { run() }
     }
 

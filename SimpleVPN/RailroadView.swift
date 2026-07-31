@@ -27,7 +27,7 @@ struct TrackLine: View {
 
     /// Train speed from rate: log-scaled so 1 KB/s visibly crawls and
     /// 100 MB/s hurries without becoming a blur. Points per second.
-    private func speed(_ rate: Double) -> Double {
+    nonisolated private func speed(_ rate: Double) -> Double {
         guard rate > 64 else { return 0 }
         return min(120, 12 * log10(rate / 64 + 1) * 8)
     }

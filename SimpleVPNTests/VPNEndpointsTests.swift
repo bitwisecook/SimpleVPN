@@ -47,7 +47,10 @@ struct VPNEndpointsTests {
             VPNEndpoint(host: "plain.example.org"),
             VPNEndpoint(host: "named.example.org", label: "Named"),
         ])
-        let back = VPNEndpointList.decode(from: try #require(list.encodedBlob()))
+        // Typed: decode(from:) takes Data?, so an inline #require would infer the
+        // optional itself and assert nothing.
+        let blob: Data = try #require(list.encodedBlob())
+        let back = VPNEndpointList.decode(from: blob)
         #expect(back.endpoints.map(\.host) == ["named.example.org"])
     }
 

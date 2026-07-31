@@ -274,13 +274,14 @@ struct NetworkIdentityTests {
         // readable), and nothing overwrites it with a through-tunnel result.
         let network = "mac:0:8:a2:e:dc:c7"
         let store = EndpointProbeStore(networkKey: { network })
-        var engaged = false
-        store.isProfileEngaged = { _ in engaged }
+        store.isProfileEngaged = { _ in false }
         let id = VPNEndpoint(host: "tig-vpn.grlab.co.uk").id
 
         store.record(EndpointMeasurement(rttMS: 21, reachable: true, measuredAt: Date()),
                      for: id, network: network, profile: "grlab")
-        engaged = true
+        // Connecting is a new answer to the same question, so the predicate is
+        // replaced rather than a captured flag flipped under it.
+        store.isProfileEngaged = { _ in true }
         store.record(EndpointMeasurement(reachable: false, measuredAt: Date()),
                      for: id, network: network, profile: "grlab")
         #expect(store.measurement(for: id)?.rttMS == 21)

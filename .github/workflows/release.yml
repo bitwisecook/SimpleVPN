@@ -214,12 +214,23 @@ jobs:
           name: engines
           path: Vendor
 
-      # In-process 1Password (Go SDK as a static c-archive). Built fresh each
-      # release — it's ~1 minute and go.sum pins every module hash, so the
-      # output is reproducible without caching machinery. The macos-26 runner
-      # image ships NO Go toolchain (verified: v0.2's first run died here), so
-      # install it with GitHub's own setup-go, SHA-pinned like every other
-      # action, at the exact version the module's go directive names.
+      # The two Go c-archives (in-process 1Password, and the Tailscale /
+      # Headscale engine). Built fresh each release — a couple of minutes, and
+      # each module's go.sum pins every dependency hash, so the output is
+      # reproducible without caching machinery. The macos-26 runner image ships
+      # NO Go toolchain (verified: v0.2's first run died here), so install it
+      # with GitHub's own setup-go, SHA-pinned like every other action, at the
+      # exact version the module's go directive names.
+      #
+      # These stay in THIS job rather than the secret-free `engines` job on
+      # purpose, and it does not weaken that job's security boundary: the
+      # boundary exists because `engines` runs freshly-cloned UPSTREAM build
+      # scripts (openvpn3/openconnect/libssh2 configure+make). Nothing of the
+      # sort happens here — `go build` compiles pinned, hash-verified module
+      # source with no upstream build scripts of its own, driven by this repo's
+      # own Tools/ script. If a Go module ever needed a `go generate` or a cgo
+      # step that ran vendor-supplied tooling, that reasoning would change and
+      # this belongs back in `engines` with the cache extended to match.
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -230,6 +241,13 @@ jobs:
           set -euo pipefail
           go version
           Tools/build-onepassword-sdk.sh
+      # Runs gofmt/vet/go test on the shim before producing the archive, so a
+      # drift in the Swift↔Go JSON contract fails the release here rather than
+      # shipping a tunnel that connects and carries nothing.
+      - name: Build Tailscale engine archive
+        run: |
+          set -euo pipefail
+          Tools/build-tailscale-engine.sh
 
       - name: Import signing identity + provisioning profiles
         env:

@@ -27,6 +27,12 @@ enum Acknowledgements {
               url: "https://www.infradead.org/openconnect/"),
         .init(name: "libssh2", license: "BSD-3-Clause", role: "SSH tunnel engine",
               url: "https://libssh2.org"),
+        .init(name: "Tailscale", license: "BSD-3-Clause", role: "Tailscale / Headscale engine",
+              url: "https://github.com/tailscale/tailscale"),
+        .init(name: "wireguard-go", license: "MIT", role: "WireGuard data plane inside the Tailscale engine",
+              url: "https://github.com/tailscale/wireguard-go"),
+        .init(name: "gVisor", license: "Apache-2.0", role: "Userspace network stack inside the Tailscale engine",
+              url: "https://gvisor.dev"),
         .init(name: "OpenSSL 3", license: "Apache-2.0", role: "TLS / crypto for all engines",
               url: "https://www.openssl.org"),
         .init(name: "Asio", license: "BSL-1.0", role: "OpenVPN async I/O",
@@ -60,7 +66,10 @@ enum Acknowledgements {
     statically-linked OpenConnect. OpenConnect is LGPL-2.1 (GPL-compatible), OpenSSL \
     is Apache-2.0 (one-way compatible with GPLv3, no linking exception needed), and \
     DB-IP's data is CC BY 4.0 — used unmodified to derive country codes, attributed \
-    here with a link to the licence.
+    here with a link to the licence. The Tailscale client stack (with wireguard-go \
+    and gVisor, which it embeds) is statically linked into the network extension; \
+    BSD-3-Clause, MIT and Apache-2.0 are all one-way compatible with GPLv3/AGPLv3, \
+    so they impose no obligation beyond the attribution given above.
     """
 }
 

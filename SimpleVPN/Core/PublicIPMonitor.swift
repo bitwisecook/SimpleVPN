@@ -42,7 +42,7 @@ final class PublicIPMonitor {
     /// several seconds before its status says "connected", and a lookup that lands
     /// in that window answers with the tunnel's country — which is precisely how
     /// "home" once got re-stamped onto the far end of the VPN. Default: not active.
-    static var isVPNActive: @Sendable () -> Bool = { false }
+    static var isVPNActive: @MainActor () -> Bool = { false }
 
     @ObservationIgnored private var monitorTask: Task<Void, Never>?
     /// Runs only while monitoring: nothing here may touch the network at init.

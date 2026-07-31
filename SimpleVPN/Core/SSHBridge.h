@@ -28,6 +28,18 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)close;
 @end
 
+/// What consulting known_hosts (or a pin) says about the key a server just
+/// presented. Kept separate from `verifyHostKeyWithKnownHosts:` because the
+/// staged probe must be able to ASK without the accept-new side effect of
+/// writing a new entry — a diagnostic that silently trusts a new key would
+/// destroy the very evidence the next real connection needs.
+typedef NS_ENUM(NSInteger, SSHHostKeyStatus) {
+    SSHHostKeyStatusMatch = 0,        ///< known, and this is the same key
+    SSHHostKeyStatusMismatch = 1,     ///< known, and the key has CHANGED
+    SSHHostKeyStatusNotFound = 2,     ///< no record of this host
+    SSHHostKeyStatusUnavailable = 3,  ///< couldn't ask (no session / no key)
+};
+
 @interface SSHSession : NSObject
 
 /// Connect a TCP socket to host:port and run the libssh2 handshake.
@@ -36,6 +48,28 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// The server host key fingerprint (SHA-256, hex) for known-hosts verification.
 @property (nullable, readonly) NSString *hostKeyFingerprintSHA256;
+
+/// The host key's algorithm ("ssh-ed25519", "ecdsa-sha2-nistp256", …) and its
+/// length in bytes — reported by the probe so a fingerprint has context.
+@property (nullable, readonly) NSString *hostKeyType;
+@property (readonly) NSInteger hostKeyLength;
+
+/// What the handshake actually agreed on: keys "kex", "hostkey", "cipher",
+/// "mac", "compression". Empty when the session isn't up.
+@property (readonly) NSDictionary<NSString *, NSString *> *negotiatedMethods;
+
+/// READ-ONLY known_hosts/pin check — never writes, never trusts on first use.
+/// A non-empty `pinSHA256` decides on its own; otherwise known_hosts is read.
+- (SSHHostKeyStatus)checkHostKeyWithKnownHosts:(nullable NSString *)knownHostsPath
+                                           pin:(nullable NSString *)pinSHA256;
+
+/// The authentication methods the server offers for `user` ("publickey",
+/// "password", "keyboard-interactive"…). This sends the standard "none"
+/// request every SSH client sends before choosing a method; it submits no
+/// credential. Returns an EMPTY array when the server let the user straight in
+/// without any authentication at all.
+- (nullable NSArray<NSString *> *)authMethodsForUser:(NSString *)user
+                                               error:(NSError * _Nullable * _Nullable)error;
 
 /// Verify the server host key BEFORE authenticating (libssh2 does none of this
 /// itself — skipping it is a MITM hole). Precedence: an explicit pinned SHA-256

@@ -305,7 +305,7 @@ final class TopologyMonitor {
                 memcpy(&addr, sa, MemoryLayout<sockaddr_in>.size)
                 var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
                 inet_ntop(AF_INET, &addr.sin_addr, &buf, socklen_t(INET_ADDRSTRLEN))
-                byName[name]?.ipv4.append(String(cString: buf))
+                byName[name]?.ipv4.append(String(cBuffer: buf))
             case AF_INET6:
                 var addr = sockaddr_in6()
                 memcpy(&addr, sa, MemoryLayout<sockaddr_in6>.size)
@@ -313,7 +313,7 @@ final class TopologyMonitor {
                 if addr.sin6_addr.__u6_addr.__u6_addr8.0 == 0xfe { break }
                 var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
                 inet_ntop(AF_INET6, &addr.sin6_addr, &buf, socklen_t(INET6_ADDRSTRLEN))
-                byName[name]?.ipv6.append(String(cString: buf))
+                byName[name]?.ipv6.append(String(cBuffer: buf))
             case AF_LINK:
                 if let dataPtr = ifa.ifa_data {
                     let data = dataPtr.assumingMemoryBound(to: if_data.self).pointee

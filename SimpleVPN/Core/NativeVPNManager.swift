@@ -190,6 +190,10 @@ final class NativeVPNManager {
             p.excludeLocalNetworks = c.excludeLocalNetworks
         }
         for sa in [p.ikeSecurityAssociationParameters, p.childSecurityAssociationParameters] {
+            // The 128-bit cases are deprecated by Apple (macOS 14) with no
+            // replacement — the advice is "use 256-bit". They stay because a
+            // concentrator that only proposes AES-128 is otherwise unreachable,
+            // and dropping the case would fail the connection silently.
             switch c.ikeEncryption {
             case "aes128": sa.encryptionAlgorithm = .algorithmAES128
             case "aes256": sa.encryptionAlgorithm = .algorithmAES256

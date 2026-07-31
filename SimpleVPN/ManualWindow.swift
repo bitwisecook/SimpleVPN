@@ -89,7 +89,7 @@ private struct ManualWebView: NSViewRepresentable {
         // Keep navigation inside the bundle; external links open in the browser.
         func webView(_ webView: WKWebView,
                      decidePolicyFor navigationAction: WKNavigationAction,
-                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+                     decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
             guard let url = navigationAction.request.url else { decisionHandler(.allow); return }
             if url.isFileURL {
                 decisionHandler(.allow)

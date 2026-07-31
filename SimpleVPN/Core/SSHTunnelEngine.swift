@@ -234,7 +234,9 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
     /// queue. Both directions free the channel on the ssh queue at end/error.
     private func pump(_ conn: NWConnection, _ channel: SSHChannel) {
         // Write every byte, retrying the unwritten tail on partial writes / EAGAIN.
-        func writeAll(_ d: Data, _ from: Int) {
+        // @Sendable throughout: these three hand themselves between the `ssh` queue
+        // and Network.framework's callback queue, and only touch queue-confined state.
+        @Sendable func writeAll(_ d: Data, _ from: Int) {
             self.ssh.async {
                 if channel.isClosed() { return }
                 let remaining = d.count - from
@@ -249,14 +251,14 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
                 }
             }
         }
-        func clientToChannel() {
+        @Sendable func clientToChannel() {
             conn.receive(minimumIncompleteLength: 1, maximumLength: 32768) { data, _, isDone, _ in
                 if let d = data, !d.isEmpty { writeAll(d, 0) }
                 if isDone { self.ssh.async { self.closeChannel(channel) }; return }
                 clientToChannel()
             }
         }
-        func channelToClient() {
+        @Sendable func channelToClient() {
             self.ssh.async {
                 if channel.isClosed() { return }
                 var buf = [UInt8](repeating: 0, count: 32768)

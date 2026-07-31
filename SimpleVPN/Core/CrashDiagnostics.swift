@@ -136,7 +136,9 @@ nonisolated enum CrashDiagnostics {
         MainActor.assumeIsolated {
             guard let window = NSApp?.keyWindow ?? NSApp?.mainWindow else { return "no key window" }
             var hosted: [String] = []
-            func walk(_ view: NSView, depth: Int) {
+            // @MainActor: a local function doesn't inherit the isolation the
+            // assumeIsolated body already stands in, and it reads NSView state.
+            @MainActor func walk(_ view: NSView, depth: Int) {
                 let name = String(describing: type(of: view))
                 // Our own representables and SwiftUI's hosts for them.
                 if name.contains("Catcher") || name.contains("NSTextView")

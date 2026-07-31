@@ -13,6 +13,15 @@ import Foundation
 import Testing
 @testable import SimpleVPN
 
+/// The network the caches are asked about, in a box. The `networkKey` closures are
+/// @MainActor — hence Sendable — and a captured `var` may not be mutated once such
+/// a closure has it; moving network mid-test is exactly what this file exercises,
+/// so the moving part lives here instead.
+@MainActor final class MovingNetwork {
+    var key: String
+    init(_ key: String) { self.key = key }
+}
+
 @MainActor
 struct NetworkKeyedCachesTests {
 
@@ -33,8 +42,9 @@ struct NetworkKeyedCachesTests {
     // MARK: EndpointLocator — one host, two networks, two answers
 
     @Test func hostCacheKeepsOneAnswerPerNetwork() {
-        var network = office
-        let locator = EndpointLocator(defaults: scratchDefaults("perNetwork"), networkKey: { network })
+        let network = MovingNetwork(office)
+        let locator = EndpointLocator(defaults: scratchDefaults("perNetwork"),
+                                      networkKey: { network.key })
 
         locator.store(host: "vpn.example.com", network: office,
                       addresses: ["10.1.2.3"], countryCode: "GB")
@@ -47,29 +57,29 @@ struct NetworkKeyedCachesTests {
         #expect(inOffice.ip == "10.1.2.3")
         #expect(inOffice.countryCode == "GB")
 
-        network = cafe
+        network.key = cafe
         let inCafe = locator.locations(for: endpoint)[0]
         #expect(inCafe.ip == "203.0.113.9")
         #expect(inCafe.countryCode == "DE")
 
         // Going back must find the office answer still there — the whole point
         // of keying rather than clearing.
-        network = office
+        network.key = office
         #expect(locator.locations(for: endpoint)[0].ip == "10.1.2.3")
     }
 
     @Test func hostCacheSurvivesRelaunchPerNetwork() {
         let defaults = scratchDefaults("relaunch")
-        var network = office
-        let first = EndpointLocator(defaults: defaults, networkKey: { network })
+        let network = MovingNetwork(office)
+        let first = EndpointLocator(defaults: defaults, networkKey: { network.key })
         first.store(host: "vpn.example.com", network: office,
                     addresses: ["10.1.2.3"], countryCode: "GB")
         first.store(host: "vpn.example.com", network: cafe,
                     addresses: ["203.0.113.9"], countryCode: "DE")
 
-        let reloaded = EndpointLocator(defaults: defaults, networkKey: { network })
+        let reloaded = EndpointLocator(defaults: defaults, networkKey: { network.key })
         #expect(reloaded.cached(host: "vpn.example.com")?.ip == "10.1.2.3")
-        network = cafe
+        network.key = cafe
         #expect(reloaded.cached(host: "vpn.example.com")?.ip == "203.0.113.9")
     }
 
@@ -127,28 +137,28 @@ struct NetworkKeyedCachesTests {
     // MARK: EndpointProbeStore — timings belong to one network
 
     @Test func measurementsAreOnlyVisibleOnTheNetworkTheyWereTakenOn() {
-        var network = office
-        let store = EndpointProbeStore(networkKey: { network })
+        let network = MovingNetwork(office)
+        let store = EndpointProbeStore(networkKey: { network.key })
         let id = VPNEndpoint(host: "vpn.example.com").id
 
         store.record(EndpointMeasurement(rttMS: 3, reachable: true, measuredAt: Date()),
                      for: id, network: office)
         #expect(store.measurement(for: id)?.rttMS == 3)
 
-        network = cafe
+        network.key = cafe
         #expect(store.measurement(for: id) == nil, "3 ms from the office is a lie in a café")
 
         store.record(EndpointMeasurement(rttMS: 84, reachable: true, measuredAt: Date()),
                      for: id, network: cafe)
         #expect(store.measurement(for: id)?.rttMS == 84)
 
-        network = office
+        network.key = office
         #expect(store.measurement(for: id)?.rttMS == 3)
     }
 
     @Test func movingNetworkDropsTheMeasurementsThatCanNeverBeReadAgain() {
-        var network = office
-        let store = EndpointProbeStore(networkKey: { network })
+        let network = MovingNetwork(office)
+        let store = EndpointProbeStore(networkKey: { network.key })
         let id = VPNEndpoint(host: "vpn.example.com").id
         store.record(EndpointMeasurement(rttMS: 3, reachable: true, measuredAt: Date()),
                      for: id, network: office)
@@ -156,7 +166,7 @@ struct NetworkKeyedCachesTests {
                      for: id, network: cafe)
         #expect(store.results.count == 2)
 
-        network = cafe
+        network.key = cafe
         store.dropMeasurements(notOn: cafe)
         #expect(store.results.count == 1)
         #expect(store.measurement(for: id)?.rttMS == 84)

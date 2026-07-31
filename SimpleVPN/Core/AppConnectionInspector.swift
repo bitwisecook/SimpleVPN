@@ -97,7 +97,7 @@ enum AppConnectionInspector {
         } else {
             return nil
         }
-        return String(cString: buf)
+        return String(cBuffer: buf)
     }
 
     // MARK: Naming
@@ -112,7 +112,7 @@ enum AppConnectionInspector {
         }
         var buf = [CChar](repeating: 0, count: 2 * Int(MAXCOMLEN) + 1)
         let n = proc_name(pid, &buf, UInt32(buf.count))
-        let raw = n > 0 ? String(cString: buf) : "another program"
+        let raw = n > 0 ? String(cBuffer: buf) : "another program"
         return stripHelperNoise(raw)
     }
 

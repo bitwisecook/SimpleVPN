@@ -21,6 +21,16 @@ import Foundation
 import Darwin
 import SystemConfiguration
 
+nonisolated extension String {
+    /// Decode a NUL-terminated C buffer filled by inet_ntop/getnameinfo/proc_name.
+    /// `String(cString:)` on an array is deprecated because it hid this truncation;
+    /// every C-buffer site in the app funnels through here instead.
+    init(cBuffer: [CChar]) {
+        self = String(decoding: cBuffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) },
+                      as: UTF8.self)
+    }
+}
+
 nonisolated enum NetworkProbes {
 
     // MARK: - Address resolution
@@ -39,7 +49,7 @@ nonisolated enum NetworkProbes {
                 var buf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                 if getnameinfo(n.pointee.ai_addr, n.pointee.ai_addrlen, &buf, socklen_t(buf.count),
                                nil, 0, NI_NUMERICHOST) == 0 {
-                    let s = String(cString: buf)
+                    let s = String(cBuffer: buf)
                     if n.pointee.ai_family == AF_INET6 { if !v6.contains(s) { v6.append(s) } }
                     else if n.pointee.ai_family == AF_INET { if !v4.contains(s) { v4.append(s) } }
                 }
@@ -67,7 +77,7 @@ nonisolated enum NetworkProbes {
                     getnameinfo($0, socklen_t(MemoryLayout<sockaddr_in>.size), &host, socklen_t(host.count), nil, 0, NI_NAMEREQD) } }
             }
             guard rc == 0 else { return nil }
-            let name = String(cString: host)
+            let name = String(cBuffer: host)
             return name.isEmpty ? nil : name
         }.value
     }
@@ -743,6 +753,6 @@ nonisolated enum NetworkProbes {
                 getnameinfo($0, socklen_t($0.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
             }
         }
-        return rc == 0 ? String(cString: host) : nil
+        return rc == 0 ? String(cBuffer: host) : nil
     }
 }

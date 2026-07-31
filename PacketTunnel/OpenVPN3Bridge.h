@@ -90,6 +90,12 @@ typedef NS_ENUM(NSInteger, OVPNStatus) {
 - (void)bridge:(OpenVPN3Bridge *)bridge didLog:(NSString *)line;
 @end
 
+// NS_SWIFT_SENDABLE: this bridge is designed for cross-thread use and
+// already is used that way — it owns its own engine thread, delivers
+// delegate callbacks on that thread, and answers stats/pause calls from
+// the provider's work queue. The annotation states that existing
+// contract to Swift 6 rather than introducing it.
+NS_SWIFT_SENDABLE
 @interface OpenVPN3Bridge : NSObject
 
 - (instancetype)initWithProvider:(NEPacketTunnelProvider *)provider

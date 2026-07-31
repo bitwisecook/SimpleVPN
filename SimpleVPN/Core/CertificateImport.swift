@@ -18,7 +18,7 @@ import CryptoKit
 // MARK: - Slots
 
 /// The four places a profile embeds crypto material.
-enum CertSlot: String, CaseIterable, Identifiable, Sendable {
+nonisolated enum CertSlot: String, CaseIterable, Identifiable, Sendable {
     case ca, cert, key, tlsKey
     var id: String { rawValue }
 
@@ -35,7 +35,7 @@ enum CertSlot: String, CaseIterable, Identifiable, Sendable {
 // MARK: - Content sniffing
 
 /// What a dropped/browsed file turned out to contain.
-enum SniffedPayload {
+nonisolated enum SniffedPayload {
     case certificates(pem: String, count: Int)      // one or more PEM certificates
     case privateKey(pem: String, encrypted: Bool)
     case pkcs12(Data)                               // needs a password to open
@@ -43,7 +43,7 @@ enum SniffedPayload {
     case unknown
 }
 
-enum CertificateImport {
+nonisolated enum CertificateImport {
 
     /// Identify file contents. PEM markers first, then DER/PKCS#12 by parsing.
     static func sniff(_ data: Data) -> SniffedPayload {
@@ -251,7 +251,7 @@ enum CertificateImport {
 /// Read/rewrite the inline blocks of an .ovpn. Setting a block also removes the
 /// matching file-reference directive ("ca ca.crt") — after embedding, the file
 /// is self-contained.
-enum OVPNInline {
+nonisolated enum OVPNInline {
 
     static func tags(for slot: CertSlot, in ovpn: String) -> [String] {
         switch slot {
@@ -374,7 +374,7 @@ enum OVPNInline {
 
 // MARK: - Summaries for the cards
 
-struct CertificateSummary: Identifiable, Equatable {
+nonisolated struct CertificateSummary: Identifiable, Equatable {
     var id: String { sha256Fingerprint }
 
     var commonName = ""
@@ -486,7 +486,7 @@ struct CertificateSummary: Identifiable, Equatable {
     }
 }
 
-struct PrivateKeySummary: Equatable {
+nonisolated struct PrivateKeySummary: Equatable {
     var algorithm: String?
     var bits: Int?
     var encrypted = false
@@ -533,7 +533,7 @@ struct PrivateKeySummary: Equatable {
     }
 }
 
-struct TLSKeySummary: Equatable {
+nonisolated struct TLSKeySummary: Equatable {
     var mode: String        // "tls-crypt" | "tls-auth"
     var direction: String?  // key-direction, tls-auth only
 
