@@ -142,3 +142,188 @@ struct CredentialSourceTests {
         #expect(EditVPNView.parseOnePasswordDrop("   \n ") == nil)
     }
 }
+
+/// The Connect-readiness seam (`ConnectInputs.readiness`) is the ONE decision the
+/// detail Connect button, the sidebar play button and the menu row all read. It
+/// exists because those three used to recompute enablement independently and
+/// drifted: a Tailscale VPN was connectable from the detail pane yet stuck on a
+/// dimmed "Sign-in needed" play button in the sidebar — so it could never be
+/// signed in. These tests pin the pure decision AND the invariant that the two
+/// view mappings can never disagree.
+struct ConnectReadinessTests {
+
+    // The two view mappings, transcribed from ConnectionView.canConnect and
+    // VPNSidebarRow.missingTypedInput — the exact seam under test.
+    private func detailCanConnect(_ r: ConnectReadiness) -> Bool { r == .ready }
+    private enum SidebarMissing: Equatable { case none, signIn, code }
+    private func sidebarMissing(_ r: ConnectReadiness) -> SidebarMissing {
+        switch r {
+        case .ready: .none
+        case .needsCode: .code
+        case .needsSignIn, .blocked: .signIn
+        }
+    }
+
+    // MARK: - The bug: Tailscale signs itself in, so it is always connectable
+
+    /// The regression this whole change fixes: a Tailscale VPN is READY with no
+    /// stored credentials, no typed username/password, no OTP — nothing.
+    @Test func tailscaleIsReadyWithNothingStoredOrTyped() {
+        var inputs = ConnectInputs()
+        inputs.kind = .tailscale
+        #expect(inputs.readiness == .ready)
+    }
+
+    /// …and stays ready no matter what the credential fields say — the kind wins
+    /// outright, so the sidebar can't fall back to "Sign-in needed".
+    @Test(arguments: [true, false])
+    func tailscaleIgnoresEveryCredentialField(_ flag: Bool) {
+        var inputs = ConnectInputs()
+        inputs.kind = .tailscale
+        inputs.requiresOTP = flag
+        inputs.typedUsername = flag
+        inputs.typedPassword = flag
+        inputs.typedOTP = flag
+        inputs.hasLockedUsername = flag
+        inputs.biometricProtected = flag
+        #expect(inputs.readiness == .ready)
+    }
+
+    // MARK: - Sidebar and detail can never disagree
+
+    /// The core invariant: for every reachable input combination, the detail
+    /// pane's "Connect enabled" and the sidebar's "nothing missing" agree. A
+    /// Tailscale profile with no credentials must be connectable in BOTH.
+    @Test func detailAndSidebarNeverDisagree() {
+        for inputs in Self.matrix {
+            let r = inputs.readiness
+            let detailEnabled = detailCanConnect(r)
+            let sidebarClear = sidebarMissing(r) == .none
+            #expect(detailEnabled == sidebarClear,
+                    "detail(\(detailEnabled)) vs sidebar(\(sidebarClear)) for \(inputs)")
+        }
+    }
+
+    // Every combination the gatherer can produce, across all kinds — the exact
+    // set the two views must agree on.
+    private static let matrix: [ConnectInputs] = {
+        var out: [ConnectInputs] = []
+        let bools = [false, true]
+        // Tailscale + proxy variants.
+        out.append({ var i = ConnectInputs(); i.kind = .tailscale; return i }())
+        for problem in bools { for auth in bools { for complete in bools {
+            var i = ConnectInputs(); i.kind = .proxyTunnel
+            i.proxyHasProblem = problem; i.proxyRequiresAuth = auth; i.proxyCredentialsComplete = complete
+            out.append(i)
+        }}}
+        // OpenVPN across autologin / manager / biometric / typed dimensions.
+        for autologin in bools {
+          for manager in [CredentialSourceKind.manual, .applePasswords, .onePassword] {
+            for otp in bools { for bioP in bools { for bioStored in bools { for bioTOTP in bools {
+              for locked in bools { for tUser in bools { for tPass in bools { for tOTP in bools {
+                var i = ConnectInputs(); i.kind = .openVPN
+                i.autologin = autologin; i.managerKind = manager; i.requiresOTP = otp
+                i.biometricProtected = bioP; i.biometricStored = bioStored; i.biometricHasTOTP = bioTOTP
+                i.hasLockedUsername = locked; i.typedUsername = tUser; i.typedPassword = tPass; i.typedOTP = tOTP
+                out.append(i)
+              }}}}
+            }}}}
+          }
+        }
+        return out
+    }()
+
+    // MARK: - Autologin: the certificate is the sign-in
+
+    @Test func autologinIsReadyWithNoTypedCredentials() {
+        var inputs = ConnectInputs()
+        inputs.kind = .openVPN
+        inputs.autologin = true
+        #expect(inputs.readiness == .ready)
+    }
+
+    // MARK: - Proxy Tunnel
+
+    @Test func proxyWithoutAuthIsReady() {
+        var i = ConnectInputs(); i.kind = .proxyTunnel
+        #expect(i.readiness == .ready)
+    }
+
+    @Test func proxyNeedingAuthWaitsOnItsStoredSignIn() {
+        var i = ConnectInputs(); i.kind = .proxyTunnel; i.proxyRequiresAuth = true
+        #expect(i.readiness == .needsSignIn)
+        i.proxyCredentialsComplete = true
+        #expect(i.readiness == .ready)
+    }
+
+    @Test func proxyProblemBlocksConnect() {
+        var i = ConnectInputs(); i.kind = .proxyTunnel
+        i.proxyHasProblem = true
+        i.proxyRequiresAuth = true
+        i.proxyCredentialsComplete = true   // even fully-credentialled, a problem blocks
+        #expect(i.readiness == .blocked)
+    }
+
+    // MARK: - Password managers
+
+    /// Apple Passwords can't hand over a one-time code, so a code is still needed;
+    /// 1Password can, so it doesn't block.
+    @Test func managerOTPGapDependsOnTheManager() {
+        var apple = ConnectInputs(); apple.kind = .openVPN
+        apple.managerKind = .applePasswords; apple.requiresOTP = true
+        #expect(apple.readiness == .needsCode)
+        apple.typedOTP = true
+        #expect(apple.readiness == .ready)
+
+        var op = ConnectInputs(); op.kind = .openVPN
+        op.managerKind = .onePassword; op.requiresOTP = true
+        #expect(op.readiness == .ready)   // 1Password supplies the code itself
+    }
+
+    @Test func managerWithoutOTPIsReady() {
+        var i = ConnectInputs(); i.kind = .openVPN
+        i.managerKind = .applePasswords
+        #expect(i.readiness == .ready)
+    }
+
+    // MARK: - Touch ID-protected sign-in
+
+    @Test func biometricReleasesStoredSecretsButAnUncoveredCodeStillBlocks() {
+        var i = ConnectInputs(); i.kind = .openVPN
+        i.biometricProtected = true; i.biometricStored = true; i.requiresOTP = true
+        #expect(i.readiness == .needsCode)      // no stored TOTP, none typed
+        i.biometricHasTOTP = true
+        #expect(i.readiness == .ready)          // the store supplies the code
+    }
+
+    @Test func biometricWithoutOTPIsReady() {
+        var i = ConnectInputs(); i.kind = .openVPN
+        i.biometricProtected = true; i.biometricStored = true
+        #expect(i.readiness == .ready)
+    }
+
+    // MARK: - Plain typed credentials
+
+    @Test func typedCredentialsNeedUsernameAndPassword() {
+        var i = ConnectInputs(); i.kind = .openVPN
+        #expect(i.readiness == .needsSignIn)
+        i.typedUsername = true
+        #expect(i.readiness == .needsSignIn)    // password still missing
+        i.typedPassword = true
+        #expect(i.readiness == .ready)
+    }
+
+    @Test func aLockedUsernameCountsAsPresent() {
+        var i = ConnectInputs(); i.kind = .openVPN
+        i.hasLockedUsername = true; i.typedPassword = true
+        #expect(i.readiness == .ready)
+    }
+
+    @Test func typedCredentialsNeedTheCodeWhenOTPIsRequired() {
+        var i = ConnectInputs(); i.kind = .openVPN
+        i.typedUsername = true; i.typedPassword = true; i.requiresOTP = true
+        #expect(i.readiness == .needsCode)
+        i.typedOTP = true
+        #expect(i.readiness == .ready)
+    }
+}

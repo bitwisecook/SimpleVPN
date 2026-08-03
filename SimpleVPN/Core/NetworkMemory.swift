@@ -199,6 +199,31 @@ nonisolated enum NetworkIdentity {
                                   ssid: ssid)
     }
 
+    /// The interface a probe of a VPN SERVER must egress from, so its hello + reply
+    /// travel the real underlying path and cannot loop back through the very tunnel
+    /// being tested. It is the non-tunnel default route's interface (the same path
+    /// the tunnel's own control channel uses) — and, when there is no physical
+    /// default at all, the interface holding our address. nil ⇒ none determinable,
+    /// so the caller probes unbound (today's behavior). Pure over its snapshot, so
+    /// the tunnel-skipping is testable from fixtures.
+    static func physicalEgressInterface(in snapshot: RouteTableSnapshot,
+                                        fallbackInterface: () -> String? = { primaryIPv4Interface() })
+        -> String? {
+        if let name = underlayDefaultRoute(in: snapshot)?.interfaceName, !name.isEmpty {
+            return name
+        }
+        return fallbackInterface()
+    }
+
+    /// Live `IP_BOUND_IF` index for `physicalEgressInterface`, read straight from the
+    /// kernel (one sysctl, no subprocess). 0 ⇒ no non-tunnel interface found, so the
+    /// probe binds nothing and falls back to normal routing.
+    static func physicalEgressBoundIf() -> UInt32 {
+        guard let snapshot = try? RouteTableSource.snapshot(),
+              let name = physicalEgressInterface(in: snapshot) else { return 0 }
+        return NetworkProbes.interfaceIndex(name)
+    }
+
     /// The IPv4 network the given interface sits on, e.g. "192.168.87.0/24".
     /// In-process (getifaddrs), so no subprocess and no permission involved.
     static func ipv4Network(of iface: String) -> String? {

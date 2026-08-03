@@ -43,16 +43,39 @@ nonisolated enum AuthenticatedProbe {
 
     /// Plan, then run. `progress` fires after every step so the ladder fills in
     /// live rather than appearing all at once at the end.
+    ///
+    /// - `egressBoundIf`: the `IP_BOUND_IF` index every probe socket is pinned to.
+    ///   nil ⇒ resolve the current PHYSICAL (non-tunnel) egress here, so the
+    ///   handshake probes travel the real underlying path and can't loop back
+    ///   through the very VPN they're testing — even while it owns the default
+    ///   route. 0/unresolvable falls back to normal routing.
+    /// - `seed`: an earlier ladder to resume from. Its leading run of settled
+    ///   steps (passed / not-applicable) is carried forward and only the first
+    ///   unsettled rung onward is re-run — the incremental re-check.
     static func run(facts: ProbeTargetFacts,
                     includeAccountSteps: Bool = false,
                     signIn: ProbeSignInMaterial? = nil,
+                    egressBoundIf: UInt32? = nil,
+                    seed: ProbeLadder? = nil,
                     progress: (@Sendable ([ProbeStep]) -> Void)? = nil) async -> ProbeLadder {
         var ladder = ProbeLadderPlan.ladder(for: facts)
-        let runner = ProbeStageRunner(facts: facts, signIn: signIn)
+        // A nonisolated async func runs on its caller's actor (the main one here),
+        // so keep the routing-table sysctl off it — same reasoning as NetworkMemory.
+        let boundIf: UInt32
+        if let egressBoundIf {
+            boundIf = egressBoundIf
+        } else {
+            boundIf = await Task.detached { NetworkIdentity.physicalEgressBoundIf() }.value
+        }
+        let runner = ProbeStageRunner(facts: facts, signIn: signIn, egressBoundIf: boundIf)
         ladder.includedAccountSteps = includeAccountSteps
+        // Only a same-shaped seed can be resumed; a plan that changed shape (the
+        // profile was edited) re-runs whole.
+        let seedSteps = seed.flatMap { $0.steps.map(\.stage) == ladder.steps.map(\.stage) ? $0.steps : nil }
         ladder.steps = await ProbeLadderEngine.run(
             plan: ladder.steps,
             includeAccountSteps: includeAccountSteps,
+            seed: seedSteps,
             progress: progress) { stage in
                 await runner.execute(stage)
             }
@@ -68,6 +91,8 @@ actor ProbeStageRunner {
 
     private let facts: ProbeTargetFacts
     private let signIn: ProbeSignInMaterial?
+    /// The physical-egress interface index every probe socket binds to (0 ⇒ unbound).
+    private let egressBoundIf: UInt32
 
     // Carried between stages.
     private var tls: ProbeTLSResult?
@@ -79,9 +104,10 @@ actor ProbeStageRunner {
 
     private let timeout: TimeInterval = 4
 
-    init(facts: ProbeTargetFacts, signIn: ProbeSignInMaterial?) {
+    init(facts: ProbeTargetFacts, signIn: ProbeSignInMaterial?, egressBoundIf: UInt32 = 0) {
         self.facts = facts
         self.signIn = signIn
+        self.egressBoundIf = egressBoundIf
     }
 
     func finish() {
@@ -163,7 +189,7 @@ actor ProbeStageRunner {
 
     private func streamReachability() async -> ProbeStepOutcome {
         let result = await VPNProbe.tcpExchange(host: facts.host, port: facts.port,
-                                                payload: [], timeout: timeout)
+                                                payload: [], timeout: timeout, boundIf: egressBoundIf)
         switch result {
         case .reply, .connectedNoReply:
             return .ok("The VPN accepts connections on port \(facts.port).",
@@ -186,7 +212,7 @@ actor ProbeStageRunner {
             ? VPNProbe.openVPNResetPacket(sessionID: (0..<8).map { _ in UInt8.random(in: 0...255) })
             : [UInt8](repeating: 0, count: 32)
         let result = await VPNProbe.udpExchange(host: facts.host, port: facts.port,
-                                                payload: payload, timeout: timeout)
+                                                payload: payload, timeout: timeout, boundIf: egressBoundIf)
         switch result {
         case .reply:
             return .ok("The VPN answered on port \(facts.port).",
@@ -213,8 +239,8 @@ actor ProbeStageRunner {
         let payload = VPNProbe.openVPNResetPacket(sessionID: session)
         let wire = tcp ? VPNProbe.openVPNTCPFramed(payload) : payload
         let result = tcp
-            ? await VPNProbe.tcpExchange(host: facts.host, port: facts.port, payload: wire, timeout: timeout)
-            : await VPNProbe.udpExchange(host: facts.host, port: facts.port, payload: wire, timeout: timeout)
+            ? await VPNProbe.tcpExchange(host: facts.host, port: facts.port, payload: wire, timeout: timeout, boundIf: egressBoundIf)
+            : await VPNProbe.udpExchange(host: facts.host, port: facts.port, payload: wire, timeout: timeout, boundIf: egressBoundIf)
 
         switch result {
         case .reply(let bytes):
@@ -256,8 +282,8 @@ actor ProbeStageRunner {
         let tcp = facts.transport == .tcp
         let wire = tcp ? VPNProbe.openVPNTCPFramed(payload) : payload
         let result = tcp
-            ? await VPNProbe.tcpExchange(host: facts.host, port: facts.port, payload: wire, timeout: timeout)
-            : await VPNProbe.udpExchange(host: facts.host, port: facts.port, payload: wire, timeout: timeout)
+            ? await VPNProbe.tcpExchange(host: facts.host, port: facts.port, payload: wire, timeout: timeout, boundIf: egressBoundIf)
+            : await VPNProbe.udpExchange(host: facts.host, port: facts.port, payload: wire, timeout: timeout, boundIf: egressBoundIf)
 
         switch result {
         case .reply(let raw):
@@ -360,7 +386,7 @@ actor ProbeStageRunner {
 
     private func sshBanner() async -> ProbeStepOutcome {
         let result = await VPNProbe.tcpExchange(host: facts.host, port: facts.port,
-                                                payload: [], timeout: timeout)
+                                                payload: [], timeout: timeout, boundIf: egressBoundIf)
         guard case .reply(let bytes) = result else {
             return .failed("The server sent no greeting.",
                            evidence: ["SSH servers always greet first; nothing arrived"],
@@ -569,7 +595,7 @@ actor ProbeStageRunner {
         let payload = ProbeIKE.saInit(initiatorSPI: spi, proposal: ikeProposalValue)
         let port = facts.port == 0 ? VPNProbe.ikeDefaultPort : facts.port
         let result = await VPNProbe.udpExchange(host: facts.host, port: port,
-                                                payload: payload, timeout: timeout)
+                                                payload: payload, timeout: timeout, boundIf: egressBoundIf)
         switch result {
         case .reply(let bytes):
             ikeReply = bytes
@@ -640,7 +666,7 @@ actor ProbeStageRunner {
         let payload = ProbeIKE.saInit(initiatorSPI: spi, proposal: ikeProposalValue,
                                       nonESPMarker: true)
         let result = await VPNProbe.udpExchange(host: facts.host, port: VPNProbe.ikeNATTPort,
-                                                payload: payload, timeout: timeout)
+                                                payload: payload, timeout: timeout, boundIf: egressBoundIf)
         let offeredDetection = ikeReply
             .flatMap { ProbeIKE.parse($0, initiatorSPI: ikeSPI) }?
             .natDetectionOffered ?? false
@@ -665,7 +691,8 @@ actor ProbeStageRunner {
     private func tlsHandshake() async -> ProbeStepOutcome {
         let result = await ProbeTLS.handshake(host: facts.host, port: facts.port,
                                               sni: facts.host,
-                                              httpRequest: httpProbeRequest, timeout: 8)
+                                              httpRequest: httpProbeRequest, timeout: 8,
+                                              boundIf: egressBoundIf)
         tls = result
         guard result.handshakeCompleted else {
             return .failed("The secure handshake didn\u{2019}t complete.",
@@ -828,7 +855,7 @@ actor ProbeStageRunner {
         evidence.append("The VPN\u{2019}s public key: \(peer)")
 
         let result = await VPNProbe.udpExchange(host: facts.host, port: facts.port,
-                                                payload: session.message, timeout: timeout)
+                                                payload: session.message, timeout: timeout, boundIf: egressBoundIf)
         switch result {
         case .reply(let bytes):
             switch WireGuardHandshake.check(response: bytes, session: session) {
@@ -880,7 +907,7 @@ actor ProbeStageRunner {
                            remedy: .probeRemedy(.controlPlaneUnreachable, vpnName: facts.profileName))
         }
         let port = url.port ?? (url.scheme == "http" ? 80 : 443)
-        let result = await VPNProbe.tcpExchange(host: host, port: port, payload: [], timeout: timeout)
+        let result = await VPNProbe.tcpExchange(host: host, port: port, payload: [], timeout: timeout, boundIf: egressBoundIf)
         switch result {
         case .reply, .connectedNoReply:
             return .ok("The coordination server is reachable.",
@@ -905,7 +932,8 @@ actor ProbeStageRunner {
             return .notApplicable("This coordination server is set up without encryption, so there is no certificate to check.")
         }
         let port = url.port ?? 443
-        let result = await ProbeTLS.handshake(host: host, port: port, sni: host, timeout: 8)
+        let result = await ProbeTLS.handshake(host: host, port: port, sni: host, timeout: 8,
+                                              boundIf: egressBoundIf)
         tls = result
         guard result.handshakeCompleted else {
             return .failed("The secure handshake with the coordination server didn\u{2019}t complete.",

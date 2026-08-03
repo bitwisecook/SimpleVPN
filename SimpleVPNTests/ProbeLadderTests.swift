@@ -173,6 +173,92 @@ struct ProbeLadderEngineTests {
                        step(.openVPNClientCertificate))) { _ in .ok("fine") }
         #expect(steps[1].status == .ok)
     }
+
+    // MARK: Incremental re-run (seed)
+
+    /// A step in a given post-run state, to seed an incremental re-run.
+    private func settled(_ stage: ProbeStage, _ status: ProbeStepStatus) -> ProbeStep {
+        var s = step(stage)
+        s.status = status
+        s.detail = "seeded"
+        return s
+    }
+
+    @Test func aSeedReRunsOnlyFromTheFirstUnsettledStep() async {
+        let recorder = Recorder()
+        // DNS + reachability passed; the shared-key step failed (the reported bug).
+        let seed = [settled(.dnsResolve, .ok), settled(.reachability, .ok),
+                    settled(.openVPNStaticKey, .failed)]
+        let steps = await ProbeLadderEngine.run(
+            plan: plan(step(.dnsResolve), step(.reachability), step(.openVPNStaticKey)),
+            seed: seed) { stage in
+                recorder.note(stage)
+                return .ok("now fine")
+            }
+        // Only the failed rung is re-run; the passes are carried, not re-executed.
+        #expect(recorder.stages == [.openVPNStaticKey])
+        #expect(steps[0].status == .ok)
+        #expect(steps[0].detail == "seeded", "an untouched pass keeps its earlier result")
+        #expect(steps[2].status == .ok)
+        #expect(steps[2].detail == "now fine")
+    }
+
+    @Test func aSeedTreatsNotApplicableAsSettled() async {
+        let recorder = Recorder()
+        // ok, not-applicable, then a held-back sign-in (skipped) is the first
+        // unsettled rung — so only it re-runs on the opt-in.
+        let seed = [settled(.reachability, .ok), settled(.openVPNStaticKey, .notApplicable),
+                    settled(.openVPNSignIn, .skipped)]
+        _ = await ProbeLadderEngine.run(
+            plan: plan(step(.reachability), step(.openVPNStaticKey),
+                       step(.openVPNSignIn, blocking: false, account: true)),
+            includeAccountSteps: true, seed: seed) { stage in
+                recorder.note(stage)
+                return .ok("signed in")
+            }
+        #expect(recorder.stages == [.openVPNSignIn])
+    }
+
+    @Test func aSeedOfADifferentShapeIsIgnored() async {
+        let recorder = Recorder()
+        // Seed for a different plan (fewer/renamed stages) can't be resumed, so the
+        // whole ladder runs — the safe answer when the profile changed shape.
+        let seed = [settled(.dnsResolve, .ok)]
+        let steps = await ProbeLadderEngine.run(
+            plan: plan(step(.dnsResolve), step(.reachability)),
+            seed: seed) { stage in
+                recorder.note(stage)
+                return .ok("fine")
+            }
+        #expect(recorder.stages == [.dnsResolve, .reachability])
+        #expect(steps.allSatisfy { $0.status == .ok })
+    }
+}
+
+// MARK: - Network fingerprint (the re-run decision seam)
+
+struct ProbeNetworkFingerprintTests {
+
+    @Test func sameNetworkAndServerIsUnchanged() {
+        let a = ProbeNetworkFingerprint(networkKey: "mac:0:8:a2:e:dc:c7", serverIP: "203.0.113.9")
+        let b = ProbeNetworkFingerprint(networkKey: "mac:0:8:a2:e:dc:c7", serverIP: "203.0.113.9")
+        #expect(a == b, "unchanged network + server ⇒ an incremental re-run is honest")
+    }
+
+    @Test func aMovedNetworkChangesTheFingerprint() {
+        let home = ProbeNetworkFingerprint(networkKey: "mac:0:8:a2:e:dc:c7", serverIP: "203.0.113.9")
+        let cafe = ProbeNetworkFingerprint(networkKey: "mac:a0:99:9b:18:dc:93", serverIP: "203.0.113.9")
+        #expect(home != cafe)
+    }
+
+    @Test func theServerResolvingElsewhereChangesTheFingerprint() {
+        // Same physical network, but the host now resolves to a different address
+        // (round-robin / failover) — the earlier rungs measured a different target,
+        // so the whole ladder must run again.
+        let before = ProbeNetworkFingerprint(networkKey: "mac:0:8:a2:e:dc:c7", serverIP: "203.0.113.9")
+        let after = ProbeNetworkFingerprint(networkKey: "mac:0:8:a2:e:dc:c7", serverIP: "198.51.100.4")
+        #expect(before != after)
+    }
 }
 
 // MARK: - Plans

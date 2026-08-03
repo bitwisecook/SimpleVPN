@@ -48,10 +48,14 @@ nonisolated enum ProbeTLS {
     /// VPN answers with the certificate a real connection would see).
     static func handshake(host: String, port: Int, sni: String? = nil,
                           httpRequest: String? = nil,
-                          timeout: TimeInterval = 8) async -> ProbeTLSResult {
+                          timeout: TimeInterval = 8, boundIf: UInt32 = 0) async -> ProbeTLSResult {
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(clamping: port)) else {
             return ProbeTLSResult(failureReason: "That port number can\u{2019}t be used.")
         }
+        // Resolve the egress interface (if any) BEFORE the handshake, so a probe of a
+        // VPN server takes the physical path rather than looping through the tunnel it
+        // is testing. nil ⇒ normal routing (honest fallback).
+        let egress = await boundInterface(index: boundIf)
         let box = TLSResultBox()
         let queue = DispatchQueue(label: "com.bragi0.SimpleVPN.probe.tls")
 
@@ -74,6 +78,7 @@ nonisolated enum ProbeTLS {
         }, queue)
 
         let params = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
+        if let egress { params.requiredInterface = egress }
         let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: params)
         let once = ResumeGate()
 
@@ -118,6 +123,27 @@ nonisolated enum ProbeTLS {
             }
         }
         return box.value()
+    }
+
+    /// Resolve an `IP_BOUND_IF` index to the `NWInterface` that `NWParameters`
+    /// wants. The raw-socket probes bind by index directly; NWConnection can only
+    /// be pinned with an `NWInterface`, so this bridges the two. A brief, bounded
+    /// path lookup — nil (index 0, an unresolvable index, or no match in time)
+    /// means "leave it to normal routing", which is the honest fallback.
+    static func boundInterface(index: UInt32) async -> NWInterface? {
+        guard index != 0, let name = RouteTableSource.interfaceName(index: index) else { return nil }
+        let monitor = NWPathMonitor()
+        let queue = DispatchQueue(label: "com.bragi0.SimpleVPN.probe.iface")
+        let gate = ResumeGate()
+        let match: NWInterface? = await withCheckedContinuation { (cont: CheckedContinuation<NWInterface?, Never>) in
+            monitor.pathUpdateHandler = { path in
+                gate.fire { cont.resume(returning: path.availableInterfaces.first { $0.name == name }) }
+            }
+            monitor.start(queue: queue)
+            queue.asyncAfter(deadline: .now() + 0.4) { gate.fire { cont.resume(returning: nil) } }
+        }
+        monitor.cancel()
+        return match
     }
 
     /// Human-readable TLS version. Kept as a table rather than

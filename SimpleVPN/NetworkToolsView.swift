@@ -443,6 +443,12 @@ struct NetworkToolsView: View {
     @ViewBuilder private var ladderSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             ladderControls
+            if let facts = ladderRunner.facts, isLadderProfileConnected(facts) {
+                Label("This VPN is connected right now. The checks are sent out the physical network, not through the tunnel, so they test the real path rather than answering their own hello.",
+                      systemImage: "info.circle")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let problem = ladderRunner.signInProblem {
                 Label("\(problem.title). \(problem.explanation)", systemImage: "exclamationmark.triangle.fill")
                     .font(.callout).foregroundStyle(.orange)
@@ -455,9 +461,42 @@ struct NetworkToolsView: View {
                     testSignIn: ladderRunner.facts.map { facts in
                         { ladderRunner.runIncludingSignIn(facts, vpn: vpn) }
                     },
-                    rerun: { runLadder() })
+                    rerun: { ladderRunner.checkAgain(vpn: vpn) })
+                if let note = rerunModeNote, !ladderRunner.isRunning {
+                    Label(note, systemImage: "arrow.clockwise")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
+    }
+
+    /// One line saying how the last re-check went — everything, or just the rung
+    /// that hadn't passed — so "Check Again" is never a silent no-op.
+    private var rerunModeNote: String? {
+        switch ladderRunner.lastRerun {
+        case .incremental:
+            return "The network hadn\u{2019}t changed, so only the step that hadn\u{2019}t passed was re-checked."
+        case .incrementalSignIn:
+            return "The network hadn\u{2019}t changed, so only the sign-in was re-checked."
+        case .full:
+            return "The network changed, so every step was re-checked."
+        case .none:
+            return nil
+        }
+    }
+
+    /// Is the VPN this ladder belongs to connected right now? That is the context
+    /// that made the old behavior confusing — a probe that went THROUGH the VPN it
+    /// was testing — so it is worth naming on screen.
+    private func isLadderProfileConnected(_ facts: ProbeTargetFacts) -> Bool {
+        let id = facts.profileID
+        guard !id.isEmpty else { return false }
+        if vpn.profiles.contains(where: { $0.id == id && UI.isActive($0.status) }) { return true }
+        if let s = reach?.latestStats[id], !s.tunnelIPv4.isEmpty { return true }
+        if facts.kind.isSingletonNative, nativeVPN?.status == .connected,
+           nativeVPN?.configs.contains(where: { $0.id == id }) == true { return true }
+        return false
     }
 
     @ViewBuilder private var ladderControls: some View {
@@ -1130,8 +1169,14 @@ struct NetworkToolsView: View {
         probeTask = Task {
             probeRunning = true
             defer { if !Task.isCancelled { probeRunning = false } }
+            // The VPN Probe asks a VPN server what it is, so it must go out the
+            // PHYSICAL egress — never through a tunnel (least of all the one it's
+            // testing, which would answer its own hello). This is the same binding
+            // the step-by-step ladder uses, so the two never contradict. 0 ⇒ no
+            // non-tunnel interface, which honestly falls back to normal routing.
+            let boundIf = await Task.detached { NetworkIdentity.physicalEgressBoundIf() }.value
             let result = await VPNProbe.fingerprint(host: host, port: port,
-                                                    proto: transport, hint: kind)
+                                                    proto: transport, hint: kind, boundIf: boundIf)
             guard !Task.isCancelled else { return }
             fingerprint = result
         }

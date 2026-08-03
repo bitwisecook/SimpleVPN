@@ -107,8 +107,13 @@ nonisolated enum VPNProbe {
     /// `port` is the endpoint the profile would actually dial. The IKE probe is the
     /// one exception that may leave it: IKEv2 lives on UDP 500/4500 by convention and
     /// asking 443 for an IKE_SA_INIT tells us nothing.
+    /// `boundIf` pins every probe socket to a chosen egress interface. When the
+    /// target is a VPN server the caller passes the PHYSICAL egress, so the probe
+    /// takes the real underlying path even while that VPN owns the default route —
+    /// the same binding the step-by-step ladder uses, so the two never disagree.
     static func fingerprint(host: String, port: Int, proto: Transport,
-                            hint: VPNKind?, timeout: TimeInterval = 3) async -> Fingerprint {
+                            hint: VPNKind?, timeout: TimeInterval = 3,
+                            boundIf: UInt32 = 0) async -> Fingerprint {
         var out = Fingerprint(host: host, port: port, transport: proto)
         let host = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty else {
@@ -118,7 +123,7 @@ nonisolated enum VPNProbe {
 
         var findings: [Finding] = []
         await withTaskGroup(of: Finding?.self) { group in
-            for probe in plan(host: host, port: port, proto: proto, hint: hint) {
+            for probe in plan(host: host, port: port, proto: proto, hint: hint, boundIf: boundIf) {
                 group.addTask { await probe.run(timeout) }
             }
             for await f in group { if let f { findings.append(f) } }
@@ -141,22 +146,22 @@ nonisolated enum VPNProbe {
     }
 
     private static func plan(host: String, port: Int, proto: Transport,
-                             hint: VPNKind?) -> [PlannedProbe] {
+                             hint: VPNKind?, boundIf: UInt32 = 0) -> [PlannedProbe] {
         var probes: [PlannedProbe] = []
         func openVPN(_ t: Transport) {
-            probes.append(PlannedProbe { await probeOpenVPN(host: host, port: port, transport: t, timeout: $0) })
+            probes.append(PlannedProbe { await probeOpenVPN(host: host, port: port, transport: t, timeout: $0, boundIf: boundIf) })
         }
         func wireGuard() {
-            probes.append(PlannedProbe { await probeWireGuard(host: host, port: port, expected: hint == .wireGuard, timeout: $0) })
+            probes.append(PlannedProbe { await probeWireGuard(host: host, port: port, expected: hint == .wireGuard, timeout: $0, boundIf: boundIf) })
         }
         func ike(_ p: Int) {
-            probes.append(PlannedProbe { await probeIKE(host: host, port: p, timeout: $0) })
+            probes.append(PlannedProbe { await probeIKE(host: host, port: p, timeout: $0, boundIf: boundIf) })
         }
         func sslVPN(_ p: Int) {
-            probes.append(PlannedProbe { await probeSSLVPN(host: host, port: p, timeout: max($0, 6)) })
+            probes.append(PlannedProbe { await probeSSLVPN(host: host, port: p, timeout: max($0, 6), boundIf: boundIf) })
         }
         func ssh(_ p: Int) {
-            probes.append(PlannedProbe { await probeSSH(host: host, port: p, timeout: $0) })
+            probes.append(PlannedProbe { await probeSSH(host: host, port: p, timeout: $0, boundIf: boundIf) })
         }
 
         switch hint {
@@ -283,15 +288,15 @@ nonisolated enum VPNProbe {
     }
 
     static func probeOpenVPN(host: String, port: Int, transport: Transport,
-                             timeout: TimeInterval = 3) async -> Finding {
+                             timeout: TimeInterval = 3, boundIf: UInt32 = 0) async -> Finding {
         let tcp = transport == .tcp
         let name = "OpenVPN over \(tcp ? "TCP" : "UDP")"
         let session = (0..<8).map { _ in UInt8.random(in: 0...255) }
         let payload = openVPNResetPacket(sessionID: session)
         let wire = tcp ? openVPNTCPFramed(payload) : payload
         let result = tcp
-            ? await tcpExchange(host: host, port: port, payload: wire, timeout: timeout)
-            : await udpExchange(host: host, port: port, payload: wire, timeout: timeout)
+            ? await tcpExchange(host: host, port: port, payload: wire, timeout: timeout, boundIf: boundIf)
+            : await udpExchange(host: host, port: port, payload: wire, timeout: timeout, boundIf: boundIf)
 
         switch result {
         case .reply(let bytes):
@@ -352,10 +357,10 @@ nonisolated enum VPNProbe {
     static let wireGuardDefaultPort = 51820
 
     static func probeWireGuard(host: String, port: Int, expected: Bool,
-                               timeout: TimeInterval = 3) async -> Finding {
+                               timeout: TimeInterval = 3, boundIf: UInt32 = 0) async -> Finding {
         let name = "WireGuard over UDP"
         let result = await udpExchange(host: host, port: port,
-                                       payload: wireGuardInitiation(), timeout: timeout)
+                                       payload: wireGuardInitiation(), timeout: timeout, boundIf: boundIf)
         switch result {
         case .reply(let bytes):
             return Finding(probe: name, detected: false,
@@ -518,12 +523,13 @@ nonisolated enum VPNProbe {
                         notifyType: notify)
     }
 
-    static func probeIKE(host: String, port: Int, timeout: TimeInterval = 3) async -> Finding {
+    static func probeIKE(host: String, port: Int, timeout: TimeInterval = 3,
+                         boundIf: UInt32 = 0) async -> Finding {
         let name = "IKEv2 on UDP \(port)"
         let spi = (0..<8).map { _ in UInt8.random(in: 0...255) }
         let marker = (port == ikeNATTPort)
         let payload = ikeSAInit(initiatorSPI: spi, nonESPMarker: marker)
-        let result = await udpExchange(host: host, port: port, payload: payload, timeout: timeout)
+        let result = await udpExchange(host: host, port: port, payload: payload, timeout: timeout, boundIf: boundIf)
 
         switch result {
         case .reply(let bytes):
@@ -617,9 +623,10 @@ nonisolated enum VPNProbe {
         return nil
     }
 
-    static func probeSSLVPN(host: String, port: Int, timeout: TimeInterval = 6) async -> Finding {
+    static func probeSSLVPN(host: String, port: Int, timeout: TimeInterval = 6,
+                            boundIf: UInt32 = 0) async -> Finding {
         let name = "SSL-VPN on TCP \(port)"
-        let banner = await tlsHTTPProbe(host: host, port: port, timeout: timeout)
+        let banner = await tlsHTTPProbe(host: host, port: port, timeout: timeout, boundIf: boundIf)
         guard banner.connected else {
             return Finding(probe: name, detected: false,
                            label: "No TLS service answered on port \(port).",
@@ -696,10 +703,11 @@ nonisolated enum VPNProbe {
         return nil
     }
 
-    static func probeSSH(host: String, port: Int, timeout: TimeInterval = 3) async -> Finding {
+    static func probeSSH(host: String, port: Int, timeout: TimeInterval = 3,
+                         boundIf: UInt32 = 0) async -> Finding {
         let name = "SSH on TCP \(port)"
         // The server speaks first, so we send nothing at all.
-        let result = await tcpExchange(host: host, port: port, payload: [], timeout: timeout)
+        let result = await tcpExchange(host: host, port: port, payload: [], timeout: timeout, boundIf: boundIf)
         switch result {
         case .reply(let bytes):
             let text = String(decoding: bytes.prefix(512), as: UTF8.self)
@@ -763,7 +771,7 @@ nonisolated enum VPNProbe {
     /// One datagram out, one datagram in. The socket is `connect`ed so that an ICMP
     /// port-unreachable surfaces as ECONNREFUSED instead of vanishing.
     static func udpExchange(host: String, port: Int, payload: [UInt8],
-                            timeout: TimeInterval) async -> WireResult {
+                            timeout: TimeInterval, boundIf: UInt32 = 0) async -> WireResult {
         await onProbeQueue {
             var hints = addrinfo(ai_flags: 0, ai_family: AF_UNSPEC, ai_socktype: SOCK_DGRAM,
                                  ai_protocol: IPPROTO_UDP, ai_addrlen: 0, ai_canonname: nil,
@@ -774,6 +782,9 @@ nonisolated enum VPNProbe {
             let fd = socket(first.pointee.ai_family, first.pointee.ai_socktype, first.pointee.ai_protocol)
             guard fd >= 0 else { return .failed }
             defer { close(fd) }
+            // Pin to the physical egress when asked, so a probe of a VPN server can't
+            // hairpin through the tunnel it is testing (IP_BOUND_IF / IPV6_BOUND_IF).
+            NetworkProbes.bindEgress(fd, to: boundIf, v6: first.pointee.ai_family == AF_INET6)
             var tv = recvTimeval(timeout)
             setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
             guard connect(fd, first.pointee.ai_addr, first.pointee.ai_addrlen) == 0 else { return .failed }
@@ -790,7 +801,8 @@ nonisolated enum VPNProbe {
     /// Connect, optionally write `payload`, then read whatever the peer says first.
     /// An empty payload is the SSH case (server greets first).
     static func tcpExchange(host: String, port: Int, payload: [UInt8],
-                            timeout: TimeInterval, readLimit: Int = 8192) async -> WireResult {
+                            timeout: TimeInterval, readLimit: Int = 8192,
+                            boundIf: UInt32 = 0) async -> WireResult {
         await onProbeQueue {
             var hints = addrinfo(ai_flags: 0, ai_family: AF_UNSPEC, ai_socktype: SOCK_STREAM,
                                  ai_protocol: IPPROTO_TCP, ai_addrlen: 0, ai_canonname: nil,
@@ -801,6 +813,8 @@ nonisolated enum VPNProbe {
             let fd = socket(first.pointee.ai_family, first.pointee.ai_socktype, first.pointee.ai_protocol)
             guard fd >= 0 else { return .failed }
             defer { close(fd) }
+            // Pin to the physical egress when asked (see udpExchange).
+            NetworkProbes.bindEgress(fd, to: boundIf, v6: first.pointee.ai_family == AF_INET6)
 
             // Non-blocking connect + poll: Darwin doesn't apply SO_SNDTIMEO to
             // connect(), so this is the only way to bound a dead endpoint.
@@ -849,8 +863,10 @@ nonisolated enum VPNProbe {
     /// TLS handshake that accepts ANY certificate (we are identifying the server, not
     /// trusting it — nothing is sent that matters and the connection is discarded),
     /// then one HTTP GET / and whatever comes back first.
-    static func tlsHTTPProbe(host: String, port: Int, timeout: TimeInterval) async -> TLSBanner {
+    static func tlsHTTPProbe(host: String, port: Int, timeout: TimeInterval,
+                             boundIf: UInt32 = 0) async -> TLSBanner {
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(clamping: port)) else { return TLSBanner() }
+        let egress = await ProbeTLS.boundInterface(index: boundIf)
         let box = BannerBox()
 
         let tls = NWProtocolTLS.Options()
@@ -865,6 +881,7 @@ nonisolated enum VPNProbe {
 
         let request = "GET / HTTP/1.1\r\nHost: \(host)\r\nUser-Agent: SimpleVPN-Probe/1\r\nAccept: */*\r\nConnection: close\r\n\r\n"
         let params = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
+        if let egress { params.requiredInterface = egress }
         let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: params)
         let flag = ResumeOnce()
 

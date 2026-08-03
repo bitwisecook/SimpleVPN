@@ -115,7 +115,9 @@ nonisolated enum NetworkProbes {
 
     /// Pin `fd` to interface index `boundIf` (no-op when 0). Applies the v4 or v6 option
     /// per `v6`; a bind failure is non-fatal (the probe simply runs unbound).
-    private static func bindEgress(_ fd: Int32, to boundIf: UInt32, v6: Bool) {
+    /// Internal (not private) so the VPN-server probes in `VPNProbe` bind through the
+    /// exact same `IP_BOUND_IF`/`IPV6_BOUND_IF` mechanism the egress picker uses.
+    static func bindEgress(_ fd: Int32, to boundIf: UInt32, v6: Bool) {
         guard boundIf != 0 else { return }
         var idx = boundIf
         let level = v6 ? IPPROTO_IPV6 : IPPROTO_IP

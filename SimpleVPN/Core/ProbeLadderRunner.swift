@@ -46,9 +46,27 @@ final class ProbeLadderStore {
     func clear(_ profileID: String) { ladders[profileID] = nil }
 }
 
+/// The lightweight identity of the network a ladder was run on: the physical
+/// network (default interface + its gateway/address, via `NetworkFingerprint`)
+/// plus the address the probe would actually dial. It is what decides, on a
+/// "Check Again", whether the earlier rungs' results are still true or the whole
+/// ladder must climb again — bringing a tunnel up or down does NOT change it (the
+/// key is physical-only), but moving networks or the server resolving elsewhere
+/// does. Pure and Equatable, so the equality is testable without a network.
+nonisolated struct ProbeNetworkFingerprint: Sendable, Equatable {
+    /// `NetworkFingerprint.key` — physical interface + gateway MAC / local network.
+    var networkKey: String
+    /// The first address the host resolves to (or the literal, when it is one).
+    var serverIP: String
+}
+
 @MainActor
 @Observable
 final class ProbeLadderRunner {
+
+    /// Which flavour of run last happened, so the card can say whether it re-ran
+    /// everything or only the failed / sign-in rung.
+    enum RerunMode: Sendable, Equatable { case full, incremental, incrementalSignIn }
 
     private(set) var ladder: ProbeLadder?
     private(set) var isRunning = false
@@ -59,6 +77,12 @@ final class ProbeLadderRunner {
     /// right one and the result is filed under the right profile.
     private(set) var facts: ProbeTargetFacts?
 
+    /// The network the current ladder was measured on — the "did anything move?"
+    /// test a re-run consults.
+    private(set) var networkContext: ProbeNetworkFingerprint?
+    /// How the last re-run went (nil before any re-run). Surfaced in the UI.
+    private(set) var lastRerun: RerunMode?
+
     private var task: Task<Void, Never>?
 
     func cancel() {
@@ -67,16 +91,57 @@ final class ProbeLadderRunner {
         isRunning = false
     }
 
-    /// Run the automatic part of the ladder: everything up to the account
-    /// boundary. This is what every entry point calls.
+    /// A fresh, full run of the automatic part of the ladder: everything up to
+    /// the account boundary. The initial entry point (a first "Check Step by
+    /// Step" / an auto-run Probe); it captures the network context re-runs compare
+    /// against.
     func run(_ facts: ProbeTargetFacts) {
-        start(facts, includeAccountSteps: false, signIn: nil)
+        lastRerun = nil
+        // Start the ladder at once — its own DNS rung does the resolving the user
+        // is watching. Capture the network context in parallel (it only has to be
+        // ready by the NEXT re-run, seconds away), so a slow/broken lookup never
+        // delays the first climb.
+        start(facts, includeAccountSteps: false, signIn: nil, seed: nil)
+        Task { [weak self] in
+            let context = await Self.networkFingerprint(for: facts)
+            guard let self, !Task.isCancelled else { return }
+            if self.facts?.profileID == facts.profileID { self.networkContext = context }
+        }
+    }
+
+    /// "Check Again": re-run the ladder. If the network hasn't moved, only the
+    /// first unsettled rung onward is re-run (the failed handshake step) and the
+    /// earlier passes are kept; if it has, the whole ladder runs again. Never
+    /// crosses the account boundary — a sign-in is retried only on the opt-in.
+    func checkAgain(vpn: VPNController?) {
+        guard let facts, let existing = ladder, existing.isComplete else {
+            if let facts { run(facts) }
+            return
+        }
+        isRunning = true
+        Task { [weak self] in
+            guard let self else { return }
+            let fresh = await Self.networkFingerprint(for: facts)
+            guard !Task.isCancelled else { return }
+            let unchanged = self.networkContext.map { $0 == fresh } ?? false
+            self.networkContext = fresh
+            if unchanged {
+                self.lastRerun = .incremental
+                self.start(facts, includeAccountSteps: false, signIn: nil, seed: existing)
+            } else {
+                self.lastRerun = .full
+                self.start(facts, includeAccountSteps: false, signIn: nil, seed: nil)
+            }
+        }
     }
 
     /// "Test sign-in too" — the deliberate, clicked-on crossing of the account
-    /// boundary. Credentials are resolved here, not before.
+    /// boundary. Credentials are resolved here, not before. When the network is
+    /// unchanged it re-runs ONLY the sign-in rung, keeping the earlier passes.
     func runIncludingSignIn(_ facts: ProbeTargetFacts, vpn: VPNController?) {
         signInProblem = nil
+        isRunning = true
+        let existing = ladder
         Task { [weak self] in
             guard let self else { return }
             var material = ProbeSignInMaterial(username: "", password: "", otp: "",
@@ -85,21 +150,48 @@ final class ProbeLadderRunner {
                 do {
                     material = try await Self.signInMaterial(profileID: facts.profileID, vpn: vpn)
                 } catch is CancellationError {
+                    self.isRunning = false
                     return                      // the user dismissed the prompt
                 } catch {
                     self.signInProblem = UserFacingError.classify(error)
+                    self.isRunning = false
                     return
                 }
             }
-            self.start(facts, includeAccountSteps: true, signIn: material)
+            let fresh = await Self.networkFingerprint(for: facts)
+            guard !Task.isCancelled else { return }
+            let unchanged = self.networkContext.map { $0 == fresh } ?? false
+            self.networkContext = fresh
+            let seed = (unchanged && existing?.isComplete == true) ? existing : nil
+            self.lastRerun = seed != nil ? .incrementalSignIn : .full
+            self.start(facts, includeAccountSteps: true, signIn: material, seed: seed)
         }
     }
 
+    /// The network context (physical fingerprint + resolved server address) for a
+    /// set of facts, read off the main actor.
+    private static func networkFingerprint(for facts: ProbeTargetFacts) async -> ProbeNetworkFingerprint {
+        let key = await NetworkIdentity.current()?.key ?? "net:unknown"
+        let host = facts.host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let ip: String
+        if host.isEmpty {
+            ip = ""
+        } else if NetworkProbes.isIPv4Literal(host) {
+            ip = host
+        } else {
+            let resolved = await NetworkProbes.resolve(host: host)
+            ip = resolved.v4.first ?? resolved.v6.first ?? host
+        }
+        return ProbeNetworkFingerprint(networkKey: key, serverIP: ip)
+    }
+
     private func start(_ facts: ProbeTargetFacts, includeAccountSteps: Bool,
-                       signIn: ProbeSignInMaterial?) {
+                       signIn: ProbeSignInMaterial?, seed: ProbeLadder?) {
         cancel()
         self.facts = facts
-        ladder = ProbeLadderPlan.ladder(for: facts)
+        // A seed keeps the earlier results on screen while only the tail re-runs,
+        // rather than flashing the whole ladder back to "pending".
+        ladder = seed ?? ProbeLadderPlan.ladder(for: facts)
         isRunning = true
         let profileID = facts.profileID
         // One weak capture, made here rather than inside the run task, so the
@@ -113,7 +205,7 @@ final class ProbeLadderRunner {
         task = Task { [weak self] in
             let result = await AuthenticatedProbe.run(
                 facts: facts, includeAccountSteps: includeAccountSteps, signIn: signIn,
-                progress: publish)
+                seed: seed, progress: publish)
             guard !Task.isCancelled else { return }
             self?.ladder = result
             self?.isRunning = false

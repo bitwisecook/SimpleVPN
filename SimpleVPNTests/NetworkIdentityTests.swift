@@ -164,6 +164,47 @@ struct NetworkIdentityTests {
         #expect(route.interfaceName == "en0", "the route the kernel would really use")
     }
 
+    // MARK: Physical egress for VPN-server probes
+
+    @Test func theProbeEgressIsThePhysicalDefaultNotTheTunnel() throws {
+        // A full tunnel owns the default route; a probe of the VPN's own server
+        // must still go out the physical link, or it loops through the tunnel it
+        // is testing and answers its own hello.
+        let name = NetworkIdentity.physicalEgressInterface(
+            in: RouteTableSnapshot(netstatText: physicalPlusFullTunnel))
+        #expect(name == "en0")
+        // Same with an always-on Tailscale utun in the table.
+        #expect(NetworkIdentity.physicalEgressInterface(
+            in: RouteTableSnapshot(netstatText: physicalPlusTailscaleExitNode)) == "en0")
+    }
+
+    @Test func theProbeEgressFallsBackToTheInterfaceHoldingOurAddress() throws {
+        // Tunnel-only default (no physical default in the table): the egress is
+        // the interface our address sits on, so the probe still leaves the tunnel.
+        let tunnelOnly = """
+        Internet:
+        Destination        Gateway            Flags        Netif Expire
+        default            10.8.0.5           UGScg          utun4
+        127                127.0.0.1          UCS            lo0
+        """
+        let name = NetworkIdentity.physicalEgressInterface(
+            in: RouteTableSnapshot(netstatText: tunnelOnly), fallbackInterface: { "en0" })
+        #expect(name == "en0")
+    }
+
+    @Test func theProbeEgressIsNilWhenNothingPhysicalCanBeFound() {
+        // Genuinely nothing to bind to ⇒ nil, and the probe runs unbound (honest
+        // fallback to normal routing rather than failing).
+        let tunnelOnly = """
+        Internet:
+        Destination        Gateway            Flags        Netif Expire
+        default            10.8.0.5           UGScg          utun4
+        127                127.0.0.1          UCS            lo0
+        """
+        #expect(NetworkIdentity.physicalEgressInterface(
+            in: RouteTableSnapshot(netstatText: tunnelOnly), fallbackInterface: { nil }) == nil)
+    }
+
     @Test func withNoPhysicalDefaultTheInterfaceHoldingOurAddressIsUsed() throws {
         // Tunnel-only default route: DHCP hasn't handed one out, or the physical
         // default was withdrawn. Falling back keeps the memory alive rather than

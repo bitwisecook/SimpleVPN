@@ -90,3 +90,87 @@ struct CredentialSource: Codable, Sendable, Equatable {
         return (try? JSONDecoder().decode(CredentialSource.self, from: blob)) ?? CredentialSource()
     }
 }
+
+// MARK: - Connect readiness (single source of truth)
+
+/// What a VPN still needs before Connect can succeed — the ONE decision the
+/// detail Connect button, the sidebar play button and the menu row all read, so
+/// a control can never be enabled in one place and disabled in another.
+///
+/// It used to be recomputed independently in each view (`ConnectionView`'s
+/// `canConnect` vs `VPNSidebarRow`'s `missingTypedInput`), and the two drifted:
+/// the detail pane knew Tailscale/autologin/proxy need nothing typed, but the
+/// sidebar still assumed a username+password and so showed "Sign-in needed" on a
+/// Tailscale VPN and dimmed its play button — even while the detail Connect was
+/// live. Both now derive from `ConnectInputs.readiness` below.
+nonisolated enum ConnectReadiness: Equatable, Sendable {
+    /// A click connects now — nothing is waiting on typed input.
+    case ready
+    /// Username + password still needed (or a proxy's stored sign-in details).
+    case needsSignIn
+    /// A one-time code the stored source can't supply is still needed.
+    case needsCode
+    /// A hard configuration problem — Connect cannot proceed as set up.
+    case blocked
+}
+
+/// The plain facts the readiness decision turns on, gathered by `VPNController`
+/// from the profile, its auth config, its credential source and any typed input.
+/// A pure value type so the decision is testable without a live tunnel.
+nonisolated struct ConnectInputs: Equatable, Sendable {
+    var kind: VPNKind = .openVPN
+    /// The certificate is the sign-in — no credentials to collect.
+    var autologin = false
+
+    // Proxy Tunnel (dials on its stored settings — no OTP; credentials, when the
+    // proxy needs them, are entered in the editor, not the connect row).
+    var proxyHasProblem = false
+    var proxyRequiresAuth = false
+    var proxyCredentialsComplete = false
+
+    // Credential collection (OpenVPN and the other typed-credential kinds).
+    var managerKind: CredentialSourceKind = .manual
+    var requiresOTP = false
+    var biometricProtected = false
+    var biometricStored = false
+    var biometricHasTOTP = false
+    var hasLockedUsername = false
+    var typedUsername = false
+    var typedPassword = false
+    var typedOTP = false
+
+    var readiness: ConnectReadiness {
+        // Tailscale/Headscale sign themselves in — a stored setup key registers
+        // the Mac silently, or the engine opens a browser sign-in on connect.
+        // There is nothing to type first.
+        if kind == .tailscale { return .ready }
+
+        // A Proxy Tunnel connects on its stored configuration.
+        if kind == .proxyTunnel {
+            if proxyHasProblem { return .blocked }
+            if !proxyRequiresAuth { return .ready }
+            return proxyCredentialsComplete ? .ready : .needsSignIn
+        }
+
+        // Autologin: the profile's certificate IS the sign-in.
+        if autologin { return .ready }
+
+        // A password manager supplies username/password on connect; only a code
+        // it cannot provide (Apple Passwords can't; 1Password can) still blocks.
+        if managerKind != .manual {
+            let needsTypedCode = requiresOTP && managerKind != .onePassword && !typedOTP
+            return needsTypedCode ? .needsCode : .ready
+        }
+
+        // Touch ID-protected sign-in: the fingerprint releases everything the
+        // store holds; only an uncovered one-time code can still block.
+        if biometricProtected, biometricStored {
+            let needsTypedCode = requiresOTP && !biometricHasTOTP && !typedOTP
+            return needsTypedCode ? .needsCode : .ready
+        }
+
+        // Plain typed credentials (a userlocked username counts as present).
+        if !(hasLockedUsername || typedUsername) || !typedPassword { return .needsSignIn }
+        return (requiresOTP && !typedOTP) ? .needsCode : .ready
+    }
+}

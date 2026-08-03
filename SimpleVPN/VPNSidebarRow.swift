@@ -170,29 +170,19 @@ struct VPNSidebarRow: View {
         }
     }
 
-    /// What still has to be typed before this VPN can connect, mirroring the
-    /// detail pane's `canConnect`. nil ⇒ a tap on Play can genuinely connect.
+    /// What still has to be typed before this VPN can connect. Reads the SAME
+    /// shared readiness decision as the detail pane's `canConnect`, so the
+    /// sidebar play button and the detail Connect button can never disagree —
+    /// Tailscale/autologin/proxy VPNs (which sign themselves in) resolve to nil
+    /// here, so Play stays green and connects rather than showing "Sign-in
+    /// needed". nil ⇒ a tap on Play can genuinely connect.
     private enum MissingInput { case signIn, code }
     private var missingTypedInput: MissingInput? {
-        let auth = vpn.authConfig(for: profile.id)
-        let kind = vpn.credentialSource(for: profile.id).kind
-        let c = vpn.transientCredentials(for: profile.id)
-        let otpEmpty = c.otp.trimmingCharacters(in: .whitespaces).isEmpty
-        if kind != .manual {
-            // A manager supplies username/password; only a code it can't provide
-            // (Apple Passwords can't; 1Password can) blocks the button.
-            return (auth.requiresOTP && kind != .onePassword && otpEmpty) ? .code : nil
+        switch vpn.connectReadiness(for: profile.id) {
+        case .ready: return nil
+        case .needsCode: return .code
+        case .needsSignIn, .blocked: return .signIn
         }
-        // Touch ID-protected sign-in: the fingerprint supplies everything the
-        // store holds; only an uncovered one-time code can still block.
-        if auth.protectWithBiometrics {
-            let info = BiometricCredentialStore.info(profile: profile.id)
-            if info.exists {
-                return (auth.requiresOTP && !info.hasTOTP && otpEmpty) ? .code : nil
-            }
-        }
-        if c.username.trimmingCharacters(in: .whitespaces).isEmpty || c.password.isEmpty { return .signIn }
-        return (auth.requiresOTP && otpEmpty) ? .code : nil
     }
 
     // MARK: Endpoint picker (multi-endpoint VPNs)

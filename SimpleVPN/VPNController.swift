@@ -1418,6 +1418,56 @@ final class VPNController {
         effectiveAuthConfig(for: id).requiresOTP
     }
 
+    /// The ONE readiness decision every Connect affordance reads — the detail
+    /// Connect button, the sidebar play button and the menu row — so a control
+    /// is never enabled in one place and disabled in another. (Tailscale used to
+    /// be connectable from the detail pane yet stuck on "Sign-in needed" in the
+    /// sidebar because each view recomputed this for itself.)
+    func connectReadiness(for id: String) -> ConnectReadiness {
+        connectInputs(for: id).readiness
+    }
+
+    /// Gather the plain facts `ConnectReadiness` turns on. Kept separate from the
+    /// (pure, testable) decision so the keychain/evaluator lookups happen once,
+    /// and only for the kinds that need them.
+    func connectInputs(for id: String) -> ConnectInputs {
+        var inputs = ConnectInputs()
+        inputs.kind = profiles.first { $0.id == id }?.kind ?? .openVPN
+
+        // Tailscale and Proxy Tunnels decide on their own settings — no typed
+        // credentials, so skip the evaluator/keychain work entirely.
+        if inputs.kind == .tailscale { return inputs }
+        if inputs.kind == .proxyTunnel {
+            let config = proxyTunnelConfig(for: id)
+            inputs.proxyHasProblem = config.connectProblem != nil
+            inputs.proxyRequiresAuth = config.requiresAuth
+            let creds = proxyTunnelCredentials(for: id)
+            inputs.proxyCredentialsComplete =
+                !creds.username.trimmingCharacters(in: .whitespaces).isEmpty && !creds.password.isEmpty
+            return inputs
+        }
+
+        inputs.autologin = isAutologin(id)
+        inputs.managerKind = credentialSource(for: id).kind
+        inputs.requiresOTP = effectiveAuthConfig(for: id).requiresOTP
+        inputs.hasLockedUsername = !(profileEvaluation(for: id)?.userlockedUsername.isEmpty ?? true)
+        let c = transientCredentials(for: id)
+        inputs.typedUsername = !c.username.trimmingCharacters(in: .whitespaces).isEmpty
+        inputs.typedPassword = !c.password.isEmpty
+        inputs.typedOTP = !c.otp.trimmingCharacters(in: .whitespaces).isEmpty
+
+        // Touch ID facts only matter for a manual, protected source (a manager
+        // source resolves its own secret); reading them otherwise is a needless
+        // keychain hit on every redraw.
+        inputs.biometricProtected = authConfig(for: id).protectWithBiometrics
+        if inputs.managerKind == .manual, inputs.biometricProtected {
+            let info = BiometricCredentialStore.info(profile: id)
+            inputs.biometricStored = info.exists
+            inputs.biometricHasTOTP = info.hasTOTP
+        }
+        return inputs
+    }
+
     /// Connect unattended (menu / sidebar quick-connect). Uses a configured
     /// password manager when it can run without typing, else remembered
     /// credentials. Returns false when a fresh OTP or manual entry is needed —

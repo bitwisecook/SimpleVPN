@@ -12,6 +12,7 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+import AppKit
 import os
 
 /// Settings key: open the live-details (inspector) pane when the window opens.
@@ -33,6 +34,13 @@ struct ConnectionView: View {
     /// the Settings toggle changes the launch state, the toolbar button the moment.
     @AppStorage(inspectorDefaultsKey) private var inspectorOpenByDefault = false
     @State private var showInspector = false
+    /// The window's width from just BEFORE the inspector opens. AppKit is supposed
+    /// to grow the window for `.inspector` and shrink it back on dismiss, but the
+    /// shrink-back half is unreliable (the window is left enlarged after toggling
+    /// the pane off) — so the pre-inspector width is captured here and force-
+    /// restored right after the pane closes, in `restoreWindowWidthAfterInspectorToggle`,
+    /// overriding whatever (wider) frame AppKit actually settled on.
+    @State private var widthBeforeInspector: CGFloat?
     /// Sidebar visibility — starts closed when there's only one VPN (a list of
     /// one is noise); the standard sidebar toolbar button reopens it.
     @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
@@ -276,6 +284,27 @@ struct ConnectionView: View {
             // launch, so the user's own toggling always wins.
             showInspector = inspectorOpenByDefault
             if vpn.profiles.count <= 1 { columnVisibility = .detailOnly }
+        }
+        .onChange(of: showInspector) { _, isShowing in
+            restoreWindowWidthAfterInspectorToggle(isShowing: isShowing)
+        }
+    }
+
+    /// See `widthBeforeInspector` for why this exists. Captures the width just
+    /// before the pane opens; on close, force-restores it — asynchronously, so
+    /// AppKit's own (partial) resize gets a chance to run first, and this simply
+    /// corrects whatever it left the frame at rather than fighting it mid-flight.
+    private func restoreWindowWidthAfterInspectorToggle(isShowing: Bool) {
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+        if isShowing {
+            widthBeforeInspector = window.frame.width
+        } else if let target = widthBeforeInspector {
+            DispatchQueue.main.async {
+                var frame = window.frame
+                guard frame.width > target else { return }   // already restored / narrower
+                frame.size.width = target
+                window.setFrame(frame, display: true, animate: !reduceMotion)
+            }
         }
     }
 
@@ -556,40 +585,11 @@ private struct ConnectionDetailView: View {
     }
     private var isProtected: Bool { biometricInfo.exists }
 
+    /// Enabled exactly when the shared readiness decision says so — the SAME
+    /// source of truth the sidebar play button and menu row read, so the two
+    /// controls can never disagree (Tailscale/autologin/proxy included).
     private var canConnect: Bool {
-        // Tailscale signs itself in — with the stored setup key, or by opening
-        // a browser sign-in page. There is nothing to type first.
-        if profile.kind == .tailscale { return true }
-        // A Proxy Tunnel connects on nothing when the proxy needs no sign-in;
-        // when it does, it connects with the credentials saved in its settings
-        // (there is no OTP, and the editor is where they are entered).
-        if profile.kind == .proxyTunnel {
-            let config = vpn.proxyTunnelConfig(for: profile.id)
-            if config.connectProblem != nil { return false }
-            if !config.requiresAuth { return true }
-            let creds = vpn.proxyTunnelCredentials(for: profile.id)
-            return !creds.username.trimmingCharacters(in: .whitespaces).isEmpty && !creds.password.isEmpty
-        }
-        // Autologin: the certificate is the sign-in.
-        if isAutologin { return true }
-        if usesManager {
-            // The manager supplies username/password; only gate on a typed OTP
-            // when the manager can't provide one.
-            return !managerNeedsTypedOTP
-                || !vpn.transientCredentials(for: profile.id).otp.trimmingCharacters(in: .whitespaces).isEmpty
-        }
-        if isProtected {
-            // The fingerprint releases username+password (and the code, when an
-            // authenticator secret is stored); a typed code covers the gap.
-            return !requiresOTP || biometricInfo.hasTOTP
-                || !vpn.transientCredentials(for: profile.id).otp.trimmingCharacters(in: .whitespaces).isEmpty
-        }
-        let c = vpn.transientCredentials(for: profile.id)
-        let usernameOK = !lockedUsername.isEmpty
-            || !c.username.trimmingCharacters(in: .whitespaces).isEmpty
-        return usernameOK
-            && !c.password.isEmpty
-            && (!requiresOTP || !c.otp.trimmingCharacters(in: .whitespaces).isEmpty)
+        vpn.connectReadiness(for: profile.id) == .ready
     }
 
     var body: some View {
@@ -598,16 +598,11 @@ private struct ConnectionDetailView: View {
         ScrollView {
             VStack(spacing: 20) {
                 header
-                // Default-gateway picker (PolicyRouting.md Tier 2): appears as soon
-                // as a single connected capable VPN gives the user a choice — its
-                // "route all internet through this VPN" switch (RC2) — and stays for
-                // the multi-VPN owner picker. One live switch for which VPN owns
-                // 0.0.0.0/0, plus the animated traffic path. Shown here (not
-                // per-profile) so it's visible whichever VPN is selected.
-                if vpn.showsDefaultGatewayControl {
-                    DefaultGatewayCard(vpn: vpn)
-                        .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
-                }
+                // Default-gateway picker (PolicyRouting.md Tier 2) moved OUT of this
+                // window — too prominent for non-technical users to find here. It
+                // now lives in VPN ▸ Routes, alongside the route graph and the
+                // drift/diff indicators it's naturally paired with (see
+                // RouteGraphView's compact `gatewayBar`).
                 // Sign-in comes FIRST, directly under the Connect row it feeds —
                 // username/password/OTP are what the button is waiting for, so they
                 // must not sit below the fold behind panels and pickers.

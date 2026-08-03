@@ -355,13 +355,31 @@ nonisolated enum ProbeLadderEngine {
     /// - `progress`: called after each step so the UI can fill in live.
     static func run(plan: [ProbeStep],
                     includeAccountSteps: Bool = false,
+                    seed: [ProbeStep]? = nil,
                     clock: @Sendable () -> Date = { Date() },
                     progress: (@Sendable ([ProbeStep]) -> Void)? = nil,
                     execute: Executor) async -> [ProbeStep] {
         var steps = plan
         var stopped = false
 
+        // Incremental re-run: carry forward the leading run of already-SETTLED rungs
+        // (passed or not-applicable) from a same-shaped earlier ladder, and only
+        // execute from the first UNSETTLED rung onward — the failed handshake step,
+        // or the held-back sign-in. A settled step's answer was true of a path that,
+        // by the caller's fingerprint check, hasn't changed, so re-running it would
+        // only spend time re-confirming it. Any other seed shape is ignored.
+        var startIndex = 0
+        if let seed, seed.count == steps.count, seed.map(\.stage) == steps.map(\.stage) {
+            startIndex = seed.firstIndex { $0.status != .ok && $0.status != .notApplicable }
+                ?? seed.count
+            for i in 0..<startIndex { steps[i] = seed[i] }
+        }
+
         for index in steps.indices {
+            if index < startIndex {
+                progress?(steps)        // carried forward; nothing to run
+                continue
+            }
             if stopped {
                 steps[index].apply(.skipped(notReached), duration: nil)
                 progress?(steps)
