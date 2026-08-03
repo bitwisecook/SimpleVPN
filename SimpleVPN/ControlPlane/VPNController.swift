@@ -360,6 +360,9 @@ final class VPNController {
                 if kind == .proxyTunnel {
                     proxyTunnelConfigs[id] = ProxyTunnelConfig.decode(from: proto?.providerConfiguration?["proxytunnel"] as? Data)
                 }
+                if kind == .wireGuard {
+                    wireGuardConfigs[id] = WireGuardConfig.decode(from: proto?.providerConfiguration?["wireguard"] as? Data)
+                }
                 list.append(Profile(id: id,
                                     name: mgr.localizedDescription ?? id,
                                     server: proto?.serverAddress ?? "",
@@ -458,6 +461,13 @@ final class VPNController {
     /// Latest engine status per profile, refreshed while connected.
     var proxyTunnelStatuses: [String: ProxyTunnelStatus] = [:]   // was private(set) — internal for the +File split
 
+    /// Observable mirror of the persisted (REDACTED — keys live in the
+    /// keychain) WireGuard settings.
+    var wireGuardConfigs: [String: WireGuardConfig] = [:]
+    /// Latest engine status per profile, refreshed while connected — the
+    /// last-handshake time is WireGuard's one health signal.
+    var wireGuardStatuses: [String: WireGuardEngineStatus] = [:]
+
     /// Observable mirror of the persisted override blobs (see authConfigs).
     var overridesCache: [String: OpenVPNOverrides] = [:]   // was private(set) — internal for the +File split
 
@@ -503,9 +513,10 @@ final class VPNController {
     /// kind with `ConfigDetector` first, and for anything but `.openVPN` hands
     /// the raw text off here instead of always trying the OpenVPN evaluator.
     /// Wired once at launch (SimpleVPNApp) to the same WireGuard/Cisco/native
-    /// stores ManageVPNsView's own importer already dispatches to; nil until
-    /// wired (or in tests) degrades to the previous OpenVPN-only behaviour.
-    var otherEngineImportHandler: ((DetectedConfigKind, String, String) -> ImportOutcome)?
+    /// destinations ManageVPNsView's own importer already dispatches to; nil
+    /// until wired (or in tests) degrades to the previous OpenVPN-only
+    /// behaviour. Async because a WireGuard import creates a real NE profile.
+    var otherEngineImportHandler: ((DetectedConfigKind, String, String) async -> ImportOutcome)?
 
     /// Profiles being reconnected to apply a settings change — the UI shows an
     /// "applying" state instead of collapsing to the disconnected/Connect layout.

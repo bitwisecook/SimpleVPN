@@ -17,20 +17,18 @@ struct ManageVPNsView: View {
     @Environment(SubprocessTunnelStore.self) private var tunnels
     @Environment(SubprocessTunnelManager.self) private var tunnelManager
     @Environment(NativeVPNManager.self) private var nativeVPN
-    @Environment(WireGuardStore.self) private var wireguard
     @Environment(\.dismiss) private var dismissWindow
     @State private var selection: String?
 
     /// Every configured VPN across all backends — "only one VPN" for the
     /// save-closes-the-window behaviour.
     private var totalVPNCount: Int {
-        vpn.profiles.count + tunnels.tunnels.count + nativeVPN.configs.count + wireguard.configs.count
+        vpn.profiles.count + tunnels.tunnels.count + nativeVPN.configs.count
     }
 
     /// Sidebar selection is tagged so rows never collide with NE profile ids.
     private static let tunnelTag = "tunnel:"
     private static let nativeTag = "native:"
-    private static let wgTag = "wg:"
     @State private var showImporter = false
     @State private var showDiscover = false
     @State private var ciscoNote: String?
@@ -101,17 +99,6 @@ struct ManageVPNsView: View {
                             .contextMenu {
                                 Button("Remove", role: .destructive) { nativeVPN.remove(c.id) }
                             }
-                        }
-                    }
-                }
-                if !wireguard.configs.isEmpty {
-                    Section("WireGuard") {
-                        ForEach(wireguard.configs) { c in
-                            Label(c.name, systemImage: "lock.shield")
-                                .tag(Self.wgTag + c.id)
-                                .contextMenu {
-                                    Button("Remove", role: .destructive) { wireguard.remove(c.id) }
-                                }
                         }
                     }
                 }
@@ -334,8 +321,8 @@ struct ManageVPNsView: View {
 
         case .wireGuard:
             let c = WireGuardConfig.parse(text, name: name)
-            wireguard.save(c)
-            selection = Self.wgTag + c.id
+            do { selection = try await vpn.createWireGuard(from: c) }
+            catch { vpn.importOutcome = .invalid(reason: error.localizedDescription) }
 
         case .cisco:
             importCiscoText(text, name: name)
@@ -360,7 +347,7 @@ struct ManageVPNsView: View {
         }
     }
 
-    private func newWireGuard() {
+    private func newWireGuard() async {
         var c = WireGuardConfig()
         // Sensible defaults for a hand-built tunnel (imports keep their own values):
         // a 25s keepalive so the peer stays reachable through NAT, and an explicit
@@ -368,13 +355,8 @@ struct ManageVPNsView: View {
         // overhead is subtracted — heading off the MTU-blackhole stall.
         c.persistentKeepalive = 25
         c.mtu = 1420
-        wireguard.save(c)
-        selection = Self.wgTag + c.id
-    }
-    private func wgBinding(for selection: String) -> WireGuardConfig? {
-        guard selection.hasPrefix(Self.wgTag) else { return nil }
-        let id = String(selection.dropFirst(Self.wgTag.count))
-        return wireguard.configs.first { $0.id == id }
+        do { selection = try await vpn.createWireGuard(from: c) }
+        catch { vpn.lastError = error.localizedDescription }
     }
 
     /// The "+" menu. Extracted from the toolbar closure: SwiftUI's result
@@ -382,7 +364,7 @@ struct ManageVPNsView: View {
     /// alone is past what the compiler will do in reasonable time inline.
     @ViewBuilder private var addMenu: some View {
         Button("OpenVPN") { Task { await newEmpty() } }
-        Button("WireGuard") { newWireGuard() }
+        Button("WireGuard") { Task { await newWireGuard() } }
         Button("Tailscale / Headscale") { Task { await newTailscale() } }
         Button("Proxy Tunnel (SOCKS5 / HTTP)") { Task { await newProxyTunnel() } }
         Button("IKEv2") { newNative(.ikev2) }
@@ -412,8 +394,8 @@ struct ManageVPNsView: View {
             SubprocessTunnelView(vpn: vpn, store: tunnels, manager: tunnelManager, draft: t).id(id)
         } else if let id = selection, let c = nativeBinding(for: id) {
             NativeVPNView(vpn: vpn, manager: nativeVPN, draft: c).id(id)
-        } else if let id = selection, let w = wgBinding(for: id) {
-            WireGuardView(vpn: vpn, store: wireguard, draft: w).id(id)
+        } else if let id = selection, vpn.isWireGuard(id) {
+            WireGuardView(vpn: vpn, profileID: id).id(id)
         } else if let id = selection, vpn.isTailscale(id) {
             TailscaleView(vpn: vpn, profileID: id).id(id)
         } else if let id = selection, vpn.isProxyTunnel(id) {

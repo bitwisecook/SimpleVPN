@@ -140,11 +140,11 @@ route-participants.
 | OpenConnect (subprocess/ocproxy) | ➖ no default route | ~ | ✅ **proxy** (system SOCKS) | Proxy-mediator participant |
 | SSH | ➖ no default route | ➖ | ✅ **proxy** (SOCKS `-D`) | Proxy-mediator participant |
 | Native IKEv2/IPsec/L2TP | ~ coarse (full/split via `includeAllNetworks`; no live demote) | ~ (`NEDNSSettings`) | ~ (`NEProxySettings`) | OS-run via NEVPNManager; entitlement-gated |
-| WireGuard | ⛔ engine not built | — | — | excluded cleanly with a reason |
+| WireGuard | ✅ full | ✅ (`DNS=` servers → catch-all) | ➖ (no proxy directive) | `WireGuardNetworkSettings` `suppressDefaultRoute` — demotes live like the proxy tunnel |
 
 **Route-mediator classification rule:** only kinds with a real default-route capability get a
 gateway role and enter ≤1-owner arbitration. Kinds with no default route (SSH, subprocess
-OpenConnect, unbuilt WireGuard) are **excluded** from the gateway picker with a reason and never
+OpenConnect) are **excluded** from the gateway picker with a reason and never
 assigned a role. Native kinds participate coarsely (`includeAllNetworks`) or are marked limited.
 The Proxy mediator owns the SOCKS-proxy kinds (SSH, ocproxy OpenConnect). Never crash, never
 silently no-op a kind — every kind resolves to one bucket, surfaced in the UI.

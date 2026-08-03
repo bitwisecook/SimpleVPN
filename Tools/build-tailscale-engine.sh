@@ -107,6 +107,14 @@ for sym in _PXSetCallbacks _PXStart _PXStop _PXStatus _PXPacketIn _PXFree; do
   grep -q "${sym#_}" "$PXHEADER" \
     || { echo "error: ${sym#_} not declared in $PXHEADER" >&2; exit 1; }
 done
+# Third family in the same archive: the plain-WireGuard engine (wireguard.go),
+# declared by its own stable header next to tsengine.h.
+for sym in _WGSetCallbacks _WGStart _WGStop _WGStatus _WGPacketIn _WGFree; do
+  nm -gU "$OUT/libtsengine.a" 2>/dev/null | grep -q " T $sym\$" \
+    || { echo "error: $sym missing from libtsengine.a" >&2; exit 1; }
+  grep -q "${sym#_}" "$INCLUDE/wgengine.h" \
+    || { echo "error: ${sym#_} not declared in include/wgengine.h" >&2; exit 1; }
+done
 
 # Size note: this archive is large (~50 MB) because it carries the whole
 # Tailscale stack plus gVisor's netstack. Dead-code stripping at link time cuts

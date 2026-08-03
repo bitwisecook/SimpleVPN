@@ -214,14 +214,16 @@ nonisolated enum DNSDriftDecision {
 /// (StateMediators.md › VPN-kind participation). Every kind resolves to exactly one.
 nonisolated enum DNSParticipation: Sendable, Equatable {
     /// Pushes real resolvers we arbitrate into split-DNS (OpenVPN, proxy-tunnel,
-    /// Tailscale/MagicDNS, in-process-NE OpenConnect and the other SSL VPNs).
+    /// Tailscale/MagicDNS, WireGuard's DNS= servers, in-process-NE OpenConnect
+    /// and the other SSL VPNs).
     case full
     /// Coarse OS-managed DNS (native NEVPNManager kinds via `NEDNSSettings`) — surfaced
     /// but not part of the live split-DNS arbitration.
     case limited
     /// No DNS of its own (SSH SOCKS, subprocess kinds) — excluded with a reason.
     case none
-    /// Engine not built (WireGuard) — excluded cleanly.
+    /// Engine not built — excluded cleanly. (No kind lands here today; kept so
+    /// the next engine-less kind gets the honest bucket rather than a lie.)
     case unsupported
 
     /// Does this bucket contribute an intent to the split-DNS arbitration?
@@ -229,15 +231,13 @@ nonisolated enum DNSParticipation: Sendable, Equatable {
 
     nonisolated static func classify(_ kind: VPNKind) -> DNSParticipation {
         switch kind {
-        case .openVPN, .proxyTunnel, .tailscale,
+        case .openVPN, .proxyTunnel, .tailscale, .wireGuard,
              .fortinet, .f5apm, .ciscoAnyConnect, .globalProtect, .juniper, .pulse, .arrayNetworks:
             return .full
         case .ikev2, .ipsec, .l2tp:
             return .limited
         case .ssh:
             return .none
-        case .wireGuard:
-            return .unsupported
         }
     }
 }

@@ -226,6 +226,8 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                         tailscalePanel
                     } else if profile.kind == .proxyTunnel {
                         proxyTunnelPanel
+                    } else if profile.kind == .wireGuard {
+                        wireGuardPanel
                     } else if isAutologin {
                         // Autologin: the profile's certificate signs in by
                         // itself, so there is no credential form to show and
@@ -424,6 +426,27 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
             // outside the VPN, not a state duplicate — and pause is opt-in anyway.
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// What stands in for the credential form on a WireGuard VPN: the keys are
+    /// the sign-in, so there is nothing to type — only a pointer at the editor
+    /// while the config still needs something.
+    @ViewBuilder private var wireGuardPanel: some View {
+        if let problem = vpn.wireGuardConfig(for: profile.id).connectProblem {
+            Label(problem, systemImage: "exclamationmark.triangle")
+                .font(.callout).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else if !vpn.wireGuardHasPrivateKey(profile.id) {
+            Label("Set this tunnel's private key first — open Manage VPNs and paste it under Set / Replace Key.",
+                  systemImage: "key")
+                .font(.callout).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            Label("This VPN signs in with its keys — nothing to type.",
+                  systemImage: "checkmark.seal")
+                .font(.callout).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     /// What stands in for the credential form on a Tailscale/Headscale VPN.
@@ -669,7 +692,8 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     var firstMissingField: CredentialField? {   // was private — internal for the file split
         // Nothing to type at all for these — a nudge must not focus a field
         // that isn't on screen.
-        if profile.kind == .tailscale || profile.kind == .proxyTunnel || isAutologin { return nil }
+        if profile.kind == .tailscale || profile.kind == .proxyTunnel
+            || profile.kind == .wireGuard || isAutologin { return nil }
         // The manager/protected forms render at most an OTP field.
         if usesManager { return managerNeedsTypedOTP ? .otp : nil }
         if isProtected { return (requiresOTP && !biometricInfo.hasTOTP) ? .otp : nil }

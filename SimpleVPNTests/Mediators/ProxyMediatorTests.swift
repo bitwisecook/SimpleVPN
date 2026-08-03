@@ -155,8 +155,9 @@ struct ProxyMediatorTests {
         for kind: VPNKind in [.ikev2, .ipsec, .l2tp] {
             #expect(ProxyParticipation.classify(kind) == .limited)
         }
+        // Neither Tailscale nor WireGuard pushes/sets a proxy of its own.
         #expect(ProxyParticipation.classify(.tailscale) == .none)
-        #expect(ProxyParticipation.classify(.wireGuard) == .unsupported)
+        #expect(ProxyParticipation.classify(.wireGuard) == .none)
     }
 
     // MARK: - Drift → re-assert decision (stage 4)

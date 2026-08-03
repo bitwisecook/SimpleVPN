@@ -246,6 +246,10 @@ extension ProbeTargetFacts {
                         evaluator: ProfileEvaluator?) -> ProbeTargetFacts {
         let target = VPNProbeTarget.resolve(profile: profile, vpn: vpn, evaluator: evaluator)
         switch profile.kind {
+        case .wireGuard:
+            // The saved blob is redacted; resolve(wireGuard:) refills the keys
+            // from the keychain at the click, so the handshake rung works.
+            return .resolve(wireGuard: vpn.wireGuardConfig(for: profile.id))
         case .tailscale:
             var facts = ProbeTargetFacts.tailscale(vpn.tailscaleConfig(for: profile.id),
                                                    profileID: profile.id, name: profile.name)

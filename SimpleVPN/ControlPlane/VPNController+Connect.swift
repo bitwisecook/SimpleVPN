@@ -356,10 +356,12 @@ extension VPNController {
     /// and the profile allows saving; the OTP is consumed and cleared.
     func connectWithTransientCredentials(id: String) async throws {
         // Tailscale has no username/password to collect — it signs in with a
-        // setup key or a browser. Every connect entry point funnels here or to
-        // one of the two below, so the branch belongs at each of them.
+        // setup key or a browser; WireGuard signs in with its stored keys.
+        // Every connect entry point funnels here or to one of the two below,
+        // so the branches belong at each of them.
         if isTailscale(id) { try await connectTailscale(id: id); return }
         if isProxyTunnel(id) { try await connectProxyTunnel(id: id); return }
+        if isWireGuard(id) { try await connectWireGuard(id: id); return }
         let c = transientCredentials(for: id)
         let auth = effectiveAuthConfig(for: id)
         let provider = ManualCredentialProvider(username: c.username, password: c.password, otp: c.otp)
@@ -420,8 +422,8 @@ extension VPNController {
         var inputs = ConnectInputs()
         inputs.kind = profiles.first { $0.id == id }?.kind ?? .openVPN
 
-        // Tailscale and Proxy Tunnels decide on their own settings — no typed
-        // credentials, so skip the evaluator/keychain work entirely.
+        // Tailscale, Proxy Tunnels and WireGuard decide on their own settings —
+        // no typed credentials, so skip the evaluator/keychain work entirely.
         if inputs.kind == .tailscale { return inputs }
         if inputs.kind == .proxyTunnel {
             let config = proxyTunnelConfig(for: id)
@@ -430,6 +432,11 @@ extension VPNController {
             let creds = proxyTunnelCredentials(for: id)
             inputs.proxyCredentialsComplete =
                 !creds.username.trimmingCharacters(in: .whitespaces).isEmpty && !creds.password.isEmpty
+            return inputs
+        }
+        if inputs.kind == .wireGuard {
+            inputs.wireGuardHasProblem = wireGuardConfig(for: id).connectProblem != nil
+            inputs.wireGuardHasKey = wireGuardHasPrivateKey(id)
             return inputs
         }
 
@@ -468,6 +475,11 @@ extension VPNController {
             // A no-auth proxy connects unattended; an auth proxy connects with
             // its stored credentials (there is no OTP to type).
             do { try await connectProxyTunnel(id: id); return true }
+            catch { report(error, profile: id); return false }
+        }
+        if isWireGuard(id) {
+            // The keys are stored, so a WireGuard connect never needs typing.
+            do { try await connectWireGuard(id: id); return true }
             catch { report(error, profile: id); return false }
         }
         // Autologin: nothing to look up — the profile's certificate IS the sign-in.
@@ -519,6 +531,7 @@ extension VPNController {
     func connectUsingConfiguredSource(id: String, typedOTP: String) async throws {
         if isTailscale(id) { try await connectTailscale(id: id); return }
         if isProxyTunnel(id) { try await connectProxyTunnel(id: id); return }
+        if isWireGuard(id) { try await connectWireGuard(id: id); return }
         let auth = effectiveAuthConfig(for: id)
         guard let provider = managerProvider(for: id) else {
             try await connectWithTransientCredentials(id: id)
@@ -716,8 +729,10 @@ extension VPNController {
     /// used to avoid dropping a live tunnel we couldn't restore.
     private func canReconnectUnattended(id: String) -> Bool {
         // Once a Tailscale node is registered its key is on disk, so a
-        // reconnect never needs the user.
+        // reconnect never needs the user. A WireGuard tunnel's keys live in
+        // the keychain — same answer.
         if isTailscale(id) { return true }
+        if isWireGuard(id) { return true }
         if isAutologin(id) { return true }   // the certificate is the sign-in
         let auth = effectiveAuthConfig(for: id)
         if managerProvider(for: id) != nil {

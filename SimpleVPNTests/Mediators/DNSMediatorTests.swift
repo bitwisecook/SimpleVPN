@@ -80,7 +80,7 @@ struct DNSMediatorTests {
     // MARK: - Participation classifier
 
     @Test func dnsParticipationBucketsEveryKind() {
-        for kind: VPNKind in [.openVPN, .proxyTunnel, .tailscale, .fortinet, .f5apm,
+        for kind: VPNKind in [.openVPN, .proxyTunnel, .tailscale, .wireGuard, .fortinet, .f5apm,
                               .ciscoAnyConnect, .globalProtect, .juniper, .pulse, .arrayNetworks] {
             #expect(DNSParticipation.classify(kind) == .full, "\(kind) should be .full")
             #expect(DNSParticipation.classify(kind).participatesInSplitDNS)
@@ -90,7 +90,6 @@ struct DNSMediatorTests {
             #expect(!DNSParticipation.classify(kind).participatesInSplitDNS)
         }
         #expect(DNSParticipation.classify(.ssh) == .none)
-        #expect(DNSParticipation.classify(.wireGuard) == .unsupported)
     }
 
     // MARK: - Drift → re-assert decision (stage 4)

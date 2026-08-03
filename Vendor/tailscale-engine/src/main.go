@@ -294,8 +294,15 @@ const maxPacketSize = 65535
 const defaultMTU = 1280
 
 // callbackTUN is a tun.Device whose two directions cross the C boundary:
-// Read() hands wireguard-go packets that Swift pushed in with TSPacketIn, and
-// Write() hands Swift the decrypted packets via the packetOut callback.
+// Read() hands wireguard-go packets that Swift pushed in with TSPacketIn (or
+// WGPacketIn), and Write() hands Swift the decrypted packets via `emit`.
+//
+// `emit` is injected rather than baked in because TWO engines in this archive
+// drive a callbackTUN — the Tailscale node (TS* callbacks) and the plain
+// WireGuard engine (WG* callbacks, wireguard.go) — and each must deliver to
+// its own registered C function pointer. nil emit drops nothing on the floor
+// silently: Write still consumes the buffers (wireguard-go treats a short
+// write as fatal), there is just no one to hand them to yet.
 //
 // It deliberately does NOT implement IsFakeTun() — tsd.System sniffs for that
 // method and would switch the whole node into netstack-only mode.
@@ -306,17 +313,29 @@ type callbackTUN struct {
 	closed    chan struct{}
 	mtu       atomic.Int64
 	dropped   atomic.Int64
+	emit      func([]byte)
 }
 
-func newCallbackTUN(mtu int) *callbackTUN {
+func newCallbackTUN(mtu int, emit func([]byte)) *callbackTUN {
 	t := &callbackTUN{
 		events:  make(chan tun.Event, 4),
 		inbound: make(chan []byte, inboundQueueDepth),
 		closed:  make(chan struct{}),
+		emit:    emit,
 	}
 	t.mtu.Store(int64(mtu))
 	t.events <- tun.EventUp
 	return t
+}
+
+// emitTSPacket is the Tailscale node's engine→flow delivery: the packet goes
+// to the TS packetOut callback (registered by TSSetCallbacks).
+func emitTSPacket(p []byte) {
+	f := cbPacketOut.Load()
+	if f == nil {
+		return
+	}
+	C.tsCallPacket(*f, (*C.uchar)(unsafe.Pointer(&p[0])), C.int(len(p)))
 }
 
 // File is only ever called by the plan9 router; nil is correct here.
@@ -377,8 +396,7 @@ func (t *callbackTUN) Write(bufs [][]byte, offset int) (int, error) {
 		return 0, os.ErrClosed
 	default:
 	}
-	f := cbPacketOut.Load()
-	if f == nil {
+	if t.emit == nil {
 		return len(bufs), nil
 	}
 	for _, b := range bufs {
@@ -391,7 +409,7 @@ func (t *callbackTUN) Write(bufs [][]byte, offset int) (int, error) {
 			t.dropped.Add(1)
 			continue
 		}
-		C.tsCallPacket(*f, (*C.uchar)(unsafe.Pointer(&p[0])), C.int(len(p)))
+		t.emit(p)
 	}
 	return len(bufs), nil
 }
@@ -595,7 +613,7 @@ func buildEngine(cfg startConfig, controlURL string, advRoutes []netip.Prefix, m
 	dialer.SetBus(sys.Bus.Get())
 	st.dialer = dialer
 
-	tundev := newCallbackTUN(mtu)
+	tundev := newCallbackTUN(mtu, emitTSPacket)
 	st.tundev = tundev
 
 	// One object is both Router and dns.OSConfigurator: Tailscale hands us the

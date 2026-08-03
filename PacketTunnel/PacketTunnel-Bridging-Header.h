@@ -13,3 +13,6 @@
 // The proxy-tunnel engine's exports live in the SAME Go c-archive as tsengine
 // (two Go c-archives cannot co-link); this is just its stable C header.
 #import "pxengine.h"
+// The plain-WireGuard engine's exports live in that same archive too (its
+// module already pins wireguard-go); this is its stable C header.
+#import "wgengine.h"

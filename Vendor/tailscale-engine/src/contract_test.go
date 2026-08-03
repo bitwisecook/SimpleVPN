@@ -146,7 +146,7 @@ func TestPublishConfigIgnoresNilRouterConfig(t *testing.T) {
 }
 
 func TestCallbackTUNBounds(t *testing.T) {
-	d := newCallbackTUN(1280)
+	d := newCallbackTUN(1280, nil)
 	defer d.Close()
 
 	// A packet larger than the destination buffer is dropped, not truncated,
@@ -169,7 +169,7 @@ func TestCallbackTUNBounds(t *testing.T) {
 }
 
 func TestCallbackTUNQueueIsBounded(t *testing.T) {
-	d := newCallbackTUN(1280)
+	d := newCallbackTUN(1280, nil)
 	defer d.Close()
 	accepted := 0
 	for i := 0; i < inboundQueueDepth*2; i++ {
@@ -186,7 +186,7 @@ func TestCallbackTUNQueueIsBounded(t *testing.T) {
 }
 
 func TestCallbackTUNClosedReadReturnsError(t *testing.T) {
-	d := newCallbackTUN(1280)
+	d := newCallbackTUN(1280, nil)
 	d.Close()
 	d.Close() // idempotent — stopTunnel may race a failed start
 	if _, err := d.Read([][]byte{make([]byte, 100)}, make([]int, 1), 0); err == nil {
@@ -200,7 +200,7 @@ func TestCallbackTUNClosedReadReturnsError(t *testing.T) {
 func TestCallbackTUNIsNotAFakeTun(t *testing.T) {
 	// tsd.System sniffs for IsFakeTun() and would silently switch the node to
 	// netstack-only (no packet path) if our device grew that method.
-	var d any = newCallbackTUN(1280)
+	var d any = newCallbackTUN(1280, nil)
 	if _, bad := d.(interface{ IsFakeTun() bool }); bad {
 		t.Fatal("callbackTUN must not implement IsFakeTun")
 	}

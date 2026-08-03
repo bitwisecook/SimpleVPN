@@ -128,6 +128,11 @@ nonisolated struct ConnectInputs: Equatable, Sendable {
     var proxyRequiresAuth = false
     var proxyCredentialsComplete = false
 
+    // WireGuard (signs in with its stored keys — nothing typed; the keys and
+    // the peer settings are entered in the editor, not the connect row).
+    var wireGuardHasProblem = false
+    var wireGuardHasKey = false
+
     // Credential collection (OpenVPN and the other typed-credential kinds).
     var managerKind: CredentialSourceKind = .manual
     var requiresOTP = false
@@ -150,6 +155,13 @@ nonisolated struct ConnectInputs: Equatable, Sendable {
             if proxyHasProblem { return .blocked }
             if !proxyRequiresAuth { return .ready }
             return proxyCredentialsComplete ? .ready : .needsSignIn
+        }
+
+        // WireGuard signs in with its keys — nothing typed. A missing private
+        // key (or an unusable peer config) is an editor problem, not a
+        // credential prompt, so it blocks rather than asks.
+        if kind == .wireGuard {
+            return (wireGuardHasProblem || !wireGuardHasKey) ? .blocked : .ready
         }
 
         // Autologin: the profile's certificate IS the sign-in.

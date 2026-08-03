@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 //  WireGuardView.swift
-//  Import / edit / export a WireGuard configuration. In-app tunnelling needs the
-//  WireGuardKit engine linked into the packet-tunnel provider (dispatched by
-//  vpnType alongside OpenVPN); until that engine build lands, Export hands a
-//  valid .conf to the official WireGuard app. The private key is kept in the
-//  keychain, never shown or exported through providerConfiguration.
+//  Import / edit / export a WireGuard configuration. A WireGuard VPN is an
+//  ordinary packet-tunnel profile (the wireguard-go engine runs in-process in
+//  the extension — VPNController+WireGuard.swift owns the settings blob and
+//  connect flow); this editor is a structured view over the wg-quick fields.
+//  The private key is kept in the keychain, never shown, and never persisted
+//  through providerConfiguration.
 //
 
 import SwiftUI
@@ -14,8 +15,8 @@ import UniformTypeIdentifiers
 
 struct WireGuardView: View {
     let vpn: VPNController
-    @Bindable var store: WireGuardStore
-    @State var draft: WireGuardConfig
+    let profileID: String
+    @State private var draft = WireGuardConfig()
 
     @State private var loaded = false
     @State private var showImporter = false
@@ -95,20 +96,15 @@ struct WireGuardView: View {
             }
 
             Section {
-                HStack {
-                    Label("In-app WireGuard tunnelling isn't in this build yet — the WireGuard engine is the remaining piece.",
-                          systemImage: "wrench.and.screwdriver")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
                 Button("Export .conf…") { export() }
                     .disabled(draft.peerPublicKey.isEmpty || !hasPrivateKey)
             } footer: {
                 Text(hasPrivateKey
-                     ? "Export produces a standard wg-quick file you can use with the official WireGuard app today."
+                     ? "Export produces a standard wg-quick file for use with other WireGuard clients."
                      : "Set a private key above before exporting — wg-quick refuses a config without one.")
             }
 
-            CustomRoutingTabView(vpn: vpn, profileID: draft.id, profile: $customRouting,
+            CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
                                 proxyAuthUsername: $crProxyAuthUsername,
                                 proxyAuthPassword: $crProxyAuthPassword)
         }
@@ -194,9 +190,13 @@ struct WireGuardView: View {
     private func loadOnce() {
         guard !loaded else { return }
         loaded = true
-        draft = draft.withSecretsFromKeychain()
-        customRouting = vpn.customRouting(for: draft.id)
-        (crProxyAuthUsername, crProxyAuthPassword) = loadCustomRoutingProxyAuthFields(profileID: draft.id)
+        // The persisted blob is redacted; the keys come back from the keychain
+        // (the "wg.<id>" item VPNController+WireGuard maintains) so the export
+        // works and the private-key row can say "set".
+        draft = vpn.wireGuardConfig(for: profileID).withSecretsFromKeychain()
+        if draft.name.isEmpty { draft.name = vpn.displayName(for: profileID) }
+        customRouting = vpn.customRouting(for: profileID)
+        (crProxyAuthUsername, crProxyAuthPassword) = loadCustomRoutingProxyAuthFields(profileID: profileID)
     }
 
     private func importConf(_ url: URL) {
@@ -209,7 +209,7 @@ struct WireGuardView: View {
     private func applyParsed(_ text: String, name: String? = nil) {
         let parsed = WireGuardConfig.parse(text, name: name ?? draft.name)
         var next = parsed
-        next.id = draft.id                       // keep identity
+        next.id = profileID                      // keep identity
         if name == nil { next.name = draft.name }
         draft = next
     }
@@ -219,17 +219,23 @@ struct WireGuardView: View {
             draft.privateKey = newPrivateKey
             newPrivateKey = ""
         }
-        // store.save() moves the private/preshared key into the keychain and
-        // persists only a redacted copy — the same move on every save path.
-        store.save(draft)
+        // The keys go to the keychain; only a redacted copy is persisted —
+        // the same move on every save path. The private key is nil (leave
+        // alone) unless something set it: typing in the write-only field, or
+        // an import that carried one.
+        vpn.setWireGuardSecrets(privateKey: draft.privateKey.isEmpty ? nil : draft.privateKey,
+                                presharedKey: draft.presharedKey,
+                                for: profileID)
         // Fire-and-forget: save() is called synchronously from a plain Button
-        // action; commitCustomRouting is idempotent, and CustomRoutingTabView's
-        // own onDisappear covers the case where the view closes before this lands.
-        let id = draft.id
+        // action; both persists are idempotent, and CustomRoutingTabView's own
+        // onDisappear covers the case where the view closes before this lands.
+        let toSave = draft
         let user = crProxyAuthUsername, pass = crProxyAuthPassword
         let toCommit = customRouting
         Task { @MainActor in
-            customRouting = await commitCustomRouting(vpn, profileID: id, profile: toCommit,
+            do { try await vpn.setWireGuardConfig(toSave, for: profileID) }
+            catch { vpn.lastError = error.localizedDescription }
+            customRouting = await commitCustomRouting(vpn, profileID: profileID, profile: toCommit,
                                                       proxyAuthUsername: user, proxyAuthPassword: pass)
         }
     }

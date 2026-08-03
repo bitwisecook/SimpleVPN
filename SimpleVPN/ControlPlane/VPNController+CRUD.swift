@@ -76,7 +76,10 @@ extension VPNController {
         KeychainCredentialStore.deleteProfileSecrets(profile: id)
         KeychainCredentialStore.clearSession(profile: id)
         KeychainCredentialStore.deleteCredentials(profile: Self.tailscaleKeyProfile(id))
+        KeychainCredentialStore.deleteCredentials(profile: Self.wireGuardKeyProfile(id))
         BiometricCredentialStore.delete(profile: id)
+        wireGuardConfigs[id] = nil
+        wireGuardStatuses[id] = nil
         tailscaleConfigs[id] = nil
         tailscaleStatuses[id] = nil
         tailscaleSignInWatch[id]?.cancel()

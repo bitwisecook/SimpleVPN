@@ -38,6 +38,23 @@ static void tsCallString(TSStringCallback f, const char *s) { if (f != NULL) f(s
 
 #line 1 "cgo-generated-wrapper"
 
+#line 68 "wireguard.go"
+
+#include <stdlib.h>
+#include <string.h>
+
+// Callback types crossing to Swift. `packetOut` borrows its buffer for the
+// duration of the call only — Swift must copy before returning.
+typedef void (*WGPacketCallback)(const unsigned char *bytes, int len);
+typedef void (*WGStringCallback)(const char *text);
+
+// Go cannot call a C function pointer directly; thin trampolines keep the nil
+// check in one place.
+static void wgCallPacket(WGPacketCallback f, const unsigned char *b, int n) { if (f != NULL) f(b, n); }
+static void wgCallString(WGStringCallback f, const char *s) { if (f != NULL) f(s); }
+
+#line 1 "cgo-generated-wrapper"
+
 
 /* End of preamble from import "C" comments.  */
 
@@ -105,6 +122,12 @@ extern char* TSStart(char* cfgJSON);
 extern char* TSStatus(void);
 extern char* TSUpdatePrefs(char* patchJSON);
 extern char* TSStop(void);
+extern void WGSetCallbacks(WGPacketCallback packetOut, WGStringCallback logLine);
+extern void WGFree(char* p);
+extern char* WGStart(char* cfgJSON);
+extern int WGPacketIn(void* bytes, int length);
+extern char* WGStatus(void);
+extern char* WGStop(void);
 
 #ifdef __cplusplus
 }

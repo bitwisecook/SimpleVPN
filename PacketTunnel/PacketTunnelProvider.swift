@@ -9,7 +9,7 @@
 import NetworkExtension
 import os
 
-final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate, OpenConnectBridgeDelegate, TailscaleEngineDelegate, ProxyTunnelEngineDelegate, @unchecked Sendable {
+final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate, OpenConnectBridgeDelegate, TailscaleEngineDelegate, ProxyTunnelEngineDelegate, WireGuardEngineDelegate, @unchecked Sendable {
 
     private static let log = Logger(subsystem: "com.bragi0.SimpleVPN.PacketTunnel", category: "tunnel")
 
@@ -22,6 +22,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
     nonisolated(unsafe) private var pxConfig: ProxyTunnelConfig?      // kept for live default-gateway re-apply
     nonisolated(unsafe) private var pxSuppressDefault = false         // gateway demotion state for the proxy tunnel
     nonisolated(unsafe) private var pxProxySettings: NEProxySettings? // app-arbitrated system proxy for the proxy tunnel (Proxy mediator applier)
+    nonisolated(unsafe) private var wgEngine: WireGuardEngine?        // plain-WireGuard engine
+    nonisolated(unsafe) private var wgConfig: WireGuardConfig?        // kept (redacted) for live settings re-apply
+    nonisolated(unsafe) private var wgSuppressDefault = false         // gateway demotion state for WireGuard
+    nonisolated(unsafe) private var wgProxySettings: NEProxySettings? // app-arbitrated system proxy for WireGuard
     nonisolated(unsafe) private var startCompletion: ((Error?) -> Void)?
     private let lock = NSLock()
 
@@ -48,13 +52,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         // configuration" before its engine was ever reached.
         let kind = (conf?["vpnType"] as? String).flatMap(VPNKind.init(rawValue:)) ?? .openVPN
 
-        // WireGuard has no engine linked into this build yet (the UI is honest
-        // about that and offers Export instead of Connect) — fail clearly here
-        // rather than falling through to the OpenVPN branch below, which would
-        // report the unrelated "missing ovpn configuration".
+        // WireGuard: one kind, in-process via the Go engine (wireguard-go's
+        // device package inside libtsengine.a).
         if kind == .wireGuard {
-            completionHandler(NSError(domain: "PacketTunnel", code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "WireGuard isn't supported in this build yet."]))
+            startWireGuard(conf: conf, options: options, profile: profile,
+                           completionHandler: completionHandler)
             return
         }
 
@@ -324,6 +326,117 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         }
     }
 
+    /// Bring up a plain WireGuard tunnel in-process. The stack is composed
+    /// synchronously (the Noise handshake is lazy); on success we apply the
+    /// utun's network settings from the saved config — pinning the engine's
+    /// RESOLVED endpoint as the remote address so the encrypted UDP routes
+    /// around the tunnel — and start the packet pump. The private/preshared
+    /// keys ride startTunnel options in memory, same invariant as every other
+    /// credential — never in providerConfiguration.
+    private func startWireGuard(conf: [String: Any]?, options: [String: NSObject]?,
+                                profile: String, completionHandler: @escaping (Error?) -> Void) {
+        let config = WireGuardConfig.decode(from: conf?["wireguard"] as? Data)
+        // Catch a bad config here so it becomes a settings message before any
+        // device is composed.
+        if let problem = config.connectProblem {
+            let error = WireGuardEngineError.engine(kind: "badRequest", message: problem)
+            writeWGIncident(profile: profile, error: error)
+            completionHandler(error)
+            return
+        }
+        // The keys are the sign-in. "password" is the generic credential slot
+        // kept as a fallback for an older app driving this extension.
+        let privateKey = (options?["wgPrivateKey"] as? String)
+            ?? (options?["password"] as? String) ?? ""
+        let presharedKey = (options?["wgPresharedKey"] as? String) ?? ""
+        guard !privateKey.isEmpty else {
+            let error = WireGuardEngineError.engine(
+                kind: "badRequest", message: "No private key was provided — set one in the WireGuard editor.")
+            writeWGIncident(profile: profile, error: error)
+            completionHandler(error)
+            return
+        }
+
+        // Default-gateway ownership at establish (RC3), same as the proxy
+        // tunnel: a non-owner comes up already demoted to split.
+        let ownedAtEstablish = (options?["gatewayOwned"] as? NSNumber)?.boolValue ?? true
+
+        let engine = WireGuardEngine(provider: self, delegate: self)
+        lock.lock(); wgEngine = engine; wgConfig = config
+        wgSuppressDefault = !ownedAtEstablish
+        startCompletion = completionHandler; lock.unlock()
+
+        let start = WireGuardStartConfig(config: config, privateKey: privateKey,
+                                         presharedKey: presharedKey)
+        if let error = engine.start(config: start) {
+            Self.log.error("wireguard start failed: \(error.localizedDescription, privacy: .public)")
+            writeWGIncident(profile: profile, error: error)
+            finishStart(with: error)
+            return
+        }
+
+        // Device is up: apply the utun addresses/routes/DNS the config
+        // describes, then start pumping (the flow has no addresses before this).
+        let px = lock.withLock { wgProxySettings }
+        guard let settings = WireGuardNetworkSettings.settings(for: config,
+                                                               resolvedEndpoint: engine.resolvedEndpoint,
+                                                               suppressDefaultRoute: !ownedAtEstablish,
+                                                               proxySettings: px) else {
+            let error = WireGuardEngineError.engine(
+                kind: "badRequest", message: "None of this tunnel's addresses are usable.")
+            writeWGIncident(profile: profile, error: error)
+            engine.stop()
+            finishStart(with: error)
+            return
+        }
+        setTunnelNetworkSettings(settings) { [weak self] error in
+            guard let self else { return }
+            if let error {
+                Self.log.error("wireguard settings failed: \(error.localizedDescription, privacy: .public)")
+                self.writeWGIncident(profile: profile, error: error)
+                engine.stop()
+                self.finishStart(with: error)
+                return
+            }
+            self.lock.lock()
+            if self.connectedSince == 0 { self.connectedSince = Date().timeIntervalSince1970 }
+            self.lock.unlock()
+            TunnelIncidentStore.clear(profile: profile)
+            engine.startPump()
+            Self.log.log("wireguard up: routes applied, pump started")
+            self.finishStart(with: nil)
+        }
+    }
+
+    private func writeWGIncident(profile: String, error: Error) {
+        let event: String
+        let category: IncidentCategory
+        if let we = error as? WireGuardEngineError {
+            event = we.incidentEvent
+            category = we.incidentCategory
+        } else {
+            event = "WG_ERROR"
+            category = .unknown
+        }
+        TunnelIncidentStore.write(TunnelIncident(profile: profile, category: category,
+                                                 event: event, info: error.localizedDescription,
+                                                 fatal: true))
+    }
+
+    // MARK: WireGuardEngineDelegate (called on the engine's Go callback threads)
+
+    func wireGuardEngine(_ engine: WireGuardEngine, didFailWithError error: Error) {
+        Self.log.error("wireguard engine error: \(error.localizedDescription, privacy: .public)")
+        lock.lock(); let p = profileID; lock.unlock()
+        writeWGIncident(profile: p, error: error)
+        finishStart(with: error)
+        cancelTunnelWithError(error)
+    }
+
+    func wireGuardEngine(_ engine: WireGuardEngine, didLog line: String) {
+        Self.log.log("wg: \(line, privacy: .public)")
+    }
+
     private func writeProxyIncident(profile: String, error: Error) {
         let event: String
         let category: IncidentCategory
@@ -488,7 +601,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
     override func stopTunnel(with reason: NEProviderStopReason,
                              completionHandler: @escaping () -> Void) {
         Self.log.log("stopTunnel reason=\(reason.rawValue)")
-        lock.lock(); let b = bridge; let oc = ocBridge; let ts = tsEngine; let px = pxEngine; let p = profileID; lock.unlock()
+        lock.lock(); let b = bridge; let oc = ocBridge; let ts = tsEngine; let px = pxEngine
+        let wg = wgEngine; let p = profileID; lock.unlock()
         // System-initiated stops the user didn't ask for become incidents too —
         // notably .superceded: another VPN configuration took over.
         switch reason {
@@ -507,6 +621,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         oc?.disconnect()
         ts?.stop()
         px?.stop()
+        wg?.stop()
         completionHandler()
     }
 
@@ -553,6 +668,21 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
                     // owns the default when its config carries it AND it isn't demoted.
                     s.suppressDefaultRoute = suppress
                     s.effectiveDefaultOwned = hasDefault && !suppress
+                    reply.encode(s)
+                }
+                return
+            }
+            if let wg = lock.withLock({ wgEngine }) {
+                lock.lock(); let p = profileID; let since = connectedSince; let rc = reconnects
+                let cfg = wgConfig; let suppress = wgSuppressDefault; lock.unlock()
+                statsQueue.async {
+                    var s = wg.stats(profile: p, connectedSince: since, reconnects: rc,
+                                     config: cfg ?? WireGuardConfig())
+                    // Same ground-truth report as the proxy tunnel (RC4): this
+                    // tunnel owns the default when its allowed IPs carry it AND
+                    // it isn't demoted.
+                    s.suppressDefaultRoute = suppress
+                    s.effectiveDefaultOwned = (cfg?.isFullTunnel ?? false) && !suppress
                     reply.encode(s)
                 }
                 return
@@ -632,6 +762,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
                 statsQueue.async {
                     reply(oc.setDefaultRouteOwned(owned) ? "ok" : "error: settings apply failed")
                 }
+            } else if let wg = lock.withLock({ wgEngine }) {       // wireguard
+                // Same live re-apply as the proxy tunnel: the device keeps
+                // running; only the utun's routes (and catch-all DNS) change.
+                lock.lock(); wgSuppressDefault = !owned; let cfg = wgConfig; let px = wgProxySettings; lock.unlock()
+                guard let cfg, let settings = WireGuardNetworkSettings.settings(
+                    for: cfg, resolvedEndpoint: wg.resolvedEndpoint,
+                    suppressDefaultRoute: !owned, proxySettings: px)
+                else { reply("error: not connected"); return }
+                setTunnelNetworkSettings(settings) { error in
+                    Self.log.log("gateway \(owned ? "full" : "split", privacy: .public) (wireguard) ok=\(error == nil)")
+                    reply(error == nil ? "ok" : "error: settings apply failed")
+                }
             } else if lock.withLock({ tsEngine }) != nil {         // tailscale
                 // Tailscale ownership is exit-node state, driven app-side through
                 // the existing "tsprefs:" path — nothing to do here.
@@ -659,6 +801,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
             // DNS queries, the last per-flow error. No secrets in it.
             guard let px = lock.withLock({ pxEngine }) else { reply(nil); return }
             statsQueue.async { reply.encode(px.status()) }
+
+        case "wgstatus":
+            // WireGuard engine status for the connection panel — the
+            // last-handshake time is THE health signal for a silent protocol.
+            // Whitelisted engine-side; never carries key material.
+            guard let wg = lock.withLock({ wgEngine }) else { reply(nil); return }
+            statsQueue.async { reply.encode(wg.status()) }
 
         case "tsforget":
             // The user deleted this VPN. Its node key is this Mac's identity on
@@ -784,6 +933,24 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
             }
             return
         }
+        if let wg = lock.withLock({ wgEngine }) {                    // wireguard
+            statsQueue.async { [weak self] in
+                guard let self else { reply("error: not connected"); return }
+                let proxy = request?.makeNEProxySettings()
+                self.lock.lock()
+                self.wgProxySettings = proxy
+                let cfg = self.wgConfig; let suppress = self.wgSuppressDefault
+                self.lock.unlock()
+                guard let cfg, let settings = WireGuardNetworkSettings.settings(
+                    for: cfg, resolvedEndpoint: wg.resolvedEndpoint,
+                    suppressDefaultRoute: suppress, proxySettings: proxy)
+                else { reply("error: not connected"); return }
+                self.setTunnelNetworkSettings(settings) { error in
+                    reply(error == nil ? "ok" : "error: settings apply failed")
+                }
+            }
+            return
+        }
         reply("ok")
     }
 
@@ -808,7 +975,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
             }
             return
         }
-        if lock.withLock({ pxEngine != nil || tsEngine != nil }) {   // no live DNS applier
+        if lock.withLock({ pxEngine != nil || tsEngine != nil || wgEngine != nil }) {   // no live DNS applier
             reply(nil as Data?)   // → app reconnects this engine to re-push its DNS
             return
         }

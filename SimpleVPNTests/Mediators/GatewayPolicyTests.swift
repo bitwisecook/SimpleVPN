@@ -73,7 +73,7 @@ struct GatewayPolicyTests {
 
     @Test func capabilityPerKind() {
         // Packet-egress full-tunnel kinds: capable when connected.
-        for kind: VPNKind in [.openVPN, .proxyTunnel, .fortinet, .f5apm, .ciscoAnyConnect,
+        for kind: VPNKind in [.openVPN, .proxyTunnel, .wireGuard, .fortinet, .f5apm, .ciscoAnyConnect,
                               .globalProtect, .juniper, .pulse, .arrayNetworks] {
             #expect(GatewayPolicy.canBeDefaultGateway(kind: kind, connected: true, tailscaleHasExitNode: false))
             #expect(!GatewayPolicy.canBeDefaultGateway(kind: kind, connected: false, tailscaleHasExitNode: false))
@@ -82,7 +82,7 @@ struct GatewayPolicyTests {
         #expect(!GatewayPolicy.canBeDefaultGateway(kind: .tailscale, connected: true, tailscaleHasExitNode: false))
         #expect(GatewayPolicy.canBeDefaultGateway(kind: .tailscale, connected: true, tailscaleHasExitNode: true))
         // Kinds that can't carry a default route, ever.
-        for kind: VPNKind in [.ssh, .ikev2, .ipsec, .l2tp, .wireGuard] {
+        for kind: VPNKind in [.ssh, .ikev2, .ipsec, .l2tp] {
             #expect(!GatewayPolicy.canBeDefaultGateway(kind: kind, connected: true, tailscaleHasExitNode: true))
         }
     }

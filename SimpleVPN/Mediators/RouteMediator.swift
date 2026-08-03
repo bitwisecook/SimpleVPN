@@ -253,15 +253,13 @@ final class RouteMediator {
     nonisolated static func participation(for kind: VPNKind, connected: Bool = true,
                                           tailscaleHasExitNode: Bool = false) -> RouteParticipation {
         switch kind {
-        case .openVPN, .proxyTunnel, .tailscale,
+        case .openVPN, .proxyTunnel, .tailscale, .wireGuard,
              .fortinet, .f5apm, .ciscoAnyConnect, .globalProtect, .juniper, .pulse, .arrayNetworks:
             return .full
         case .ikev2, .ipsec, .l2tp:
             return .limited
         case .ssh:
             return .proxyOnly
-        case .wireGuard:
-            return .unsupported
         }
     }
 

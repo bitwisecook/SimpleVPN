@@ -137,13 +137,17 @@ struct SimpleVPNApp: App {
                     // anything else routes here to the same stores ManageVPNsView's
                     // own importer already uses, so a WireGuard/Cisco file dropped
                     // on the main window no longer fails with an OpenVPN-only error.
-                    vpn.otherEngineImportHandler = { [weak wireguard, weak tunnels, weak nativeVPN] kind, text, name in
+                    vpn.otherEngineImportHandler = { [weak vpn, weak tunnels, weak nativeVPN] kind, text, name in
                         switch kind {
                         case .wireGuard:
-                            guard let wireguard else { return .invalid(reason: "WireGuard isn't available right now.") }
+                            guard let vpn else { return .invalid(reason: "WireGuard isn't available right now.") }
                             let c = WireGuardConfig.parse(text, name: name)
-                            wireguard.save(c)
-                            return .imported(profileID: c.id, name: c.name)
+                            do {
+                                let id = try await vpn.createWireGuard(from: c)
+                                return .imported(profileID: id, name: c.name)
+                            } catch {
+                                return .invalid(reason: error.localizedDescription)
+                            }
                         case .cisco:
                             guard let tunnels, let nativeVPN else {
                                 return .invalid(reason: "Import isn't available right now.")
@@ -170,6 +174,13 @@ struct SimpleVPNApp: App {
                             return .invalid(reason: "")   // unreachable — routeNonOpenVPN filters this out
                         }
                     }
+                    // One-time hand-off: WireGuard configs saved before the
+                    // engine existed lived in a UserDefaults store; they become
+                    // real packet-tunnel profiles now (same ids, so their
+                    // keychain keys carry over). Needs the managers loaded
+                    // first to be idempotent across launches.
+                    await vpn.loadAll()
+                    await vpn.migrateLegacyWireGuardStore(wireguard)
                 }
                 .task { GeoIP.warm() }                 // parse the ~10 MB DB off-main
         }

@@ -14,7 +14,7 @@ import Foundation
 
 nonisolated enum VPNKind: String, Codable, Sendable, CaseIterable {
     case openVPN   = "openvpn"     // OpenVPN 3 engine in our packet-tunnel sysext
-    case wireGuard = "wireguard"   // WireGuardKit in a packet-tunnel provider
+    case wireGuard = "wireguard"   // wireguard-go, in-process in our packet-tunnel sysext
     case ikev2     = "ikev2"       // native NEVPNProtocolIKEv2 (personal VPN)
     case ipsec     = "ipsec"       // native NEVPNProtocolIPSec (Cisco-style)
     case l2tp      = "l2tp"         // native L2TP/IPsec (NEVPNProtocolIPSec + L2TP)

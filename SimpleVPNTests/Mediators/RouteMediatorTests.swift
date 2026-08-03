@@ -103,7 +103,7 @@ struct RouteMediatorTests {
 
     @Test func participationBucketsEveryKind() {
         // Route-participants (get a live gateway role + ≤1-owner arbitration).
-        for kind: VPNKind in [.openVPN, .proxyTunnel, .tailscale, .fortinet, .f5apm,
+        for kind: VPNKind in [.openVPN, .proxyTunnel, .tailscale, .wireGuard, .fortinet, .f5apm,
                               .ciscoAnyConnect, .globalProtect, .juniper, .pulse, .arrayNetworks] {
             #expect(RouteMediator.participation(for: kind) == .full, "\(kind) should be .full")
             #expect(RouteMediator.participation(for: kind).appliesGatewayRole)
@@ -118,9 +118,6 @@ struct RouteMediatorTests {
         // Proxy-only (SOCKS egress, no default route) — the Proxy mediator's turf.
         #expect(RouteMediator.participation(for: .ssh) == .proxyOnly)
         #expect(!RouteMediator.participation(for: .ssh).appliesGatewayRole)
-        // Unsupported (engine not built).
-        #expect(RouteMediator.participation(for: .wireGuard) == .unsupported)
-        #expect(!RouteMediator.participation(for: .wireGuard).appliesGatewayRole)
     }
 
     /// Tailscale participates in role application regardless of exit node (ownership is

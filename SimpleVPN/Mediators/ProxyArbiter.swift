@@ -238,9 +238,10 @@ nonisolated enum ProxyParticipation: Sendable, Equatable {
     case egressItself
     /// Coarse OS-managed proxy (native NEVPNManager kinds via `NEProxySettings`).
     case limited
-    /// No proxy of its own (Tailscale).
+    /// No proxy of its own (Tailscale, WireGuard).
     case none
-    /// Engine not built (WireGuard).
+    /// Engine not built — no kind lands here today; kept so the next
+    /// engine-less kind gets the honest bucket rather than a lie.
     case unsupported
 
     /// Does this bucket contribute an intent to the system-proxy arbitration?
@@ -255,10 +256,10 @@ nonisolated enum ProxyParticipation: Sendable, Equatable {
             return .egressItself
         case .ikev2, .ipsec, .l2tp:
             return .limited
-        case .tailscale:
+        case .tailscale, .wireGuard:
+            // Neither pushes nor sets a proxy — WireGuard's config format has
+            // no proxy directive at all.
             return .none
-        case .wireGuard:
-            return .unsupported
         }
     }
 }

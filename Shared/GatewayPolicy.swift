@@ -33,21 +33,22 @@ nonisolated enum GatewayPolicy {
 
     /// Can this kind carry 0.0.0.0/0 as the default gateway when connected?
     ///   - packet-egress full-tunnel kinds (openvpn3, the OpenConnect SSL-VPNs,
-    ///     the proxy tunnel) can, once connected.
+    ///     the proxy tunnel, WireGuard — its engine re-applies the demotion
+    ///     live like the proxy tunnel) can, once connected.
     ///   - tailscale can *only* when an exit node is configured or available —
     ///     without one it has no way to carry everything, so it stays split.
     ///   - anything that cannot advertise a default route at all (SSH, the native
-    ///     personal-VPN kinds, WireGuard-not-built) never can.
+    ///     personal-VPN kinds) never can.
     static func canBeDefaultGateway(kind: VPNKind, connected: Bool,
                                     tailscaleHasExitNode: Bool) -> Bool {
         guard connected else { return false }
         switch kind {
-        case .openVPN, .proxyTunnel,
+        case .openVPN, .proxyTunnel, .wireGuard,
              .fortinet, .f5apm, .ciscoAnyConnect, .globalProtect, .juniper, .pulse, .arrayNetworks:
             return true
         case .tailscale:
             return tailscaleHasExitNode
-        case .wireGuard, .ikev2, .ipsec, .l2tp, .ssh:
+        case .ikev2, .ipsec, .l2tp, .ssh:
             return false
         }
     }

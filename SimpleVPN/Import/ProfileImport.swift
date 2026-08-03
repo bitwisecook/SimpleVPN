@@ -31,7 +31,7 @@ extension VPNController {
         // hint — but name the profile from the extension-less form, same as
         // ManageVPNsView's own importer.
         let suggestedName = url.deletingPathExtension().lastPathComponent
-        if let outcome = routeNonOpenVPN(text: text, filename: url.lastPathComponent, suggestedName: suggestedName) {
+        if let outcome = await routeNonOpenVPN(text: text, filename: url.lastPathComponent, suggestedName: suggestedName) {
             return outcome
         }
         return await importProfile(text: text, suggestedName: suggestedName)
@@ -42,7 +42,7 @@ extension VPNController {
         // Same sniff for the text-only entry point (paste, discovery stubs):
         // a WireGuard/Cisco config pasted or dropped here must reach its own
         // store instead of always failing the OpenVPN evaluator below.
-        if let outcome = routeNonOpenVPN(text: text, filename: suggestedName, suggestedName: suggestedName) {
+        if let outcome = await routeNonOpenVPN(text: text, filename: suggestedName, suggestedName: suggestedName) {
             return outcome
         }
         // Validate with the engine's own parser before anything else.
@@ -98,10 +98,10 @@ extension VPNController {
     /// of only ever validating against the OpenVPN parser. Returns nil for
     /// `.openVPN`, or when the handler isn't wired yet, so the caller falls
     /// through to the OpenVPN evaluator exactly as before.
-    private func routeNonOpenVPN(text: String, filename: String, suggestedName: String) -> ImportOutcome? {
+    private func routeNonOpenVPN(text: String, filename: String, suggestedName: String) async -> ImportOutcome? {
         let kind = ConfigDetector.detect(text: text, filename: filename)
         guard kind != .openVPN, let handler = otherEngineImportHandler else { return nil }
-        return handler(kind, text, suggestedName)
+        return await handler(kind, text, suggestedName)
     }
 
     private func uniqueName(from base: String) -> String {

@@ -135,6 +135,8 @@ extension VPNController {
         case .tailscale:
             let c = tailscaleConfig(for: id)
             return c.useExitNode && !c.exitNode.isEmpty
+        case .wireGuard:
+            return wireGuardConfig(for: id).isFullTunnel
         case .openVPN:
             return (ovpnText(id: id) ?? "").range(of: "redirect-gateway", options: .caseInsensitive) != nil
         default:
@@ -154,6 +156,9 @@ extension VPNController {
         case .tailscale:
             let routes = tailscaleStatuses[id]?.config?.subnetRoutes ?? []
             return routes.filter { $0 != "0.0.0.0/0" && $0 != "::/0" }
+        case .wireGuard:
+            // The peer's allowed IPs besides the default routes.
+            return wireGuardConfig(for: id).allowedIPs.filter { $0 != "0.0.0.0/0" && $0 != "::/0" }
         default:
             return []
         }
@@ -307,6 +312,15 @@ extension VPNController: DNSMediatorHost {
                 let c = proxyTunnelConfig(for: p.id)
                 resolvers = c.dnsServers
                 wantsCatchAll = c.includeDefaultRoute && !c.dnsServers.isEmpty
+                matchDomains = wantsCatchAll ? [""] : []
+            }
+            if p.kind == .wireGuard {
+                // wg-quick's DNS= servers become the catch-all resolver (that
+                // is the directive's meaning); a config with no DNS= line
+                // contributes nothing.
+                let c = wireGuardConfig(for: p.id)
+                resolvers = c.dns
+                wantsCatchAll = !c.dns.isEmpty
                 matchDomains = wantsCatchAll ? [""] : []
             }
             return DNSProfileInfo(
