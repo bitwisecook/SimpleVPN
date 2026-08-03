@@ -67,17 +67,21 @@ func sanitizedCustomRoutingProfile(_ profile: CustomRoutingProfile) -> CustomRou
 
 /// Sync the Custom Routing proxy auth fields into the keychain + the profile's
 /// `authSource` ref (NEVER inline credentials in the model). Clearing both fields
-/// deletes the stored secret and clears the ref.
+/// deletes the stored secret and clears the ref. The sign-in applies to Accept (a
+/// PUSHED proxy behind authentication) and Custom alike; Ignore means direct, so it
+/// keeps the stored secret (a mode flip shouldn't lose what was typed) but drops the
+/// ref — an unreferenced secret can never reach an apply.
 func syncCustomRoutingProxyAuth(username: String, password: String,
                                 profile: inout CustomRoutingProfile, profileID: String) {
-    guard profile.proxy.mode == .custom, !(username.isEmpty && password.isEmpty) else {
+    guard !(username.isEmpty && password.isEmpty) else {
         KeychainCredentialStore.deleteCustomRoutingProxyAuth(profile: profileID)
         profile.proxy.authSource = nil
         return
     }
     try? KeychainCredentialStore.saveCustomRoutingProxyAuth(
         profile: profileID, .init(username: username, password: password))
-    profile.proxy.authSource = "customrouting:\(profileID)"
+    profile.proxy.authSource = profile.proxy.mode == .ignore
+        ? nil : ProxyAuthSourceRef.ref(forProfile: profileID)
 }
 
 /// Load the proxy auth fields once (write-only convention elsewhere in this app
@@ -174,6 +178,10 @@ struct CustomRoutingTabView: View {
     @Binding var profile: CustomRoutingProfile
     @Binding var proxyAuthUsername: String
     @Binding var proxyAuthPassword: String
+    /// The profile's VPN kind, for the kind-aware proxy-auth captions. NE-backed
+    /// profiles resolve through the controller; hosts living outside it (the native
+    /// NEVPNManager kinds) pass it explicitly.
+    var kind: VPNKind? = nil
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -587,6 +595,18 @@ struct CustomRoutingTabView: View {
 
     // MARK: Proxy
 
+    /// The kind for the kind-aware captions below: explicit (native hosts) or resolved
+    /// through the controller (NE-backed hosts); nil for hosts outside both worlds.
+    private var effectiveKind: VPNKind? {
+        kind ?? vpn.profiles.first { $0.id == profileID }?.kind
+    }
+
+    /// The native NEVPNManager kinds: the OS owns the applied proxy (we set it only at
+    /// connect, through the VPN configuration) — the Proxy mediator's `.limited` bucket.
+    private var isObserveOnlyKind: Bool {
+        effectiveKind.map { ProxyParticipation.classify($0) == .limited } ?? false
+    }
+
     @ViewBuilder private var proxySection: some View {
         Section("Custom Routing — Proxy") {
             Picker("Mode", selection: $profile.proxy.mode) {
@@ -606,6 +626,11 @@ struct CustomRoutingTabView: View {
                     set: { profile.proxy.manualURL = $0.isEmpty ? nil : $0 }))
                     .textFieldStyle(.roundedBorder)
                 IssueCaption(issues: issues.filter { $0.field == "manualURL" })
+                if isObserveOnlyKind, profile.proxy.customIsSOCKS {
+                    Label("The native VPN configuration has no SOCKS slot — use an http:// or https:// proxy (or a PAC URL).",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2).foregroundStyle(.orange)
+                }
 
                 TextField("PAC URL (wins over the manual proxy above)", text: Binding(
                     get: { profile.proxy.pacURL ?? "" },
@@ -614,13 +639,22 @@ struct CustomRoutingTabView: View {
                 IssueCaption(issues: issues.filter { $0.field == "pacURL" })
 
                 Divider()
-                TextField("Username (optional)", text: $proxyAuthUsername)
-                    .textFieldStyle(.roundedBorder).textContentType(.username)
-                SecureField("Password (optional)", text: $proxyAuthPassword)
-                    .textFieldStyle(.roundedBorder)
-                Label("Saved in your Keychain — the profile only ever carries a reference to it.",
-                      systemImage: "lock")
-                    .font(.caption2).foregroundStyle(.secondary)
+                proxyAuthFields(caption: isObserveOnlyKind
+                    ? "Saved in your Keychain and applied when this VPN connects — the configuration only ever carries a reference."
+                    : "Saved in your Keychain — the profile only ever carries a reference to it.")
+            } else if profile.proxy.mode == .accept {
+                // Authenticated PUSHED proxies: the push never carries credentials, so
+                // the sign-in (if the proxy demands one) is stored here and attached
+                // where we are the ones applying. For the OS-owned (observe-only)
+                // kinds there is nothing we apply — say so instead of a dead field.
+                if isObserveOnlyKind {
+                    Label("macOS applies this VPN's proxy itself — SimpleVPN only observes it, so a pushed proxy's sign-in can't be added here. Use Custom to set an authenticated proxy.",
+                          systemImage: "eye")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    proxyAuthFields(caption: "Used if the pushed proxy requires sign-in. Saved in your Keychain — the profile only ever carries a reference to it.")
+                }
             }
 
             let diff = CustomRoutingDiff.diffProxy(filter: profile.proxy, pushed: pushed.proxy)
@@ -632,6 +666,19 @@ struct CustomRoutingTabView: View {
                     .font(.caption.monospaced()).foregroundStyle(.secondary)
             }
         }
+    }
+
+    /// The username/password pair for proxy auth — one control pair, reused by the
+    /// Accept (pushed-proxy sign-in) and Custom (own-proxy sign-in) modes so the two
+    /// read as one system. The caption names where the secret lives.
+    @ViewBuilder private func proxyAuthFields(caption: String) -> some View {
+        TextField("Username (optional)", text: $proxyAuthUsername)
+            .textFieldStyle(.roundedBorder).textContentType(.username)
+        SecureField("Password (optional)", text: $proxyAuthPassword)
+            .textFieldStyle(.roundedBorder)
+        Label(caption, systemImage: "lock")
+            .font(.caption2).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func pushedProxyDisplay(_ p: PushedIntentSnapshot.Proxy) -> String {

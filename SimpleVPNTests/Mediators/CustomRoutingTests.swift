@@ -235,6 +235,77 @@ struct CustomRoutingTests {
         #expect(out?.authSource == "keychain-ref-123")
     }
 
+    /// Accept + a stored sign-in ⇒ the PUSHED proxy passes through carrying the auth
+    /// REF (how an authenticated pushed proxy reaches the realizer's keychain lookup).
+    @Test func proxyAcceptAttachesAuthSourceToPushedProxy() {
+        let captured = ProxyIntent(engine: "v", mode: .manual(ProxyEndpoint(scheme: .http, host: "10.0.0.1", port: 3128)))
+        var c = ProxyCustomization(); c.mode = .accept
+        c.authSource = ProxyAuthSourceRef.ref(forProfile: "v")
+        let out = c.apply(to: captured, engine: "v")
+        #expect(out?.mode == captured.mode)
+        #expect(out?.authSource == "customrouting:v")
+    }
+
+    /// Accept + auth with NO push stays nil (the REF can't conjure a proxy), and a
+    /// non-providing capture is passed through without the REF (nothing to sign into).
+    @Test func proxyAcceptAuthNeedsAPushedProxy() {
+        var c = ProxyCustomization(); c.mode = .accept
+        c.authSource = ProxyAuthSourceRef.ref(forProfile: "v")
+        #expect(c.apply(to: nil, engine: "v") == nil)
+        let none = ProxyIntent(engine: "v", mode: .none)
+        #expect(c.apply(to: none, engine: "v")?.authSource == nil)
+    }
+
+    // MARK: - Proxy: the native (app-applied-at-connect) payload
+
+    @Test func nativeApplyRequestMapsManualWithAuth() {
+        var c = ProxyCustomization(); c.mode = .custom; c.manualURL = "https://proxy.example:8080"
+        let req = c.nativeApplyRequest(username: "alice", password: "s3cret")
+        #expect(req?.httpsHost == "proxy.example")
+        #expect(req?.httpsPort == 8080)
+        #expect(req?.username == "alice")
+        #expect(req?.password == "s3cret")
+    }
+
+    @Test func nativeApplyRequestMapsPAC() {
+        var c = ProxyCustomization(); c.mode = .custom; c.pacURL = "http://wpad.example/wpad.dat"
+        #expect(c.nativeApplyRequest()?.pacURL == "http://wpad.example/wpad.dat")
+    }
+
+    /// NEProxySettings has no SOCKS slot, so a SOCKS custom maps to nil — the editor
+    /// warns for the native kinds instead of half-applying.
+    @Test func nativeApplyRequestSOCKSIsNil() {
+        var c = ProxyCustomization(); c.mode = .custom; c.manualURL = "socks5://127.0.0.1:1080"
+        #expect(c.nativeApplyRequest() == nil)
+        #expect(c.customIsSOCKS)
+    }
+
+    /// Only `.custom` produces a native payload — Accept/Ignore have nothing the app
+    /// can apply through the VPN configuration for these kinds.
+    @Test func nativeApplyRequestNilUnlessCustom() {
+        var c = ProxyCustomization(); c.manualURL = "http://proxy.example:8080"
+        c.mode = .accept
+        #expect(c.nativeApplyRequest() == nil)
+        c.mode = .ignore
+        #expect(c.nativeApplyRequest() == nil)
+    }
+
+    // MARK: - Persistence: the no-NE-manager fallback store (native kinds)
+
+    @Test func fallbackStoreRoundTripsAndDropsIdentity() throws {
+        let suite = try #require(UserDefaults(suiteName: "test.customrouting.fallback.\(UUID().uuidString)"))
+        let store = CustomRoutingFallbackStore(defaults: suite)
+        var profile = CustomRoutingProfile()
+        profile.proxy.mode = .custom
+        profile.proxy.manualURL = "http://proxy.example:8080"
+        profile.proxy.authSource = ProxyAuthSourceRef.ref(forProfile: "native-1")
+        store.save(profile, for: "native-1")
+        #expect(store.load("native-1") == profile)
+        // An identity profile removes the entry (mirrors the omitted-when-empty blob).
+        store.save(CustomRoutingProfile(), for: "native-1")
+        #expect(store.load("native-1") == CustomRoutingProfile())
+    }
+
     // MARK: - Persistence: blob round-trip + lenient decode
 
     @Test func profileEmptyDropsBlob() {

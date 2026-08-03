@@ -404,6 +404,15 @@ struct NetworkToolsView: View {
                 if let ownerName, plan.providesProxy {
                     Text("from \(ownerName)").font(.caption).foregroundStyle(.secondary)
                 }
+                // Where the proxy's sign-in landed (only shown when it needs one):
+                // applied, or NOT injectable and why — never silently dropped.
+                if let advisory = vpn.proxies.authAdvisory {
+                    Label(advisory.message(owner: ownerName), systemImage: advisory.symbol)
+                        .font(.caption)
+                        .foregroundStyle(advisory == .applied ? AnyShapeStyle(.secondary)
+                                                              : AnyShapeStyle(Color.orange))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
                 Divider()
                 if vpn.proxies.observed.enabled, let e = vpn.proxies.observed.endpoint {

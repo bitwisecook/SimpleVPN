@@ -70,6 +70,20 @@ final class ProxyRealizer: MediatorRealizer {
     /// when ownership moves, and skip an unchanged decision (idempotent).
     private var lastPlan: ProxyPlan?
 
+    /// Resolve a plan's `authSource` keychain REF to the stored proxy sign-in, HERE
+    /// (app-side, at realize time) — the intent/plan stay credential-free and the
+    /// secret only ever rides the in-memory `proxy:apply:` IPC. Injectable so tests
+    /// exercise the auth path without a real keychain.
+    var authResolver: @MainActor (String) -> KeychainCredentialStore.CustomRoutingProxyAuth? = { source in
+        guard let id = ProxyAuthSourceRef.profileID(from: source) else { return nil }
+        return KeychainCredentialStore.loadCustomRoutingProxyAuth(profile: id)
+    }
+    /// What the last realized apply reported back — the mediator folds these into the
+    /// published `ProxyAuthAdvisory` so "this proxy wants auth we couldn't inject"
+    /// is surfaced, never silent.
+    private(set) var lastAck: String?
+    private(set) var lastCredentialsFound = false
+
     init(host: ProxyMediatorHost?, log: Logger) {
         self.host = host
         self.log = log
@@ -97,11 +111,21 @@ final class ProxyRealizer: MediatorRealizer {
             if let owner = prior?.owner, prior?.owner == plan.owner {
                 _ = await host?.proxyApply(nil, to: owner)
             }
+            lastAck = nil
+            lastCredentialsFound = false
             return
         }
-        let request = plan.applyRequest
-        log.log("proxy: applying \(owner, privacy: .public)'s proxy as the system proxy (\(request.isEmpty ? "clear" : "set", privacy: .public))")
-        _ = await host?.proxyApply(request.isEmpty ? nil : request, to: owner)
+        // Resolve the sign-in REF (if any) to real credentials now, and only now —
+        // they live on the wire payload for the length of this one IPC. Never logged;
+        // the log line carries a with-auth/no-auth flag at most.
+        var request = plan.applyRequest
+        lastCredentialsFound = false
+        if let source = plan.authSource, let auth = authResolver(source) {
+            lastCredentialsFound = true
+            request = plan.applyRequest(username: auth.username, password: auth.password)
+        }
+        log.log("proxy: applying \(owner, privacy: .public)'s proxy as the system proxy (\(request.isEmpty ? "clear" : "set", privacy: .public)\(plan.authSource != nil ? (self.lastCredentialsFound ? ", with auth" : ", auth MISSING") : "", privacy: .public))")
+        lastAck = await host?.proxyApply(request.isEmpty ? nil : request, to: owner)
     }
 }
 
@@ -191,6 +215,12 @@ final class ProxyMediator {
 
     var effectiveProxyOwner: String? { plan.owner }
 
+    /// Where the effective proxy's SIGN-IN landed (nil when it doesn't need one):
+    /// applied with the proxy, or not injectable and why — PAC, missing keychain row,
+    /// or a proxy applied outside our control that we only observe. Published so the
+    /// Network-Tools proxy card can say it instead of failing auth silently.
+    private(set) var authAdvisory: ProxyAuthAdvisory?
+
     /// A human one-liner for the effective system proxy (for compact UI surfaces).
     var effectiveProxyDescription: String {
         switch plan.mode {
@@ -225,7 +255,17 @@ final class ProxyMediator {
         let plan = self.plan
         lastApplyAt = Date()
         reconcileTask = Task { [weak self] in
-            await self?.realizer.realize(plan, from: nil)
+            guard let self else { return }
+            await self.realizer.realize(plan, from: nil)
+            // Fold the realizer's report into the published auth advisory — a proxy
+            // that needs a sign-in we couldn't attach must be said, not dropped.
+            let advisory = ProxyAuthAdvisory.decide(plan: plan,
+                                                    credentialsFound: self.realizer.lastCredentialsFound,
+                                                    ack: self.realizer.lastAck)
+            if advisory != self.authAdvisory, let advisory, advisory != .applied {
+                Self.log.log("proxy auth: \(String(describing: advisory), privacy: .public)")
+            }
+            self.authAdvisory = advisory
         }
     }
 

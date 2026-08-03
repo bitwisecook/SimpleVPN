@@ -78,7 +78,8 @@ struct NativeVPNView: View {
                 controlSection
                 CustomRoutingTabView(vpn: vpn, profileID: draft.id, profile: $customRouting,
                                     proxyAuthUsername: $crProxyAuthUsername,
-                                    proxyAuthPassword: $crProxyAuthPassword)
+                                    proxyAuthPassword: $crProxyAuthPassword,
+                                    kind: draft.kind)
             }
         }
         .formStyle(.grouped)
@@ -213,7 +214,11 @@ struct NativeVPNView: View {
                 if isActive {
                     Button("Disconnect") { manager.disconnect() }.buttonStyle(.bordered).tint(.red)
                 } else {
-                    Button("Connect") { save(); Task { await manager.connect(draft, secret: secret, sharedSecret: sharedSecret) } }
+                    Button("Connect") {
+                        save()
+                        let proxy = nativeProxySettings()
+                        Task { await manager.connect(draft, secret: secret, sharedSecret: sharedSecret, proxy: proxy) }
+                    }
                         .buttonStyle(.glassProminent)   // primary "go" — consistent with OpenVPN Connect
                         .disabled(missingFieldCaption != nil)
                 }
@@ -275,6 +280,19 @@ struct NativeVPNView: View {
         }
         customRouting = vpn.customRouting(for: draft.id)
         (crProxyAuthUsername, crProxyAuthPassword) = loadCustomRoutingProxyAuthFields(profileID: draft.id)
+    }
+
+    /// The user's Custom Routing proxy as the native VPN's `NEProxySettings` — for these
+    /// kinds the app is the applier, at connect (NEVPNManager carries the proxy in the
+    /// VPN configuration; the OS applies it while the tunnel is up). The sign-in comes
+    /// from the keychain-backed fields (the CURRENT draft, not a possibly-racing
+    /// keychain read — Connect calls save() the same instant); the stored config only
+    /// ever carries the ref.
+    private func nativeProxySettings() -> NEProxySettings? {
+        customRouting.proxy.nativeApplyRequest(
+            username: crProxyAuthUsername.isEmpty ? nil : crProxyAuthUsername,
+            password: crProxyAuthPassword.isEmpty ? nil : crProxyAuthPassword)?
+            .makeNEProxySettings()
     }
 
     private func save() {

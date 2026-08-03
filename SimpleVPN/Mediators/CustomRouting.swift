@@ -19,7 +19,8 @@
 //    • DNS:    Accept / Ignore / Replace / Add over RESOLVERS, plus domain handling
 //              (add/ignore search & match domains, ignore-all-pushed toggles).
 //    • Proxy:  Accept / Ignore / Custom (single value): keep the pushed proxy, force
-//              direct, or override with a manual URL / PAC URL (+ keychain auth ref).
+//              direct, or override with a manual URL / PAC URL. A keychain auth REF
+//              rides Accept (a pushed proxy behind sign-in) and Custom alike.
 //
 //  Route matching is EXACT prefix + a `default` token (0.0.0.0/0 · ::/0). CIDR-contains
 //  matching is a documented follow-up (see `RoutePrefix.matches`).
@@ -307,6 +308,20 @@ nonisolated struct DNSCustomization: Codable, Sendable, Equatable {
 
 // MARK: - Proxy customization
 
+/// The one authoritative shape of the proxy-auth keychain REF (`authSource`): the editor
+/// mints it, the realizer parses it back to the profile whose
+/// `KeychainCredentialStore.loadCustomRoutingProxyAuth` row holds the sign-in. A prefix
+/// (rather than the bare id) so a future second source kind can coexist in the field.
+nonisolated enum ProxyAuthSourceRef {
+    static let prefix = "customrouting:"
+    static func ref(forProfile id: String) -> String { prefix + id }
+    static func profileID(from source: String) -> String? {
+        guard source.hasPrefix(prefix) else { return nil }
+        let id = String(source.dropFirst(prefix.count))
+        return id.isEmpty ? nil : id
+    }
+}
+
 /// Per-profile proxy override — a SINGLE value, so three verbs not four: keep the pushed
 /// proxy (`accept`), force direct (`ignore` ⇒ nil intent), or override with the user's
 /// own manual URL / PAC (`custom`). Auth is a keychain REF only — never inline creds.
@@ -330,8 +345,21 @@ nonisolated struct ProxyCustomization: Codable, Sendable, Equatable {
 
     var isIdentity: Bool { self == ProxyCustomization() }
 
+    /// Whether the effective custom value is a SOCKS manual proxy (no PAC over it) —
+    /// the one custom shape the native NEVPNManager kinds can't carry, since
+    /// `NEProxySettings` has no SOCKS slot; the editor warns for those kinds.
+    var customIsSOCKS: Bool {
+        guard mode == .custom,
+              (pacURL ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let manual = manualURL, let e = Self.parseManual(manual) else { return false }
+        return e.scheme == .socks
+    }
+
     /// Rewrite one engine's captured proxy intent → its effective intent.
-    ///   • `accept`  ⇒ pass the captured intent through unchanged.
+    ///   • `accept`  ⇒ pass the captured intent through, attaching the stored sign-in's
+    ///     `authSource` REF when one is configured — this is how a PUSHED proxy that
+    ///     requires authentication gets its credentials (the push itself never carries
+    ///     any; the realizer resolves the REF from the keychain at apply time).
     ///   • `ignore`  ⇒ nil (this engine contributes no proxy — direct).
     ///   • `custom`  ⇒ build a user-sourced intent from `pacURL` (preferred) or
     ///     `manualURL`; if custom is selected but nothing parses, fall back to captured.
@@ -340,7 +368,9 @@ nonisolated struct ProxyCustomization: Codable, Sendable, Equatable {
     func apply(to captured: ProxyIntent?, engine: String) -> ProxyIntent? {
         switch mode {
         case .accept:
-            return captured
+            guard var out = captured else { return nil }
+            if out.providesProxy, let authSource { out.authSource = authSource }
+            return out
         case .ignore:
             return nil
         case .custom:
@@ -378,6 +408,23 @@ nonisolated struct ProxyCustomization: Codable, Sendable, Equatable {
         default:                return nil
         }
         return ProxyEndpoint(scheme: scheme, host: host, port: url.port ?? defaultPort)
+    }
+
+    /// The user's CUSTOM proxy as the tier-2 apply payload, for the kinds where the APP
+    /// is the applier at connect time — the native NEVPNManager kinds carry it on
+    /// `NEVPNProtocol.proxySettings` (see `NativeVPNManager.connect`), with the sign-in
+    /// riding `NEProxyServer.username`/`password`, never the stored config. nil unless
+    /// the mode is `.custom` with a usable value; a SOCKS manual proxy maps to nil too
+    /// (`NEProxySettings` has no SOCKS slot — http/https/PAC only, which the editor
+    /// calls out for these kinds).
+    func nativeApplyRequest(username: String? = nil, password: String? = nil) -> ProxyApplyRequest? {
+        guard mode == .custom, let intent = apply(to: nil, engine: "native"),
+              intent.providesProxy else { return nil }
+        let request = ProxyPlan(owner: intent.engine, mode: intent.mode, manual: intent.manual,
+                                bypass: intent.bypass,
+                                excludeSimpleHostnames: intent.excludeSimpleHostnames)
+            .applyRequest(username: username, password: password)
+        return request.isEmpty ? nil : request
     }
 }
 
@@ -516,6 +563,32 @@ nonisolated struct PushedIntentStore {
     func save(_ snapshot: PushedIntentSnapshot, for id: String) {
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         defaults?.set(data, forKey: key(id))
+    }
+
+    func clear(_ id: String) { defaults?.removeObject(forKey: key(id)) }
+}
+
+/// Reads/writes `CustomRoutingProfile`s for profiles with NO `NETunnelProviderManager`
+/// to carry the blob in providerConfiguration — the native NEVPNManager kinds, whose
+/// own configs live in `UserDefaults.standard` the same way (see `NativeVPNManager`).
+/// Carries no secrets: proxy auth is the keychain REF only. Injectable defaults for
+/// tests, mirroring `PushedIntentStore`.
+nonisolated struct CustomRoutingFallbackStore {
+    let defaults: UserDefaults?
+
+    init(defaults: UserDefaults? = .standard) { self.defaults = defaults }
+
+    private func key(_ id: String) -> String { "customrouting.\(id)" }
+
+    func load(_ id: String) -> CustomRoutingProfile {
+        CustomRoutingProfile.decode(from: defaults?.data(forKey: key(id)))
+    }
+
+    /// An identity (all-defaults) profile drops the entry, matching how the
+    /// providerConfiguration blob is omitted when empty.
+    func save(_ profile: CustomRoutingProfile, for id: String) {
+        if let blob = profile.encodedBlob() { defaults?.set(blob, forKey: key(id)) }
+        else { defaults?.removeObject(forKey: key(id)) }
     }
 
     func clear(_ id: String) { defaults?.removeObject(forKey: key(id)) }

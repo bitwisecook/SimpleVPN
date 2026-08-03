@@ -98,6 +98,10 @@ final class NativeVPNManager {
         KeychainCredentialStore.deleteNativeSecret(account: "native.\(id).psk")
         KeychainCredentialStore.deleteCredentials(profile: "native.\(id)")
         KeychainCredentialStore.deleteCredentials(profile: "native.\(id).secret")
+        // The Custom Routing proxy sign-in and the filter's fallback blob are keyed by
+        // the profile id too — same stale-secret rule.
+        KeychainCredentialStore.deleteCustomRoutingProxyAuth(profile: id)
+        CustomRoutingFallbackStore().clear(id)
         persist()
     }
 
@@ -113,7 +117,14 @@ final class NativeVPNManager {
     /// `secret` is the IKEv2 password/PSK, or the IPsec XAuth password.
     /// `sharedSecret` is the IPsec group PSK (ignored for IKEv2, which only
     /// ever needs one secret at a time).
-    func connect(_ c: NativeVPNConfig, secret: String, sharedSecret: String = "") async {
+    /// `proxy` is the user's Custom Routing proxy realized as `NEProxySettings`
+    /// (see `ProxyCustomization.nativeApplyRequest`) — for these kinds the APP is
+    /// the proxy applier, at connect, through the VPN configuration itself; any
+    /// sign-in rides `NEProxyServer.username`/`password` in memory (the OS stores
+    /// the saved configuration, never our keychain rows). No default: every caller
+    /// must decide, so a new call site can't silently drop the user's proxy.
+    func connect(_ c: NativeVPNConfig, secret: String, sharedSecret: String = "",
+                 proxy: NEProxySettings?) async {
         lastError = nil; needsEntitlement = false
         guard c.kind != .l2tp else {
             lastError = "L2TP can't be configured programmatically on macOS. Use “Export Configuration Profile” and install it."
@@ -167,6 +178,11 @@ final class NativeVPNManager {
             default:
                 return
             }
+
+            // The one native proxy hook: macOS applies these settings itself while the
+            // tunnel is up (we then only OBSERVE them via SCDynamicStore — the Proxy
+            // mediator's `.limited` bucket).
+            proto.proxySettings = proxy
 
             mgr.protocolConfiguration = proto
             mgr.localizedDescription = c.name

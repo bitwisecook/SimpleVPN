@@ -128,7 +128,13 @@ nonisolated struct ProxyPlan: Sendable, Equatable {
 
     /// Build the sole-writer wire payload from the plan (Docs/StateMediators.md › P3
     /// applier). PAC wins over manual; bypass → exceptionList. Empty ⇒ clear.
-    var applyRequest: ProxyApplyRequest {
+    var applyRequest: ProxyApplyRequest { applyRequest(username: nil, password: nil) }
+
+    /// The wire payload with the plan's `authSource` REF already resolved to a sign-in
+    /// (the realizer's job — this stays pure). Credentials attach to MANUAL servers
+    /// only: `NEProxySettings` has no PAC credential slot, so a PAC decision never
+    /// carries them (`ProxyAuthAdvisory` surfaces that instead of silently dropping).
+    func applyRequest(username: String?, password: String?) -> ProxyApplyRequest {
         if case .pac(let url) = mode {
             return ProxyApplyRequest(pacURL: url, bypass: bypass,
                                      excludeSimpleHostnames: excludeSimpleHostnames)
@@ -137,7 +143,8 @@ nonisolated struct ProxyPlan: Sendable, Equatable {
         return ProxyApplyRequest(
             httpHost: m?.http?.host, httpPort: m?.http?.port,
             httpsHost: m?.https?.host, httpsPort: m?.https?.port,
-            bypass: bypass, excludeSimpleHostnames: excludeSimpleHostnames)
+            bypass: bypass, excludeSimpleHostnames: excludeSimpleHostnames,
+            username: username, password: password)
     }
 
     var providesProxy: Bool { if case .none = mode { return false }; return true }
@@ -220,6 +227,58 @@ nonisolated enum ProxyDriftDecision {
             return (observed.enabled && observed.endpoint == endpoint) ? .none : .reassert
         case .pac(let url):
             return (observed.enabled && observed.pacURL == url) ? .none : .reassert
+        }
+    }
+}
+
+// MARK: - Auth advisory (where the proxy's sign-in actually landed — never silent)
+
+/// The PURE decision about the arbitrated proxy's authentication: given the plan, whether
+/// the `authSource` REF resolved to stored credentials, and the sole-writer apply's ack,
+/// say where the sign-in landed — applied with the proxy, or NOT injectable (and why).
+/// nil ⇒ no proxy, or a proxy with no sign-in configured (nothing to say). The mediator
+/// publishes this so a proxy that needs auth we can't provide is surfaced, not silent.
+nonisolated enum ProxyAuthAdvisory: Sendable, Equatable {
+    /// Credentials rode the apply and the owner engine acked it — `NEProxyServer`
+    /// carries `authenticationRequired` + the sign-in.
+    case applied
+    /// The plan names an `authSource` but the keychain holds nothing for it.
+    case missingCredentials
+    /// A PAC decision: `NEProxySettings` has no PAC credential slot, so each app
+    /// answers the proxy's 407 itself.
+    case pacManualAuth
+    /// No live NE applier took the credentials (no ack) — this proxy is applied
+    /// outside our control (native/OS-owned, or a subprocess kind's own setter),
+    /// so the sign-in can't be injected; we only observe.
+    case observeOnly
+
+    static func decide(plan: ProxyPlan, credentialsFound: Bool, ack: String?) -> ProxyAuthAdvisory? {
+        guard plan.providesProxy, plan.authSource != nil else { return nil }
+        if case .pac = plan.mode { return .pacManualAuth }
+        guard credentialsFound else { return .missingCredentials }
+        return ack == "ok" ? .applied : .observeOnly
+    }
+
+    /// The one-liner a UI surface shows (no secrets — names only).
+    func message(owner: String?) -> String {
+        let name = owner ?? "the VPN"
+        switch self {
+        case .applied:
+            return "Proxy sign-in from your Keychain is applied with the proxy."
+        case .missingCredentials:
+            return "This proxy is set to authenticate, but no sign-in is stored — add one in \(name)'s Custom Routing ▸ Proxy."
+        case .pacManualAuth:
+            return "A PAC proxy names its servers per request — the stored sign-in can't be attached system-wide, so apps may prompt."
+        case .observeOnly:
+            return "\(name)'s proxy is applied outside SimpleVPN's control — the stored sign-in can't be attached, so apps may prompt."
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .applied: "lock.fill"
+        case .missingCredentials: "lock.slash"
+        case .pacManualAuth, .observeOnly: "lock.open"
         }
     }
 }

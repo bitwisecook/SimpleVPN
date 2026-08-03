@@ -84,7 +84,9 @@ extension VPNController {
     /// Build a `ProxyIntent` from the structured pushed-proxy fields of a stats sample
     /// (OpenVPN's `dhcp-option PROXY_HTTP/PROXY_HTTPS/PROXY_AUTO_CONFIG_URL/PROXY_BYPASS`).
     /// PAC wins over manual. `nil` when nothing was pushed. No credentials ever — the
-    /// push carries none; a 407 is answered from the keychain.
+    /// push carries none; if the pushed proxy demands sign-in, the Custom Routing hook
+    /// attaches the profile's keychain `authSource` REF before arbitration and the
+    /// Proxy realizer resolves it at apply time.
     nonisolated static func proxyIntent(engine: String, from stats: TunnelStats) -> ProxyIntent? {
         let bypass = stats.proxyBypass ?? []
         if let pac = stats.proxyPACURL, !pac.isEmpty {

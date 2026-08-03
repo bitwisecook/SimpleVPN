@@ -93,6 +93,103 @@ struct ProxyMediatorTests {
         #expect(plan.applyRequest.makeNEProxySettings() == nil)
     }
 
+    // MARK: - Proxy authentication (authenticated pushed/custom proxies)
+
+    /// Resolved credentials ride the apply request and land on EVERY manual
+    /// `NEProxyServer` as `authenticationRequired` + username/password.
+    @Test func planManualWithAuthSetsNEProxyServerCredentials() {
+        let plan = ProxyPlan(
+            owner: "corp",
+            mode: .manual(ProxyEndpoint(scheme: .https, host: "10.0.0.2", port: 3129)),
+            manual: ProxyManual(http: ProxyEndpoint(scheme: .http, host: "10.0.0.1", port: 3128),
+                                https: ProxyEndpoint(scheme: .https, host: "10.0.0.2", port: 3129)),
+            authSource: "customrouting:corp")
+        let request = plan.applyRequest(username: "alice", password: "s3cret")
+        #expect(request.username == "alice")
+        #expect(request.password == "s3cret")
+        let settings = request.makeNEProxySettings()
+        for server in [settings?.httpServer, settings?.httpsServer] {
+            #expect(server?.authenticationRequired == true)
+            #expect(server?.username == "alice")
+            #expect(server?.password == "s3cret")
+        }
+    }
+
+    /// No sign-in resolved ⇒ the servers stay auth-free (the pre-auth behavior).
+    @Test func planManualWithoutAuthLeavesServersAuthFree() {
+        let plan = ProxyPlan(
+            owner: "corp",
+            mode: .manual(ProxyEndpoint(scheme: .http, host: "10.0.0.1", port: 3128)),
+            manual: ProxyManual(http: ProxyEndpoint(scheme: .http, host: "10.0.0.1", port: 3128)))
+        let settings = plan.applyRequest.makeNEProxySettings()
+        #expect(settings?.httpServer?.authenticationRequired == false)
+        #expect(settings?.httpServer?.username == nil)
+        #expect(settings?.httpServer?.password == nil)
+    }
+
+    /// A one-sided sign-in (password only) still marks the server authenticated —
+    /// some proxies take a bare secret.
+    @Test func planManualWithPasswordOnlyStillAuthenticates() {
+        let plan = ProxyPlan(
+            owner: "corp",
+            mode: .manual(ProxyEndpoint(scheme: .http, host: "10.0.0.1", port: 3128)),
+            manual: ProxyManual(http: ProxyEndpoint(scheme: .http, host: "10.0.0.1", port: 3128)))
+        let settings = plan.applyRequest(username: nil, password: "s3cret").makeNEProxySettings()
+        #expect(settings?.httpServer?.authenticationRequired == true)
+        #expect(settings?.httpServer?.password == "s3cret")
+    }
+
+    /// `NEProxySettings` has no PAC credential slot, so a PAC plan never carries the
+    /// sign-in on the wire (ProxyAuthAdvisory surfaces that instead).
+    @Test func planPACNeverCarriesInlineAuth() {
+        let plan = ProxyPlan(owner: "corp", mode: .pac("http://wpad.example/wpad.dat"),
+                             authSource: "customrouting:corp")
+        let request = plan.applyRequest(username: "alice", password: "s3cret")
+        #expect(request.username == nil)
+        #expect(request.password == nil)
+    }
+
+    /// The auth-advisory decision: nil without a sign-in in play; otherwise exactly one
+    /// honest bucket — applied / missing creds / PAC / observe-only.
+    @Test func authAdvisoryDecidesEveryBucket() {
+        let manual = ProxyPlan(
+            owner: "corp",
+            mode: .manual(ProxyEndpoint(scheme: .http, host: "10.0.0.1", port: 3128)),
+            authSource: "customrouting:corp")
+        // No proxy, or a proxy with no authSource ⇒ nothing to say.
+        #expect(ProxyAuthAdvisory.decide(plan: ProxyPlan(owner: nil, mode: .none),
+                                         credentialsFound: false, ack: nil) == nil)
+        var unauthenticated = manual; unauthenticated.authSource = nil
+        #expect(ProxyAuthAdvisory.decide(plan: unauthenticated,
+                                         credentialsFound: true, ack: "ok") == nil)
+        // The four buckets.
+        #expect(ProxyAuthAdvisory.decide(plan: manual, credentialsFound: true, ack: "ok") == .applied)
+        #expect(ProxyAuthAdvisory.decide(plan: manual, credentialsFound: false, ack: "ok") == .missingCredentials)
+        #expect(ProxyAuthAdvisory.decide(plan: manual, credentialsFound: true, ack: nil) == .observeOnly)
+        let pac = ProxyPlan(owner: "corp", mode: .pac("http://wpad.example/wpad.dat"),
+                            authSource: "customrouting:corp")
+        #expect(ProxyAuthAdvisory.decide(plan: pac, credentialsFound: true, ack: "ok") == .pacManualAuth)
+    }
+
+    /// The advisory's one-liners never leak a secret — they carry names only.
+    @Test func authAdvisoryMessagesNameNoSecrets() {
+        for advisory: ProxyAuthAdvisory in [.applied, .missingCredentials, .pacManualAuth, .observeOnly] {
+            let message = advisory.message(owner: "Corp VPN")
+            #expect(!message.isEmpty)
+            #expect(!message.localizedCaseInsensitiveContains("s3cret"))
+        }
+        // A nil owner degrades to a generic name, not a crash or a blank.
+        #expect(ProxyAuthAdvisory.observeOnly.message(owner: nil).contains("the VPN"))
+    }
+
+    /// The keychain REF format round-trips and rejects foreign strings.
+    @Test func authSourceRefRoundTrips() {
+        let ref = ProxyAuthSourceRef.ref(forProfile: "corp-1")
+        #expect(ProxyAuthSourceRef.profileID(from: ref) == "corp-1")
+        #expect(ProxyAuthSourceRef.profileID(from: "customrouting:") == nil)
+        #expect(ProxyAuthSourceRef.profileID(from: "keychain-ref-123") == nil)
+    }
+
     private func socks(_ host: String, _ port: Int) -> ProxyIntent.Mode {
         .manual(ProxyEndpoint(scheme: .socks, host: host, port: port))
     }

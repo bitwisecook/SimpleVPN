@@ -21,10 +21,14 @@ extension VPNController {
 
 
     /// The saved Custom Routing filter for a profile; identity (no-op) when none was set.
+    /// Profiles with no NE manager (the native NEVPNManager kinds) read the UserDefaults
+    /// fallback the setter wrote instead of a providerConfiguration blob.
     func customRouting(for id: String) -> CustomRoutingProfile {
         if let cached = customRoutingCache[id] { return cached }
-        let proto = managers[id]?.protocolConfiguration as? NETunnelProviderProtocol
-        return CustomRoutingProfile.decode(from: proto?.providerConfiguration?["customrouting"] as? Data)
+        guard let proto = managers[id]?.protocolConfiguration as? NETunnelProviderProtocol else {
+            return CustomRoutingFallbackStore().load(id)
+        }
+        return CustomRoutingProfile.decode(from: proto.providerConfiguration?["customrouting"] as? Data)
     }
 
     /// Persist a profile's Custom Routing filter (dropped entirely when empty) and
@@ -34,9 +38,12 @@ extension VPNController {
     func setCustomRouting(_ profile: CustomRoutingProfile, for id: String) async {
         guard let mgr = managers[id],
               let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else {
-            // No manager yet (fresh/importing) — still hold it in the observable cache so
-            // the UI round-trips; it persists on the next real save once a manager exists.
+            // No NE manager: the native NEVPNManager kinds live here permanently (their
+            // filter — the custom proxy especially — must survive relaunch, so it goes
+            // to the UserDefaults fallback store), and a fresh import lands here
+            // transiently (the cache carries it until a real manager exists).
             customRoutingCache[id] = profile
+            CustomRoutingFallbackStore().save(profile, for: id)
             return
         }
         var conf = proto.providerConfiguration ?? [:]
@@ -47,6 +54,9 @@ extension VPNController {
         try? await mgr.saveToPreferences()
         try? await mgr.loadFromPreferences()
         customRoutingCache[id] = profile
+        // The providerConfiguration blob is authoritative now — retire any fallback
+        // entry a pre-manager save left behind.
+        CustomRoutingFallbackStore().clear(id)
         await applyCustomRouting(forProfile: id)
     }
 

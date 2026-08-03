@@ -11,9 +11,14 @@
 //  request is Codable across the root(sysext) ↔ app boundary and the mapping is
 //  identical on both sides (and unit-testable from the app target).
 //
-//  Credentials are NEVER carried here: OpenVPN's pushed proxy has no creds (only an
-//  NTLM hint), and a 407 is answered from the keychain at connect. Only host/port/PAC
-//  and the bypass list travel on this wire.
+//  Credentials: a proxy that requires sign-in (a pushed proxy behind auth, or the
+//  user's custom proxy) rides `username`/`password` here so `NEProxyServer` can carry
+//  `authenticationRequired` + creds. They are resolved APP-SIDE from the keychain (the
+//  intent/plan carry only the `authSource` REF) at realize time and travel exactly like
+//  `startTunnel(options:)` credentials — in memory over the provider-message IPC, never
+//  in providerConfiguration, never logged (the realizer logs only a set/clear flag).
+//  PAC has no credential slot in `NEProxySettings`, so a PAC decision never carries
+//  them (surfaced app-side by `ProxyAuthAdvisory`, not silently dropped).
 //
 
 import Foundation
@@ -34,11 +39,17 @@ nonisolated struct ProxyApplyRequest: Codable, Sendable, Equatable {
     var bypass: [String]
     /// `NEProxySettings.excludeSimpleHostnames`.
     var excludeSimpleHostnames: Bool
+    /// Proxy sign-in for the manual servers (`NEProxyServer.username`/`password` +
+    /// `authenticationRequired`). Keychain-resolved app-side; IPC-only, never persisted,
+    /// never logged. Optional so payloads from older apps decode with no auth.
+    var username: String?
+    var password: String?
 
     init(httpHost: String? = nil, httpPort: Int? = nil,
          httpsHost: String? = nil, httpsPort: Int? = nil,
          pacURL: String? = nil, bypass: [String] = [],
-         excludeSimpleHostnames: Bool = false) {
+         excludeSimpleHostnames: Bool = false,
+         username: String? = nil, password: String? = nil) {
         self.httpHost = httpHost
         self.httpPort = httpPort
         self.httpsHost = httpsHost
@@ -46,6 +57,8 @@ nonisolated struct ProxyApplyRequest: Codable, Sendable, Equatable {
         self.pacURL = pacURL
         self.bypass = bypass
         self.excludeSimpleHostnames = excludeSimpleHostnames
+        self.username = username
+        self.password = password
     }
 
     /// A manual endpoint is present when a host is set (port defaults to 0 otherwise).
@@ -56,11 +69,16 @@ nonisolated struct ProxyApplyRequest: Codable, Sendable, Equatable {
     /// Nothing to apply ⇒ Direct (clear the proxy).
     var isEmpty: Bool { !hasHTTP && !hasHTTPS && !hasPAC }
 
+    /// A sign-in is present when either half was resolved (some proxies take a
+    /// bare password, some a bare account name).
+    private var hasAuth: Bool { !(username ?? "").isEmpty || !(password ?? "").isEmpty }
+
     /// Build `NEProxySettings` from the decision, or `nil` when there is nothing to
     /// set (clear the tunnel's proxy). PAC → `autoProxyConfigurationEnabled` +
     /// `proxyAutoConfigurationURL` (tier-2: let the OS evaluate the PAC; no JS
     /// evaluator — that's tier-3). Manual → `httpServer`/`httpsServer` +
-    /// `httpEnabled`/`httpsEnabled`. Bypass → `exceptionList`.
+    /// `httpEnabled`/`httpsEnabled`, each carrying `authenticationRequired` + the
+    /// sign-in when one rode along. Bypass → `exceptionList`.
     func makeNEProxySettings() -> NEProxySettings? {
         guard !isEmpty else { return nil }
         let s = NEProxySettings()
@@ -69,16 +87,25 @@ nonisolated struct ProxyApplyRequest: Codable, Sendable, Equatable {
             s.proxyAutoConfigurationURL = u
         } else {
             if hasHTTP, let host = httpHost {
-                s.httpServer = NEProxyServer(address: host, port: httpPort ?? 0)
+                s.httpServer = authenticated(NEProxyServer(address: host, port: httpPort ?? 0))
                 s.httpEnabled = true
             }
             if hasHTTPS, let host = httpsHost {
-                s.httpsServer = NEProxyServer(address: host, port: httpsPort ?? 0)
+                s.httpsServer = authenticated(NEProxyServer(address: host, port: httpsPort ?? 0))
                 s.httpsEnabled = true
             }
         }
         if !bypass.isEmpty { s.exceptionList = bypass }
         s.excludeSimpleHostnames = excludeSimpleHostnames
         return s
+    }
+
+    /// Stamp the carried sign-in onto one manual server (no-op without one).
+    private func authenticated(_ server: NEProxyServer) -> NEProxyServer {
+        guard hasAuth else { return server }
+        server.authenticationRequired = true
+        server.username = username
+        server.password = password
+        return server
     }
 }
