@@ -286,6 +286,11 @@ targets:
     settings:
       base:
         PRODUCT_NAME: simplevpn
+        # NOT "simplevpn": the module name must differ from the app's by more than
+        # case, or the CLI's swiftmodule emit lands inside SimpleVPN.swiftmodule/
+        # on the case-insensitive filesystem and clobbers the app's module (tests
+        # then fail with "cannot load module 'simplevpn' as 'SimpleVPN'").
+        PRODUCT_MODULE_NAME: SimpleVPNCLI
         # A synchronous line-oriented tool: plain nonisolated code, no UI actor.
         SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
         ENABLE_HARDENED_RUNTIME: YES
