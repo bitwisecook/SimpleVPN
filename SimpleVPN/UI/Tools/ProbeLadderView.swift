@@ -248,6 +248,7 @@ struct ProbeStepRow: View {
     private func perform(_ action: UserFacingError.Action) {
         switch action {
         case .openOnePassword: UserFacingErrorSheet.openOnePassword()
+        case .openKeePassXC: UserFacingErrorSheet.openKeePassXC()
         case .manageVPNs: openWindow?(id: "manage")
         case .networkSettings:
             if let url = URL(string: "x-apple.systempreferences:com.apple.Network-Settings.extension") {

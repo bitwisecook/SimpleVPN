@@ -65,6 +65,7 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                 Text("I'll type it in").tag(CredentialSourceKind.manual)
                 Text("in 1Password").tag(CredentialSourceKind.onePassword)
                 Text("in Apple Passwords").tag(CredentialSourceKind.applePasswords)
+                Text("in KeePassXC").tag(CredentialSourceKind.keePassXC)
             }
             .pickerStyle(.menu)
             .fixedSize()
@@ -95,6 +96,23 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                 .onAppear {
                     apServer = source.reference.isEmpty ? profile.server : source.reference
                 }
+            case .keePassXC:
+                // Same one-field shape as Apple Passwords: KeePassXC finds the
+                // entry by matching this address against each entry's URL field.
+                HStack {
+                    TextField("Address the KeePassXC entry's URL matches", text: $apServer)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        .onSubmit(saveKeePassXC)
+                    Button("Use") { saveKeePassXC() }.buttonStyle(.glass)
+                        .disabled(apServer.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                .onAppear {
+                    apServer = source.reference.isEmpty ? profile.server : source.reference
+                }
+                Text("The first connect asks KeePassXC to pair \u{2014} give the connection a name (\u{201C}SimpleVPN\u{201D}) when it asks.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(14)
@@ -235,6 +253,13 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
     private func saveApplePasswords() {
         var s = source
         s.kind = .applePasswords
+        s.reference = apServer.trimmingCharacters(in: .whitespaces)
+        Task { try? await vpn.setCredentialSource(s, for: profile.id) }
+    }
+
+    private func saveKeePassXC() {
+        var s = source
+        s.kind = .keePassXC
         s.reference = apServer.trimmingCharacters(in: .whitespaces)
         Task { try? await vpn.setCredentialSource(s, for: profile.id) }
     }

@@ -40,12 +40,25 @@ char *OPNativeGetItem(const char *requestJSON);
 ///           or {"error":{"kind","message"}}
 char *OPNativeList(const char *requestJSON);
 
+/// Item LOOKUP: which items look like `query`, with the vault each lives in —
+/// the coordinates an op:// secret reference needs and an item title alone
+/// can't supply. The SDK has no search of its own (its item list is per-vault
+/// and unfiltered), so this fans out over the account's vaults and ranks
+/// titles with the app's own ladder (0 exact · 1 prefix · 2 substring ·
+/// 3 letters in order). An empty query lists everything. OVERVIEWS ONLY — a
+/// match never carries a field, a value or an OTP code. Blocking — call off
+/// the main thread.
+/// request:  {"integrationName","integrationVersion","account","vault","query","limit","timeoutSeconds"}
+/// response: {"matches":[{"itemID","title","category","vaultID","vaultTitle","score"},…]}
+///           or {"error":{"kind","message"}}
+char *OPNativeLookup(const char *requestJSON);
+
 /// Prompt-free check that a 1Password app with SDK support is installed.
 /// Returns {"available":bool,"reason":"…"}.
 char *OPNativeProbe(void);
 
 /// Free any string returned by OPNativeResolve/OPNativeGetItem/OPNativeList/
-/// OPNativeProbe.
+/// OPNativeLookup/OPNativeProbe.
 void OPNativeFree(char *p);
 
 #ifdef __cplusplus

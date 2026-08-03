@@ -104,6 +104,10 @@ struct EditVPNView: View {
     @State private var opPreflight = OnePasswordPreflightModel()
     /// Collapses the several deliveries macOS makes of one drag into one apply.
     @State private var opDrops = OnePasswordDropCollector()
+    /// Whether KeePassXC's browser-integration socket is there to talk to
+    /// (prompt-free stat, no connection). Same optimistic start as
+    /// `opAvailable`, and for the same reason.
+    @State private var kpAvailable = true
 
     // 1Password browsing (vault/item pickers). Every list is fetched ONLY on an
     // explicit click: the first one can raise 1Password's authorization prompt,
@@ -178,6 +182,7 @@ struct EditVPNView: View {
             .navigationTitle(embedded ? name : "Edit VPN")
             .task {
                 load()
+                kpAvailable = KeePassXCProvider.probe()
                 opAvailable = await OnePasswordNative.probe()
                 // Prompt-free, so this much can be said without anyone asking:
                 // no 1Password on this Mac is a setup state, not a failure.
@@ -294,14 +299,25 @@ struct EditVPNView: View {
 
                 if credentialKind == .manual {
                     Section("Credentials") {
-                        TextField("Username", text: $username)
-                            .textContentType(.username)
-                            .disabled(usernameLocked)
+                        // AppKit-backed AutoFill fields (SwiftUI's
+                        // .textContentType is a no-op on macOS): the key-icon
+                        // suggestions from Apple Passwords and any enabled
+                        // credential provider work here, same as the connect
+                        // form. LabeledContent supplies the label a bare
+                        // representable lacks in a Form row.
+                        LabeledContent("Username") {
+                            AutoFillField(kind: .username, placeholder: "Username",
+                                          text: $username)
+                        }
+                        .disabled(usernameLocked)
                         if usernameLocked {
                             Text("This configuration only works with the username above.")
                                 .font(.callout).foregroundStyle(.secondary)
                         }
-                        SecureField("Password", text: $password).textContentType(.password)
+                        LabeledContent("Password") {
+                            AutoFillField(kind: .password, placeholder: "Password",
+                                          text: $password)
+                        }
                         if evaluation?.allowPasswordSave ?? true {
                             Toggle("Remember password", isOn: $remember)
                         } else {
@@ -317,6 +333,11 @@ struct EditVPNView: View {
                             Text("The saved username and password move into a fingerprint-locked keychain item; connecting asks for Touch ID (or your Apple Watch, or the account password) to release them.")
                                 .font(.callout).foregroundStyle(.secondary)
                             if requiresOTP && vpn.authConfig(for: profileID).protectWithBiometrics {
+                                // Stays a SecureField, not an AutoFillField: a
+                                // TOTP ENROLLMENT SEED has no NSTextContentType
+                                // (.oneTimeCode means a current 6-digit code),
+                                // so AutoFill could only ever offer the wrong
+                                // thing here.
                                 SecureField("Authenticator setup key (otpauth:// link or secret)",
                                             text: $totpSecretInput)
                                     .autocorrectionDisabled()
@@ -415,6 +436,13 @@ struct EditVPNView: View {
                     .disabled(!opAvailable || loadingOPFields)
                 }
             }
+        } else if credentialKind == .keePassXC {
+            // No mapping to configure: KeePassXC computes the code from the
+            // matched entry's own TOTP settings — worth saying, so nobody goes
+            // hunting for a field picker that doesn't exist.
+            Label("KeePassXC supplies the code from the matched entry's TOTP, when it has one.",
+                  systemImage: "arrow.right.circle")
+                .font(.callout).foregroundStyle(.secondary)
         }
     }
 
@@ -464,6 +492,22 @@ struct EditVPNView: View {
                 TextField("Account (optional)", text: $sourceAccount)
                     .autocorrectionDisabled()
                 Text("SimpleVPN reads the saved username and password for this server from Apple Passwords. macOS asks your permission the first time. One-time codes aren't read — enter those below if required.")
+                    .font(.callout).foregroundStyle(.secondary)
+                sourceTestRow
+            case .keePassXC:
+                TextField("Website or server", text: $sourceReference,
+                          prompt: Text(verbatim: evaluation?.remoteHost ?? "vpn.example.com"))
+                    .autocorrectionDisabled()
+                TextField("Account (optional \u{2014} only needed if several entries match)",
+                          text: $sourceAccount)
+                    .autocorrectionDisabled()
+                if !kpAvailable {
+                    Label("KeePassXC isn't running (or its browser integration is off). Open KeePassXC and turn on Settings \u{25B8} Browser Integration \u{25B8} \u{201C}Enable browser integration\u{201D}.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text("SimpleVPN asks the KeePassXC app for the entry whose URL matches this address — including its one-time code, when the entry has one. The first request asks you to pair (name it \u{201C}SimpleVPN\u{201D}), and a locked database raises KeePassXC's own unlock.")
                     .font(.callout).foregroundStyle(.secondary)
                 sourceTestRow
             }
@@ -722,6 +766,18 @@ struct EditVPNView: View {
             opItems = try await withAccountFallback { account in
                 if vault.isEmpty {
                     return try await OnePasswordNative.listItemsAcrossVaults(account: account)
+                }
+                // Lookup rather than list even for one vault: it reports the
+                // vault's real id AND title, where the plain list only knows
+                // the scope string the user typed (which may be either).
+                // Falls back to the list on an archive predating the endpoint.
+                if let matches = try? await OnePasswordNative.lookup(
+                    query: "", vault: vault, account: account) {
+                    return matches.map {
+                        OnePasswordNative.OPItemInVault(
+                            itemID: $0.itemID, title: $0.title, category: $0.category,
+                            vaultID: $0.vaultID, vaultTitle: $0.vaultTitle)
+                    }
                 }
                 return try await OnePasswordNative.listItems(vault: vault, account: account)
                     .map {

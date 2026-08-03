@@ -56,6 +56,20 @@ struct CredentialSourceTests {
         #expect(roundTrip(source).vault == "Private")
     }
 
+    /// A KeePassXC source keeps reference + account and round-trips; vault and
+    /// field map stay 1Password-only concepts.
+    @Test func keePassXCSourceRoundTrips() {
+        var source = CredentialSource()
+        source.kind = .keePassXC
+        source.reference = "tig-vpn.grlab.co.uk"
+        source.account = "jim"
+        let back = roundTrip(source)
+        #expect(back.kind == .keePassXC)
+        #expect(back.reference == "tig-vpn.grlab.co.uk")
+        #expect(back.account == "jim")
+        #expect(back.vault.isEmpty)
+    }
+
     // MARK: - Legacy blobs
 
     private func legacyBlob(kind: String, account: String) -> Data {
@@ -217,8 +231,10 @@ struct ConnectReadinessTests {
             out.append(i)
         }}}
         // OpenVPN across autologin / manager / biometric / typed dimensions.
+        // allCases, not a hand-list: a new manager kind must join this matrix
+        // the moment it exists, or its readiness is simply untested.
         for autologin in bools {
-          for manager in [CredentialSourceKind.manual, .applePasswords, .onePassword] {
+          for manager in CredentialSourceKind.allCases {
             for otp in bools { for bioP in bools { for bioStored in bools { for bioTOTP in bools {
               for locked in bools { for tUser in bools { for tPass in bools { for tOTP in bools {
                 var i = ConnectInputs(); i.kind = .openVPN
@@ -267,7 +283,7 @@ struct ConnectReadinessTests {
     // MARK: - Password managers
 
     /// Apple Passwords can't hand over a one-time code, so a code is still needed;
-    /// 1Password can, so it doesn't block.
+    /// 1Password and KeePassXC can, so they don't block.
     @Test func managerOTPGapDependsOnTheManager() {
         var apple = ConnectInputs(); apple.kind = .openVPN
         apple.managerKind = .applePasswords; apple.requiresOTP = true
@@ -278,6 +294,20 @@ struct ConnectReadinessTests {
         var op = ConnectInputs(); op.kind = .openVPN
         op.managerKind = .onePassword; op.requiresOTP = true
         #expect(op.readiness == .ready)   // 1Password supplies the code itself
+
+        var kp = ConnectInputs(); kp.kind = .openVPN
+        kp.managerKind = .keePassXC; kp.requiresOTP = true
+        #expect(kp.readiness == .ready)   // KeePassXC serves get-totp
+    }
+
+    /// The one answer the readiness logic, the unattended connect and the
+    /// connect form all read — pinned per kind so a new case has to declare
+    /// itself here.
+    @Test func otpCapabilityPerKind() {
+        #expect(!CredentialSourceKind.manual.suppliesOTP)
+        #expect(!CredentialSourceKind.applePasswords.suppliesOTP)
+        #expect(CredentialSourceKind.onePassword.suppliesOTP)
+        #expect(CredentialSourceKind.keePassXC.suppliesOTP)
     }
 
     @Test func managerWithoutOTPIsReady() {

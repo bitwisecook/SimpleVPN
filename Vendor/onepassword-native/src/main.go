@@ -55,6 +55,25 @@
 //	  listing items without naming a vault is a badRequest rather than a
 //	  sweep of every vault the account can see.
 //
+//	OPNativeLookup(requestJSON) -> responseJSON
+//	  request:  {"integrationName": "...", "integrationVersion": "...",
+//	             "account": "...", "vault": "<optional scope, id or title>",
+//	             "query": "<what was typed; empty = everything>",
+//	             "limit": 0, "timeoutSeconds": 180}
+//	  response: {"matches": [{"itemID","title","category","vaultID",
+//	                          "vaultTitle","score"}, ...]}
+//	         or {"error": {"kind": "...", "message": "..."}}
+//	  kinds: as OPNativeResolve.
+//
+//	  The name→item-refs endpoint: WHICH items look like what was typed, and
+//	  crucially WHICH VAULT each lives in — the coordinate an op:// secret
+//	  reference needs and the one an item title alone can't supply. The SDK has
+//	  no search (ItemsList is per-vault and unfiltered), so the fan-out and the
+//	  ranking (FuzzyMatch's ladder: 0 exact · 1 prefix · 2 substring ·
+//	  3 subsequence) happen here rather than in a round trip per vault.
+//	  OVERVIEWS ONLY, same rule as OPNativeList — a match never carries a
+//	  field, a value or an OTP code.
+//
 //	OPNativeProbe() -> {"available": bool, "reason": "..."}
 //	  Prompt-free: only checks that the 1Password app's SDK IPC dylib exists
 //	  on disk (same paths the SDK itself probes). It does NOT confirm the app
@@ -178,6 +197,36 @@ type listResponse struct {
 	Vaults *[]vaultOverview `json:"vaults,omitempty"`
 	Items  *[]itemOverview  `json:"items,omitempty"`
 	Error  *shimError       `json:"error,omitempty"`
+}
+
+type lookupRequest struct {
+	IntegrationName    string `json:"integrationName"`
+	IntegrationVersion string `json:"integrationVersion"`
+	Account            string `json:"account"`
+	Vault              string `json:"vault"`
+	Query              string `json:"query"`
+	Limit              int    `json:"limit"`
+	TimeoutSeconds     int    `json:"timeoutSeconds"`
+}
+
+// itemMatch is an itemOverview plus the vault it turned out to live in and how
+// closely the title matched. The vault is the point of the whole endpoint: an
+// item ref without its vault can't become an op:// secret reference, which is
+// the narrow-grant path OnePasswordProvider prefers.
+type itemMatch struct {
+	ItemID     string `json:"itemID"`
+	Title      string `json:"title"`
+	Category   string `json:"category"`
+	VaultID    string `json:"vaultID"`
+	VaultTitle string `json:"vaultTitle"`
+	// 0 exact · 1 prefix · 2 substring · 3 subsequence — the same ladder as
+	// the app's FuzzyMatch, so the shim's order and the picker's agree.
+	Score int `json:"score"`
+}
+
+type lookupResponse struct {
+	Matches *[]itemMatch `json:"matches,omitempty"`
+	Error   *shimError   `json:"error,omitempty"`
 }
 
 // Error kinds — keep in sync with OnePasswordNativeError in
@@ -732,6 +781,152 @@ func listOnce(ctx context.Context, req listRequest) (listResponse, *shimError) {
 	return listResponse{Items: &out}, nil
 }
 
+// ---- Item lookup (name → item refs) ----------------------------------------
+
+// handleLookup answers "which items look like what was typed?" with (item id,
+// title, category, VAULT id + title) per match — the coordinates a caller needs
+// to form an op:// secret reference or to disambiguate a title that matches
+// several items. This is the endpoint the app used to need the `op` CLI's
+// searching item read for; the SDK has no search of its own (ItemsList is
+// per-vault and unfiltered), so the fan-out and the matching live here rather
+// than in five round trips from Swift.
+//
+// An empty query lists everything the account can show (a bounded browse), so
+// this subsumes OPNativeList's item mode across vaults.
+func handleLookup(reqJSON string) lookupResponse {
+	var req lookupRequest
+	if err := json.Unmarshal([]byte(reqJSON), &req); err != nil {
+		return lookupResponse{Error: &shimError{Kind: kindBadRequest,
+			Message: "bad request JSON: " + err.Error()}}
+	}
+	if req.IntegrationName == "" {
+		req.IntegrationName = "SimpleVPN"
+	}
+	if req.IntegrationVersion == "" {
+		req.IntegrationVersion = "dev"
+	}
+	timeout := 180 * time.Second
+	if req.TimeoutSeconds > 0 {
+		timeout = time.Duration(req.TimeoutSeconds) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	matches, shimErr := lookupOnce(ctx, req)
+	// Same session-expiry policy as every other call: rebuild the client
+	// (which re-prompts) and retry exactly once.
+	if shimErr != nil && shimErr.Kind == kindSessionExpired {
+		dropClient()
+		matches, shimErr = lookupOnce(ctx, req)
+	}
+	if shimErr != nil {
+		return lookupResponse{Error: shimErr}
+	}
+	return lookupResponse{Matches: &matches}
+}
+
+func lookupOnce(ctx context.Context, req lookupRequest) ([]itemMatch, *shimError) {
+	c, err := cachedClient(ctx, req.Account, req.IntegrationName, req.IntegrationVersion)
+	if err != nil {
+		e := classify(err)
+		return nil, &e
+	}
+	vaults, err := c.Vaults().List(ctx)
+	if err != nil {
+		e := classify(err)
+		if e.Kind != kindSessionExpired {
+			dropClient()
+		}
+		return nil, &e
+	}
+	wantVault := strings.TrimSpace(req.Vault)
+	candidates, shimErr := matchVaults(vaults, wantVault)
+	if shimErr != nil {
+		return nil, shimErr
+	}
+
+	query := strings.TrimSpace(req.Query)
+	out := make([]itemMatch, 0, 64)
+	for _, v := range candidates {
+		items, err := c.Items().List(ctx, v.ID)
+		if err != nil {
+			// A vault the user named explicitly must report its error; while
+			// sweeping, one unreadable drawer must not hide the other twenty.
+			if wantVault != "" {
+				e := classify(err)
+				if e.Kind != kindSessionExpired {
+					dropClient()
+				}
+				return nil, &e
+			}
+			continue
+		}
+		for _, o := range items {
+			// Archived/deleted items can't sign anyone in.
+			if o.State != "" && o.State != onepassword.ItemStateActive {
+				continue
+			}
+			score, ok := titleScore(query, o.Title, o.ID)
+			if !ok {
+				continue
+			}
+			out = append(out, itemMatch{ItemID: o.ID, Title: o.Title,
+				Category: string(o.Category), VaultID: v.ID, VaultTitle: v.Title,
+				Score: score})
+		}
+	}
+	// Closest first; then alphabetically, so typing never reshuffles ties.
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Score != out[j].Score {
+			return out[i].Score < out[j].Score
+		}
+		if !strings.EqualFold(out[i].Title, out[j].Title) {
+			return strings.ToLower(out[i].Title) < strings.ToLower(out[j].Title)
+		}
+		return strings.ToLower(out[i].VaultTitle) < strings.ToLower(out[j].VaultTitle)
+	})
+	if req.Limit > 0 && len(out) > req.Limit {
+		out = out[:req.Limit]
+	}
+	return out, nil
+}
+
+// titleScore ranks a candidate title against the query the same way the app's
+// FuzzyMatch does (0 exact · 1 prefix · 2 substring · 3 letters in order), so
+// a lookup and a locally filtered list can't disagree about which row is
+// first. An exact ID hit scores 0 — a UUID typed in full is not a guess. An
+// empty query matches everything at 0 (the browse case).
+func titleScore(query, title, id string) (int, bool) {
+	if query == "" {
+		return 0, true
+	}
+	if id == query {
+		return 0, true
+	}
+	q, t := strings.ToLower(query), strings.ToLower(title)
+	switch {
+	case t == q:
+		return 0, true
+	case strings.HasPrefix(t, q):
+		return 1, true
+	case strings.Contains(t, q):
+		return 2, true
+	}
+	// Subsequence: every query rune appears in order ("wrk" → "Work Router").
+	rest := t
+	for _, r := range q {
+		i := strings.IndexRune(rest, r)
+		if i < 0 {
+			return 0, false
+		}
+		rest = rest[i+len(string(r)):]
+	}
+	return 3, true
+}
+
 // probe reports whether the 1Password app's SDK IPC dylib is installed — the
 // same locations internal/shared_lib_core.go checks. File-existence only, so
 // it can never raise a prompt.
@@ -788,6 +983,15 @@ func OPNativeList(requestJSON *C.char) *C.char {
 			Kind: kindBadRequest, Message: "nil request"}})
 	}
 	return jsonCString(handleList(C.GoString(requestJSON)))
+}
+
+//export OPNativeLookup
+func OPNativeLookup(requestJSON *C.char) *C.char {
+	if requestJSON == nil {
+		return jsonCString(lookupResponse{Error: &shimError{
+			Kind: kindBadRequest, Message: "nil request"}})
+	}
+	return jsonCString(handleLookup(C.GoString(requestJSON)))
 }
 
 //export OPNativeProbe

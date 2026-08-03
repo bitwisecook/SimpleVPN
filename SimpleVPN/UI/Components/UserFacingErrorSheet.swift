@@ -29,6 +29,7 @@ struct UserFacingErrorSheet: View {
     private var tint: Color {
         switch error.category {
         case .onePassword: .blue
+        case .keePassXC: .green   // KeePassXC's own brand color
         case .credentials: .indigo
         case .approval: .orange
         case .network: .yellow
@@ -160,6 +161,9 @@ struct UserFacingErrorSheet: View {
             // Deliberately does NOT dismiss: the steps have to stay readable
             // while they're being followed in the other app.
             Self.openOnePassword()
+        case .openKeePassXC:
+            // Same no-dismiss reasoning as 1Password.
+            Self.openKeePassXC()
         case .manageVPNs:
             openWindow?("manage")
             dismiss()
@@ -185,5 +189,16 @@ struct UserFacingErrorSheet: View {
             }
         }
         if let url = URL(string: "https://1password.com/downloads/mac") { workspace.open(url) }
+    }
+
+    /// Bring KeePassXC forward — same bundle-id resolution reasoning as
+    /// 1Password (Homebrew casks land in /Applications, but nothing forces it).
+    static func openKeePassXC() {
+        let workspace = NSWorkspace.shared
+        if let url = workspace.urlForApplication(withBundleIdentifier: "org.keepassxc.keepassxc") {
+            workspace.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+            return
+        }
+        if let url = URL(string: "https://keepassxc.org/download/") { workspace.open(url) }
     }
 }

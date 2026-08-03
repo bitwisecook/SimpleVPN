@@ -80,7 +80,7 @@ extension VPNController {
         }
     }
 
-    // MARK: Credential source (manual / 1Password / Apple Passwords)
+    // MARK: Credential source (manual / 1Password / Apple Passwords / KeePassXC)
 
 
     func credentialSource(for id: String) -> CredentialSource {
@@ -128,6 +128,8 @@ extension VPNController {
                 fieldMap: source.fieldMap)
         case .applePasswords:
             return ApplePasswordsProvider(server: source.reference, account: source.account)
+        case .keePassXC:
+            return KeePassXCProvider(reference: source.reference, account: source.account)
         }
     }
 
@@ -496,11 +498,11 @@ extension VPNController {
         let auth = effectiveAuthConfig(for: id)
 
         // A password manager can auto-connect when the profile needs no OTP, or
-        // when it can supply the OTP itself (1Password TOTP; the Touch ID store
-        // with a saved authenticator secret). Apple Passwords can't provide an
-        // OTP, so an OTP profile still needs the form.
+        // when it can supply the OTP itself (1Password/KeePassXC TOTP; the
+        // Touch ID store with a saved authenticator secret). Apple Passwords
+        // can't provide an OTP, so an OTP profile still needs the form.
         if let provider = managerProvider(for: id) {
-            let canServeOTP = credentialSource(for: id).kind == .onePassword
+            let canServeOTP = credentialSource(for: id).kind.suppliesOTP
                 || biometricCanServe(id: id)
             guard !auth.requiresOTP || canServeOTP else { return false }
             do {
@@ -736,8 +738,8 @@ extension VPNController {
         if isAutologin(id) { return true }   // the certificate is the sign-in
         let auth = effectiveAuthConfig(for: id)
         if managerProvider(for: id) != nil {
-            // 1Password can serve an OTP itself; Apple Passwords can't.
-            return !auth.requiresOTP || credentialSource(for: id).kind == .onePassword
+            // 1Password/KeePassXC can serve an OTP itself; Apple Passwords can't.
+            return !auth.requiresOTP || credentialSource(for: id).kind.suppliesOTP
         }
         if auth.requiresOTP { return false }   // a one-time code can't be reused
         if let c = transientCreds[id], !c.password.isEmpty { return true }

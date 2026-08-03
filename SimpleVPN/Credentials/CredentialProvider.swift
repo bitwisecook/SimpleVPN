@@ -213,6 +213,10 @@ struct BiometricCredentialProvider: CredentialProvider {
 //   IPC to the 1Password app (OnePasswordNative / opnative-helper); no `op`
 //   CLI, works fully offline.
 //
+// KeePassXC (shipped): `KeePassXCProvider` — the keepassxc-browser protocol
+//   over KeePassXC's unix socket (KeePassXCProtocol/KeePassXCCrypto); pairing
+//   lives in the keychain, per-database.
+//
 // Apple Passwords (M9): `ApplePasswordsCredentialProvider`
 //   - username/password/otp are best sourced via native AutoFill on the text fields
 //     (textContentType .username/.password/.oneTimeCode + associated-domains), so this

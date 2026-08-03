@@ -15,12 +15,14 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
     case manual
     case onePassword
     case applePasswords
+    case keePassXC
 
     var displayName: String {
         switch self {
         case .manual: "Manual / Saved"
         case .onePassword: "1Password"
         case .applePasswords: "Apple Passwords"
+        case .keePassXC: "KeePassXC"
         }
     }
     var systemImage: String {
@@ -28,6 +30,23 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
         case .manual: "keyboard"
         case .onePassword: "key.fill"
         case .applePasswords: "person.badge.key.fill"
+        case .keePassXC: "key.horizontal.fill"
+        }
+    }
+
+    /// Whether this manager can hand over a one-time code by itself —
+    /// 1Password computes TOTP from the item, KeePassXC serves get-totp;
+    /// Apple Passwords stores codes but exposes none of them to SecItem.
+    /// THE one answer the readiness logic, the unattended connect and the
+    /// connect form's "still needs a typed code" row all read — it used to be
+    /// three scattered `== .onePassword` tests, which is exactly how a new
+    /// kind would have half-worked.
+    // nonisolated: read inside `ConnectInputs.readiness`, which is nonisolated
+    // pure data (the app target defaults to MainActor isolation).
+    nonisolated var suppliesOTP: Bool {
+        switch self {
+        case .manual, .applePasswords: false
+        case .onePassword, .keePassXC: true
         }
     }
 }
@@ -35,14 +54,15 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
 struct CredentialSource: Codable, Sendable, Equatable {
     var kind: CredentialSourceKind = .manual
 
-    /// 1Password: item name or UUID (optionally "vault/item"). Apple Passwords:
-    /// the service/server to match (e.g. "tig-vpn.grlab.co.uk"). Unused for manual.
+    /// 1Password: item name or UUID (optionally "vault/item"). Apple Passwords
+    /// and KeePassXC: the server/URL to match (e.g. "tig-vpn.grlab.co.uk" —
+    /// KeePassXC matches it against each entry's URL field). Unused for manual.
     var reference = ""
     /// 1Password: WHICH ACCOUNT to ask — the name shown at the top of
     /// 1Password's sidebar, or its UUID. Not cosmetic: the SDK's desktop-app
     /// integration refuses to build a client without it ("Account not found")
-    /// whenever it can't pick one on its own. Apple Passwords: the account
-    /// (username) when a service has several saved logins.
+    /// whenever it can't pick one on its own. Apple Passwords and KeePassXC:
+    /// the account (username) when a server has several saved logins.
     var account = ""
     /// 1Password only: which vault holds the item ("" = search them all).
     /// Separate from `account` — a vault names a drawer inside an account, and
@@ -168,9 +188,10 @@ nonisolated struct ConnectInputs: Equatable, Sendable {
         if autologin { return .ready }
 
         // A password manager supplies username/password on connect; only a code
-        // it cannot provide (Apple Passwords can't; 1Password can) still blocks.
+        // it cannot provide (Apple Passwords can't; 1Password and KeePassXC
+        // can) still blocks.
         if managerKind != .manual {
-            let needsTypedCode = requiresOTP && managerKind != .onePassword && !typedOTP
+            let needsTypedCode = requiresOTP && !managerKind.suppliesOTP && !typedOTP
             return needsTypedCode ? .needsCode : .ready
         }
 

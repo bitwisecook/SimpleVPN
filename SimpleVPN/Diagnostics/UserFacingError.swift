@@ -29,6 +29,7 @@ nonisolated struct UserFacingError: Identifiable, Sendable, Equatable {
     /// What broke, in the vocabulary of the fix — drives the symbol and tint.
     enum Category: String, Sendable, Equatable {
         case onePassword      // the 1Password app / its integration
+        case keePassXC        // the KeePassXC app / its browser integration
         case credentials      // the sign-in itself is wrong or missing
         case approval         // something is waiting for the user to say yes
         case network          // this Mac's own connectivity
@@ -53,6 +54,7 @@ nonisolated struct UserFacingError: Identifiable, Sendable, Equatable {
     /// stays Sendable and comparable, and the view owns AppKit.
     enum Action: Sendable, Equatable {
         case openOnePassword
+        case openKeePassXC
         case manageVPNs
         case networkSettings
         case openURL(URL)
@@ -60,6 +62,7 @@ nonisolated struct UserFacingError: Identifiable, Sendable, Equatable {
         var title: String {
             switch self {
             case .openOnePassword: "Open 1Password"
+            case .openKeePassXC: "Open KeePassXC"
             case .manageVPNs: "Open Manage VPNs"
             case .networkSettings: "Open Network Settings"
             case .openURL: "Open Download Page"
@@ -69,6 +72,7 @@ nonisolated struct UserFacingError: Identifiable, Sendable, Equatable {
         var symbol: String {
             switch self {
             case .openOnePassword: "key.fill"
+            case .openKeePassXC: "key.horizontal.fill"
             case .manageVPNs: "slider.horizontal.3"
             case .networkSettings: "wifi"
             case .openURL: "arrow.down.circle"
@@ -122,6 +126,9 @@ nonisolated extension UserFacingError {
         if let native = error as? OnePasswordNativeError {
             return classify(native: native, secrets: secrets, occurred: occurred)
         }
+        if let kp = error as? KeePassXCError {
+            return classify(keePassXC: kp, secrets: secrets, occurred: occurred)
+        }
         return classify(message: error.localizedDescription, secrets: secrets, occurred: occurred)
     }
 
@@ -139,6 +146,9 @@ nonisolated extension UserFacingError {
         }
         if isOnePassword(s) {
             return onePassword(lowercased: s, detail: detail, occurred: occurred)
+        }
+        if isKeePassXC(s) {
+            return keePassXC(lowercased: s, detail: detail, occurred: occurred)
         }
         if s.contains("offline") || s.contains("not connected to the internet") {
             return offline(detail: detail, occurred: occurred)
@@ -171,6 +181,38 @@ nonisolated extension UserFacingError {
             return onePassword(lowercased: message.lowercased(),
                                detail: redact(message, secrets: secrets), occurred: occurred)
         }
+    }
+
+    /// Typed KeePassXC failures — the connector maps every wire error code
+    /// onto these, so unlike 1Password there is no prose to sniff: each case
+    /// IS the classification.
+    static func classify(keePassXC error: KeePassXCError, secrets: [String] = [],
+                         occurred: Date = .now) -> UserFacingError {
+        let detail = redact(error.errorDescription ?? "", secrets: secrets)
+        switch error {
+        case .notRunning, .handshakeFailed:
+            return kpNotRunning(detail: detail, occurred: occurred)
+        case .databaseLocked:
+            return kpLocked(detail: detail, occurred: occurred)
+        case .accessDenied:
+            return kpNeedsApproval(detail: detail, occurred: occurred)
+        case .associationFailed, .associationRevoked:
+            return kpNeedsPairing(detail: detail, occurred: occurred)
+        case .noLogins(let host):
+            return kpNoLogins(host: host, detail: detail, occurred: occurred)
+        case .ambiguous:
+            return kpAmbiguous(detail: detail, occurred: occurred)
+        case .timedOut:
+            return kpTimedOut(detail: detail, occurred: occurred)
+        case .protocolError, .serverError:
+            return kpGeneric(detail: detail, occurred: occurred)
+        }
+    }
+
+    /// Is this failure about KeePassXC at all? Only our own connector speaks
+    /// its name, so the name is the whole signature.
+    private static func isKeePassXC(_ s: String) -> Bool {
+        s.contains("keepassxc") || s.contains("keepass")
     }
 
     /// Is this failure about 1Password at all? The SDK's strings don't always say
@@ -393,6 +435,141 @@ nonisolated extension UserFacingError {
             ],
             action: .openOnePassword, canRetry: true, category: .onePassword,
             symbol: "key.fill", technicalDetail: detail, occurred: occurred)
+    }
+
+    // MARK: KeePassXC substring table
+
+    /// Message-text fallback for KeePassXC failures that arrive as strings
+    /// (a `lastError` path) — the typed classify above is the main road.
+    private static func keePassXC(lowercased s: String, detail: String,
+                                  occurred: Date) -> UserFacingError {
+        if s.contains("locked") { return kpLocked(detail: detail, occurred: occurred) }
+        if s.contains("running") || s.contains("browser integration")
+            || s.contains("handshake") || s.contains("connect") {
+            return kpNotRunning(detail: detail, occurred: occurred)
+        }
+        if s.contains("dismissed") || s.contains("denied") || s.contains("cancel") {
+            return kpNeedsApproval(detail: detail, occurred: occurred)
+        }
+        if s.contains("pair") || s.contains("associat") {
+            return kpNeedsPairing(detail: detail, occurred: occurred)
+        }
+        if s.contains("no entry") || s.contains("no logins") || s.contains("matches") {
+            return kpNoLogins(host: "", detail: detail, occurred: occurred)
+        }
+        if s.contains("didn't answer") || s.contains("timed out") {
+            return kpTimedOut(detail: detail, occurred: occurred)
+        }
+        return kpGeneric(detail: detail, occurred: occurred)
+    }
+
+    // MARK: KeePassXC cases
+
+    private static func kpNotRunning(detail: String, occurred: Date) -> UserFacingError {
+        UserFacingError(
+            title: "KeePassXC isn\u{2019}t answering",
+            explanation: "SimpleVPN asks the KeePassXC app for this VPN\u{2019}s sign-in, and there\u{2019}s nothing to ask.",
+            steps: [
+                .init("Open **KeePassXC** and unlock your database."),
+                .init("In **KeePassXC \u{25B8} Settings \u{25B8} Browser Integration**, make sure **Enable browser integration** is ticked.",
+                      note: "That\u{2019}s the switch that opens the local connection SimpleVPN uses \u{2014} no browser is involved."),
+                .init("Come back here and click **Connect** again."),
+            ],
+            action: .openKeePassXC, canRetry: true, category: .keePassXC,
+            symbol: "moon.zzz.fill", technicalDetail: detail, occurred: occurred)
+    }
+
+    private static func kpLocked(detail: String, occurred: Date) -> UserFacingError {
+        UserFacingError(
+            title: "Your KeePassXC database is locked",
+            explanation: "KeePassXC can\u{2019}t hand over a sign-in until you\u{2019}ve unlocked it.",
+            steps: [
+                .init("Switch to **KeePassXC** and unlock the database \u{2014} Touch ID quick-unlock counts."),
+                .init("Click **Connect** again."),
+            ],
+            action: .openKeePassXC, canRetry: true, category: .keePassXC,
+            symbol: "lock.fill", technicalDetail: detail, occurred: occurred)
+    }
+
+    private static func kpNeedsApproval(detail: String, occurred: Date) -> UserFacingError {
+        UserFacingError(
+            title: "KeePassXC needs you to allow SimpleVPN",
+            explanation: "KeePassXC asks your permission before it hands an entry to another app.",
+            steps: [
+                .init("Switch to **KeePassXC** \u{2014} it\u{2019}s showing a prompt about **SimpleVPN**."),
+                .init("Choose **Allow** (tick **Remember** to skip the ask next time)."),
+                .init("Click **Connect** again."),
+            ],
+            action: .openKeePassXC, canRetry: true, category: .approval,
+            symbol: "hand.raised.fill", technicalDetail: detail, occurred: occurred)
+    }
+
+    private static func kpNeedsPairing(detail: String, occurred: Date) -> UserFacingError {
+        UserFacingError(
+            title: "SimpleVPN and KeePassXC need to pair again",
+            explanation: "KeePassXC no longer recognises SimpleVPN \u{2014} the pairing was never finished, or it was removed from the database.",
+            steps: [
+                .init("Click **Connect** again \u{2014} KeePassXC will ask to pair."),
+                .init("Give the connection a name (\u{201C}SimpleVPN\u{201D} is fine) and confirm.",
+                      note: "The pairing is stored inside your database, so it follows the database wherever it goes."),
+            ],
+            action: .openKeePassXC, canRetry: true, category: .keePassXC,
+            symbol: "link.badge.plus", technicalDetail: detail, occurred: occurred)
+    }
+
+    private static func kpNoLogins(host: String, detail: String, occurred: Date) -> UserFacingError {
+        UserFacingError(
+            title: "KeePassXC has no entry for this VPN",
+            explanation: host.isEmpty
+                ? "No entry\u{2019}s URL matches the address this VPN looks for."
+                : "No entry\u{2019}s URL matches \u{201C}\(host)\u{201D}.",
+            steps: [
+                .init("Open **KeePassXC** and find (or create) this VPN\u{2019}s entry."),
+                .init(host.isEmpty
+                      ? "Put the VPN\u{2019}s address in the entry\u{2019}s **URL** field."
+                      : "Put **https://\(host)** in the entry\u{2019}s **URL** field."),
+                .init("Click **Connect** again."),
+            ],
+            action: .openKeePassXC, canRetry: true, category: .credentials,
+            symbol: "magnifyingglass", technicalDetail: detail, occurred: occurred)
+    }
+
+    private static func kpAmbiguous(detail: String, occurred: Date) -> UserFacingError {
+        UserFacingError(
+            title: "More than one KeePassXC entry matches",
+            explanation: "Several entries carry this VPN\u{2019}s address, and nothing says which one is right.",
+            steps: [
+                .init("Open **Manage VPNs** and select this VPN."),
+                .init("In its **Credentials** settings, type the entry\u{2019}s username into **Account**."),
+                .init("Click **Connect** again."),
+            ],
+            action: .manageVPNs, canRetry: true, category: .credentials,
+            symbol: "square.on.square", technicalDetail: detail, occurred: occurred)
+    }
+
+    private static func kpTimedOut(detail: String, occurred: Date) -> UserFacingError {
+        UserFacingError(
+            title: "KeePassXC didn\u{2019}t answer",
+            explanation: "The request took too long \u{2014} usually a prompt waiting somewhere you couldn\u{2019}t see it.",
+            steps: [
+                .init("Bring **KeePassXC** to the front and make sure the database is unlocked."),
+                .init("Click **Connect** again, and answer the prompt if one appears."),
+            ],
+            action: .openKeePassXC, canRetry: true, category: .keePassXC,
+            symbol: "clock.badge.exclamationmark", technicalDetail: detail, occurred: occurred)
+    }
+
+    private static func kpGeneric(detail: String, occurred: Date) -> UserFacingError {
+        UserFacingError(
+            title: "KeePassXC couldn\u{2019}t give SimpleVPN the sign-in",
+            explanation: "Something went wrong between the two apps. These usually fix it.",
+            steps: [
+                .init("Open **KeePassXC** and unlock your database."),
+                .init("Check **Settings \u{25B8} Browser Integration** is enabled."),
+                .init("Click **Connect** again."),
+            ],
+            action: .openKeePassXC, canRetry: true, category: .keePassXC,
+            symbol: "key.horizontal.fill", technicalDetail: detail, occurred: occurred)
     }
 
     // MARK: Non-1Password cases

@@ -11,8 +11,12 @@
 //
 //  Two read shapes: explicit coordinates (vault + item + field names) resolve
 //  as op:// secret references — the narrowest possible grant; anything less
-//  explicit (no vault, a link-style reference, or default field-name guesses
-//  that missed) reads the whole item once and picks fields locally.
+//  explicit (a link-style reference, or default field-name guesses that
+//  missed) reads the whole item once and picks fields locally.
+//
+//  A missing vault is no longer a reason to fall back: OPNativeLookup answers
+//  "which vault is this item in?", so an item linked by name alone now takes
+//  the narrow path too (three fields granted instead of the whole entry).
 //
 
 import Foundation
@@ -48,8 +52,23 @@ struct OnePasswordProvider: CredentialProvider {
     }
 
     func resolve(profile: String, fields: Set<CredentialField>) async throws -> RawCredentials {
-        let ref = itemReference.trimmingCharacters(in: .whitespaces)
+        var ref = itemReference.trimmingCharacters(in: .whitespaces)
         guard !ref.isEmpty else { throw OPError.noReference }
+        var vault = self.vault.trimmingCharacters(in: .whitespaces)
+
+        // No vault configured? ASK which one it's in. The narrow path needs a
+        // vault to form op:// references, and until the lookup endpoint existed
+        // there was no way to learn one — so an item linked by name alone
+        // always fell back to reading the WHOLE item. Now it doesn't: one
+        // lookup buys the coordinates, and the request that follows grants
+        // access to three fields instead of everything in the entry.
+        // Best-effort: a failure here just leaves the old whole-item path.
+        if vault.isEmpty, !ref.contains("://"),
+           let match = try? await OnePasswordNative.lookupOne(
+            query: ref, account: account.trimmingCharacters(in: .whitespaces)) {
+            vault = match.vaultID
+            ref = match.itemID
+        }
 
         // Narrow path first: when the item's coordinates are explicit enough to
         // form `op://vault/item/field` secret references (a vault, a non-URL
@@ -58,12 +77,12 @@ struct OnePasswordProvider: CredentialProvider {
         // fields and nothing else. Roles the map doesn't name use a standard
         // Login item's field names; a wrong guess is the one failure that
         // quietly falls through to the full-item read below.
-        if let native = nativeSecretRefs(for: fields, item: ref) {
+        if let native = nativeSecretRefs(for: fields, item: ref, vault: vault) {
             let refs = native.refs
             // The key passphrase isn't a CredentialField (it rides alongside),
             // but when the map names one, fetch it in the same authorization.
             let passphraseRef = fieldMap[CredentialRole.privateKeyPassphrase.rawValue]
-                .flatMap { $0.isEmpty ? nil : "op://\(vault.trimmingCharacters(in: .whitespaces))/\(ref)/\($0)" }
+                .flatMap { $0.isEmpty ? nil : "op://\(vault)/\(ref)/\($0)" }
             do {
                 let values = try await OnePasswordNative.resolve(
                     refs: Array(refs.values) + (passphraseRef.map { [$0] } ?? []),
@@ -99,8 +118,7 @@ struct OnePasswordProvider: CredentialProvider {
         let item: OnePasswordNative.OPItem
         do {
             item = try await OnePasswordNative.getItem(
-                reference: ref,
-                vault: vault.trimmingCharacters(in: .whitespaces),
+                reference: ref, vault: vault,
                 account: account.trimmingCharacters(in: .whitespaces))
         } catch let e as OnePasswordNativeError {
             if case .userCancelled = e { throw CancellationError() }
@@ -110,15 +128,17 @@ struct OnePasswordProvider: CredentialProvider {
     }
 
     /// Secret references for the wanted roles, or nil when the native path
-    /// can't express this item (no vault, or a link-style reference). Roles the
+    /// can't express this item (no vault — not even one the lookup could find —
+    /// or a link-style reference). `vault` is passed rather than read off the
+    /// provider because `resolve` may have just LEARNED it. Roles the
     /// field map doesn't name fall back to a standard Login item's field names
     /// ("username" / "password" / "one-time password") — `usedDefaults` tells
     /// the caller a wrong guess should quietly retry via the full-item read
     /// rather than surface an error. OTP refs ask for the computed code via
     /// `?attribute=otp` rather than the enrollment secret.
-    private func nativeSecretRefs(for fields: Set<CredentialField>, item: String)
+    private func nativeSecretRefs(for fields: Set<CredentialField>, item: String,
+                                  vault v: String)
         -> (refs: [CredentialField: String], usedDefaults: Bool)? {
-        let v = vault.trimmingCharacters(in: .whitespaces)
         guard !v.isEmpty, !item.contains("://") else { return nil }
         var usedDefaults = false
         func fieldName(_ role: CredentialRole, default defaultName: String) -> String {

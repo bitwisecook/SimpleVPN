@@ -300,6 +300,9 @@ struct AutoFillField<Focus: Hashable>: NSViewRepresentable {
 
     func updateNSView(_ field: NSTextField, context: Context) {
         context.coordinator.parent = self
+        // .disabled() reaches a representable only through the environment —
+        // without this line a "disabled" field would still take typing.
+        field.isEnabled = context.environment.isEnabled
         // Don't clobber composition mid-edit: only push model→view when the
         // view isn't the one being typed into or the values genuinely differ.
         if field.stringValue != text, field.currentEditor() == nil {
@@ -311,6 +314,17 @@ struct AutoFillField<Focus: Hashable>: NSViewRepresentable {
                 field.window?.makeFirstResponder(field)
             }
         }
+    }
+
+    /// Take the width offered, keep the field's own one-line height. Without
+    /// this a Form row proposes a width and gets back the CONTENT's intrinsic
+    /// width (an NSTextField hugs its text) — the field then wanders as you
+    /// type. The Grid call sites relied on hugging priorities to stretch;
+    /// answering the proposal directly serves both containers.
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextField,
+                      context: Context) -> CGSize? {
+        let fitting = nsView.fittingSize
+        return CGSize(width: proposal.width ?? fitting.width, height: fitting.height)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
@@ -333,6 +347,18 @@ struct AutoFillField<Focus: Hashable>: NSViewRepresentable {
             }
             return false
         }
+    }
+}
+
+extension AutoFillField where Focus == Bool {
+    /// A field with no focus bridge — for editor forms that have no focus
+    /// token (the shake/nudge machinery is a connect-form thing). The constant
+    /// binding swallows the coordinator's focus writes; nil never equals the
+    /// focusValue, so no focus is ever stolen either.
+    init(kind: Kind, placeholder: String, text: Binding<String>,
+         onSubmit: @escaping () -> Void = {}) {
+        self.init(kind: kind, placeholder: placeholder, text: text,
+                  focus: .constant(nil), focusValue: true, onSubmit: onSubmit)
     }
 }
 

@@ -21,7 +21,7 @@ extern const char *_GoStringPtr(_GoString_ s);
 /* Start of preamble from import "C" comments.  */
 
 
-#line 77 "main.go"
+#line 96 "main.go"
 
 #include <stdlib.h>
 
@@ -90,6 +90,7 @@ extern "C" {
 extern char* OPNativeResolve(char* requestJSON);
 extern char* OPNativeGetItem(char* requestJSON);
 extern char* OPNativeList(char* requestJSON);
+extern char* OPNativeLookup(char* requestJSON);
 extern char* OPNativeProbe(void);
 extern void OPNativeFree(char* p);
 

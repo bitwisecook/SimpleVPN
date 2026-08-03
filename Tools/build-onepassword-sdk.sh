@@ -37,6 +37,13 @@ if [ "$pinned" != "$SDK_VERSION" ]; then
 fi
 go mod verify
 
+# Same gate as build-tailscale-engine.sh: the shim's pure logic (title ranking,
+# link parsing, error classification) is checked before an archive is produced,
+# so a broken lookup can't reach a build.
+gofmt -l . | grep . && { echo "error: gofmt found unformatted files (above)" >&2; exit 1; }
+go vet ./...
+go test ./...
+
 # c-archive: Go runtime + SDK + shim in one .a. The generated header lands next
 # to the archive; rename it to libopnative.h (reference only — Swift includes
 # the stable include/opnative.h instead).
@@ -46,7 +53,7 @@ CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
 mv "$OUT/libopnative.h" "$INCLUDE/libopnative.h"
 
 # The stable header must declare exactly what the archive exports.
-for sym in _OPNativeResolve _OPNativeGetItem _OPNativeList _OPNativeProbe _OPNativeFree; do
+for sym in _OPNativeResolve _OPNativeGetItem _OPNativeList _OPNativeLookup _OPNativeProbe _OPNativeFree; do
   nm -gU "$OUT/libopnative.a" 2>/dev/null | grep -q " T $sym\$" \
     || { echo "error: $sym missing from libopnative.a" >&2; exit 1; }
   grep -q "${sym#_}" "$INCLUDE/opnative.h" \

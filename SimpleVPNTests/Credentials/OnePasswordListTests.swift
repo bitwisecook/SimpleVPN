@@ -144,6 +144,56 @@ struct OnePasswordListTests {
         }
     }
 
+    // MARK: - Item lookup (name → item refs + the vault each lives in)
+
+    /// The endpoint that removed the last reason to shell out to `op`: the SDK
+    /// has no search, so the shim fans out and ranks, and this pins the reply
+    /// it hands back.
+    @Test func lookupReplyDecodesWithVaultCoordinates() throws {
+        let matches = try OnePasswordNative.matches(
+            fromLookupReply: reply(#"""
+            {"matches":[
+              {"itemID":"i1","title":"GR Lab VPN","category":"Login","vaultID":"v1","vaultTitle":"Private","score":0},
+              {"itemID":"i2","title":"GR Lab VPN (old)","category":"Login","vaultID":"v2","vaultTitle":"Shared","score":1}
+            ]}
+            """#),
+            account: "Secure Vault")
+        #expect(matches.count == 2)
+        #expect(matches[0].itemID == "i1")
+        // The whole point: a match names the VAULT, which an item title alone
+        // can't — that is what makes an op:// secret reference possible.
+        #expect(matches[0].vaultID == "v1")
+        #expect(matches[0].vaultTitle == "Private")
+        #expect(matches[0].score == 0)
+        // Vault-qualified ids, so two vaults' items can't collide in a list.
+        #expect(matches[0].id == "v1/i1")
+        #expect(matches[1].id == "v2/i2")
+    }
+
+    /// An empty match list is an ANSWER ("nothing matches"), not a malformed
+    /// reply — same rule the vault/item lists follow.
+    @Test func emptyLookupIsAnAnswerNotAFailure() throws {
+        #expect(try OnePasswordNative.matches(
+            fromLookupReply: reply(#"{"matches":[]}"#), account: "").isEmpty)
+    }
+
+    @Test func lookupWithoutMatchesKeyIsMalformed() {
+        #expect(throws: OnePasswordNativeError.badResponse) {
+            _ = try OnePasswordNative.matches(fromLookupReply: reply("{}"), account: "")
+        }
+    }
+
+    /// A lookup failure is classified like every other: an unmatched account
+    /// asks for the account name.
+    @Test func lookupErrorsClassifyByKind() {
+        #expect(throws: OnePasswordNativeError.accountNotFound(
+            account: "Secure Vault", detail: "Account not found")) {
+            _ = try OnePasswordNative.matches(
+                fromLookupReply: reply(#"{"error":{"kind":"accountNotFound","message":"Account not found"}}"#),
+                account: "Secure Vault")
+        }
+    }
+
     // MARK: - Drop payload flavours
 
     @Test func urlFlavourCapturesTheAccount() throws {

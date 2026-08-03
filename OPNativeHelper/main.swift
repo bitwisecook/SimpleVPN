@@ -18,6 +18,10 @@
 //                                       writes OPNativeList JSON on stdout
 //                                       (vault/item OVERVIEWS only — the
 //                                       pickers never see a field value)
+//    opnative-helper lookup           → reads request JSON on stdin (to EOF),
+//                                       writes OPNativeLookup JSON on stdout
+//                                       (name → item refs + the vault each
+//                                       lives in; OVERVIEWS only)
 //  Exit status 0 in all cases (errors travel INSIDE the JSON, so the app has
 //  one parsing path); non-zero only for misuse.
 //
@@ -49,7 +53,11 @@ case "list":
     let request = FileHandle.standardInput.readDataToEndOfFile()
     let requestString = String(data: request, encoding: .utf8) ?? ""
     emit(OPNativeList(requestString))
+case "lookup":
+    let request = FileHandle.standardInput.readDataToEndOfFile()
+    let requestString = String(data: request, encoding: .utf8) ?? ""
+    emit(OPNativeLookup(requestString))
 default:
-    FileHandle.standardError.write(Data("usage: opnative-helper probe|resolve|item|list\n".utf8))
+    FileHandle.standardError.write(Data("usage: opnative-helper probe|resolve|item|list|lookup\n".utf8))
     exit(2)
 }

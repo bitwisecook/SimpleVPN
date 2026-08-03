@@ -112,9 +112,10 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     var credentialKind: CredentialSourceKind { vpn.credentialSource(for: profile.id).kind }   // was private — internal for the file split
     var usesManager: Bool { credentialKind != .manual }   // was private — internal for the file split
     /// A manager source still needs a typed OTP only when the profile requires
-    /// one AND the manager can't supply it (Apple Passwords can't; 1Password can).
+    /// one AND the manager can't supply it (Apple Passwords can't; 1Password
+    /// and KeePassXC can).
     private var managerNeedsTypedOTP: Bool {
-        usesManager && requiresOTP && credentialKind != .onePassword
+        usesManager && requiresOTP && !credentialKind.suppliesOTP
     }
 
     // One live credential state shared with the menu bar and edit sheet:
@@ -533,8 +534,9 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Manager-source form: credentials come from 1Password / Apple Passwords on
-    /// connect. Only shows an OTP field when the manager can't supply one.
+    /// Manager-source form: credentials come from 1Password / Apple Passwords /
+    /// KeePassXC on connect. Only shows an OTP field when the manager can't
+    /// supply one.
     private var managerForm: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label("Credentials come from \(credentialKind.displayName).",
@@ -553,13 +555,21 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                 .textFieldStyle(.roundedBorder)
                 .frame(maxWidth: 380)
             }
-            Text(credentialKind == .onePassword
-                 ? "1Password will ask for Touch ID when you connect."
-                 : "macOS will ask permission to read the saved password the first time.")
+            Text(managerFootnote)
                 .font(.caption).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear { if managerNeedsTypedOTP { focusedField = .otp } }
+    }
+
+    /// What connecting will feel like, per manager — a wrong promise here
+    /// ("Touch ID" for a manager that shows a different dialog) reads as a bug.
+    private var managerFootnote: String {
+        switch credentialKind {
+        case .onePassword: "1Password will ask for Touch ID when you connect."
+        case .keePassXC: "KeePassXC will ask to allow access when you connect (and to unlock first, if the database is locked)."
+        default: "macOS will ask permission to read the saved password the first time."
+        }
     }
 
     // Inline credentials so you can connect straight from here (Remember saves them).

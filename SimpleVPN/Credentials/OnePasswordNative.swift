@@ -258,6 +258,36 @@ enum OnePasswordNative {
         var vault: String
         var timeoutSeconds: Int
     }
+
+    private nonisolated struct LookupRequest: Encodable {
+        var integrationName: String
+        var integrationVersion: String
+        var account: String
+        var vault: String
+        var query: String
+        var limit: Int
+        var timeoutSeconds: Int
+    }
+
+    /// One lookup hit: the item, its category, and — the point of the endpoint
+    /// — the vault it turned out to live in. `score` is the shim's ranking on
+    /// FuzzyMatch's own ladder, already sorted closest-first.
+    nonisolated struct OPItemMatch: Decodable, Sendable, Hashable, Identifiable {
+        var itemID: String
+        var title: String
+        var category: String
+        var vaultID: String
+        var vaultTitle: String
+        var score: Int
+        /// Vault-qualified, matching OPItemInVault's id rule.
+        var id: String { "\(vaultID)/\(itemID)" }
+    }
+
+    private nonisolated struct LookupResponse: Decodable {
+        struct Err: Decodable { var kind: String; var message: String }
+        var matches: [OPItemMatch]?
+        var error: Err?
+    }
     private nonisolated struct ListResponse: Decodable {
         struct Err: Decodable { var kind: String; var message: String }
         var vaults: [OPVaultOverview]?
@@ -384,6 +414,17 @@ enum OnePasswordNative {
     nonisolated static func listItemsAcrossVaults(
         account: String = "", maxConcurrent: Int = 4, timeout: TimeInterval = 180
     ) async throws -> [OPItemInVault] {
+        // The lookup endpoint does exactly this fan-out inside ONE helper run
+        // (and one authorization), so prefer it and keep the Swift-side
+        // fan-out below as the fallback for an older archive that predates
+        // OPNativeLookup — the helper's `default:` arm exits non-zero, which
+        // arrives here as an unparseable reply rather than a crash.
+        if let matches = try? await lookup(query: "", account: account, timeout: timeout) {
+            return matches.map {
+                OPItemInVault(itemID: $0.itemID, title: $0.title, category: $0.category,
+                              vaultID: $0.vaultID, vaultTitle: $0.vaultTitle)
+            }
+        }
         let vaults = try await listVaults(account: account, timeout: timeout)
         guard !vaults.isEmpty else { return [] }
         let limit = max(1, min(maxConcurrent, vaults.count))
@@ -429,6 +470,73 @@ enum OnePasswordNative {
             $0.title.caseInsensitiveCompare(key) == .orderedSame
         }) { return match.title }
         return nil
+    }
+
+    /// Look an item up BY NAME and learn which vault it lives in — the one
+    /// thing the SDK can't be asked directly (its item list is per-vault and
+    /// unfiltered) and the last capability the retired `op` CLI had that this
+    /// channel didn't. One helper run, one authorization, ranked closest-first;
+    /// an empty query is a bounded browse of everything the account can show.
+    ///
+    /// Called ONLY from an explicit user action or in service of one: the first
+    /// call can raise 1Password's authorization prompt.
+    nonisolated static func lookup(
+        query: String, vault: String = "", account: String = "", limit: Int = 0,
+        timeout: TimeInterval = 180
+    ) async throws -> [OPItemMatch] {
+        let request = LookupRequest(
+            integrationName: "SimpleVPN",
+            integrationVersion: Bundle.main.object(
+                forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev",
+            account: account,
+            vault: vault.trimmingCharacters(in: .whitespaces),
+            query: query.trimmingCharacters(in: .whitespaces),
+            limit: limit,
+            timeoutSeconds: Int(timeout))
+        let data = try await runHelper("lookup", input: try JSONEncoder().encode(request),
+                                      killAfter: timeout + 15)
+        return try matches(fromLookupReply: data, account: account)
+    }
+
+    /// The item a name resolves to when it resolves to exactly one — the shape
+    /// a caller that needs coordinates (vault + item) actually wants. An
+    /// ambiguous name is an error carrying the candidates, same policy as
+    /// `getItem`: quietly picking one would connect a VPN with the wrong
+    /// credentials.
+    nonisolated static func lookupOne(
+        query: String, vault: String = "", account: String = "",
+        timeout: TimeInterval = 180
+    ) async throws -> OPItemMatch {
+        let all = try await lookup(query: query, vault: vault, account: account,
+                                   timeout: timeout)
+        // Only the closest tier competes: an exact title beats a substring hit
+        // outright, so "VPN" matching six items isn't ambiguous when one of
+        // them is called exactly that.
+        guard let best = all.first else {
+            throw OnePasswordNativeError.itemNotFound(
+                "no item matching \u{201C}\(query.trimmingCharacters(in: .whitespaces))\u{201D}")
+        }
+        let tied = all.filter { $0.score == best.score }
+        guard tied.count == 1 else {
+            let names = tied.prefix(4).map { "\u{201C}\($0.title)\u{201D} in vault \u{201C}\($0.vaultTitle)\u{201D}" }
+            throw OnePasswordNativeError.ambiguous(
+                "\(tied.count) items match: \(names.joined(separator: ", "))")
+        }
+        return best
+    }
+
+    /// Decode half of `lookup`, split out so tests can pin the wire shape and
+    /// the account-aware error mapping without spawning the helper.
+    nonisolated static func matches(fromLookupReply data: Data, account: String) throws
+        -> [OPItemMatch] {
+        guard let response = try? JSONDecoder().decode(LookupResponse.self, from: data) else {
+            throw OnePasswordNativeError.badResponse
+        }
+        if let err = response.error {
+            throw nativeError(kind: err.kind, message: err.message, account: account)
+        }
+        guard let matches = response.matches else { throw OnePasswordNativeError.badResponse }
+        return matches
     }
 
     private nonisolated static func runList(
