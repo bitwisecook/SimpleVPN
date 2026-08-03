@@ -60,6 +60,8 @@ targets:
         excludes:
           - "SimpleVPN.entitlements"
           - "Info.plist"
+          # Charter notes for not-yet-built pieces (Intents/, PBR/) — docs, not resources.
+          - "**/README.md"
       - Shared
       # Country-level GeoIP DB for endpoint pins (fetched/refreshed by
       # Tools/fetch-geoip.sh; gitignored, so optional at generation time).

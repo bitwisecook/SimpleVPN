@@ -144,12 +144,33 @@ as `{password}{otp}` (no `static-challenge`). No client cert → `ENABLE_EXTERNA
   passwords) go through `KeychainCredentialStore` (per-profile `secrets` service → read-once session
   payload), NEVER providerConfiguration. Bridge side: `OVPNClientSettings` (apply-only-non-nil onto
   `ClientAPI::Config` in `OpenVPN3Bridge.mm`).
-- **`SimpleVPN/Core/`** — UI-free layer (no SwiftUI/AppKit imports): descriptor registry
-  (`OpenVPNSettingDescriptors` — stable ids like `openvpn.compression` drive the Options form, manual
-  anchors, a11y labels, and future CLI/MDM addressing), `Policy` (MDM-shaped stub; all enable/disable
-  routes through it), profile evaluation (real `eval_config` via `OVPNProfileEvaluator.mm` — the app
-  links the engine xcframework for this), import pipeline, certificate import, endpoints/GeoIP,
-  failure diagnostics. When the CLI/API lands this group becomes the `TunnelCore`-style framework.
+- **App-target layout** (one module, concern-per-directory — reorganized from the old `Core/` junk
+  drawer; a file's directory states its concern, and everything outside `App/`, `UI/`, and
+  `Diagnostics/` stays UI-free — no SwiftUI/AppKit imports):
+  - `SimpleVPN/App/` — entry point, lifecycle, system-extension activation.
+  - `SimpleVPN/UI/` — every view, grouped: `Connection/ Editors/ Routes/ Tools/ Map/ Credentials/
+    MenuBar/ Settings/ Components/`.
+  - `SimpleVPN/ControlPlane/` — `VPNController`, engine managers (native/subprocess/SSH), compositions,
+    the descriptor registry (`OpenVPNSettingDescriptors` — stable ids like `openvpn.compression` drive
+    the Options form, manual anchors, a11y labels, and future CLI/MDM addressing), `EngineSettings`,
+    profile evaluation (real `eval_config` via `OVPNProfileEvaluator.mm`).
+  - `SimpleVPN/Credentials/` — provider seam (manual/1Password/Apple Passwords), TOTP, auth config,
+    SSO browser launching.
+  - `SimpleVPN/Mediators/` — the route/DNS/proxy system-state mediators (`Docs/StateMediators.md`) +
+    tier-2 Custom Routing.
+  - `SimpleVPN/Monitoring/` — reachability/link/public-IP monitors, route-table readers, network
+    memory/topology, traffic history; `Probes/` holds the whole probe stack (ladder, TLS/IKE/SSH/WG,
+    MTU).
+  - `SimpleVPN/Diagnostics/` — logging/highlighting, doctor, diagnostic bundles + capture UI, crash
+    handling, `UserFacingError`.
+  - `SimpleVPN/Geo/` — GeoIP, regions, endpoints/discovery/ranking, world-map model.
+  - `SimpleVPN/Import/` — config importers (ovpn/cisco/ssh/cert) + detector.
+  - `SimpleVPN/MDM/` — `ManagedPolicy` (forced defaults) + `Policy` (the seam every enable/disable
+    routes through).
+  - `SimpleVPN/Intents/`, `SimpleVPN/PBR/`, top-level `CLI/` — charter READMEs for pieces designed
+    but not built (App Intents; the tier-3 PBR engine; the `simplevpn` CLI target). Read the README
+    before adding code there. When the CLI/API lands, the non-UI directories become the
+    `TunnelCore`-style framework boundary.
 - **Naming rule:** protocol-specific code carries the protocol's name (`OpenVPN*`/`OVPN*`); shared
   infrastructure stays protocol-neutral. New VPN kinds (WireGuard, IPsec, …) switch on `VPNKind` at
   four seams: NE protocol object, editor form, importer, connect flow.
