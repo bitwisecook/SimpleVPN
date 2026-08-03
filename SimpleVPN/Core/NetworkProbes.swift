@@ -98,6 +98,31 @@ nonisolated enum NetworkProbes {
         }
     }
 
+    // MARK: - Egress binding (Network Tools "Egress" picker)
+    //
+    // macOS has NO `SO_BINDTODEVICE`; the Darwin equivalent is `IP_BOUND_IF` /
+    // `IPV6_BOUND_IF`, which pin a socket's egress to one interface INDEX regardless of
+    // the route table — exactly what lets a diagnostic go out a chosen tunnel even when
+    // routing wouldn't send it there. `boundIf == 0` means "unbound" (Automatic — the
+    // normal, route-table-obeying diagnostic socket, i.e. today's behavior).
+
+    /// Turn an interface BSD name ("utun4", "en0") into the index `IP_BOUND_IF` wants.
+    /// 0 (never a valid index) ⇒ Automatic / not resolvable.
+    static func interfaceIndex(_ bsdName: String?) -> UInt32 {
+        guard let bsdName, !bsdName.isEmpty else { return 0 }
+        return if_nametoindex(bsdName)
+    }
+
+    /// Pin `fd` to interface index `boundIf` (no-op when 0). Applies the v4 or v6 option
+    /// per `v6`; a bind failure is non-fatal (the probe simply runs unbound).
+    private static func bindEgress(_ fd: Int32, to boundIf: UInt32, v6: Bool) {
+        guard boundIf != 0 else { return }
+        var idx = boundIf
+        let level = v6 ? IPPROTO_IPV6 : IPPROTO_IP
+        let option = v6 ? IPV6_BOUND_IF : IP_BOUND_IF
+        setsockopt(fd, level, option, &idx, socklen_t(MemoryLayout<UInt32>.size))
+    }
+
     /// SO_RCVTIMEO timeval that preserves fractional seconds and is never {0,0}
     /// (POSIX reads a zero timeout as "block forever").
     private static func recvTimeval(_ seconds: TimeInterval) -> timeval {
@@ -112,7 +137,8 @@ nonisolated enum NetworkProbes {
     struct PingReply: Sendable { var rttMS: Double?; var from: String? }
 
     /// One ICMP echo to `host` (IPv4). rttMS nil = timed out / unreachable.
-    static func pingOnce(host: String, seq: UInt16, timeout: TimeInterval = 2) async -> PingReply {
+    static func pingOnce(host: String, seq: UInt16, timeout: TimeInterval = 2,
+                         boundIf: UInt32 = 0) async -> PingReply {
         await Self.onProbeQueue {
             var addr = sockaddr_in()
             addr.sin_family = sa_family_t(AF_INET)
@@ -123,6 +149,7 @@ nonisolated enum NetworkProbes {
             let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)   // unprivileged on Darwin
             guard fd >= 0 else { return PingReply(rttMS: nil, from: nil) }
             defer { close(fd) }
+            Self.bindEgress(fd, to: boundIf, v6: false)
             var tv = Self.recvTimeval(timeout)
             setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
@@ -157,7 +184,8 @@ nonisolated enum NetworkProbes {
 
     /// TTL-stepped ICMP echoes. Each hop is the router that returned time-exceeded;
     /// stops at the destination's echo-reply or maxHops.
-    static func traceroute(host: String, maxHops: Int = 30, timeout: TimeInterval = 2) async -> [TraceHop] {
+    static func traceroute(host: String, maxHops: Int = 30, timeout: TimeInterval = 2,
+                           boundIf: UInt32 = 0) async -> [TraceHop] {
         await Self.onProbeQueue {
             var addr = sockaddr_in(); addr.sin_family = sa_family_t(AF_INET)
             guard inet_pton(AF_INET, host, &addr.sin_addr) == 1 else { return [] }
@@ -166,6 +194,7 @@ nonisolated enum NetworkProbes {
             for ttl in 1...maxHops {
                 let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)
                 if fd < 0 { break }
+                Self.bindEgress(fd, to: boundIf, v6: false)
                 var t = Int32(ttl)
                 setsockopt(fd, IPPROTO_IP, IP_TTL, &t, socklen_t(MemoryLayout<Int32>.size))
                 var tv = Self.recvTimeval(timeout)
@@ -214,12 +243,14 @@ nonisolated enum NetworkProbes {
     }
 
     /// Query `server` directly for `name`/`type` over UDP:53 and parse the answers.
-    static func dnsQuery(name: String, type: DNSType, server: String, timeout: TimeInterval = 3) async -> DNSResult? {
+    static func dnsQuery(name: String, type: DNSType, server: String, timeout: TimeInterval = 3,
+                         boundIf: UInt32 = 0) async -> DNSResult? {
         await Self.onProbeQueue {
             let isV6 = server.contains(":")
             let fd = socket(isV6 ? AF_INET6 : AF_INET, SOCK_DGRAM, IPPROTO_UDP)
             guard fd >= 0 else { return nil }
             defer { close(fd) }
+            Self.bindEgress(fd, to: boundIf, v6: isV6)
             var tv = Self.recvTimeval(timeout)
             setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
@@ -402,7 +433,7 @@ nonisolated enum NetworkProbes {
     /// no answer costs two timeouts (probe plus one retry), so a badly behaved path can
     /// take tens of seconds — always call this from a cancellable background task.
     static func measurePathMTU(host: String, ceiling: Int = 1472,
-                               timeout: TimeInterval = 1.5) async -> PathMTUResult {
+                               timeout: TimeInterval = 1.5, boundIf: UInt32 = 0) async -> PathMTUResult {
         let ip = await resolve(host: host).v4.first ?? host
         var out = PathMTUResult(target: ip)
         guard isIPv4Literal(ip) else { out.hasIPv4 = false; return out }
@@ -411,9 +442,9 @@ nonisolated enum NetworkProbes {
         // packet on a lossy path would otherwise be read as "too big" and drag the
         // whole binary search down with it.
         func probe(_ payload: Int, df: Bool = true) async -> SizedEcho {
-            let first = await onProbeQueue { sizedEcho(ip: ip, payload: payload, df: df, timeout: timeout) }
+            let first = await onProbeQueue { sizedEcho(ip: ip, payload: payload, df: df, timeout: timeout, boundIf: boundIf) }
             guard first == .silence else { return first }
-            return await onProbeQueue { sizedEcho(ip: ip, payload: payload, df: df, timeout: timeout) }
+            return await onProbeQueue { sizedEcho(ip: ip, payload: payload, df: df, timeout: timeout, boundIf: boundIf) }
         }
 
         // 1. Does the target answer ICMP at all? Without this anchor "no reply" is
@@ -465,7 +496,7 @@ nonisolated enum NetworkProbes {
     /// One sized ICMP echo, optionally with the don't-fragment bit set.
     /// Blocking — callers must run it on `probeQueue`.
     private static func sizedEcho(ip: String, payload: Int, df: Bool,
-                                  timeout: TimeInterval) -> SizedEcho {
+                                  timeout: TimeInterval, boundIf: UInt32 = 0) -> SizedEcho {
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         guard inet_pton(AF_INET, ip, &addr.sin_addr) == 1 else { return .sendFailed }
@@ -475,6 +506,7 @@ nonisolated enum NetworkProbes {
         let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)
         guard fd >= 0 else { return .sendFailed }
         defer { close(fd) }
+        bindEgress(fd, to: boundIf, v6: false)
         var tv = recvTimeval(timeout)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         var dontFragment: Int32 = df ? 1 : 0
@@ -532,7 +564,7 @@ nonisolated enum NetworkProbes {
     /// one deliberately larger than the MSS. Plain TCP exchanges no payload, so it
     /// yields the MSS only — see `MTUAssessment` for how that is reported.
     static func measureTransportMTU(host: String, port: Int, proto: MTUProtocol,
-                                    timeout: TimeInterval = 6) async -> TransportMTUResult {
+                                    timeout: TimeInterval = 6, boundIf: UInt32 = 0) async -> TransportMTUResult {
         let ip = await resolve(host: host).v4.first ?? host
         var out = TransportMTUResult(target: ip, port: port, proto: proto)
         guard proto.isTCP, isIPv4Literal(ip) else { return out }
@@ -541,7 +573,7 @@ nonisolated enum NetworkProbes {
         // on this same connection so "small works" is established on one path.
         let smallRequest = request(for: proto, host: host, padTo: nil, mss: nil)
         let first = await onProbeQueue {
-            tcpExchange(ip: ip, port: port, request: smallRequest, readLimit: 16 * 1024, timeout: timeout)
+            tcpExchange(ip: ip, port: port, request: smallRequest, readLimit: 16 * 1024, timeout: timeout, boundIf: boundIf)
         }
         out.connected = first.connected
         out.mss = first.mss
@@ -558,7 +590,7 @@ nonisolated enum NetworkProbes {
         let largeRequest = request(for: proto, host: host, padTo: 2 * (first.mss ?? 1360) + 128, mss: first.mss)
         guard !largeRequest.isEmpty, largeRequest.count > smallRequest.count else { return out }
         let second = await onProbeQueue {
-            tcpExchange(ip: ip, port: port, request: largeRequest, readLimit: 32 * 1024, timeout: timeout)
+            tcpExchange(ip: ip, port: port, request: largeRequest, readLimit: 32 * 1024, timeout: timeout, boundIf: boundIf)
         }
         guard !Task.isCancelled else { return out }
         out.largeExchange = MTUExchange(requestBytes: largeRequest.count,
@@ -578,7 +610,8 @@ nonisolated enum NetworkProbes {
     /// Connect, read TCP_MAXSEG, write `request`, drain the reply.
     /// Blocking — callers must run it on `probeQueue`.
     private static func tcpExchange(ip: String, port: Int, request: [UInt8],
-                                    readLimit: Int, timeout: TimeInterval) -> TCPProbeOutcome {
+                                    readLimit: Int, timeout: TimeInterval,
+                                    boundIf: UInt32 = 0) -> TCPProbeOutcome {
         var out = TCPProbeOutcome()
         let started = Date()
         var addr = sockaddr_in()
@@ -589,6 +622,7 @@ nonisolated enum NetworkProbes {
         let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
         guard fd >= 0 else { return out }
         defer { close(fd) }
+        bindEgress(fd, to: boundIf, v6: false)
 
         // Non-blocking connect + poll: Darwin does not apply SO_SNDTIMEO to connect(),
         // so this is the only way to bound how long a dead endpoint stalls us.

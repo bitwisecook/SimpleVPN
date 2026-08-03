@@ -35,6 +35,27 @@ struct TunnelStats: Codable, Sendable, Equatable {
     var searchDomains: [String]? = nil // pushed DNS search domains
     var mtu: Int? = nil                // tunnel MTU
 
+    // Structured pushed-proxy capture (Proxy mediator P3 — the per-kind intent for
+    // OpenVPN). `proxies` above stays the display-string list for existing consumers;
+    // these carry the machine-usable detail the ProxyIntent/NEProxySettings path needs.
+    // Optional for app↔extension version skew.
+    var proxyHTTPHost: String? = nil   // pushed HTTP proxy host
+    var proxyHTTPPort: Int? = nil      // pushed HTTP proxy port
+    var proxyHTTPSHost: String? = nil  // pushed HTTPS proxy host
+    var proxyHTTPSPort: Int? = nil     // pushed HTTPS proxy port
+    var proxyPACURL: String? = nil     // pushed PAC / auto-config URL
+    var proxyBypass: [String]? = nil   // pushed proxy-bypass hosts (→ exceptionList)
+
+    // Default-route ownership GROUND TRUTH, reported by the engine (not the stored
+    // preference and not the client-.ovpn grep). The app seeds its applied-role
+    // cache and the traffic-path UI from `effectiveDefaultOwned`, so it can never
+    // show split while the tunnel actually routes full — nor skip a needed
+    // gateway:split/full IPC (RC1/RC4). Optional for app↔extension version skew.
+    var defaultRouteV4: Bool? = nil        // a v4 default route was pushed
+    var defaultRouteV6: Bool? = nil        // a v6 default route was pushed
+    var suppressDefaultRoute: Bool? = nil  // ownership demoted: default suppressed
+    var effectiveDefaultOwned: Bool? = nil // truly holds 0.0.0.0/0 · ::/0 right now
+
     var uptime: TimeInterval { max(0, timestamp - connectedSince) }
 }
 

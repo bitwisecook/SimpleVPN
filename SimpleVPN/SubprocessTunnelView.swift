@@ -12,21 +12,31 @@
 import SwiftUI
 
 struct SubprocessTunnelView: View {
+    let vpn: VPNController
     @Bindable var store: SubprocessTunnelStore
     @Bindable var manager: SubprocessTunnelManager
     @State var draft: SubprocessTunnelConfig
+    @State private var customRouting = CustomRoutingProfile()
+    @State private var crProxyAuthUsername = ""
+    @State private var crProxyAuthPassword = ""
 
     @State private var password = ""
     @State private var proxyPassword = ""
     @State private var jumpPassword = ""
+    @State private var tokenSecret = ""
+    @State private var keyPassphrase = ""
     @State private var remember = true
     @State private var loaded = false
+    // Shown when a saved "sso" was migrated back to password (unsupported kind).
+    @State private var authNote: String?
     // SSH import (drop well) state.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var importTargeted = false
     @State private var importFeedback: (text: String, ok: Bool)?
     @State private var feedbackClearTask: Task<Void, Never>?
     @State private var hostPicker: HostPickerPayload?
+    // Debounce for live forward edits while connected.
+    @State private var applyForwardsTask: Task<Void, Never>?
 
     private var live: SubprocessTunnelManager.Live? { manager.live[draft.id] }
     private var active: Bool { manager.isActive(draft.id) }
@@ -42,6 +52,14 @@ struct SubprocessTunnelView: View {
                         Label($0.displayName, systemImage: $0.systemImage).tag($0)
                     }
                 }
+                // Switching to a kind without a browser sign-in flow can strand
+                // an "sso" authMode the picker no longer offers — fix it up.
+                .onChange(of: draft.kind) {
+                    if draft.authMode == "sso", !draft.kind.supportsExternalBrowserSSO {
+                        draft.authMode = "password"
+                        authNote = "Single sign-on isn't available for \(draft.kind.displayName) — switched to password sign-in."
+                    }
+                }
                 cliStatusRow
             }
 
@@ -51,6 +69,7 @@ struct SubprocessTunnelView: View {
                 sshAdvanced
             } else if draft.kind.isSSLVPN {
                 sslVPNSection
+                sslSocksSection
                 proxySection
                 sslAdvanced
             }
@@ -58,6 +77,10 @@ struct SubprocessTunnelView: View {
             credentialsSection
             controlSection
             if let log = live?.log, !log.isEmpty { logSection(log) }
+
+            CustomRoutingTabView(vpn: vpn, profileID: draft.id, profile: $customRouting,
+                                proxyAuthUsername: $crProxyAuthUsername,
+                                proxyAuthPassword: $crProxyAuthPassword)
         }
         .formStyle(.grouped)
         .disabled(ManagedPolicy.lockConfiguration)
@@ -80,7 +103,7 @@ struct SubprocessTunnelView: View {
                 .foregroundStyle(cli.isAvailable ? .green : .orange)
             Text(cli.isAvailable ? "\(cli.rawValue) found" : cli.installHint)
                 .font(.callout).foregroundStyle(.secondary)
-            if [.fortinet, .f5apm, .ciscoAnyConnect].contains(draft.kind), !TunnelCLI.ocproxy.isAvailable {
+            if draft.kind.isSSLVPN, !TunnelCLI.ocproxy.isAvailable {
                 Spacer()
                 Text("ocproxy not found — needs root without it")
                     .font(.caption).foregroundStyle(.orange)
@@ -92,7 +115,7 @@ struct SubprocessTunnelView: View {
         switch draft.kind {
         case .ssh: .ssh
         case .fortinet: TunnelCLI.openconnect.isAvailable ? .openconnect : .openfortivpn
-        default: .openconnect  // f5 / anyconnect
+        default: .openconnect  // the other OpenConnect SSL-VPN kinds
         }
     }
 
@@ -107,7 +130,7 @@ struct SubprocessTunnelView: View {
             case .socks: socksSectionBody
             case .portForward: forwardsSectionBody
             case .netTunnel:
-                Label("Point-to-point tunnel over SSH (-w). Needs admin rights and “PermitTunnel” enabled on the server — a rarely-used, advanced mode.",
+                Label("Point-to-point tunnel over SSH (-w). Creating the utun device requires root, so this mode is not supported in this build (it also needs “PermitTunnel” on the server).",
                       systemImage: "exclamationmark.triangle")
                     .font(.callout).foregroundStyle(.secondary)
             }
@@ -299,20 +322,78 @@ struct SubprocessTunnelView: View {
     @ViewBuilder private var socksSectionBody: some View {
         intField("Local SOCKS port", value: $draft.socksPort, default: 1080)
         Toggle("Route Mac traffic through this proxy", isOn: $draft.setSystemProxy)
-        Text("Points the active network service's SOCKS proxy at 127.0.0.1:\(draft.socksPort) while connected (asks for your admin password), and restores it on disconnect.")
+            // The toggle applies live to a connected tunnel — no reconnect.
+            .onChange(of: draft.setSystemProxy) {
+                guard active else { return }
+                store.save(draft)
+                manager.setSystemProxyLive(draft, enabled: draft.setSystemProxy)
+            }
+        Text("Points the active network service's SOCKS proxy at 127.0.0.1:\(draft.socksPort) while connected (asks for your admin password), and restores it on disconnect. Flipping it while connected applies immediately.")
             .font(.callout).foregroundStyle(.secondary)
     }
 
     @ViewBuilder private var forwardsSectionBody: some View {
         ForEach(Array(draft.forwards.enumerated()), id: \.offset) { i, _ in
-            TextField("L 8080:internal.host:80", text: Binding(
-                get: { draft.forwards[i] }, set: { draft.forwards[i] = $0 }))
-                .font(.callout.monospaced())
+            VStack(alignment: .leading, spacing: 2) {
+                TextField("L 8080:internal.host:80", text: Binding(
+                    get: { draft.forwards[i] }, set: { draft.forwards[i] = $0 }))
+                    .font(.callout.monospaced())
+                    .onSubmit { applyForwardsNow() }
+                if active, let phase = forwardPhase(draft.forwards[i]) {
+                    forwardBadge(phase)
+                }
+            }
         }
-        .onDelete { draft.forwards.remove(atOffsets: $0) }
+        .onDelete { draft.forwards.remove(atOffsets: $0); applyForwardsNow() }
         Button("Add Forward") { draft.forwards.append("") }
-        Text("One per line: “L localPort:host:port” (local → remote) or “R remotePort:host:port” (remote → local).")
+        Text(active
+             ? "Changes apply to the live tunnel as you finish typing — no reconnect needed."
+             : "One per line: “L localPort:host:port” (local → remote) or “R remotePort:host:port” (remote → local).")
             .font(.callout).foregroundStyle(.secondary)
+            // Debounced live apply: per-keystroke -O forward calls would thrash
+            // half-typed specs; onSubmit above applies instantly.
+            .onChange(of: draft.forwards) { scheduleApplyForwards() }
+    }
+
+    /// The live status of the forward a row currently describes, if any.
+    private func forwardPhase(_ line: String) -> SubprocessTunnelManager.ForwardPhase? {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return nil }
+        return live?.forwardStates[SubprocessTunnelManager.forwardKey(t)]
+    }
+
+    @ViewBuilder private func forwardBadge(_ phase: SubprocessTunnelManager.ForwardPhase) -> some View {
+        switch phase {
+        case .active:
+            Label("Active", systemImage: "checkmark.circle.fill")
+                .font(.caption).foregroundStyle(.green)
+        case .pending:
+            Label("Applying…", systemImage: "clock")
+                .font(.caption).foregroundStyle(.secondary)
+        case .failed(let why):
+            Label(why, systemImage: "xmark.circle.fill")
+                .font(.caption).foregroundStyle(.red).lineLimit(2)
+        }
+    }
+
+    private func scheduleApplyForwards() {
+        guard active else { return }
+        applyForwardsTask?.cancel()
+        applyForwardsTask = Task {
+            try? await Task.sleep(for: .milliseconds(800))
+            guard !Task.isCancelled else { return }
+            applyForwardsNow()
+        }
+    }
+
+    /// Persist the edited set (so the next connect reproduces it) and reconcile
+    /// the live tunnel. No-op while disconnected — specs then apply at connect,
+    /// exactly as before.
+    private func applyForwardsNow() {
+        applyForwardsTask?.cancel()
+        guard active else { return }
+        store.save(draft)
+        manager.applyForwards(draft)
     }
 
     /// Web-proxy path to the SSL-VPN gateway: system default / direct / manual.
@@ -327,6 +408,9 @@ struct SubprocessTunnelView: View {
                 TextField("Proxy username (optional)", text: $draft.proxyUsername)
                     .autocorrectionDisabled()
                 SecureField("Proxy password (optional)", text: $proxyPassword)
+                Toggle("Include proxy password in process arguments (visible to other local processes)",
+                       isOn: Binding(get: { draft.proxyPasswordInArgv ?? false },
+                                     set: { draft.proxyPasswordInArgv = $0 ? true : nil }))
             }
             Text(proxyModeHelp).font(.callout).foregroundStyle(.secondary)
         }
@@ -336,7 +420,7 @@ struct SubprocessTunnelView: View {
         switch draft.proxyMode {
         case .systemDefault: "Reach the gateway through whatever web proxy your Mac is configured to use (System Settings ▸ Network ▸ Proxies)."
         case .none: "Ignore any system proxy and connect straight to the gateway."
-        case .manual: "Send the connection through this specific HTTP/SOCKS proxy. Supports http://, https:// and socks5://."
+        case .manual: "Send the connection through this specific HTTP/SOCKS proxy. Supports http://, https:// and socks5://. openconnect can only take a proxy password on its command line — where any local process can read it with `ps` — so it's only passed when the toggle above is on; off, an authenticating proxy will refuse the connection (use an unauthenticated proxy, or the in-process engine under Advanced)."
         }
     }
 
@@ -344,22 +428,64 @@ struct SubprocessTunnelView: View {
         Section("Gateway") {
             TextField("Server URL or host", text: $draft.server, prompt: Text("vpn.example.com")).autocorrectionDisabled()
             portField
+            // SSO is only offered where openconnect's --external-browser flow
+            // exists (AnyConnect / GlobalProtect / Pulse); elsewhere it would
+            // just drop the password and fail under --non-inter.
             Picker("Sign-in method", selection: $draft.authMode) {
                 Text("Password").tag("password")
                 Text("Client certificate").tag("certificate")
-                Text("Single sign-on (SAML / passkey)").tag("sso")
+                if draft.kind.supportsExternalBrowserSSO {
+                    Text("Single sign-on (SAML / passkey)").tag("sso")
+                }
+            }
+            if let note = authNote {
+                Label(note, systemImage: "info.circle")
+                    .font(.callout).foregroundStyle(.orange)
             }
             if draft.authMode == "sso" {
                 Text("Signs in through your browser, so identity-provider passkeys/WebAuthn and MFA work. Set a specific browser under Advanced if needed.")
                     .font(.callout).foregroundStyle(.secondary)
+            } else if !draft.kind.supportsExternalBrowserSSO {
+                Text("Single sign-on isn't available for \(draft.kind.displayName): openconnect has no browser sign-in flow for this protocol.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             TextField("Username", text: $draft.username).textContentType(.username)
             TextField("Realm / group (optional)", text: $draft.realm)
             TextField("Pinned cert SHA-256 (optional)", text: $draft.trustedCertSHA256)
                 .font(.callout.monospaced())
-            Text(draft.kind == .f5apm
-                 ? "F5 BIG-IP APM: OpenConnect performs the HTTPS logon then runs the PPP-over-TLS tunnel."
-                 : "FortiGate SSL VPN via OpenConnect (or openfortivpn). With ocproxy it needs no admin rights.")
+            Text(gatewayFooter).font(.callout).foregroundStyle(.secondary)
+        }
+    }
+
+    /// Kind-specific gateway blurb — the seven SSL-VPN kinds are different
+    /// products; describing them all as F5/FortiGate was misleading.
+    private var gatewayFooter: String {
+        switch draft.kind {
+        case .fortinet: "FortiGate SSL VPN via OpenConnect (or openfortivpn). With ocproxy it needs no admin rights."
+        case .f5apm: "F5 BIG-IP APM: OpenConnect performs the HTTPS logon then runs the PPP-over-TLS tunnel."
+        case .ciscoAnyConnect: "Cisco AnyConnect / Secure Client (or an ocserv gateway) via OpenConnect. With ocproxy it needs no admin rights."
+        case .globalProtect: "Palo Alto GlobalProtect via OpenConnect. “User group / path” under Advanced selects portal vs gateway sign-in."
+        case .juniper: "Juniper Network Connect (oNCP) via OpenConnect. With ocproxy it needs no admin rights."
+        case .pulse: "Pulse / Ivanti Connect Secure via OpenConnect. With ocproxy it needs no admin rights."
+        case .arrayNetworks: "Array Networks SSL VPN via OpenConnect. With ocproxy it needs no admin rights."
+        default: ""
+        }
+    }
+
+    /// Every OpenConnect kind runs through `ocproxy -D <port>` here (the no-root
+    /// path), so the port is editable for all of them — two tunnels on the same
+    /// port would collide on bind.
+    @ViewBuilder private var sslSocksSection: some View {
+        Section("Local SOCKS Proxy") {
+            intField("Local SOCKS port", value: $draft.socksPort, default: 1080)
+            Toggle("Route Mac traffic through this proxy", isOn: $draft.setSystemProxy)
+                // The toggle applies live to a connected tunnel — no reconnect.
+                .onChange(of: draft.setSystemProxy) {
+                    guard active else { return }
+                    store.save(draft)
+                    manager.setSystemProxyLive(draft, enabled: draft.setSystemProxy)
+                }
+            Text("OpenConnect exposes this tunnel as a SOCKS proxy on 127.0.0.1:\(draft.socksPort) via ocproxy — give each tunnel its own port to run two at once. “Route Mac traffic” points the active network service's SOCKS proxy at it while connected (asks for your admin password) and restores it on disconnect.")
                 .font(.callout).foregroundStyle(.secondary)
         }
     }
@@ -391,6 +517,10 @@ struct SubprocessTunnelView: View {
                 row("oc.os", text: $draft.spoofOS, prompt: "mac-intel")
                 toggleRow("oc.no-dtls", isOn: $draft.disableDTLS)
                 toggleRow("oc.disable-csd", isOn: $draft.disableCSD)
+                if draft.kind == .globalProtect {
+                    Text("Skipping the host checker also stubs GlobalProtect's HIP report — gateways that require a HIP submission may refuse or restrict the session.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
 
                 Toggle("Run in-process (no OpenConnect subprocess)", isOn: $draft.preferInProcess)
                 Text("Runs this VPN through SimpleVPN's built-in OpenConnect engine as a full system tunnel, instead of the openconnect command-line tool. Falls back to the tool automatically if it can't start. New — validate against your gateway before relying on it.")
@@ -420,12 +550,22 @@ struct SubprocessTunnelView: View {
                     Text("HOTP").tag("hotp")
                     Text("OIDC").tag("oidc")
                 }
+                if !draft.tokenMode.isEmpty {
+                    SecureField("Token secret (TOTP/HOTP seed)", text: $tokenSecret)
+                    Text("Stored in your login keychain and handed to openconnect via a private temporary file at connect — never on the command line. Required: without it the connection fails before starting.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 // Client-certificate auth.
                 LabeledContent("Client certificate") {
                     TextField("~/client.pem or .p12", text: $draft.clientCertFile).autocorrectionDisabled()
                 }
                 LabeledContent("Client private key") {
                     TextField("~/client.key (optional)", text: $draft.clientKeyFile).autocorrectionDisabled()
+                }
+                if !draft.clientCertFile.isEmpty || !draft.clientKeyFile.isEmpty {
+                    SecureField("Key / PKCS#12 passphrase (if encrypted)", text: $keyPassphrase)
+                    Text("Stored in your login keychain and passed to openconnect as --key-password when the key or .p12 is encrypted.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Picker("Compression", selection: $draft.ocCompression) {
                     Text("Default").tag("")
@@ -472,10 +612,34 @@ struct SubprocessTunnelView: View {
                 } else {
                     Button("Connect") { connect() }
                         .buttonStyle(.glassProminent)   // primary "go" — consistent with OpenVPN Connect
-                        .disabled(!requiredCLI.isAvailable || draft.server.isEmpty)
+                        .disabled(connectBlockedReason != nil)
                 }
             }
+            // A dead button must say why (the rule ConnectionView follows).
+            if !active, let reason = connectBlockedReason {
+                Text(reason)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
         }
+    }
+
+    /// Why Connect is disabled right now, or nil when it can go.
+    private var connectBlockedReason: String? {
+        if draft.kind == .ssh, draft.sshMode == .netTunnel {
+            return "Network tunnel (-w) requires root for the utun device — not supported in this build."
+        }
+        if !requiredCLI.isAvailable {
+            return "\(requiredCLI.rawValue) isn't installed. \(requiredCLI.installHint)"
+        }
+        if draft.server.isEmpty {
+            return draft.kind == .ssh ? "Enter a host to connect to." : "Enter the gateway address."
+        }
+        // --token-mode without its seed would just die under --non-inter.
+        if draft.kind.isSSLVPN, !draft.tokenMode.isEmpty, tokenSecret.isEmpty {
+            return "One-time-code token (\(draft.tokenMode.uppercased())) needs its secret — add it under Advanced."
+        }
+        return nil
     }
 
     @ViewBuilder private var statusBadge: some View {
@@ -583,6 +747,17 @@ struct SubprocessTunnelView: View {
         }
         proxyPassword = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(draft.id).proxy")?.password ?? ""
         jumpPassword = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(draft.id).jump")?.password ?? ""
+        tokenSecret = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(draft.id).token")?.password ?? ""
+        keyPassphrase = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(draft.id).privateKey")?.password ?? ""
+        // A saved "sso" on a kind openconnect can't browser-sign-in (the store
+        // migrates persisted configs, but this draft may predate it): fall back
+        // to password and say so.
+        if draft.authMode == "sso", !draft.kind.supportsExternalBrowserSSO {
+            draft.authMode = "password"
+            authNote = "This VPN was set to single sign-on, which openconnect can't do for \(draft.kind.displayName) — switched to password sign-in."
+        }
+        customRouting = vpn.customRouting(for: draft.id)
+        (crProxyAuthUsername, crProxyAuthPassword) = loadCustomRoutingProxyAuthFields(profileID: draft.id)
     }
 
     private func save() {
@@ -606,6 +781,30 @@ struct SubprocessTunnelView: View {
                                                          .init(username: draft.jumpUsername, password: jumpPassword))
         } else {
             KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(draft.id).jump")
+        }
+        // OTP token seed (--token-secret rides a private temp file at connect).
+        if !draft.tokenMode.isEmpty, !tokenSecret.isEmpty {
+            try? KeychainCredentialStore.saveCredentials(profile: "tunnel.\(draft.id).token",
+                                                         .init(username: draft.username, password: tokenSecret))
+        } else {
+            KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(draft.id).token")
+        }
+        // Client private-key / PKCS#12 passphrase (--key-password).
+        if !draft.clientCertFile.isEmpty || !draft.clientKeyFile.isEmpty, !keyPassphrase.isEmpty {
+            try? KeychainCredentialStore.saveCredentials(profile: "tunnel.\(draft.id).privateKey",
+                                                         .init(username: draft.username, password: keyPassphrase))
+        } else {
+            KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(draft.id).privateKey")
+        }
+        // Fire-and-forget: save() is called synchronously (Save button, Connect);
+        // commitCustomRouting is idempotent and CustomRoutingTabView's own
+        // onDisappear covers the case where the view closes before this lands.
+        let id = draft.id
+        let user = crProxyAuthUsername, pass = crProxyAuthPassword
+        let toCommit = customRouting
+        Task { @MainActor in
+            customRouting = await commitCustomRouting(vpn, profileID: id, profile: toCommit,
+                                                      proxyAuthUsername: user, proxyAuthPassword: pass)
         }
     }
 

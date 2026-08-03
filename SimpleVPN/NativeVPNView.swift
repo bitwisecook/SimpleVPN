@@ -11,14 +11,43 @@ import SwiftUI
 import NetworkExtension
 
 struct NativeVPNView: View {
+    let vpn: VPNController
     @Bindable var manager: NativeVPNManager
     @State var draft: NativeVPNConfig
+    /// IKEv2: the password or PSK, whichever mode is active. IPsec: the XAuth
+    /// password (optional — the group secret alone is sometimes enough).
     @State private var secret = ""
+    /// IPsec only: the group shared secret (PSK). Kept separate from `secret`
+    /// because IPsec, unlike IKEv2, can need both at once.
+    @State private var sharedSecret = ""
     @State private var loaded = false
+    @State private var customRouting = CustomRoutingProfile()
+    @State private var crProxyAuthUsername = ""
+    @State private var crProxyAuthPassword = ""
 
     private var isActive: Bool {
         manager.activeConfigID == draft.id &&
         (manager.status == .connected || manager.status == .connecting || manager.status == .reasserting)
+    }
+
+    /// nil once every field the active auth mode needs is filled in;
+    /// otherwise a short caption naming what's missing, for both the Connect
+    /// button's disabled state and a visible reason (never just a dead button).
+    private var missingFieldCaption: String? {
+        if draft.server.isEmpty { return "Enter a server address to connect." }
+        switch draft.kind {
+        case .ipsec:
+            if sharedSecret.isEmpty { return "Enter the shared secret (PSK) to connect." }
+        case .ikev2:
+            if draft.usesSharedSecret {
+                if secret.isEmpty { return "Enter the shared secret (PSK) to connect." }
+            } else {
+                if draft.username.isEmpty { return "Enter a username to connect." }
+                if secret.isEmpty { return "Enter a password to connect." }
+            }
+        default: break
+        }
+        return nil
     }
 
     var body: some View {
@@ -30,6 +59,13 @@ struct NativeVPNView: View {
                     Text("IPsec (IKEv1)").tag(VPNKind.ipsec)
                     Text("L2TP / IPsec").tag(VPNKind.l2tp)
                 }
+                .onChange(of: draft.kind) {
+                    // IPsec has no certificate path (no identity picker/import
+                    // exists), so it's always the shared-secret mode — keep
+                    // the model honest even though connect() no longer trusts
+                    // this flag for IPsec either.
+                    if draft.kind == .ipsec { draft.usesSharedSecret = true }
+                }
             }
 
             if draft.kind == .l2tp {
@@ -40,6 +76,9 @@ struct NativeVPNView: View {
                 if draft.kind == .ikev2 { ikev2AdvancedSection }
                 routingSection
                 controlSection
+                CustomRoutingTabView(vpn: vpn, profileID: draft.id, profile: $customRouting,
+                                    proxyAuthUsername: $crProxyAuthUsername,
+                                    proxyAuthPassword: $crProxyAuthPassword)
             }
         }
         .formStyle(.grouped)
@@ -68,13 +107,27 @@ struct NativeVPNView: View {
     }
 
     @ViewBuilder private var authSection: some View {
-        Section("Authentication") {
-            Toggle("Use a shared secret (PSK)", isOn: $draft.usesSharedSecret)
-            if !draft.usesSharedSecret {
-                TextField("Username", text: $draft.username).textContentType(.username)
+        Section {
+            if draft.kind == .ipsec {
+                // No certificate/identity path exists (no picker, no import),
+                // so IPsec always authenticates with a shared secret — the
+                // Cisco-style group PSK, optionally paired with an XAuth
+                // username/password (exactly what a .pcf import produces).
+                SecureField("Shared secret (group PSK)", text: $sharedSecret)
+                TextField("Username (XAuth, optional)", text: $draft.username).textContentType(.username)
+                SecureField("Password (XAuth, optional)", text: $secret)
+            } else {
+                Toggle("Use a shared secret (PSK)", isOn: $draft.usesSharedSecret)
+                if !draft.usesSharedSecret {
+                    TextField("Username", text: $draft.username).textContentType(.username)
+                }
+                SecureField(draft.usesSharedSecret ? "Shared secret" : "Password", text: $secret)
             }
-            SecureField(draft.usesSharedSecret ? "Shared secret" : "Password", text: $secret)
             Toggle("Connect on demand", isOn: $draft.onDemand)
+        } footer: {
+            if draft.kind == .ipsec {
+                Text("Certificate authentication isn't supported in this build — IPsec always uses a shared secret.")
+            }
         }
     }
 
@@ -160,10 +213,13 @@ struct NativeVPNView: View {
                 if isActive {
                     Button("Disconnect") { manager.disconnect() }.buttonStyle(.bordered).tint(.red)
                 } else {
-                    Button("Connect") { save(); Task { await manager.connect(draft, secret: secret) } }
+                    Button("Connect") { save(); Task { await manager.connect(draft, secret: secret, sharedSecret: sharedSecret) } }
                         .buttonStyle(.glassProminent)   // primary "go" — consistent with OpenVPN Connect
-                        .disabled(draft.server.isEmpty)
+                        .disabled(missingFieldCaption != nil)
                 }
+            }
+            if !isActive, let caption = missingFieldCaption {
+                Text(caption).font(.caption).foregroundStyle(.secondary)
             }
             if let err = manager.lastError {
                 Text(err).font(.callout).foregroundStyle(.red)
@@ -189,23 +245,59 @@ struct NativeVPNView: View {
         }
         Section {
             Button("Export Configuration Profile…") { exportMobileconfig() }
-                .disabled(draft.server.isEmpty)
+                .disabled(draft.server.isEmpty || secret.isEmpty)
         } footer: {
-            Text("macOS has no programmatic L2TP API for apps. SimpleVPN writes a standard .mobileconfig you double-click to install; it then appears in System Settings ▸ VPN.")
+            if secret.isEmpty {
+                Text("Enter the shared secret before exporting — the profile needs it to configure IPSec.")
+            } else {
+                Text("macOS has no programmatic L2TP API for apps. SimpleVPN writes a standard .mobileconfig you double-click to install; it then appears in System Settings ▸ VPN.")
+            }
         }
     }
 
     private func loadOnce() {
         guard !loaded else { return }
         loaded = true
-        secret = KeychainCredentialStore.loadCredentials(profile: "native.\(draft.id)")?.password ?? ""
+        if draft.kind == .ipsec { draft.usesSharedSecret = true }   // no cert path — always PSK
+        let base = KeychainCredentialStore.loadCredentials(profile: "native.\(draft.id)")
+        secret = base?.password ?? ""
+        guard draft.kind == .ipsec else { return }
+        if let group = KeychainCredentialStore.loadCredentials(profile: "native.\(draft.id).secret") {
+            sharedSecret = group.password
+        } else if !secret.isEmpty {
+            // Backward compat: earlier builds (and the Cisco .pcf importer,
+            // ManageVPNsView.importCiscoText) stored the IPsec group PSK in
+            // this same base slot, with no separate XAuth password field to
+            // conflict with. Migrate it into the new shared-secret field so
+            // existing saved configs keep working without re-entry.
+            sharedSecret = secret
+            secret = ""
+        }
+        customRouting = vpn.customRouting(for: draft.id)
+        (crProxyAuthUsername, crProxyAuthPassword) = loadCustomRoutingProxyAuthFields(profileID: draft.id)
     }
 
     private func save() {
+        if draft.kind == .ipsec { draft.usesSharedSecret = true }
         manager.save(draft)
         if !secret.isEmpty {
             try? KeychainCredentialStore.saveCredentials(profile: "native.\(draft.id)",
                                                          .init(username: draft.username, password: secret))
+        }
+        if draft.kind == .ipsec, !sharedSecret.isEmpty {
+            try? KeychainCredentialStore.saveCredentials(profile: "native.\(draft.id).secret",
+                                                         .init(username: "", password: sharedSecret))
+        }
+        // save() is synchronous (called inline from several button actions, incl.
+        // Export), so the commit runs in the background — harmless since it's
+        // idempotent and CustomRoutingTabView's own onDisappear covers "left before
+        // this finished" too.
+        let id = draft.id
+        let user = crProxyAuthUsername, pass = crProxyAuthPassword
+        let toCommit = customRouting
+        Task { @MainActor in
+            customRouting = await commitCustomRouting(vpn, profileID: id, profile: toCommit,
+                                                      proxyAuthUsername: user, proxyAuthPassword: pass)
         }
     }
 
@@ -221,14 +313,30 @@ struct NativeVPNView: View {
 
 /// Minimal, valid L2TP-over-IPsec .mobileconfig generator (PPP + IPSec payload).
 enum NativeVPNProfile {
+    /// Escapes the five XML-significant characters. Every interpolated string
+    /// below is attacker/user-controlled (profile name, username, server) —
+    /// unescaped, a name like `Foo</string><key>Bad`  would break out of its
+    /// element and corrupt (or inject into) the generated plist. The base64
+    /// secret needs no escaping (its alphabet is `[A-Za-z0-9+/=]`).
+    private static func xmlEscaped(_ s: String) -> String {
+        s.replacingOccurrences(of: "&", with: "&amp;")
+         .replacingOccurrences(of: "<", with: "&lt;")
+         .replacingOccurrences(of: ">", with: "&gt;")
+         .replacingOccurrences(of: "\"", with: "&quot;")
+         .replacingOccurrences(of: "'", with: "&apos;")
+    }
+
     static func l2tpMobileconfig(_ c: NativeVPNConfig, secret: String) -> String {
         let uuid = UUID().uuidString
         let payloadUUID = UUID().uuidString
+        let name = xmlEscaped(c.name)
+        let username = xmlEscaped(c.username)
+        let server = xmlEscaped(c.server)
         return """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
         <plist version="1.0"><dict>
-          <key>PayloadDisplayName</key><string>\(c.name)</string>
+          <key>PayloadDisplayName</key><string>\(name)</string>
           <key>PayloadIdentifier</key><string>com.bragi0.SimpleVPN.\(uuid)</string>
           <key>PayloadType</key><string>Configuration</string>
           <key>PayloadUUID</key><string>\(uuid)</string>
@@ -238,11 +346,11 @@ enum NativeVPNProfile {
             <key>PayloadIdentifier</key><string>com.bragi0.SimpleVPN.vpn.\(payloadUUID)</string>
             <key>PayloadUUID</key><string>\(payloadUUID)</string>
             <key>PayloadVersion</key><integer>1</integer>
-            <key>UserDefinedName</key><string>\(c.name)</string>
+            <key>UserDefinedName</key><string>\(name)</string>
             <key>VPNType</key><string>L2TP</string>
             <key>PPP</key><dict>
-              <key>AuthName</key><string>\(c.username)</string>
-              <key>CommRemoteAddress</key><string>\(c.server)</string>
+              <key>AuthName</key><string>\(username)</string>
+              <key>CommRemoteAddress</key><string>\(server)</string>
             </dict>
             <key>IPSec</key><dict>
               <key>AuthenticationMethod</key><string>SharedSecret</string>

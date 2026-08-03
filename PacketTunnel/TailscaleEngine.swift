@@ -56,6 +56,10 @@ final class TailscaleEngine: @unchecked Sendable {
     private var startCompletion: ((Error?) -> Void)?
     private var pumpRunning = false
     private var lastConfig: TailscaleTunnelConfig?
+    /// App-arbitrated system proxy (Proxy mediator applier — Docs/StateMediators.md).
+    /// Guarded by `lock` like the rest of the mutable session state; merged into the
+    /// settings built from every netmap and by `applyProxySettings(_:)`.
+    private var proxySettings: NEProxySettings?
     private var lastState: TailscaleBackendState = .noState
     private var pendingAuthURL: String = ""
     private var startTimer: DispatchSourceTimer?
@@ -251,7 +255,8 @@ final class TailscaleEngine: @unchecked Sendable {
             self.lock.unlock()
             guard !unchanged else { return }
 
-            guard let settings = TailscaleNetworkSettings.settings(for: config) else {
+            let px = { self.lock.lock(); defer { self.lock.unlock() }; return self.proxySettings }()
+            guard let settings = TailscaleNetworkSettings.settings(for: config, proxySettings: px) else {
                 // No addresses yet: the node is registered but the control
                 // plane has not handed out an IP. Nothing to apply, and
                 // applying empty settings would drop what is already there.
@@ -277,6 +282,36 @@ final class TailscaleEngine: @unchecked Sendable {
 
     fileprivate func handleLog(_ line: String) {
         delegate?.tailscaleEngine(self, didLog: line)
+    }
+
+    // MARK: - Proxy mediator applier (Docs/StateMediators.md)
+
+    /// Store the arbitrated system proxy and re-apply the last netmap's settings live
+    /// (no reconnect); nil clears it. Returns NO when there is no netmap to rebuild from
+    /// yet (the stored proxy is honoured at the next netmap) or the apply fails.
+    /// Synchronous — the provider calls it off its message queue like the other appliers.
+    func applyProxySettings(_ proxy: NEProxySettings?) -> Bool {
+        lock.lock()
+        proxySettings = proxy
+        let config = lastConfig
+        lock.unlock()
+        Self.log.log("tailscale applyProxySettings: \(proxy != nil ? "set" : "cleared", privacy: .public)")
+        guard let provider, let config,
+              let settings = TailscaleNetworkSettings.settings(for: config, proxySettings: proxy)
+        else { return true }   // no netmap yet: honoured at the next netmapChanged
+        // The semaphore establishes happens-before between the completion and the wait,
+        // so the result is safe to hand back through a small unchecked-Sendable box
+        // (Swift 6 can't prove that of a captured `var`).
+        final class ResultBox: @unchecked Sendable { var ok = false }
+        let box = ResultBox()
+        let done = DispatchSemaphore(value: 0)
+        provider.setTunnelNetworkSettings(settings) { error in
+            box.ok = (error == nil)
+            if let error { Self.log.error("tailscale proxy apply failed: \(error.localizedDescription, privacy: .public)") }
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + 15)
+        return box.ok
     }
 
     // MARK: - Start completion

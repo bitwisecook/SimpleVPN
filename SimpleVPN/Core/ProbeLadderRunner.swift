@@ -195,7 +195,11 @@ extension ProbeTargetFacts {
 
     static func resolve(wireGuard config: WireGuardConfig) -> ProbeTargetFacts {
         let split = VPNProbeTarget.splitHostPort(config.endpoint)
-        return .wireGuard(config, profileID: config.id,
+        // WireGuardStore.save() never keeps the private/preshared key in the
+        // persisted config (they live in the keychain) — fill them back in
+        // here, at the click, so the handshake rung isn't permanently stuck on
+        // "missing key" for every editor-saved config.
+        return .wireGuard(config.withSecretsFromKeychain(), profileID: config.id,
                           host: split.host,
                           port: split.port ?? VPNProbe.wireGuardDefaultPort)
     }

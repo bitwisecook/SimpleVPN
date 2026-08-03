@@ -69,6 +69,13 @@ struct EditVPNView: View {
     @State private var passwordTemplate = VPNAuthConfig.defaultTemplate
     @State private var otpAdvancedExpanded = false
 
+    // Custom Routing draft (Mediators/CustomRouting.swift) — owned here (not inside
+    // CustomRoutingTabView) so the toolbar Save button can commit it even while the
+    // tab never disappears; see CustomRoutingTabView.swift's header comment.
+    @State private var customRouting = CustomRoutingProfile()
+    @State private var crProxyAuthUsername = ""
+    @State private var crProxyAuthPassword = ""
+
     // Credential source (manual / 1Password / Apple Passwords)
     @State private var credentialKind: CredentialSourceKind = .manual
     @State private var sourceReference = ""
@@ -156,6 +163,13 @@ struct EditVPNView: View {
                 configurationTab
                     .disabled(ManagedPolicy.lockConfiguration)
                     .tabItem { Label("Configuration", systemImage: "doc.text") }
+                Form {
+                    CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
+                                        proxyAuthUsername: $crProxyAuthUsername,
+                                        proxyAuthPassword: $crProxyAuthPassword)
+                }
+                .formStyle(.grouped)
+                .tabItem { Label("Custom Routing", systemImage: "arrow.triangle.branch") }
             }
             // Clear the toolbar's scroll-edge shadow band — without this the
             // segmented tab strip sits flush under the title bar and the edge
@@ -1123,6 +1137,8 @@ struct EditVPNView: View {
         let prefs = vpn.uiPrefs(for: profileID)
         allowPause = prefs.allowPause
         showConnectionManager = prefs.showConnectionManager
+        customRouting = vpn.customRouting(for: profileID)
+        (crProxyAuthUsername, crProxyAuthPassword) = loadCustomRoutingProxyAuthFields(profileID: profileID)
     }
 
     private func save() async {
@@ -1194,6 +1210,9 @@ struct EditVPNView: View {
         try? KeychainCredentialStore.saveProfileSecrets(profile: profileID, .init(
             proxyPassword: proxyPassword.isEmpty ? nil : proxyPassword,
             privateKeyPassword: privateKeyPassword.isEmpty ? nil : privateKeyPassword))
+        customRouting = await commitCustomRouting(vpn, profileID: profileID, profile: customRouting,
+                                                  proxyAuthUsername: crProxyAuthUsername,
+                                                  proxyAuthPassword: crProxyAuthPassword)
         if embedded {
             savedTick = true
             // Long enough to SEE the tick, then done. dismiss() is a no-op in a

@@ -67,7 +67,10 @@ static os_log_t gBridgeLog = os_log_create("com.bragi0.SimpleVPN.PacketTunnel", 
 - (void)tunExcludeRoute:(NSString *)address prefix:(int)prefix ipv6:(BOOL)ipv6;
 - (void)tunAddDNS:(NSString *)address;
 - (void)tunAddSearchDomain:(NSString *)domain;
-- (void)tunAddProxy:(NSString *)proxy;
+- (void)tunSetProxyHTTP:(NSString *)host port:(int)port;
+- (void)tunSetProxyHTTPS:(NSString *)host port:(int)port;
+- (void)tunSetProxyPAC:(NSString *)url;
+- (void)tunAddProxyBypass:(NSString *)host;
 - (void)tunSetMTU:(int)mtu;
 - (int)tunEstablish;
 - (void)tunTeardown;
@@ -118,14 +121,20 @@ public:
         return true;
     }
     bool tun_builder_set_mtu(int mtu) override { [bridge() tunSetMTU:mtu]; return true; }
+    // Pushed-proxy capture (dhcp-option PROXY_HTTP/PROXY_HTTPS/PROXY_AUTO_CONFIG_URL/
+    // PROXY_BYPASS): structured per-scheme host:port, PAC url, and bypass list — the
+    // Proxy mediator's per-kind intent for OpenVPN (Docs/StateMediators.md › Proxy).
     bool tun_builder_set_proxy_http(const std::string &host, int port) override {
-        [bridge() tunAddProxy:[NSString stringWithFormat:@"HTTP %s:%d", host.c_str(), port]]; return true;
+        [bridge() tunSetProxyHTTP:@(host.c_str()) port:port]; return true;
     }
     bool tun_builder_set_proxy_https(const std::string &host, int port) override {
-        [bridge() tunAddProxy:[NSString stringWithFormat:@"HTTPS %s:%d", host.c_str(), port]]; return true;
+        [bridge() tunSetProxyHTTPS:@(host.c_str()) port:port]; return true;
     }
     bool tun_builder_set_proxy_auto_config_url(const std::string &url) override {
-        [bridge() tunAddProxy:[NSString stringWithFormat:@"PAC %s", url.c_str()]]; return true;
+        [bridge() tunSetProxyPAC:@(url.c_str())]; return true;
+    }
+    bool tun_builder_add_proxy_bypass(const std::string &bypass_host) override {
+        [bridge() tunAddProxyBypass:@(bypass_host.c_str())]; return true;
     }
     bool tun_builder_set_session_name(const std::string &) override { return true; }
     bool tun_builder_persist() override { return false; }      // force fd-based establish()
@@ -173,8 +182,24 @@ private:
     NSMutableArray<NEIPv4Route *> *_v4Included, *_v4Excluded;
     NSMutableArray<NEIPv6Route *> *_v6Included, *_v6Excluded;
     NSMutableArray<NSString *> *_dns, *_searchDomains, *_proxies;
+    // Structured pushed-proxy capture (was loose "SCHEME host:port" strings in
+    // _proxies — kept, derived, for existing connectionInfo consumers).
+    NSString *_proxyHTTPHost, *_proxyHTTPSHost, *_proxyPACURL;
+    int _proxyHTTPPort, _proxyHTTPSPort;
+    NSMutableArray<NSString *> *_proxyBypass;
+    // The arbitrated system proxy the app asked us to apply (Proxy mediator P3).
+    // Owner-egress only; nil = none. Guarded by _stateMutex like the rest.
+    NEProxySettings *_proxySettings;
+    // The arbitrated per-tunnel DNS the app asked us to apply (DNS mediator applier —
+    // Docs/StateMediators.md). When set it OVERRIDES the DNS captured from the push;
+    // nil restores the captured/pushed DNS. Guarded by _stateMutex like the rest.
+    NEDNSSettings *_dnsOverride;
     NSString *_remote;
     BOOL _defaultV4, _defaultV6;
+    // Default-gateway ownership: when YES the pushed default route is suppressed
+    // (this tunnel is demoted to split — specific subnets only). Guarded by
+    // _stateMutex like the rest of the captured tun state. Defaults NO (owner).
+    BOOL _suppressDefault;
     int _mtu;
 
     // Guards ALL captured tun state below: the openvpn3 event thread rebuilds
@@ -273,6 +298,9 @@ private:
     ClientAPI::ProvideCreds creds;
     creds.username = username.UTF8String;
     creds.password = password.UTF8String;
+    // static-challenge one-time code — the engine formats the wire response
+    // itself (base64 SCRV1 or appended, per the profile's directive).
+    if (s && s.challengeResponse) creds.response = s.challengeResponse.UTF8String;
     ClientAPI::Status cs = _client->provide_creds(creds);
     if (cs.error) {
         if (error) *error = [NSError errorWithDomain:kOVPNErrorDomain code:2
@@ -319,6 +347,24 @@ private:
     return YES;
 }
 
+- (void)setInitialDefaultRouteOwned:(BOOL)owned {
+    // Establish-time seed of the ownership gate, BEFORE connect() builds the tun.
+    // The app passes the desired role via startTunnel options so the ≤1-owner
+    // invariant holds at the very first establish — even before (or without) the
+    // app reconciling live (RC3). No reapply here: there is no tun to rebuild yet.
+    std::lock_guard<std::mutex> hold(_stateMutex);
+    _suppressDefault = !owned;
+    BLOG("setInitialDefaultRouteOwned: %d (suppressDefault=%d)", owned, !owned);
+}
+
+- (BOOL)setDefaultRouteOwned:(BOOL)owned {
+    { std::lock_guard<std::mutex> hold(_stateMutex); _suppressDefault = !owned; }
+    BLOG("setDefaultRouteOwned: %d (suppressDefault=%d)", owned, !owned);
+    // Live: rebuild and re-apply the captured settings with the default route
+    // gate flipped. No reconnect — the TLS session and fd pump are untouched.
+    return [self reapplyTunSettingsIncludingRoutes:YES];
+}
+
 - (void)transportBytesIn:(int64_t *)bytesIn bytesOut:(int64_t *)bytesOut {
     if (!_client) { if (bytesIn) *bytesIn = 0; if (bytesOut) *bytesOut = 0; return; }
     ClientAPI::TransportStats ts = _client->transport_stats();
@@ -345,6 +391,11 @@ private:
         }
     }
     std::lock_guard<std::mutex> hold(_stateMutex);
+    // Effective default-route ownership = the engine's GROUND TRUTH: a default
+    // route was pushed (redirect-gateway / server push) AND it is not suppressed.
+    // The app seeds its applied-role cache from this, never the client-.ovpn grep,
+    // so it can never wrongly skip a needed gateway:split/full (RC1).
+    BOOL effectiveOwned = (_defaultV4 || _defaultV6) && !_suppressDefault;
     return @{
         @"server":        _remote ?: @"",
         @"serverIP":      serverIP,
@@ -358,6 +409,16 @@ private:
         @"dns":           _dns ? [_dns copy] : @[],
         @"searchDomains": _searchDomains ? [_searchDomains copy] : @[],
         @"proxies":       _proxies ? [_proxies copy] : @[],
+        @"proxyHTTPHost":  _proxyHTTPHost ?: @"",
+        @"proxyHTTPPort":  @(_proxyHTTPPort),
+        @"proxyHTTPSHost": _proxyHTTPSHost ?: @"",
+        @"proxyHTTPSPort": @(_proxyHTTPSPort),
+        @"proxyPAC":       _proxyPACURL ?: @"",
+        @"proxyBypass":    _proxyBypass ? [_proxyBypass copy] : @[],
+        @"defaultV4":            @(_defaultV4),
+        @"defaultV6":            @(_defaultV6),
+        @"suppressDefault":      @(_suppressDefault),
+        @"effectiveDefaultOwned": @(effectiveOwned),
     };
 }
 
@@ -369,8 +430,20 @@ private:
     _v4Included = [NSMutableArray new]; _v4Excluded = [NSMutableArray new];
     _v6Included = [NSMutableArray new]; _v6Excluded = [NSMutableArray new];
     _dns = [NSMutableArray new]; _searchDomains = [NSMutableArray new];
-    _proxies = [NSMutableArray new];
+    _proxies = [NSMutableArray new]; _proxyBypass = [NSMutableArray new];
+    _proxyHTTPHost = _proxyHTTPSHost = _proxyPACURL = nil;
+    _proxyHTTPPort = _proxyHTTPSPort = 0;
+    // NOTE: _proxySettings is deliberately NOT reset here — like _suppressDefault, the
+    // app-arbitrated proxy decision must survive an engine-driven reconnect that
+    // rebuilds the captured tun state.
+    // NOTE: _dnsOverride is deliberately NOT reset here either, for the same reason —
+    // the app-arbitrated DNS decision must survive an engine-driven reconnect.
     _defaultV4 = _defaultV6 = NO; _remote = nil; _mtu = 1500;
+    // NOTE: _suppressDefault is deliberately NOT reset here. A (re)connect rebuilds
+    // the captured routes, but the coordinator's chosen gateway ownership must
+    // survive an engine-driven reconnect (RECONNECTING rebuilds the tun) — the app
+    // re-asserts it too, but honouring the last-set flag avoids a full-tunnel flash
+    // mid-reconnect for a VPN that was demoted to split.
 }
 - (void)tunSetRemote:(NSString *)address {
     std::lock_guard<std::mutex> hold(_stateMutex);
@@ -454,8 +527,43 @@ private:
 
 - (void)tunAddDNS:(NSString *)address { std::lock_guard<std::mutex> hold(_stateMutex); [_dns addObject:address]; }
 - (void)tunAddSearchDomain:(NSString *)domain { std::lock_guard<std::mutex> hold(_stateMutex); [_searchDomains addObject:domain]; }
-- (void)tunAddProxy:(NSString *)proxy { std::lock_guard<std::mutex> hold(_stateMutex); [_proxies addObject:proxy]; }
+- (void)tunSetProxyHTTP:(NSString *)host port:(int)port {
+    std::lock_guard<std::mutex> hold(_stateMutex);
+    _proxyHTTPHost = host; _proxyHTTPPort = port;
+    [_proxies addObject:[NSString stringWithFormat:@"HTTP %@:%d", host, port]];
+}
+- (void)tunSetProxyHTTPS:(NSString *)host port:(int)port {
+    std::lock_guard<std::mutex> hold(_stateMutex);
+    _proxyHTTPSHost = host; _proxyHTTPSPort = port;
+    [_proxies addObject:[NSString stringWithFormat:@"HTTPS %@:%d", host, port]];
+}
+- (void)tunSetProxyPAC:(NSString *)url {
+    std::lock_guard<std::mutex> hold(_stateMutex);
+    _proxyPACURL = url;
+    [_proxies addObject:[NSString stringWithFormat:@"PAC %@", url]];
+}
+- (void)tunAddProxyBypass:(NSString *)host {
+    std::lock_guard<std::mutex> hold(_stateMutex);
+    if (host.length) [_proxyBypass addObject:host];
+}
 - (void)tunSetMTU:(int)mtu { std::lock_guard<std::mutex> hold(_stateMutex); _mtu = mtu; }
+
+// Proxy mediator P3 applier (Docs/StateMediators.md): store the arbitrated system
+// proxy and re-apply the captured settings so it takes effect live (no reconnect).
+- (BOOL)applyProxySettings:(NEProxySettings *)proxy {
+    { std::lock_guard<std::mutex> hold(_stateMutex); _proxySettings = proxy; }
+    BLOG("applyProxySettings: %{public}s", proxy ? "set" : "cleared");
+    return [self reapplyTunSettingsIncludingRoutes:YES];
+}
+
+// DNS mediator applier (Docs/StateMediators.md): store the arbitrated per-tunnel DNS
+// and re-apply the captured settings so it takes effect live (no reconnect). When set
+// it overrides the DNS captured from the push; nil restores the captured/pushed DNS.
+- (BOOL)applyDNSSettings:(NEDNSSettings *)dns {
+    { std::lock_guard<std::mutex> hold(_stateMutex); _dnsOverride = dns; }
+    BLOG("applyDNSSettings: %{public}s", dns ? "set" : "cleared");
+    return [self reapplyTunSettingsIncludingRoutes:YES];
+}
 
 /// Build NEPacketTunnelNetworkSettings from the captured tun state.
 /// includeRoutes=NO keeps only the interface addresses/MTU — no routes, no DNS —
@@ -469,7 +577,10 @@ private:
         NEIPv4Settings *ipv4 = [[NEIPv4Settings alloc] initWithAddresses:_v4Addrs subnetMasks:_v4Masks];
         if (includeRoutes) {
             NSMutableArray *inc = [_v4Included mutableCopy];
-            if (_defaultV4) [inc addObject:[NEIPv4Route defaultRoute]];
+            // Gate the pushed default route on ownership: a VPN demoted to split
+            // (_suppressDefault) keeps every specific subnet in _v4Included but
+            // drops 0.0.0.0/0 so it stops owning the gateway.
+            if (_defaultV4 && !_suppressDefault) [inc addObject:[NEIPv4Route defaultRoute]];
             if (_extraV4Included) [inc addObjectsFromArray:_extraV4Included];
             ipv4.includedRoutes = inc;
             ipv4.excludedRoutes = [_v4Excluded arrayByAddingObjectsFromArray:(_extraV4Excluded ?: @[])];
@@ -482,7 +593,7 @@ private:
         NEIPv6Settings *ipv6 = [[NEIPv6Settings alloc] initWithAddresses:_v6Addrs networkPrefixLengths:_v6Prefixes];
         if (includeRoutes) {
             NSMutableArray *inc = [_v6Included mutableCopy];
-            if (_defaultV6) [inc addObject:[NEIPv6Route defaultRoute]];
+            if (_defaultV6 && !_suppressDefault) [inc addObject:[NEIPv6Route defaultRoute]];
             if (_extraV6Included) [inc addObjectsFromArray:_extraV6Included];
             ipv6.includedRoutes = inc;
             ipv6.excludedRoutes = [_v6Excluded arrayByAddingObjectsFromArray:(_extraV6Excluded ?: @[])];
@@ -491,12 +602,30 @@ private:
         }
         settings.IPv6Settings = ipv6;
     }
-    if (includeRoutes && _dns.count) {
+    // DNS: the app-arbitrated override (DNS mediator applier — Docs/StateMediators.md)
+    // is the sole writer when set, winning over the pushed DNS; nil falls back to the
+    // captured push. Only asserted when routes are in play (bypass mode leaves DNS off).
+    if (includeRoutes && _dnsOverride) {
+        settings.DNSSettings = _dnsOverride;
+    } else if (includeRoutes && _dns.count) {
         NEDNSSettings *dns = [[NEDNSSettings alloc] initWithServers:_dns];
         if (_searchDomains.count) dns.searchDomains = _searchDomains;
-        if (_defaultV4 || _defaultV6) dns.matchDomains = @[@""]; // route all DNS through the tunnel
-        settings.DNSSettings = dns;
+        BOOL ownsDefault = (_defaultV4 || _defaultV6) && !_suppressDefault;
+        if (ownsDefault) {
+            dns.matchDomains = @[@""];            // owner: route ALL DNS through the tunnel
+            settings.DNSSettings = dns;
+        } else if (_searchDomains.count) {
+            // Split (demoted, or a genuinely split-tunnel profile): scope the
+            // tunnel's resolvers to its own search domains only, so a non-owner
+            // can't hijack every lookup on the Mac. With no search domains there
+            // is nothing safe to scope to, so the tunnel DNS is left off entirely.
+            dns.matchDomains = _searchDomains;
+            settings.DNSSettings = dns;
+        }
     }
+    // System proxy: apply the app-arbitrated decision (owner egress only) whenever
+    // routes are in play. In bypass mode (includeRoutes=NO) no proxy is asserted.
+    if (includeRoutes && _proxySettings) settings.proxySettings = _proxySettings;
     settings.MTU = @(_mtu);
     return settings;
 }

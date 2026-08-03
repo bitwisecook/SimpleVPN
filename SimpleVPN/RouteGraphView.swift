@@ -289,6 +289,7 @@ struct RouteGraphView: View {
                              height: layout.canvas.height + canvasInset * 2)
         VStack(spacing: 0) {
             controlBar(outcome)
+            driftBanner
             if let outcome { answerPanel(outcome) }
             Divider()
             GeometryReader { geo in
@@ -364,6 +365,49 @@ struct RouteGraphView: View {
                 ContentUnavailableView("No Active Routes", systemImage: "arrow.triangle.branch",
                     description: Text("Connect a VPN, or wait for the routing table to be read."))
             }
+        }
+    }
+
+    // MARK: Drift indicator (external default-route change detected + re-asserted)
+    //
+    // Fed by the Route mediator's PUBLISHED drift event (PF_ROUTE monitor → diff-vs-
+    // expected → re-assert). Subtle by design: a single-line badge saying what changed
+    // and when, so the picture is honest about the moment something external moved the
+    // default. Pure SwiftUI (no platform-backed views) and OUTSIDE the scaled subtree.
+    @ViewBuilder private var driftBanner: some View {
+        // One row per system-state mediator that has seen external drift (routes/DNS/
+        // proxy). Each names its resource so the picture is honest about WHICH thing
+        // something else moved, and when.
+        let drifts: [(String, MediatorDriftEvent)] = [
+            ("Routing", vpn.routes.lastDrift),
+            ("DNS", vpn.dns.lastDrift),
+            ("Proxy", vpn.proxies.lastDrift),
+        ].compactMap { label, event in event.map { (label, $0) } }
+        if !drifts.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(drifts, id: \.1.id) { label, drift in
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
+                            .foregroundStyle(.orange)
+                        Text(label).fontWeight(.medium).foregroundStyle(.secondary)
+                        Text(drift.summary)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                        Text("· \(drift.at.formatted(.relative(presentation: .named)))")
+                            .foregroundStyle(.tertiary)
+                        Spacer(minLength: 0)
+                        if drift.reasserted {
+                            Text("re-asserted").foregroundStyle(.tertiary)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("External \(label) change: \(drift.summary)")
+                }
+            }
+            .font(.caption)
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.orange.opacity(0.10))
         }
     }
 
@@ -1075,6 +1119,7 @@ struct RouteGraphView: View {
         let last = min(total, first + window + (scrollable ? 1 : 0))
         let slice = first < last ? Array(dest.routes[first..<last]) : []
         let sliceOffset = offset - CGFloat(first) * rowHeight
+        let diff = customRoutingDiff(for: dest)
         // No card-level highlight any more: every destination card is a list of real
         // CIDRs, so the matching ROW is the answer. The one routeless answer — the
         // default — is the globe.
@@ -1083,7 +1128,7 @@ struct RouteGraphView: View {
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(slice) { row in
-                        routeRow(row, in: dest, outcome)
+                        routeRow(row, in: dest, outcome, diff: diff)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -1128,14 +1173,30 @@ struct RouteGraphView: View {
         .help("Click to trace what feeds this")
     }
 
-    /// One CIDR, exactly `rowHeight` tall and one line, always.
+    /// One CIDR, exactly `rowHeight` tall and one line, always. When this row's
+    /// interface belongs to a profile with a Custom Routing filter, a small glyph
+    /// marks a route that filter ADDED or REPLACED versus what the VPN actually
+    /// pushed (`CustomRoutingDiff`) — the at-a-glance health view the drift banner
+    /// above already started. Purely decorative (same fixed height either way), so
+    /// it can't touch `destHeight`'s prediction.
     private func routeRow(_ row: RouteRow, in dest: GraphNode.Destination,
-                          _ outcome: SearchOutcome?) -> some View {
+                          _ outcome: SearchOutcome?, diff: ResourceDiff?) -> some View {
         let lit = isHighlighted(row, in: dest, outcome)
-        return Text(row.cidr)
-            .font(.caption2.monospaced())
-            .foregroundStyle(lit ? Color.accentColor : Color.secondary)
-            .lineLimit(1)
+        let delta = diff?.items.first { $0.value == Self.normCIDR(row.cidr) }?.delta
+        return HStack(spacing: 2) {
+            Text(row.cidr)
+                .font(.caption2.monospaced())
+                .foregroundStyle(lit ? Color.accentColor : Color.secondary)
+                .lineLimit(1)
+            if let delta, delta != .unchanged {
+                Image(systemName: delta == .added ? "plus.circle.fill" : "arrow.triangle.2.circlepath")
+                    .font(.system(size: 7, weight: .bold))
+                    .foregroundStyle(delta == .added ? Color.green : Color.orange)
+                    .help(delta == .added ? "Added by this VPN's Custom Routing rules"
+                                          : "Replaced by this VPN's Custom Routing rules")
+                    .accessibilityLabel(delta == .added ? "added by Custom Routing" : "replaced by Custom Routing")
+            }
+        }
             .padding(.horizontal, 3)
             .frame(height: rowHeight - 2, alignment: .leading)
             .background(lit ? Color.accentColor.opacity(0.12) : .clear,
@@ -1372,6 +1433,22 @@ struct RouteGraphView: View {
         (reach?.latestStats ?? [:]).first { _, s in
             !s.tunnelIPv4.isEmpty && iface.ipv4.contains(s.tunnelIPv4)
         }?.key
+    }
+
+    /// This destination's owning profile's Custom Routing diff (effective vs
+    /// pushed), or nil when the interface isn't ours or has no filter set — the
+    /// common case, so most cards draw exactly as before.
+    private func customRoutingDiff(for dest: GraphNode.Destination) -> ResourceDiff? {
+        guard let iface = topo?.topology.interfaces.first(where: { $0.name == dest.interfaceName }),
+              let pid = profileID(for: iface) else { return nil }
+        let filter = vpn.customRouting(for: pid).routes
+        guard !filter.isIdentity else { return nil }
+        let pushed = vpn.lastPushedIntent(for: pid)?.routes ?? PushedIntentSnapshot.Routes()
+        return CustomRoutingDiff.diffRoutes(filter: filter, pushed: pushed)
+    }
+
+    private static func normCIDR(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     /// Health of the connection behind an interface. Only interfaces we own get an

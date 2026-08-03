@@ -21,7 +21,11 @@ extension VPNController {
                 let outcome = await importProfile(from: url)
                 switch outcome {
                 case .imported(let id, _):
-                    selectedID = id
+                    // Only an OpenVPN import lands in `profiles` — a WireGuard/
+                    // Cisco import (routed to its own store by
+                    // otherEngineImportHandler) has no row here to select, so
+                    // don't clobber whatever OpenVPN profile was showing.
+                    if profiles.contains(where: { $0.id == id }) { selectedID = id }
                 case .duplicate, .invalid:
                     // First problem wins in a multi-file drop — don't clobber an
                     // alert the user hasn't acknowledged yet.

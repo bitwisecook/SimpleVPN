@@ -7,6 +7,16 @@ require (
 	tailscale.com v1.102.1
 )
 
+// The proxy-tunnel engine (SimpleVPN's Proxy Tunnel VPN kind) is folded into
+// THIS Go c-archive rather than its own: two Go c-archives cannot link into one
+// binary (duplicate runtime symbols), and PacketTunnel already links this one.
+// main.go blank-imports it so its //export symbols land here. pxengine is a
+// local module (its own pinned go.mod/tests/header); the replace keeps it out
+// of the module proxy. It shares this build's gVisor pin.
+require pxengine v0.0.0
+
+replace pxengine => ../../proxy-engine/src
+
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/akutz/memconn v0.1.0 // indirect

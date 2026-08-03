@@ -102,6 +102,12 @@ import (
 	"unsafe"
 
 	"github.com/tailscale/wireguard-go/tun"
+	// Folded-in second engine: the proxy-tunnel (tun2socks) shim. Blank-imported
+	// ONLY so its cgo //export symbols (PXStart/PXStop/…) are compiled into this
+	// same c-archive — two Go c-archives cannot be linked into one binary, and
+	// PacketTunnel already links this one. pxengine shares nothing with the
+	// Tailscale stack at runtime; see its own package for the engine itself.
+	_ "pxengine"
 	"tailscale.com/control/controlclient"
 	_ "tailscale.com/feature/condregister" // registers portmapper, captive-portal detection, …
 	"tailscale.com/ipn"

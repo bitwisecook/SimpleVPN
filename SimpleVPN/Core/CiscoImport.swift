@@ -54,7 +54,6 @@ enum CiscoImport {
             c.name = entry.name.isEmpty ? entry.address : entry.name
             c.server = entry.address
             c.realm = entry.userGroup            // → OpenConnect --authgroup
-            c.sslProtocol = "anyconnect"
             return c
         }
     }

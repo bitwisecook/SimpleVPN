@@ -36,7 +36,7 @@ settings:
     SWIFT_VERSION: "6.0"                       # Swift 6 language mode = complete/strict concurrency
     SWIFT_APPROACHABLE_CONCURRENCY: YES
     SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
-    MARKETING_VERSION: "0.2"
+    MARKETING_VERSION: "0.3"
     CURRENT_PROJECT_VERSION: "1"
     # Xcode "recommended settings" we accept (signing stays Developer ID, ARCHS stays arm64 by design).
     DEAD_CODE_STRIPPING: YES
@@ -160,13 +160,19 @@ targets:
           - "$(SRCROOT)/Vendor/openvpn3-include"
           - "$(SRCROOT)/Vendor/openconnect-include"
           - "$(SRCROOT)/Vendor/tailscale-engine/include"
+          # Proxy-tunnel engine's stable header. Its C symbols are compiled INTO
+          # libtsengine.a (two Go c-archives cannot co-link), so there is no
+          # extra library to search for — only this header to find.
+          - "$(SRCROOT)/Vendor/proxy-engine/include"
         # Tailscale / Headscale engine: the tailscale.com stack as a Go
         # c-archive (Tools/build-tailscale-engine.sh). Unlike the 1Password Go
         # archive it is linked DIRECTLY into this binary and needs no
         # hardened-runtime relaxation: it dlopens nothing, so library
         # validation is satisfied by ordinary static linking. CoreFoundation +
         # Security are the Go runtime's own darwin dependencies (crypto/x509
-        # system roots, net's resolver).
+        # system roots, net's resolver). The proxy-tunnel engine (gVisor
+        # netstack → SOCKS5/CONNECT) is folded into THIS archive via a blank
+        # import in the Tailscale shim, so -ltsengine carries both.
         LIBRARY_SEARCH_PATHS:
           - "$(SRCROOT)/Vendor/tailscale-engine"
         OTHER_LDFLAGS:

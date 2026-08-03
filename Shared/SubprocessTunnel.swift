@@ -78,8 +78,8 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     var strictHostKey = "accept-new" // -o StrictHostKeyChecking: accept-new | yes | no
     var sshExtraOptions: [String] = []  // extra "-o Key=Value" lines
 
-    // SSL-VPN (OpenConnect / openfortivpn)
-    var sslProtocol = "fortinet" // openconnect --protocol value: fortinet | f5 | gp | anyconnect | nc
+    // SSL-VPN (OpenConnect / openfortivpn). The --protocol value comes from
+    // `kind.openconnectProtocol` — the kind IS the protocol, nothing stored here.
     // How the SSL-VPN authenticates: password, a client certificate, or single
     // sign-on in the browser (SAML/SSO — this is the passkey/WebAuthn path, since
     // the identity provider's page does the passkey ceremony).
@@ -93,6 +93,11 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     var proxyMode: ProxyMode = .systemDefault
     var proxyURL = ""            // e.g. http://proxy:8080 or socks5://proxy:1080
     var proxyUsername = ""
+    // openconnect only accepts proxy credentials embedded in the --proxy URL,
+    // which any local process can read via `ps`. Off (nil/false, the default) the
+    // password is withheld from argv; the user opts in explicitly. Optional so
+    // configs saved before the field existed still decode.
+    var proxyPasswordInArgv: Bool? = nil
     var disableDTLS = false      // --no-dtls (force TLS transport)
     var reconnectTimeout: Int? = nil  // --reconnect-timeout <seconds>
     var disableCSD = false       // --csd-wrapper /usr/bin/true (skip host-checker)
@@ -129,6 +134,20 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     var preferInProcess = false
 
     var isDefault: Bool { self == SubprocessTunnelConfig(id: id) }
+}
+
+extension VPNKind {
+    /// Kinds whose openconnect protocol implements the `--external-browser`
+    /// SAML/SSO flow (anyconnect, gp; pulse partially). Fortinet, Juniper,
+    /// Array — and in practice F5 — have no browser sign-in path in
+    /// openconnect: "SSO" there would just drop --passwd-on-stdin and fail
+    /// under --non-inter. Gates the editor's SSO option and the argv builder.
+    nonisolated var supportsExternalBrowserSSO: Bool {
+        switch self {
+        case .ciscoAnyConnect, .globalProtect, .pulse: true
+        default: false
+        }
+    }
 }
 
 /// The command-line tools a subprocess kind can use, and where to find them.
@@ -174,10 +193,10 @@ final class SubprocessTunnelStore {
     }
     func remove(_ id: String) {
         tunnels.removeAll { $0.id == id }
-        // Delete the tunnel's keychain secrets too — password, proxy/jump passwords
-        // and the OTP token seed — or they'd linger in the keychain indefinitely
-        // after the tunnel itself is gone.
-        for suffix in ["", ".proxy", ".jump", ".token"] {
+        // Delete the tunnel's keychain secrets too — password, proxy/jump passwords,
+        // the OTP token seed and the client-key passphrase — or they'd linger in
+        // the keychain indefinitely after the tunnel itself is gone.
+        for suffix in ["", ".proxy", ".jump", ".token", ".privateKey"] {
             KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(id)\(suffix)")
         }
         persist()
@@ -185,8 +204,17 @@ final class SubprocessTunnelStore {
 
     private func load() {
         guard let d = UserDefaults.standard.data(forKey: Self.key),
-              let list = try? JSONDecoder().decode([SubprocessTunnelConfig].self, from: d) else { return }
+              var list = try? JSONDecoder().decode([SubprocessTunnelConfig].self, from: d) else { return }
+        // SSO saved on a kind openconnect can't browser-sign-in (configs predate
+        // the gating): fall back to password so connect doesn't silently fail
+        // under --non-inter. The editor shows a note explaining the switch.
+        var migrated = false
+        for i in list.indices where list[i].authMode == "sso" && !list[i].kind.supportsExternalBrowserSSO {
+            list[i].authMode = "password"
+            migrated = true
+        }
         tunnels = list
+        if migrated { persist() }
     }
     private func persist() {
         if let d = try? JSONEncoder().encode(tunnels) { UserDefaults.standard.set(d, forKey: Self.key) }

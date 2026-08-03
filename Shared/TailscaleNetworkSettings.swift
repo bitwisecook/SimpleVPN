@@ -61,7 +61,11 @@ nonisolated enum TailscaleNetworkSettings {
     /// `tunnelRemoteAddress` is cosmetic for a mesh VPN (there is no single
     /// server), so it reports this node's own address rather than inventing a
     /// peer that traffic would appear to be destined for.
-    static func settings(for config: TailscaleTunnelConfig) -> NEPacketTunnelNetworkSettings? {
+    /// `proxySettings` is the app-arbitrated system proxy (Proxy mediator applier —
+    /// Docs/StateMediators.md), threaded onto the built settings so `proxy:apply` can
+    /// hot-swap it by rebuilding + re-applying from the last netmap. nil ⇒ none.
+    static func settings(for config: TailscaleTunnelConfig,
+                         proxySettings: NEProxySettings? = nil) -> NEPacketTunnelNetworkSettings? {
         let locals = parseAll(config.localAddrs)
         guard !locals.isEmpty else { return nil }
 
@@ -101,6 +105,11 @@ nonisolated enum TailscaleNetworkSettings {
             if !config.dns.matchDomains.isEmpty { dns.matchDomains = config.dns.matchDomains }
             s.dnsSettings = dns
         }
+
+        // System proxy: the app-arbitrated decision. Tailscale pushes no proxy and the
+        // arbiter classifies it as a non-provider, so it is never the system-proxy owner
+        // today — this is the forward-looking hot-swap seam for `proxy:apply`.
+        if let proxySettings { s.proxySettings = proxySettings }
 
         s.mtu = NSNumber(value: config.mtu > 0 ? config.mtu : TailscaleStartConfig.defaultMTU)
         return s

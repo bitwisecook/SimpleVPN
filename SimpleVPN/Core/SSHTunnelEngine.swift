@@ -21,11 +21,20 @@
 
 import Foundation
 import Network
+import os
 
 // Safe to pass across the Network.framework callback queues and the `ssh` serial
 // queue: every libssh2 call on an SSHChannel is funnelled onto the `ssh` queue, so
 // it is never touched concurrently despite being handed between executors.
 extension SSHChannel: @unchecked Sendable {}
+
+/// A live-forward request the in-process engine couldn't satisfy — the message is
+/// shown verbatim as the row's failure reason.
+nonisolated struct SSHForwardError: LocalizedError {
+    let message: String
+    init(_ message: String) { self.message = message }
+    var errorDescription: String? { message }
+}
 
 /// Nonisolated: the whole engine lives on background queues (libssh2 serial queue +
 /// Network.framework). `state` is observable for UI but published on the main queue.
@@ -34,9 +43,17 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
     enum State: Equatable { case idle, connecting, connected, failed(String) }
     private(set) var state: State = .idle
 
+    private static let log = Logger(subsystem: "com.bragi0.SimpleVPN", category: "ssh-engine")
+
     private let ssh = DispatchQueue(label: "com.bragi0.SimpleVPN.ssh.session")
     private var session: SSHSession?      // touched only on `ssh`
     private var listener: NWListener?
+
+    // Live forwards added while connected ("-L"/"-D" listeners keyed by their
+    // normalized "FLAG spec" line). Guarded by a lock: add/remove arrive from
+    // MainActor tasks while stop() may race them.
+    private let forwardLock = NSLock()
+    private var _forwards: [String: NWListener] = [:]
 
     // Stop signal, readable from both the MainActor (`stop`) and the `ssh` queue
     // (the in-flight connect), so a disconnect during connect can't leave a live
@@ -59,6 +76,8 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
         var pinnedHostKeySHA256: String? = nil
         /// "yes" | "accept-new" | "no" — a changed key is always refused regardless.
         var strictHostKey: String = "accept-new"
+        /// TCP connect timeout in seconds (ssh's ConnectTimeout).
+        var connectTimeout: Int = 15
     }
 
     /// Publish `state` on the main queue so the `@Observable` bookkeeping and any
@@ -76,12 +95,18 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
             ssh.async {
                 let s = SSHSession()
                 do {
-                    try s.connect(toHost: config.host, port: Int32(config.port), timeout: 15)
+                    try s.connect(toHost: config.host, port: Int32(config.port),
+                                  timeout: Int32(max(1, config.connectTimeout)))
                     // Verify the host key BEFORE auth — otherwise we'd hand
                     // credentials to whoever answered (MITM).
                     try s.verifyHostKey(withKnownHosts: config.knownHostsPath,
                                         pin: config.pinnedHostKeySHA256,
                                         strict: config.strictHostKey)
+                    // TOFU is a trust decision — say out loud exactly what key
+                    // was just pinned, so a surprise entry is attributable.
+                    if s.acceptedNewHostKey, let fp = s.hostKeyFingerprintSHA256 {
+                        Self.log.notice("Trusted new SSH host key on first use for \(config.host, privacy: .public):\(config.port): \(s.hostKeyType ?? "key", privacy: .public) SHA256:\(fp, privacy: .public) — appended to known_hosts")
+                    }
                     try Self.authenticate(s, config)
                     s.enterDataMode()   // non-blocking from here on
                 } catch {
@@ -101,7 +126,15 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
             ssh.async { self.session?.disconnect(); self.session = nil }
             throw CancellationError()
         }
-        try startListener(port: config.socksPort)
+        do {
+            try await startListener(port: config.socksPort)
+        } catch {
+            // Publish the real reason (typically EADDRINUSE) and rethrow so the
+            // caller can fall back — never report Connected over a dead listener.
+            publish(.failed("SOCKS listener failed: \(error.localizedDescription)"))
+            throw error
+        }
+        if stopped { throw CancellationError() }   // stop() during listener startup
         publish(.connected)
     }
 
@@ -119,13 +152,142 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
         try s.authAgent(forUser: c.username)
     }
 
-    private func startListener(port: Int) throws {
-        let params = NWParameters.tcp
-        let listener = try NWListener(using: params,
+    /// Start the main SOCKS listener and return only once it is actually
+    /// `.ready` — bind errors (EADDRINUSE when the port is taken) arrive
+    /// asynchronously via `stateUpdateHandler`, so returning at `start()` would
+    /// report a proxy that can never accept a connection.
+    private func startListener(port: Int) async throws {
+        let listener = try NWListener(using: .tcp,
                                       on: NWEndpoint.Port(rawValue: UInt16(port)) ?? .any)
         listener.newConnectionHandler = { [weak self] conn in self?.handleSOCKS(conn) }
-        listener.start(queue: .global(qos: .userInitiated))
-        self.listener = listener
+        self.listener = listener   // published before start so stop() can cancel it mid-await
+        try await Self.startAndAwaitReady(listener)
+    }
+
+    /// Start a listener and wait for `.ready`; `.failed`/`.waiting` throw the
+    /// underlying error (a fixed local port that can't bind never becomes ready).
+    private static func startAndAwaitReady(_ listener: NWListener) async throws {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            // The handler fires for every state change; resume exactly once.
+            let resumed = OSAllocatedUnfairLock(initialState: false)
+            @Sendable func resumeOnce(_ result: Result<Void, Error>) {
+                let first = resumed.withLock { done -> Bool in
+                    if done { return false }
+                    done = true
+                    return true
+                }
+                guard first else { return }
+                cont.resume(with: result)
+            }
+            // weak: a strong capture in the listener's own handler is a cycle.
+            listener.stateUpdateHandler = { [weak listener] state in
+                switch state {
+                case .ready:
+                    resumeOnce(.success(()))
+                case .failed(let error):
+                    listener?.cancel()
+                    resumeOnce(.failure(error))
+                case .waiting(let error):
+                    listener?.cancel()
+                    resumeOnce(.failure(error))
+                case .cancelled:
+                    resumeOnce(.failure(CancellationError()))
+                default:
+                    break
+                }
+            }
+            listener.start(queue: .global(qos: .userInitiated))
+        }
+    }
+
+    // MARK: Live forwards (add/remove while connected — no reconnect)
+
+    /// Add a forward to the running session. "D" opens another SOCKS listener,
+    /// "L" a fixed local→remote listener; both reuse the direct-tcpip pump.
+    /// "R" would need a `libssh2_channel_forward_listen` accept loop the data
+    /// pump doesn't run — refused honestly so the caller can say "reconnect
+    /// required" (the subprocess path supports it live).
+    func addForward(flag: String, spec: String) async throws {
+        let key = "\(flag) \(spec)"
+        switch flag {
+        case "D":
+            guard let port = Self.dynamicPort(spec), (1...65535).contains(port) else {
+                throw SSHForwardError("Couldn't parse a SOCKS port out of “\(spec)”.")
+            }
+            try await startForwardListener(key: key, port: port) { [weak self] conn in
+                self?.handleSOCKS(conn)
+            }
+        case "L":
+            guard let (localPort, host, remotePort) = Self.localForwardParts(spec) else {
+                throw SSHForwardError("Couldn't parse “\(spec)” — expected [bind:]port:host:hostport (bracketed IPv6 binds aren't supported in-process).")
+            }
+            try await startForwardListener(key: key, port: localPort) { [weak self] conn in
+                self?.handleLocalForward(conn, host: host, port: remotePort)
+            }
+        default:
+            throw SSHForwardError("Reverse forwards (-R) need a reconnect on the in-process engine.")
+        }
+    }
+
+    /// Tear down a live forward added with `addForward`. Keyed by the same
+    /// normalized "FLAG spec" line.
+    func removeForward(key: String) {
+        forwardLock.lock()
+        let listener = _forwards.removeValue(forKey: key)
+        forwardLock.unlock()
+        listener?.cancel()
+    }
+
+    /// Register the listener under its key BEFORE starting it, so stop()/remove
+    /// can cancel it even mid-startup; deregister again if it never got ready.
+    private func startForwardListener(key: String, port: Int,
+                                      onConnection: @escaping @Sendable (NWConnection) -> Void) async throws {
+        guard !stopped else { throw CancellationError() }
+        let listener = try NWListener(using: .tcp,
+                                      on: NWEndpoint.Port(rawValue: UInt16(port)) ?? .any)
+        listener.newConnectionHandler = onConnection
+        forwardLock.withLock {
+            _forwards[key]?.cancel()   // replacing an edited spec under the same key
+            _forwards[key] = listener
+        }
+        do {
+            try await Self.startAndAwaitReady(listener)
+        } catch {
+            forwardLock.withLock {
+                if _forwards[key] === listener { _forwards[key] = nil }
+            }
+            throw error
+        }
+    }
+
+    /// A fixed -L forward: no SOCKS handshake — every accepted connection goes
+    /// straight to a direct-tcpip channel to the configured host:port.
+    private func handleLocalForward(_ conn: NWConnection, host: String, port: Int) {
+        conn.start(queue: .global(qos: .userInitiated))
+        ssh.async {
+            guard !self.stopped, let s = self.session,
+                  let channel = try? s.openDirectTCPIP(toHost: host, port: Int32(port)) else {
+                conn.cancel(); return
+            }
+            self.pump(conn, channel)
+        }
+    }
+
+    /// "[bind:]port" → port (the -D spec).
+    private static func dynamicPort(_ spec: String) -> Int? {
+        Int(spec.split(separator: ":").last.map(String.init) ?? spec)
+    }
+
+    /// "[bind:]port:host:hostport" → (localPort, host, remotePort). Bracketed
+    /// IPv6 fields break the colon split and return nil (surfaced as an error).
+    private static func localForwardParts(_ spec: String) -> (Int, String, Int)? {
+        let parts = spec.split(separator: ":").map(String.init)
+        guard parts.count == 3 || parts.count == 4 else { return nil }
+        let p = parts.count == 4 ? Array(parts.dropFirst()) : parts   // drop the bind address
+        guard let localPort = Int(p[0]), (1...65535).contains(localPort),
+              let remotePort = Int(p[2]), (1...65535).contains(remotePort),
+              !p[1].isEmpty else { return nil }
+        return (localPort, p[1], remotePort)
     }
 
     // MARK: SOCKS5 (RFC 1928, CONNECT + no-auth only)
@@ -283,6 +445,10 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
     func stop() {
         markStopped()
         listener?.cancel(); listener = nil
+        forwardLock.lock()
+        let extras = _forwards; _forwards = [:]
+        forwardLock.unlock()
+        for l in extras.values { l.cancel() }
         ssh.async { self.session?.disconnect(); self.session = nil }
         publish(.idle)
     }

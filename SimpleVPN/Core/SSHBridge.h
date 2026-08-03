@@ -82,6 +82,12 @@ typedef NS_ENUM(NSInteger, SSHHostKeyStatus) {
                              strict:(NSString *)strict
                               error:(NSError * _Nullable * _Nullable)error;
 
+/// YES when the last `verifyHostKeyWithKnownHosts:` trusted a previously-unknown
+/// host on first use (accept-new / no) and appended it to known_hosts. Pair with
+/// `hostKeyFingerprintSHA256` / `hostKeyType` to log exactly what was trusted —
+/// TOFU must never be silent.
+@property (readonly) BOOL acceptedNewHostKey;
+
 /// Switch the session to non-blocking after auth, so channel reads/writes never
 /// block the shared serial queue (kills head-of-line blocking between channels).
 - (void)enterDataMode;

@@ -27,8 +27,9 @@ struct TailscaleView: View {
     @State private var savedTick = false
     @State private var status: TailscaleStatus?
     @State private var prefsError: String?
-
-    @Environment(\.openWindow) private var openWindow
+    @State private var customRouting = CustomRoutingProfile()
+    @State private var crProxyAuthUsername = ""
+    @State private var crProxyAuthPassword = ""
 
     var body: some View {
         Form {
@@ -109,6 +110,10 @@ struct TailscaleView: View {
             if let status, status.backendState == .running {
                 networkSection(status)
             }
+
+            CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
+                                proxyAuthUsername: $crProxyAuthUsername,
+                                proxyAuthPassword: $crProxyAuthPassword)
         }
         .formStyle(.grouped)
         .disabled(ManagedPolicy.lockConfiguration)
@@ -153,7 +158,11 @@ struct TailscaleView: View {
                 Text(state.displayText).font(.callout).foregroundStyle(.secondary)
                 if state == .needsLogin {
                     Spacer()
-                    Button("Open Sign-In…") { openWindow(id: "sso") }
+                    // The engine's login URL, in the default browser (the SSO
+                    // window is OpenConnect's loopback flow, not this one).
+                    // Disabled until the engine has issued a URL to open.
+                    Button("Open Sign-In…") { vpn.openTailscaleSignIn(id: profileID) }
+                        .disabled(vpn.tailscaleSignInURL[profileID] == nil)
                 }
             }
         }
@@ -222,6 +231,8 @@ struct TailscaleView: View {
         authKey = vpn.tailscaleAuthKey(for: profileID)
         advertiseText = draft.advertiseRoutes.joined(separator: ", ")
         status = vpn.tailscaleStatuses[profileID]
+        customRouting = vpn.customRouting(for: profileID)
+        (crProxyAuthUsername, crProxyAuthPassword) = loadCustomRoutingProxyAuthFields(profileID: profileID)
     }
 
     /// Live status while this editor is open: the exit-node list and the
@@ -255,6 +266,9 @@ struct TailscaleView: View {
             } else {
                 prefsError = nil
             }
+            customRouting = await commitCustomRouting(vpn, profileID: profileID, profile: customRouting,
+                                                      proxyAuthUsername: crProxyAuthUsername,
+                                                      proxyAuthPassword: crProxyAuthPassword)
             savedTick = true
             try? await Task.sleep(for: .seconds(2))
             savedTick = false

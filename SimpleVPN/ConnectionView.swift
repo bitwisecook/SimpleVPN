@@ -29,7 +29,6 @@ struct ConnectionView: View {
     @Environment(NativeVPNManager.self) private var nativeVPN: NativeVPNManager?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showImporter = false
-    @State private var sso = SSOAuthModel.shared
     /// The right-hand live-details pane. Closed by default (simple window);
     /// the Settings toggle changes the launch state, the toolbar button the moment.
     @AppStorage(inspectorDefaultsKey) private var inspectorOpenByDefault = false
@@ -147,10 +146,9 @@ struct ConnectionView: View {
                 reach?.start(connectedIDs: { vpn.profiles.filter { $0.status == .connected }.map(\.id) },
                              fetch: { await vpn.fetchStats(id: $0) })
             }
-            // A VPN needs SAML/SSO sign-in in the in-app window → raise it.
-            .onChange(of: sso.generation) {
-                if sso.pending != nil { openWindow(id: "sso") }
-            }
+            // (SSO sign-in requests raise the in-app window from app scope now —
+            // see SSOWindowOpener in SimpleVPNApp — so they surface even when
+            // this window is closed.)
             .fileImporter(isPresented: $showImporter,
                           allowedContentTypes: [UI.ovpnType, .data, .plainText],
                           onCompletion: importConfig)
@@ -414,7 +412,6 @@ private struct ConnectionDetailView: View {
     @Environment(LinkStateMonitor.self) private var link: LinkStateMonitor?
     @Environment(ExtensionController.self) private var ext: ExtensionController?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.openWindow) private var openWindow
     @State private var busy = false
     /// The in-flight connect, so the busy pill's ✕ can cancel the credential lookup.
     @State private var connectTask: Task<Void, Never>?
@@ -449,9 +446,19 @@ private struct ConnectionDetailView: View {
     /// AutoFillFields, which SwiftUI focus can't reach.
     @State private var focusedField: CredentialField?
 
-    private var requiresOTP: Bool { vpn.authConfig(for: profile.id).requiresOTP }
+    private var requiresOTP: Bool { vpn.requiresOTP(for: profile.id) }
     private var allowPasswordSave: Bool {
         vpn.ovpnText(id: profile.id).map { evaluator.evaluation(for: $0).allowPasswordSave } ?? true
+    }
+    /// Autologin profiles sign in with their certificate — no credentials to
+    /// collect, so no form, no gating, no first-connect credential coaching.
+    private var isAutologin: Bool {
+        vpn.ovpnText(id: profile.id).map { evaluator.evaluation(for: $0).autologin } ?? false
+    }
+    /// A `USERNAME` userlock: the profile fixes the username, so the form shows
+    /// it read-only and Connect never waits on it.
+    private var lockedUsername: String {
+        vpn.ovpnText(id: profile.id).map { evaluator.evaluation(for: $0).userlockedUsername } ?? ""
     }
     private var isPaused: Bool { vpn.pausedProfiles.contains(profile.id) }
     private var isStalled: Bool { reach?.isStalled(profile.id) == true }
@@ -550,6 +557,21 @@ private struct ConnectionDetailView: View {
     private var isProtected: Bool { biometricInfo.exists }
 
     private var canConnect: Bool {
+        // Tailscale signs itself in — with the stored setup key, or by opening
+        // a browser sign-in page. There is nothing to type first.
+        if profile.kind == .tailscale { return true }
+        // A Proxy Tunnel connects on nothing when the proxy needs no sign-in;
+        // when it does, it connects with the credentials saved in its settings
+        // (there is no OTP, and the editor is where they are entered).
+        if profile.kind == .proxyTunnel {
+            let config = vpn.proxyTunnelConfig(for: profile.id)
+            if config.connectProblem != nil { return false }
+            if !config.requiresAuth { return true }
+            let creds = vpn.proxyTunnelCredentials(for: profile.id)
+            return !creds.username.trimmingCharacters(in: .whitespaces).isEmpty && !creds.password.isEmpty
+        }
+        // Autologin: the certificate is the sign-in.
+        if isAutologin { return true }
         if usesManager {
             // The manager supplies username/password; only gate on a typed OTP
             // when the manager can't provide one.
@@ -563,7 +585,9 @@ private struct ConnectionDetailView: View {
                 || !vpn.transientCredentials(for: profile.id).otp.trimmingCharacters(in: .whitespaces).isEmpty
         }
         let c = vpn.transientCredentials(for: profile.id)
-        return !c.username.trimmingCharacters(in: .whitespaces).isEmpty
+        let usernameOK = !lockedUsername.isEmpty
+            || !c.username.trimmingCharacters(in: .whitespaces).isEmpty
+        return usernameOK
             && !c.password.isEmpty
             && (!requiresOTP || !c.otp.trimmingCharacters(in: .whitespaces).isEmpty)
     }
@@ -574,6 +598,16 @@ private struct ConnectionDetailView: View {
         ScrollView {
             VStack(spacing: 20) {
                 header
+                // Default-gateway picker (PolicyRouting.md Tier 2): appears as soon
+                // as a single connected capable VPN gives the user a choice — its
+                // "route all internet through this VPN" switch (RC2) — and stays for
+                // the multi-VPN owner picker. One live switch for which VPN owns
+                // 0.0.0.0/0, plus the animated traffic path. Shown here (not
+                // per-profile) so it's visible whichever VPN is selected.
+                if vpn.showsDefaultGatewayControl {
+                    DefaultGatewayCard(vpn: vpn)
+                        .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
+                }
                 // Sign-in comes FIRST, directly under the Connect row it feeds —
                 // username/password/OTP are what the button is waiting for, so they
                 // must not sit below the fold behind panels and pickers.
@@ -588,6 +622,16 @@ private struct ConnectionDetailView: View {
                     // the first-connect credential coaching applies.
                     if profile.kind == .tailscale {
                         tailscalePanel
+                    } else if profile.kind == .proxyTunnel {
+                        proxyTunnelPanel
+                    } else if isAutologin {
+                        // Autologin: the profile's certificate signs in by
+                        // itself, so there is no credential form to show and
+                        // no "how do you sign in" questions to ask.
+                        Label("This VPN signs in automatically — no username or password needed.",
+                              systemImage: "checkmark.seal")
+                            .font(.callout).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
                         if neverConnected, !setupDismissed {
                             FirstConnectSetupCard(vpn: vpn, profile: profile,
@@ -978,7 +1022,14 @@ private struct ConnectionDetailView: View {
     /// graph, map and details live in the inspector (third) column.
     @ViewBuilder private var connectedBody: some View {
         VStack(alignment: .leading, spacing: 16) {
-            if profile.status == .connecting, connectingTooLong {
+            // A Tailscale connect waiting on the browser sign-in: say so, and
+            // keep the URL reachable — a dismissed tab must not be a dead end.
+            if profile.status == .connecting, profile.kind == .tailscale,
+               vpn.tailscaleSignInURL[profile.id] != nil {
+                TailscaleSignInBanner { vpn.openTailscaleSignIn(id: profile.id) }
+            }
+            if profile.status == .connecting, connectingTooLong,
+               vpn.tailscaleSignInURL[profile.id] == nil {   // the sign-in banner already explains the wait
                 StuckConnectingBanner(vpnName: profile.name, host: probeHost) {
                     vpn.disconnect(id: profile.id)
                 }
@@ -999,15 +1050,20 @@ private struct ConnectionDetailView: View {
     /// exist, and points at the one place a setup key can be entered.
     @ViewBuilder private var tailscalePanel: some View {
         let status = vpn.tailscaleStatuses[profile.id]
+        let signInURL = vpn.tailscaleSignInURL[profile.id]
         VStack(alignment: .leading, spacing: 8) {
             if let status, status.backendState.needsUserAction {
                 Label(status.backendState == .needsMachineAuth
                       ? "Waiting for someone to approve this Mac on your network."
-                      : "Waiting for you to sign in. The sign-in page should have opened.",
+                      : "Waiting for you to sign in. The sign-in page should have opened in your browser.",
                       systemImage: "person.badge.key")
                     .foregroundStyle(.orange)
                 if status.backendState == .needsLogin {
-                    Button("Open Sign-In Page") { openWindow(id: "sso") }
+                    // Re-opens the engine's login URL in the default browser —
+                    // the way back when the tab was closed. Disabled until the
+                    // engine has actually issued one.
+                    Button("Open Sign-In Page") { vpn.openTailscaleSignIn(id: profile.id) }
+                        .disabled(signInURL == nil)
                 }
             } else if let status, status.backendState == .running {
                 Label("This Mac is on the network as \(status.selfDNSName.isEmpty ? status.primaryIPv4 : status.selfDNSName).",
@@ -1021,6 +1077,33 @@ private struct ConnectionDetailView: View {
                 Label("This VPN signs itself in — with a setup key, or by opening a sign-in page the first time.",
                       systemImage: "point.3.connected.trianglepath.dotted")
                     .foregroundStyle(.secondary)
+            }
+        }
+        .font(.callout)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// What stands in for the credential form on a Proxy Tunnel. Says what will
+    /// happen and points at the editor for the upstream/credentials, rather than
+    /// asking for something the connect row doesn't own.
+    @ViewBuilder private var proxyTunnelPanel: some View {
+        let config = vpn.proxyTunnelConfig(for: profile.id)
+        VStack(alignment: .leading, spacing: 8) {
+            if let problem = config.connectProblem {
+                Label(problem, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+            } else {
+                Label("Every connection is dialled through \(config.proxyHost.isEmpty ? "the proxy" : config.proxyHost).",
+                      systemImage: "arrow.triangle.branch")
+                    .foregroundStyle(.secondary)
+                if config.requiresAuth {
+                    let creds = vpn.proxyTunnelCredentials(for: profile.id)
+                    let ok = !creds.username.isEmpty && !creds.password.isEmpty
+                    Label(ok ? "Sign-in details are saved."
+                             : "This proxy needs a username and password — add them in this VPN's settings.",
+                          systemImage: ok ? "checkmark.circle" : "person.badge.key")
+                        .foregroundStyle(ok ? Color.secondary : Color.orange)
+                }
             }
         }
         .font(.callout)
@@ -1121,10 +1204,15 @@ private struct ConnectionDetailView: View {
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
                 GridRow {
                     Text("Username").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
+                    // A userlocked profile fixes the username: prefilled (see
+                    // loadOnce) and read-only, matching the editor's behaviour.
                     AutoFillField(kind: .username, placeholder: "Username",
                                   text: username, focus: $focusedField, focusValue: .username,
                                   onSubmit: attemptConnect)
-                        .requiredEmphasis(missing: username.wrappedValue.isEmpty, attempted: submitAttempted, nudge: nudgeTick)
+                        .disabled(!lockedUsername.isEmpty)
+                        .requiredEmphasis(missing: username.wrappedValue.isEmpty && lockedUsername.isEmpty,
+                                          attempted: submitAttempted, nudge: nudgeTick)
+                        .help(lockedUsername.isEmpty ? "" : "This VPN's configuration fixes the username.")
                 }
                 GridRow {
                     Text("Password").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
@@ -1179,8 +1267,14 @@ private struct ConnectionDetailView: View {
     }
 
     private var firstMissingField: CredentialField? {
+        // Nothing to type at all for these — a nudge must not focus a field
+        // that isn't on screen.
+        if profile.kind == .tailscale || profile.kind == .proxyTunnel || isAutologin { return nil }
+        // The manager/protected forms render at most an OTP field.
+        if usesManager { return managerNeedsTypedOTP ? .otp : nil }
+        if isProtected { return (requiresOTP && !biometricInfo.hasTOTP) ? .otp : nil }
         let c = vpn.transientCredentials(for: profile.id)
-        return c.username.isEmpty ? .username
+        return (c.username.isEmpty && lockedUsername.isEmpty) ? .username
              : c.password.isEmpty ? .password
              : requiresOTP ? .otp : nil
     }
@@ -1198,7 +1292,11 @@ private struct ConnectionDetailView: View {
         loaded = true
         // Materialize the shared credential state (prefills from the keychain)
         // so every surface sees the same values from here on.
-        vpn.transientCreds[profile.id] = vpn.transientCredentials(for: profile.id)
+        var creds = vpn.transientCredentials(for: profile.id)
+        // A userlocked username always wins — the row is read-only, so a stale
+        // saved value could otherwise never be corrected.
+        if !lockedUsername.isEmpty { creds.username = lockedUsername }
+        vpn.transientCreds[profile.id] = creds
     }
 
     private func connect() async {
@@ -1633,6 +1731,31 @@ private struct UnreachableHereBanner: View {
         }
         .padding(12)
         .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+/// A Tailscale connect waiting on the user's browser sign-in. Orange like the
+/// other "waiting on you" states, with the one action that moves it forward:
+/// re-open the sign-in page (the engine's login URL stays valid until used).
+private struct TailscaleSignInBanner: View {
+    let reopen: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "person.badge.key").font(.title3).foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Sign in in your browser").font(.callout.weight(.semibold))
+                Text("A sign-in page opened in your browser. Finish signing in there and this Mac joins the network by itself. Closed the tab? Open it again.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button("Open Sign-In Page", action: reopen)
+                .buttonStyle(.glassProminent).tint(.orange)
+        }
+        .padding(12)
+        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
     }
 }
 

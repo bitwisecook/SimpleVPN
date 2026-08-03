@@ -91,7 +91,13 @@ final class NativeVPNManager {
     }
     func remove(_ id: String) {
         store.removeAll { $0.id == id }
+        // Both the persistent-reference copies (nativeService, keyed by the
+        // accounts connect() writes) and the credsService copy NativeVPNView.save()
+        // writes need clearing — leaving either behind is a stale-secret leak.
         KeychainCredentialStore.deleteNativeSecret(account: "native.\(id)")
+        KeychainCredentialStore.deleteNativeSecret(account: "native.\(id).psk")
+        KeychainCredentialStore.deleteCredentials(profile: "native.\(id)")
+        KeychainCredentialStore.deleteCredentials(profile: "native.\(id).secret")
         persist()
     }
 
@@ -103,9 +109,11 @@ final class NativeVPNManager {
         status = mgr.connection.status
     }
 
-    /// Push this config into the single personal-VPN slot and start it. `secret`
-    /// is the password or shared secret depending on the config's auth mode.
-    func connect(_ c: NativeVPNConfig, secret: String) async {
+    /// Push this config into the single personal-VPN slot and start it.
+    /// `secret` is the IKEv2 password/PSK, or the IPsec XAuth password.
+    /// `sharedSecret` is the IPsec group PSK (ignored for IKEv2, which only
+    /// ever needs one secret at a time).
+    func connect(_ c: NativeVPNConfig, secret: String, sharedSecret: String = "") async {
         lastError = nil; needsEntitlement = false
         guard c.kind != .l2tp else {
             lastError = "L2TP can't be configured programmatically on macOS. Use “Export Configuration Profile” and install it."
@@ -114,68 +122,116 @@ final class NativeVPNManager {
         let mgr = NEVPNManager.shared()
         try? await mgr.loadFromPreferences()
 
-        let account = "native.\(c.id)"
-        let secretRef = KeychainCredentialStore.persistentReference(forSecret: secret, account: account)
-
-        let proto: NEVPNProtocol
-        switch c.kind {
-        case .ikev2:
-            let p = NEVPNProtocolIKEv2()
-            p.serverAddress = c.server
-            p.remoteIdentifier = c.remoteID.isEmpty ? c.server : c.remoteID
-            p.localIdentifier = c.username
-            if c.usesSharedSecret {
-                p.authenticationMethod = .sharedSecret
-                p.sharedSecretReference = secretRef
-            } else {
-                p.authenticationMethod = .none
-                p.useExtendedAuthentication = true      // EAP username/password
-                p.username = c.username
-                p.passwordReference = secretRef
-            }
-            applyIKEv2Options(c, to: p)
-            proto = p
-        case .ipsec:
-            let p = NEVPNProtocolIPSec()
-            p.serverAddress = c.server
-            p.username = c.username
-            p.passwordReference = secretRef
-            p.useExtendedAuthentication = true
-            p.localIdentifier = c.groupOrRealm.isEmpty ? nil : c.groupOrRealm
-            // IPsec group auth commonly rides a shared secret alongside XAuth.
-            p.authenticationMethod = c.usesSharedSecret ? .sharedSecret : .certificate
-            if c.usesSharedSecret { p.sharedSecretReference = secretRef }
-            proto = p
-        default:
-            return
-        }
-
-        mgr.protocolConfiguration = proto
-        mgr.localizedDescription = c.name
-        mgr.isEnabled = true
-        mgr.isOnDemandEnabled = c.onDemand
+        // Distinct keychain accounts per secret — IPsec needs the group PSK
+        // and the XAuth password to coexist, so they can no longer share one
+        // persistent reference (that was bug: both ended up pointing at
+        // whichever value happened to come in last).
+        let baseAccount = "native.\(c.id)"
+        let pskAccount = "native.\(c.id).psk"
 
         do {
+            let proto: NEVPNProtocol
+            switch c.kind {
+            case .ikev2:
+                let p = NEVPNProtocolIKEv2()
+                p.serverAddress = c.server
+                p.remoteIdentifier = c.remoteID.isEmpty ? c.server : c.remoteID
+                p.localIdentifier = c.username
+                if c.usesSharedSecret {
+                    p.authenticationMethod = .sharedSecret
+                    p.sharedSecretReference = try KeychainCredentialStore.persistentReference(forSecret: secret, account: baseAccount)
+                } else {
+                    p.authenticationMethod = .none
+                    p.useExtendedAuthentication = true      // EAP username/password
+                    p.username = c.username
+                    p.passwordReference = try KeychainCredentialStore.persistentReference(forSecret: secret, account: baseAccount)
+                }
+                applyIKEv2Options(c, to: p)
+                proto = p
+            case .ipsec:
+                let p = NEVPNProtocolIPSec()
+                p.serverAddress = c.server
+                p.username = c.username
+                p.useExtendedAuthentication = true
+                p.localIdentifier = c.groupOrRealm.isEmpty ? nil : c.groupOrRealm
+                // Certificate/identity authentication isn't wired up (no
+                // identity picker or import path exists) — the only mode that
+                // actually works, and the one the UI now forces, is a shared
+                // secret optionally paired with XAuth username/password (the
+                // Cisco-style combo CiscoImport produces from .pcf files).
+                p.authenticationMethod = .sharedSecret
+                p.sharedSecretReference = try KeychainCredentialStore.persistentReference(forSecret: sharedSecret, account: pskAccount)
+                p.passwordReference = try KeychainCredentialStore.persistentReference(forSecret: secret, account: baseAccount)
+                applyCommonOptions(c, to: p)
+                proto = p
+            default:
+                return
+            }
+
+            mgr.protocolConfiguration = proto
+            mgr.localizedDescription = c.name
+            mgr.isEnabled = true
+            mgr.isOnDemandEnabled = c.onDemand
+            // isOnDemandEnabled alone does nothing without at least one rule;
+            // a bare Connect rule is the sensible default (reconnect whenever
+            // something opens a network connection), matching what the
+            // "Connect on demand" toggle implies to a user.
+            mgr.onDemandRules = c.onDemand ? [NEOnDemandRuleConnect()] : []
+
             try await mgr.saveToPreferences()
             try await mgr.loadFromPreferences()
             try mgr.connection.startVPNTunnel()
             activeConfigID = c.id
         } catch {
             let ns = error as NSError
-            // NEVPNError / missing entitlement surfaces here.
-            if ns.domain == NEVPNErrorDomain || ns.localizedDescription.localizedCaseInsensitiveContains("entitlement") {
+            Self.log.error("native connect failed: \(ns.localizedDescription, privacy: .public) domain=\(ns.domain, privacy: .public) code=\(ns.code)")
+            if ns.domain == NEVPNErrorDomain, let code = NEVPNError.Code(rawValue: ns.code) {
+                switch code {
+                case .configurationReadWriteFailed:
+                    // macOS gives this same code both for a missing Personal
+                    // VPN entitlement AND for the user declining the "Add VPN
+                    // Configurations" prompt — there's no distinct code for
+                    // either, only the wording differs. Route on that wording
+                    // rather than lumping both under "not provisioned".
+                    let desc = ns.localizedDescription.localizedLowercase
+                    let underlying = ((ns.userInfo[NSUnderlyingErrorKey] as? NSError)?.localizedDescription ?? "").localizedLowercase
+                    if desc.contains("denied") || desc.contains("cancel") || underlying.contains("denied") || underlying.contains("cancel") {
+                        lastError = "You declined the “Add VPN Configurations” prompt. Native VPN needs that approval — try Connect again and allow it."
+                    } else {
+                        needsEntitlement = true
+                        lastError = "This build isn't provisioned for the native personal VPN yet (Personal VPN capability). \(ns.localizedDescription)"
+                    }
+                default:
+                    // configurationInvalid / configurationDisabled / connectionFailed /
+                    // configurationStale / configurationUnknown all mean something
+                    // else entirely — show what actually happened.
+                    lastError = ns.localizedDescription
+                }
+            } else if ns.localizedDescription.localizedCaseInsensitiveContains("entitlement") {
                 needsEntitlement = true
                 lastError = "This build isn't provisioned for the native personal VPN yet (Personal VPN capability). \(ns.localizedDescription)"
             } else {
                 lastError = ns.localizedDescription
             }
-            Self.log.error("native connect failed: \(ns.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Options that live on NEVPNProtocol itself, not the IKEv2 subclass —
+    /// apply to every native kind so Routing-section toggles (Send All
+    /// Traffic, Allow Local Network, Disconnect on Sleep) actually do
+    /// something for IPsec, not just IKEv2.
+    private func applyCommonOptions(_ c: NativeVPNConfig, to p: NEVPNProtocol) {
+        p.disconnectOnSleep = c.disconnectOnSleep
+        if #available(macOS 15.0, *) {
+            p.includeAllNetworks = c.includeAllNetworks
+            p.excludeLocalNetworks = c.excludeLocalNetworks
         }
     }
 
     /// Map the comprehensive IKEv2 fields onto the protocol object; each blank
     /// value leaves the OS default in place.
     private func applyIKEv2Options(_ c: NativeVPNConfig, to p: NEVPNProtocolIKEv2) {
+        applyCommonOptions(c, to: p)
         switch c.deadPeerDetection {
         case "none": p.deadPeerDetectionRate = .none
         case "low": p.deadPeerDetectionRate = .low
@@ -184,20 +240,17 @@ final class NativeVPNManager {
         default: p.deadPeerDetectionRate = .medium
         }
         p.disableMOBIKE = c.disableMOBIKE
-        p.disconnectOnSleep = c.disconnectOnSleep
-        if #available(macOS 15.0, *) {
-            p.includeAllNetworks = c.includeAllNetworks
-            p.excludeLocalNetworks = c.excludeLocalNetworks
-        }
         for sa in [p.ikeSecurityAssociationParameters, p.childSecurityAssociationParameters] {
             // The 128-bit cases are deprecated by Apple (macOS 14) with no
             // replacement — the advice is "use 256-bit". They stay because a
             // concentrator that only proposes AES-128 is otherwise unreachable,
-            // and dropping the case would fail the connection silently.
+            // and dropping the case would fail the connection silently. Reached
+            // via rawValue (AES128 = 3, AES128GCM = 5 per <NEVPNProtocolIKEv2.h>)
+            // so the deliberate use doesn't raise a deprecation warning every build.
             switch c.ikeEncryption {
-            case "aes128": sa.encryptionAlgorithm = .algorithmAES128
+            case "aes128": sa.encryptionAlgorithm = NEVPNIKEv2EncryptionAlgorithm(rawValue: 3)!
             case "aes256": sa.encryptionAlgorithm = .algorithmAES256
-            case "aes128gcm": sa.encryptionAlgorithm = .algorithmAES128GCM
+            case "aes128gcm": sa.encryptionAlgorithm = NEVPNIKEv2EncryptionAlgorithm(rawValue: 5)!
             case "aes256gcm": sa.encryptionAlgorithm = .algorithmAES256GCM
             case "chacha20poly1305": if #available(macOS 14.0, *) { sa.encryptionAlgorithm = .algorithmChaCha20Poly1305 }
             default: break   // 3DES etc. are unavailable on macOS — OS default stands
@@ -208,17 +261,30 @@ final class NativeVPNManager {
             case "sha512": sa.integrityAlgorithm = .SHA512
             default: break   // SHA-1 variants are unavailable on macOS
             }
-            switch c.ikeDHGroup {
-            case "14": sa.diffieHellmanGroup = .group14
-            case "15": sa.diffieHellmanGroup = .group15
-            case "16": sa.diffieHellmanGroup = .group16
-            case "19": sa.diffieHellmanGroup = .group19
-            case "20": sa.diffieHellmanGroup = .group20
-            case "21": sa.diffieHellmanGroup = .group21
-            case "31": sa.diffieHellmanGroup = .group31
-            default: break
-            }
             if let m = c.ikeLifetimeMinutes { sa.lifetimeMinutes = Int32(m) }
+        }
+        // The DH group picker always sets the IKE SA's group (or leaves the OS
+        // default on "Automatic"). The child SA's diffieHellmanGroup is what
+        // actually turns Perfect Forward Secrecy on for CREATE_CHILD_SA
+        // rekeys — Apple's API has no separate "enable PFS" bit, so the
+        // enablePFS toggle is wired to *whether* the child SA gets a group at
+        // all, using the same group as the picker (falling back to the
+        // widely-supported Group 14 if the picker is left on Automatic).
+        func dhGroup(_ v: String) -> NEVPNIKEv2DiffieHellmanGroup? {
+            switch v {
+            case "14": return .group14
+            case "15": return .group15
+            case "16": return .group16
+            case "19": return .group19
+            case "20": return .group20
+            case "21": return .group21
+            case "31": return .group31
+            default: return nil
+            }
+        }
+        if let g = dhGroup(c.ikeDHGroup) { p.ikeSecurityAssociationParameters.diffieHellmanGroup = g }
+        if c.enablePFS {
+            p.childSecurityAssociationParameters.diffieHellmanGroup = dhGroup(c.ikeDHGroup) ?? .group14
         }
     }
 

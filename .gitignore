@@ -35,3 +35,16 @@ Vendor/tailscale-engine/*
 # module; the archive build never produces it, but a stray one must not be
 # committed.
 Vendor/tailscale-engine/src/tsengine
+
+# Proxy-tunnel engine (tun2socks-style gVisor netstack → SOCKS5/CONNECT). Same
+# Go-as-c-archive deal: track the shim source, the pinned lockfiles and the
+# stable header; the built libpxengine.a (a STANDALONE verification build — the
+# engine actually ships folded into libtsengine.a) is rebuilt reproducibly by
+# Tools/build-proxy-engine.sh and never belongs in git.
+!Vendor/proxy-engine/
+Vendor/proxy-engine/*
+!Vendor/proxy-engine/src/
+!Vendor/proxy-engine/include/
+# Stray executables from `go build ./...` in the shim directory.
+Vendor/proxy-engine/src/pxengine
+Vendor/proxy-engine/src/carchive/carchive

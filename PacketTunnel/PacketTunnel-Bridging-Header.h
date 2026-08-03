@@ -10,3 +10,6 @@
 #import "OpenVPN3Bridge.h"
 #import "OpenConnectBridge.h"
 #import "tsengine.h"
+// The proxy-tunnel engine's exports live in the SAME Go c-archive as tsengine
+// (two Go c-archives cannot co-link); this is just its stable C header.
+#import "pxengine.h"

@@ -24,6 +24,7 @@ enum KeychainCredentialStore {
     private static let credsService = "com.bragi0.SimpleVPN.creds"      // persistent base creds
     private static let sessionService = "com.bragi0.SimpleVPN.session"  // read-once per connect
     private static let secretsService = "com.bragi0.SimpleVPN.secrets"  // persistent engine secrets
+    private static let customRoutingProxyAuthService = "com.bragi0.SimpleVPN.customrouting-proxyauth"
 
     struct Credentials: Codable, Sendable {
         var username: String
@@ -70,6 +71,28 @@ enum KeychainCredentialStore {
     }
     static func deleteProfileSecrets(profile: String) {
         delete(service: secretsService, account: profile)
+    }
+
+    // MARK: Custom Routing proxy auth (Mediators/CustomRouting.swift `ProxyCustomization`)
+    //
+    // The model carries only a keychain REF (`authSource`) — never inline credentials.
+    // This is that ref's backing store: one username/password per profile, keyed by the
+    // profile id exactly like the other per-profile stores above.
+
+    struct CustomRoutingProxyAuth: Codable, Sendable, Equatable {
+        var username: String
+        var password: String
+    }
+
+    static func saveCustomRoutingProxyAuth(profile: String, _ auth: CustomRoutingProxyAuth) throws {
+        try set(service: customRoutingProxyAuthService, account: profile, data: try JSONEncoder().encode(auth))
+    }
+    static func loadCustomRoutingProxyAuth(profile: String) -> CustomRoutingProxyAuth? {
+        guard let d = get(service: customRoutingProxyAuthService, account: profile) else { return nil }
+        return try? JSONDecoder().decode(CustomRoutingProxyAuth.self, from: d)
+    }
+    static func deleteCustomRoutingProxyAuth(profile: String) {
+        delete(service: customRoutingProxyAuthService, account: profile)
     }
 
     // MARK: Transient session secret (username + {password}{otp}), consumed once by the extension
@@ -170,8 +193,11 @@ enum KeychainCredentialStore {
 
     private static let nativeService = "com.bragi0.SimpleVPN.native"
 
-    @discardableResult
-    static func persistentReference(forSecret secret: String, account: String) -> Data? {
+    /// - Throws: an `NSOSStatusErrorDomain` error carrying the raw `OSStatus`
+    ///   if `SecItemAdd` fails, instead of silently handing back `nil` — a
+    ///   caller that swallowed that `nil` would only see an opaque native-VPN
+    ///   failure much later, with no way back to "the keychain write failed".
+    static func persistentReference(forSecret secret: String, account: String) throws -> Data {
         let acct = account
         SecItemDelete([kSecClass as String: kSecClassGenericPassword,
                        kSecAttrService as String: nativeService,
@@ -185,8 +211,13 @@ enum KeychainCredentialStore {
             kSecReturnPersistentRef as String: true,
         ]
         var out: CFTypeRef?
-        guard SecItemAdd(add as CFDictionary, &out) == errSecSuccess else { return nil }
-        return out as? Data
+        let status = SecItemAdd(add as CFDictionary, &out)
+        guard status == errSecSuccess, let data = out as? Data else {
+            log.error("native keychain ref write for account \(account, privacy: .public) failed: OSStatus \(status)")
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status),
+                          userInfo: [NSLocalizedDescriptionKey: "Couldn't save the secret to the keychain (\(status))."])
+        }
+        return data
     }
 
     static func deleteNativeSecret(account: String) {

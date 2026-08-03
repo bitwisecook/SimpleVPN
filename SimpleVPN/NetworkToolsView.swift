@@ -41,7 +41,7 @@ final class LatencyMonitor {
         networkKey != resolvedOn || age >= reresolveAfter
     }
 
-    func start(host: String) {
+    func start(host: String, boundIf: UInt32 = 0) {
         stop()
         task = Task { [weak self] in
             // Ping the first IPv4 (unprivileged ICMP is v4 here).
@@ -51,7 +51,7 @@ final class LatencyMonitor {
             var resolvedAt = Date()
             self.targetIP = target
             while !Task.isCancelled {
-                let r = await NetworkProbes.pingOnce(host: target, seq: UInt16(truncatingIfNeeded: self.seq))
+                let r = await NetworkProbes.pingOnce(host: target, seq: UInt16(truncatingIfNeeded: self.seq), boundIf: boundIf)
                 // stop() may have fired (and cleared samples) while we were awaiting
                 // the ping — don't append a stale sample into a cleared/next session.
                 guard !Task.isCancelled else { return }
@@ -115,6 +115,11 @@ struct NetworkToolsView: View {
     @Environment(NativeVPNManager.self) private var nativeVPN: NativeVPNManager?
 
     @State private var target = ""
+    /// Which egress the diagnostics go out of. Automatic = a normal, route-table-obeying
+    /// socket (today's behavior); the others pin the probe sockets to a chosen
+    /// interface via `IP_BOUND_IF` so reachability/latency can be tested THROUGH a
+    /// specific tunnel even when routing wouldn't send it there.
+    @State private var egress: ProbeEgress = .automatic
     @State private var request = NetworkToolsRequest.shared
     @State private var latency = LatencyMonitor()
     @State private var running = false
@@ -169,6 +174,9 @@ struct NetworkToolsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 targetBar
+                routingStateCard
+                dnsStateCard
+                proxyStateCard
                 ladderSection
                 vpnProbeCard
                 if hasResults {
@@ -247,6 +255,189 @@ struct NetworkToolsView: View {
             return .resolve(native: native)
         }
         return nil
+    }
+
+    // MARK: Routing state (the Route mediator's live effective state)
+    //
+    // Everything here reads the mediator's PUBLISHED state (`vpn.routes.*`, all
+    // `@Observable`) — the current default owner, each connected tunnel's live role,
+    // and the last external-drift event — so the panel reflects reality, not the stored
+    // preference. "Re-assert" drives the mediator to reconcile the OS back to desired.
+    @ViewBuilder private var routingStateCard: some View {
+        let owner = vpn.routes.displayedGatewayOwner
+        let ownerName = vpn.routes.name(for: owner)
+        let participants = vpn.routes.connectedProfiles
+        GroupBox("Routing") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: owner == nil ? "arrow.up.forward" : "lock.shield.fill")
+                        .foregroundStyle(owner == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.accentColor))
+                    Text("Default gateway:")
+                        .foregroundStyle(.secondary)
+                    Text(ownerName ?? "Direct").fontWeight(.medium)
+                    Spacer()
+                    Button("Re-assert") { vpn.routes.reassertNow() }
+                        .controlSize(.small)
+                        .help("Drive routing back to the intended default owner now.")
+                        .disabled(participants.isEmpty)
+                }
+                .font(.callout)
+
+                if !participants.isEmpty {
+                    Divider()
+                    ForEach(participants) { p in
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(vpn.routes.gatewayRole(for: p.id) == .full ? Color.accentColor : Color.secondary)
+                                .frame(width: 7, height: 7)
+                            Text(p.name)
+                            Spacer()
+                            Text(vpn.routes.gatewayRole(for: p.id) == .full ? "full — carries the default" : "split — its subnets only")
+                                .foregroundStyle(.secondary)
+                        }
+                        .font(.caption)
+                    }
+                }
+
+                Divider()
+                if let drift = vpn.routes.lastDrift {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
+                            .foregroundStyle(.orange)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(drift.summary).foregroundStyle(.secondary)
+                            Text("\(drift.at.formatted(.relative(presentation: .named)))\(drift.reasserted ? " · re-asserted" : "")")
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .font(.caption)
+                } else {
+                    Label("No external routing changes detected.", systemImage: "checkmark.seal")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .padding(6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    // MARK: DNS state (the DNS mediator's live effective state — P2)
+    //
+    // Reads the mediator's PUBLISHED state (`vpn.dns.*`, all `@Observable`): the
+    // effective catch-all owner + its resolvers, the split-DNS domain assignments, the
+    // resolvers the OS is actually using (SCDynamicStore), and the last external-drift
+    // event. "Re-assert" re-establishes the catch-all owner's DNS.
+    @ViewBuilder private var dnsStateCard: some View {
+        let plan = vpn.dns.plan
+        let ownerName = vpn.dns.name(for: plan.catchAllOwner)
+        GroupBox("DNS") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: plan.catchAllOwner == nil ? "network" : "lock.shield.fill")
+                        .foregroundStyle(plan.catchAllOwner == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.accentColor))
+                    Text("Resolves through:").foregroundStyle(.secondary)
+                    Text(ownerName ?? "Direct (system resolvers)").fontWeight(.medium)
+                    Spacer()
+                    Button("Re-assert") { vpn.dns.reassertNow() }
+                        .controlSize(.small)
+                        .help("Re-establish the intended resolvers now.")
+                        .disabled(plan.catchAllOwner == nil)
+                }
+                .font(.callout)
+
+                if !plan.systemResolvers.isEmpty {
+                    Text(plan.systemResolvers.joined(separator: ", "))
+                        .font(.caption.monospaced()).foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                if !plan.perDomain.isEmpty {
+                    Divider()
+                    ForEach(plan.perDomain) { a in
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(a.domains.joined(separator: " · "))
+                                .font(.caption).foregroundStyle(.secondary)
+                            Text("→").font(.caption).foregroundStyle(.tertiary)
+                            Text("\(vpn.dns.name(for: a.engine) ?? a.engine) (\(a.resolvers.joined(separator: ", ")))")
+                                .font(.caption.monospaced()).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                Divider()
+                if !vpn.dns.observedResolvers.isEmpty {
+                    Text("System now uses: \(vpn.dns.observedResolvers.joined(separator: ", "))")
+                        .font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                        .textSelection(.enabled)
+                }
+                if let drift = vpn.dns.lastDrift {
+                    driftLine(drift)
+                } else {
+                    Label("No external DNS changes detected.", systemImage: "checkmark.seal")
+                        .font(.caption).foregroundStyle(.tertiary)
+                }
+            }
+            .padding(6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    // MARK: Proxy state (the Proxy mediator's live effective state — P3)
+    @ViewBuilder private var proxyStateCard: some View {
+        let plan = vpn.proxies.plan
+        let ownerName = vpn.proxies.name(for: plan.owner)
+        GroupBox("Proxy") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: plan.providesProxy ? "server.rack" : "arrow.up.forward")
+                        .foregroundStyle(plan.providesProxy ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+                    Text("System proxy:").foregroundStyle(.secondary)
+                    Text(vpn.proxies.effectiveProxyDescription).fontWeight(.medium)
+                    Spacer()
+                    Button("Re-assert") { vpn.proxies.reassertNow() }
+                        .controlSize(.small)
+                        .help("Re-apply the intended system proxy now.")
+                        .disabled(!plan.providesProxy)
+                }
+                .font(.callout)
+
+                if let ownerName, plan.providesProxy {
+                    Text("from \(ownerName)").font(.caption).foregroundStyle(.secondary)
+                }
+
+                Divider()
+                if vpn.proxies.observed.enabled, let e = vpn.proxies.observed.endpoint {
+                    Text("System now: \(e.display)")
+                        .font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                        .textSelection(.enabled)
+                } else if vpn.proxies.observed.enabled, let pac = vpn.proxies.observed.pacURL {
+                    Text("System now: PAC \(pac)")
+                        .font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                }
+                if let drift = vpn.proxies.lastDrift {
+                    driftLine(drift)
+                } else {
+                    Label("No external proxy changes detected.", systemImage: "checkmark.seal")
+                        .font(.caption).foregroundStyle(.tertiary)
+                }
+            }
+            .padding(6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// One shared drift line (used by the DNS + Proxy cards) — icon, summary, time.
+    @ViewBuilder private func driftLine(_ drift: MediatorDriftEvent) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(drift.summary).foregroundStyle(.secondary)
+                Text("\(drift.at.formatted(.relative(presentation: .named)))\(drift.reasserted ? " · re-asserted" : "")")
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .font(.caption)
     }
 
     @ViewBuilder private var ladderSection: some View {
@@ -423,6 +614,7 @@ struct NetworkToolsView: View {
             TextField("Host or IP to test", text: $target, prompt: Text("example.com"))
                 .textFieldStyle(.roundedBorder).autocorrectionDisabled()
                 .onSubmit { run() }
+            egressPicker
             Picker("MTU via", selection: $mtuProto) {
                 ForEach(NetworkProbes.MTUProtocol.allCases) { Text($0.label).tag($0) }
             }
@@ -439,6 +631,85 @@ struct NetworkToolsView: View {
                 .disabled(target.trimmingCharacters(in: .whitespaces).isEmpty)
         }
         .onChange(of: mtuProto) { restartMTU() }
+    }
+
+    // MARK: Egress picker (send diagnostics out a chosen tunnel — IP_BOUND_IF)
+
+    /// Where a diagnostic egresses. `.automatic` is a normal (unbound) socket that
+    /// obeys the route table; `.direct` pins to the physical link; `.profile` pins to a
+    /// connected route-participant's tunnel interface.
+    enum ProbeEgress: Hashable {
+        case automatic
+        case direct
+        case profile(String)   // profile id
+    }
+
+    private var egressPicker: some View {
+        Menu {
+            Picker("Egress", selection: $egress) {
+                Text("Automatic").tag(ProbeEgress.automatic)
+                let directName = physicalEgressName
+                Text("Direct" + (directName == nil ? " (unavailable)" : ""))
+                    .tag(ProbeEgress.direct)
+                Divider()
+                // Only route-participants can be an egress here — a proxy-only / native
+                // kind has no bindable tunnel interface. Each is disabled with the
+                // reason when its interface isn't up yet.
+                ForEach(vpn.routes.connectedProfiles) { p in
+                    if RouteMediator.participation(for: p.kind).appliesGatewayRole {
+                        let name = tunnelInterfaceName(for: p.id)
+                        Text(p.name + (name == nil ? " (not up)" : ""))
+                            .tag(ProbeEgress.profile(p.id))
+                    }
+                }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            Label(egressLabel, systemImage: "arrow.up.right.circle")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Send the diagnostics out a specific tunnel (via IP_BOUND_IF), regardless of the route table. Automatic uses the normal routing.")
+        // A chosen egress that isn't resolvable (interface not up) silently falls back
+        // to Automatic at bind time — so the picker never sends a probe nowhere.
+        .onChange(of: egress) { _, _ in if running { run() } }
+    }
+
+    private var egressLabel: String {
+        switch egress {
+        case .automatic: return "Automatic"
+        case .direct: return "Direct"
+        case .profile(let id): return vpn.routes.name(for: id) ?? "VPN"
+        }
+    }
+
+    /// The BSD name for the chosen egress, or nil when it can't be resolved to an up
+    /// interface (⇒ Automatic behavior at bind time).
+    private func egressInterfaceName(_ e: ProbeEgress) -> String? {
+        switch e {
+        case .automatic: return nil
+        case .direct: return physicalEgressName
+        case .profile(let id): return tunnelInterfaceName(for: id)
+        }
+    }
+
+    /// The `IP_BOUND_IF` index for the current selection (0 = Automatic/unbound).
+    private var egressBoundIf: UInt32 {
+        NetworkProbes.interfaceIndex(egressInterfaceName(egress))
+    }
+
+    /// The physical (non-tunnel) interface currently carrying traffic — "Direct".
+    private var physicalEgressName: String? {
+        topo?.topology.interfaces.first { $0.inUse && $0.kind != .tunnel }?.name
+    }
+
+    /// The tunnel interface a connected profile currently owns, matched by its live
+    /// tunnel address (the same mapping the Routes graph uses). nil ⇒ not up yet.
+    private func tunnelInterfaceName(for id: String) -> String? {
+        guard let ip = (reach?.latestStats ?? [:])[id]?.tunnelIPv4, !ip.isEmpty,
+              let iface = topo?.topology.interfaces.first(where: { $0.ipv4.contains(ip) })
+        else { return nil }
+        return iface.name
     }
 
     // MARK: Flow railroad (device → VPN(s) → egress → target)
@@ -823,7 +1094,7 @@ struct NetworkToolsView: View {
         // reverse-DNS labels, or nodes.
         hops = []; hopNames = [:]; dnsAnswers = []; targetNode = nil; dnsServerNode = nil
         pathMTU = nil; transportMTU = nil
-        latency.start(host: host)
+        latency.start(host: host, boundIf: egressBoundIf)
         probeTasks = [
             Task { await resolveTarget(host) },
             Task { await runTraceroute(host) },
@@ -890,14 +1161,15 @@ struct NetworkToolsView: View {
         // resuming late must not switch off the spinner of the one that replaced it.
         defer { if !Task.isCancelled { mtuRunning = false } }
         let proto = mtuProto
+        let boundIf = egressBoundIf
         if proto == .icmp {
-            let result = await NetworkProbes.measurePathMTU(host: host)
+            let result = await NetworkProbes.measurePathMTU(host: host, boundIf: boundIf)
             guard !Task.isCancelled else { return }
             pathMTU = result
         } else {
             let port = Int(mtuPortText.trimmingCharacters(in: .whitespaces))
                 ?? proto.defaultPort ?? 443
-            let result = await NetworkProbes.measureTransportMTU(host: host, port: port, proto: proto)
+            let result = await NetworkProbes.measureTransportMTU(host: host, port: port, proto: proto, boundIf: boundIf)
             guard !Task.isCancelled else { return }
             transportMTU = result
         }
@@ -917,7 +1189,7 @@ struct NetworkToolsView: View {
     private func runTraceroute(_ host: String) async {
         tracing = true; defer { tracing = false }
         let ip = await NetworkProbes.resolve(host: host).v4.first ?? host
-        let result = await NetworkProbes.traceroute(host: ip)
+        let result = await NetworkProbes.traceroute(host: ip, boundIf: egressBoundIf)
         guard !Task.isCancelled else { return }
         hops = result
         // Reverse-resolve each hop for readability.
@@ -936,11 +1208,12 @@ struct NetworkToolsView: View {
         // What the OS actually resolves (getaddrinfo) — used to mark which resolver
         // the answer came from (split-DNS / MagicDNS means it isn't always the first).
         let osAnswer = await NetworkProbes.resolve(host: host).v4.first
+        let boundIf = egressBoundIf
         // Ask every resolver in parallel so one slow/unreachable server can't stall.
         let collected = await withTaskGroup(of: (Int, NetworkProbes.DNSResult?, String?).self) { group -> [(Int, NetworkProbes.DNSResult?, String?)] in
             for (i, server) in servers.enumerated() {
                 group.addTask {
-                    async let ans = NetworkProbes.dnsQuery(name: host, type: .a, server: server)
+                    async let ans = NetworkProbes.dnsQuery(name: host, type: .a, server: server, boundIf: boundIf)
                     async let rev = NetworkProbes.reverseLookup(ip: server)
                     return (i, await ans, await rev)
                 }

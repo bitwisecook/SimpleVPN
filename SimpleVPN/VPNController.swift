@@ -113,6 +113,24 @@ final class VPNController {
     private var managers: [String: NETunnelProviderManager] = [:]
     private var observers: [NSObjectProtocol] = []
 
+    /// The Route mediator (Docs/StateMediators.md, P1): the single authority over the
+    /// host's default route. VPNController delegates the gateway logic to it and serves
+    /// as its live NE side (`RouteMediatorHost`). Kept as a stored child so the UI's
+    /// `@Observable` tracking reaches through `vpn.routes.*`.
+    let routes = RouteMediator()
+
+    /// The DNS mediator (Docs/StateMediators.md, P2): the single authority over the
+    /// host's resolvers. Arbitrates coherent split-DNS from each tunnel's intent,
+    /// watches `State:/Network/Global/DNS` for external drift, and publishes the
+    /// effective resolver picture through `vpn.dns.*`.
+    let dns = DNSMediator()
+
+    /// The Proxy mediator (Docs/StateMediators.md, P3): the single authority over the
+    /// system proxy. Arbitrates the one proxy decision, watches
+    /// `State:/Network/Global/Proxies` for external drift, and publishes through
+    /// `vpn.proxies.*`.
+    let proxies = ProxyMediator()
+
     /// Overrides in force for the running session (recorded at connect), used to
     /// tell the user that freshly saved settings only apply on reconnect. Tracked
     /// app-side because a live connection's protocolConfiguration snapshot can be
@@ -180,6 +198,43 @@ final class VPNController {
     init() {
         networkWatch = NetworkChange.observe { [weak self] _ in
             self?.probeResults.removeAll()
+        }
+        routes.host = self   // the mediator drives the gateway through us (the live NE side)
+        dns.host = self      // DNS + Proxy mediators observe/reconcile through us too
+        proxies.host = self
+        installCustomRoutingHooks()
+    }
+
+    /// Attach the per-profile Custom Routing filters at each mediator's single
+    /// intent-capture seam (`intentHook`). This is the TIER-2 (static, UI-driven) form of
+    /// the tier-3 `ROUTE_ADVERTISED`/`DNS_PUSHED`/`PROXY_PUSHED` rewrite hooks: at hook
+    /// entry `intent` is the RAW pushed intent, so we (1) snapshot it durably per profile
+    /// — for the offline "what this VPN pushed last time" editing surface — and then
+    /// (2) rewrite it through the profile's filter before it reaches the arbiter. An
+    /// empty/absent filter is the identity transform (no behavior change).
+    private func installCustomRoutingHooks() {
+        routes.intentHook = { [weak self] intent in
+            guard let self else { return }
+            self.recordPushedRoutes(intent)
+            intent = self.customRouting(for: intent.engine).routes.apply(to: intent)
+        }
+        dns.intentHook = { [weak self] intent in
+            guard let self else { return }
+            self.recordPushedDNS(intent)
+            intent = self.customRouting(for: intent.engine).dns.apply(to: intent)
+        }
+        proxies.intentHook = { [weak self] intent in
+            guard let self else { return }
+            self.recordPushedProxy(intent)
+            let cust = self.customRouting(for: intent.engine).proxy
+            if let result = cust.apply(to: intent, engine: intent.engine) {
+                intent = result
+            } else {
+                // Ignore ⇒ direct: this engine contributes no proxy to arbitration.
+                intent.mode = .none
+                intent.manual = nil
+                intent.bypass = []
+            }
         }
     }
 
@@ -254,6 +309,7 @@ final class VPNController {
                 managers[id] = mgr
                 authConfigs[id] = VPNAuthConfig.decode(from: proto?.providerConfiguration?["auth"] as? Data)
                 overridesCache[id] = OpenVPNOverrides.decode(from: proto?.providerConfiguration?["overrides"] as? Data)
+                customRoutingCache[id] = CustomRoutingProfile.decode(from: proto?.providerConfiguration?["customrouting"] as? Data)
                 uiPrefsCache[id] = VPNUIPrefs.decode(from: proto?.providerConfiguration?["uiprefs"] as? Data)
                 endpointsCache[id] = VPNEndpointList.decode(from: proto?.providerConfiguration?["endpoints"] as? Data)
                 credentialSources[id] = CredentialSource.decode(from: proto?.providerConfiguration?["credsource"] as? Data)
@@ -262,6 +318,9 @@ final class VPNController {
                 if kind == .tailscale {
                     tailscaleConfigs[id] = TailscaleConfig.decode(from: proto?.providerConfiguration?["tailscale"] as? Data)
                 }
+                if kind == .proxyTunnel {
+                    proxyTunnelConfigs[id] = ProxyTunnelConfig.decode(from: proto?.providerConfiguration?["proxytunnel"] as? Data)
+                }
                 list.append(Profile(id: id,
                                     name: mgr.localizedDescription ?? id,
                                     server: proto?.serverAddress ?? "",
@@ -269,6 +328,7 @@ final class VPNController {
                                     kind: kind))
             }
             observeStatusChanges()
+            routes.loadPreference()
             profiles = list.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             if selectedID == nil || !profiles.contains(where: { $0.id == selectedID }) {
                 selectedID = profiles.first?.id
@@ -344,6 +404,9 @@ final class VPNController {
         tailscaleStatuses[id] = nil
         tailscaleSignInWatch[id]?.cancel()
         tailscaleSignInWatch[id] = nil
+        tailscaleSignInURL[id] = nil
+        proxyTunnelConfigs[id] = nil
+        proxyTunnelStatuses[id] = nil
         appliedOverrides[id] = nil
         appliedOVPN[id] = nil
         endpointsCache[id] = nil
@@ -489,12 +552,16 @@ final class VPNController {
         watchTailscaleSignIn(id: id)
     }
 
-    /// Poll the extension for a sign-in URL and hand it to the existing "VPN
-    /// Sign-In" window. The extension cannot push across the root/user boundary
-    /// (see TunnelIncidentStore's note), so this is a short, bounded poll that
-    /// stops as soon as the node is authorized.
+    /// Poll the extension for a sign-in URL and open it in the user's default
+    /// browser. The extension cannot push across the root/user boundary (see
+    /// TunnelIncidentStore's note), so this is a short, bounded poll that
+    /// stops as soon as the node is authorized. Not the in-app SSO webview:
+    /// that window belongs to OpenConnect's loopback-redirect flow — a
+    /// Tailscale login is an arbitrary IdP page that may need the user's
+    /// password manager or passkeys, which live in their real browser.
     private func watchTailscaleSignIn(id: String) {
         tailscaleSignInWatch[id]?.cancel()
+        tailscaleSignInURL[id] = nil   // fresh attempt — last attempt's URL is dead
         tailscaleSignInWatch[id] = Task { [weak self] in
             // Five minutes is longer than any legitimate registration (the user
             // has to read a consent page) and short enough that a wedged session
@@ -504,23 +571,39 @@ final class VPNController {
                 guard let self, !Task.isCancelled else { return }
                 guard self.profiles.contains(where: { $0.id == id }) else { return }
                 // Keep the status fresh for the whole registration: it is what
-                // dismisses the sign-in page once the control plane completes
+                // clears the sign-in state once the control plane completes
                 // the login on its own, and what the editor shows meanwhile.
-                if await self.refreshTailscaleStatus(id: id)?.backendState == .running { return }
-                guard self.tailscaleSignInURL[id] == nil,
-                      let data = await self.sendMessageData("tsauth", to: id, timeout: 4),
-                      let text = String(data: data, encoding: .utf8), !text.isEmpty,
-                      let url = URL(string: text) else { continue }
+                let status = await self.refreshTailscaleStatus(id: id)
+                if status?.backendState == .running { return }
+                // The status carries the login URL once the engine has one; the
+                // dedicated tsauth message covers a session that can't answer a
+                // full status yet.
+                var url = status.flatMap { $0.authURL.isEmpty ? nil : URL(string: $0.authURL) }
+                if url == nil,
+                   let data = await self.sendMessageData("tsauth", to: id, timeout: 4),
+                   let text = String(data: data, encoding: .utf8), !text.isEmpty {
+                    url = URL(string: text)
+                }
+                // Each DISTINCT URL opens once per attempt — not once per status
+                // tick, and a re-keyed login (new URL) still surfaces.
+                guard let url, url != self.tailscaleSignInURL[id] else { continue }
                 self.tailscaleSignInURL[id] = url
-                SSOAuthModel.shared.request(url)
+                NSWorkspace.shared.open(url)
             }
         }
     }
 
+    /// Re-open the current browser sign-in (the panel's button — the way back
+    /// when the tab was dismissed). No-op while there is nothing to sign in to.
+    func openTailscaleSignIn(id: String) {
+        guard let url = tailscaleSignInURL[id] else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     @ObservationIgnored private var tailscaleSignInWatch: [String: Task<Void, Never>] = [:]
-    /// The sign-in page we sent this VPN's user to, so the window can be cleared
-    /// once the node registers — without clobbering another VPN's live sign-in.
-    @ObservationIgnored private var tailscaleSignInURL: [String: URL] = [:]
+    /// The sign-in page we sent this VPN's user to — observable, so the connect
+    /// panel can offer to re-open it; cleared once the node registers.
+    private(set) var tailscaleSignInURL: [String: URL] = [:]
 
     /// Refresh (and publish) the engine status for a connected Tailscale VPN.
     @discardableResult
@@ -530,13 +613,10 @@ final class VPNController {
         tailscaleStatuses[id] = status
         // Once the node is registered there is nothing left to sign in to. The
         // control plane completed the sign-in on its own — the browser never
-        // redirects anywhere this app can see — so the stale page has to be
-        // dismissed from this side.
+        // redirects anywhere this app can see — so the stale sign-in state has
+        // to be cleared from this side.
         if status.backendState == .running {
             tailscaleSignInWatch[id]?.cancel()
-            if let url = tailscaleSignInURL[id], SSOAuthModel.shared.pending == url {
-                SSOAuthModel.shared.finish()
-            }
             tailscaleSignInURL[id] = nil
         }
         return status
@@ -548,6 +628,130 @@ final class VPNController {
         guard let data = await sendMessageData("tsprefs:\(patch.jsonString())", to: id),
               let text = String(data: data, encoding: .utf8) else { return "The VPN didn't answer." }
         return text == "ok" ? nil : String(text.dropFirst("error: ".count))
+    }
+
+    // MARK: Proxy Tunnel (tun2socks)
+    //
+    // A Proxy Tunnel is an ordinary packet-tunnel profile — that is what buys it
+    // the sidebar, status dots, telemetry and map for free. Only the settings
+    // blob and the connect flow differ, and both live here. One kind, three
+    // schemes (socks5/http/https) chosen by the upstream URL — the editor picks;
+    // it is never a second VPNKind.
+
+    /// Observable mirror of the persisted proxy-tunnel settings.
+    private(set) var proxyTunnelConfigs: [String: ProxyTunnelConfig] = [:]
+    /// Latest engine status per profile, refreshed while connected.
+    private(set) var proxyTunnelStatuses: [String: ProxyTunnelStatus] = [:]
+
+    func isProxyTunnel(_ id: String) -> Bool {
+        profiles.first { $0.id == id }?.kind == .proxyTunnel
+    }
+
+    func proxyTunnelConfig(for id: String) -> ProxyTunnelConfig {
+        if let c = proxyTunnelConfigs[id] { return c }
+        let proto = managers[id]?.protocolConfiguration as? NETunnelProviderProtocol
+        return ProxyTunnelConfig.decode(from: proto?.providerConfiguration?["proxytunnel"] as? Data)
+    }
+
+    /// Create a new Proxy Tunnel. Starts as a SOCKS5 preset with a full-tunnel
+    /// default route — the common case — which the editor then refines.
+    @discardableResult
+    func createProxyTunnel(name: String = "Proxy Tunnel") async throws -> String {
+        guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
+        let id = UUID().uuidString
+        let config = ProxyTunnelConfig()
+        let mgr = NETunnelProviderManager()
+        let proto = NETunnelProviderProtocol()
+        proto.providerBundleIdentifier = Self.providerBundleID
+        // serverAddress is what macOS shows in Network settings and what the
+        // probe/endpoint machinery dials: the proxy host (empty until set).
+        proto.serverAddress = config.proxyHost.isEmpty ? "proxy" : config.proxyHost
+        var conf: [String: Any] = ["profile": id, "vpnType": VPNKind.proxyTunnel.rawValue]
+        if let blob = config.encodedBlob() { conf["proxytunnel"] = blob }
+        proto.providerConfiguration = conf
+        mgr.protocolConfiguration = proto
+        mgr.localizedDescription = name
+        mgr.isEnabled = true
+        try await mgr.saveToPreferences()
+        try await mgr.loadFromPreferences()
+        await loadAll()
+        selectedID = id
+        Self.log.log("created proxy tunnel id=\(id, privacy: .public)")
+        return id
+    }
+
+    func setProxyTunnelConfig(_ config: ProxyTunnelConfig, for id: String) async throws {
+        guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
+        guard let mgr = managers[id],
+              let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { return }
+        var conf = proto.providerConfiguration ?? [:]
+        conf["profile"] = id
+        conf["vpnType"] = VPNKind.proxyTunnel.rawValue
+        if let blob = config.encodedBlob() { conf["proxytunnel"] = blob }
+        proto.providerConfiguration = conf
+        proto.serverAddress = config.proxyHost.isEmpty ? "proxy" : config.proxyHost
+        mgr.protocolConfiguration = proto
+        try await mgr.saveToPreferences()
+        try await mgr.loadFromPreferences()
+        proxyTunnelConfigs[id] = config
+        await loadAll()
+    }
+
+    /// The saved proxy credentials (username + password), if any. Their own
+    /// keychain item under the profile id, like every other base credential.
+    func proxyTunnelCredentials(for id: String) -> (username: String, password: String) {
+        let c = KeychainCredentialStore.loadCredentials(profile: id)
+        return (c?.username ?? "", c?.password ?? "")
+    }
+
+    func setProxyTunnelCredentials(username: String, password: String, for id: String) {
+        let u = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        if u.isEmpty && password.isEmpty {
+            KeychainCredentialStore.deleteCredentials(profile: id)
+        } else {
+            try? KeychainCredentialStore.saveCredentials(profile: id, .init(username: u, password: password))
+        }
+    }
+
+    /// Connect a Proxy Tunnel. Credentials (when the proxy needs them) ride
+    /// startTunnel options in memory; a no-auth proxy connects with nothing.
+    func connectProxyTunnel(id: String) async throws {
+        guard let mgr = managers[id],
+              mgr.protocolConfiguration is NETunnelProviderProtocol else { throw err("no such profile") }
+        if let ensureExtensionReady, !(await ensureExtensionReady()) {
+            throw err("SimpleVPN needs its network extension approved before it can connect. Open System Settings ▸ General ▸ Login Items & Extensions ▸ Network Extensions and allow SimpleVPN.")
+        }
+        let config = proxyTunnelConfig(for: id)
+        if let problem = config.connectProblem { throw err(problem) }
+
+        var options: [String: NSObject] = [:]
+        if config.requiresAuth {
+            let creds = proxyTunnelCredentials(for: id)
+            if !creds.username.isEmpty { options["username"] = creds.username as NSString }
+            if !creds.password.isEmpty { options["password"] = creds.password as NSString }
+        }
+        if ManagedPolicy.forceKeepInsideVPN { options["policyKeepInside"] = true as NSNumber }
+        // Establish-time default-gateway ownership, same as OpenVPN (RC3).
+        options["gatewayOwned"] = predictedGatewayOwned(id) as NSNumber
+
+        mgr.isEnabled = true
+        try await mgr.saveToPreferences()
+        try await mgr.loadFromPreferences()
+        guard let session = mgr.connection as? NETunnelProviderSession else {
+            throw err("The VPN configuration isn't ready — try removing and re-creating it.")
+        }
+        try session.startTunnel(options: options)
+        Self.log.log("proxy tunnel startTunnel dispatched for \(id, privacy: .public)")
+        resyncStatuses()
+    }
+
+    /// Refresh (and publish) the engine status for a connected Proxy Tunnel.
+    @discardableResult
+    func refreshProxyTunnelStatus(id: String) async -> ProxyTunnelStatus? {
+        guard let data = await sendMessageData("pxstatus", to: id),
+              let status = try? JSONDecoder().decode(ProxyTunnelStatus.self, from: data) else { return nil }
+        proxyTunnelStatuses[id] = status
+        return status
     }
 
     // MARK: Engine overrides (per-VPN OpenVPN settings)
@@ -600,6 +804,116 @@ final class VPNController {
         try await mgr.loadFromPreferences()
         overridesCache[id] = normalized
         Self.log.log("overrides saved for \(id, privacy: .public): \(normalized.logDescription, privacy: .public)")
+    }
+
+    // MARK: Custom Routing (per-VPN pushed-intent filters — Mediators/CustomRouting.swift)
+
+    /// Observable mirror of the persisted "customrouting" blobs (see overridesCache). The
+    /// filter is the tier-2 static form of the tier-3 intent-rewrite hooks; it is applied
+    /// at the mediator capture seam by `installCustomRoutingHooks`.
+    private(set) var customRoutingCache: [String: CustomRoutingProfile] = [:]
+
+    /// The saved Custom Routing filter for a profile; identity (no-op) when none was set.
+    func customRouting(for id: String) -> CustomRoutingProfile {
+        if let cached = customRoutingCache[id] { return cached }
+        let proto = managers[id]?.protocolConfiguration as? NETunnelProviderProtocol
+        return CustomRoutingProfile.decode(from: proto?.providerConfiguration?["customrouting"] as? Data)
+    }
+
+    /// Persist a profile's Custom Routing filter (dropped entirely when empty) and
+    /// LIVE-APPLY it immediately: re-arbitrate + push through the route/DNS/proxy appliers
+    /// with no reconnect. Safe to call when the profile is offline — it then only persists
+    /// and takes effect on the next connect.
+    func setCustomRouting(_ profile: CustomRoutingProfile, for id: String) async {
+        guard let mgr = managers[id],
+              let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else {
+            // No manager yet (fresh/importing) — still hold it in the observable cache so
+            // the UI round-trips; it persists on the next real save once a manager exists.
+            customRoutingCache[id] = profile
+            return
+        }
+        var conf = proto.providerConfiguration ?? [:]
+        if let blob = profile.encodedBlob() { conf["customrouting"] = blob }
+        else { conf.removeValue(forKey: "customrouting") }
+        proto.providerConfiguration = conf
+        mgr.protocolConfiguration = proto
+        try? await mgr.saveToPreferences()
+        try? await mgr.loadFromPreferences()
+        customRoutingCache[id] = profile
+        await applyCustomRouting(forProfile: id)
+    }
+
+    /// Live-reconcile entry point the UI calls on commit (Save / navigate-away). Re-projects
+    /// the FILTERED intent for the mediators (captured ∘ filter, via the intent hooks) and
+    /// drives all three to re-arbitrate + live-apply through the existing appliers — no
+    /// reconnect. When the profile isn't connected there is nothing live to re-project, so
+    /// it is a no-op beyond the already-persisted config (which applies on next connect).
+    /// Idempotent: the arbiters are pure and the realizers skip an unchanged plan, so it is
+    /// safe to call repeatedly.
+    func applyCustomRouting(forProfile id: String) async {
+        // Arbitration is inherently cross-profile (≤1 default owner, one system proxy, one
+        // coherent split-DNS), so a single profile's filter change re-arbitrates the whole
+        // connected set. `reassertNow` re-runs intent capture (through the hooks) then
+        // reconciles + realizes.
+        routes.reassertNow()
+        dns.reassertNow()
+        proxies.reassertNow()
+    }
+
+    // MARK: Last-seen pushed intent (durable per-profile snapshot)
+
+    /// App Group backed store for the raw pre-filter pushed intent (survives disconnect +
+    /// relaunch). Kept off the observation graph — the observable mirror is the cache.
+    @ObservationIgnored private let pushedIntentStore = PushedIntentStore()
+    /// Observable mirror of the durable pushed-intent snapshots.
+    private(set) var pushedIntentCache: [String: PushedIntentSnapshot] = [:]
+
+    /// The last-seen pushed intent for a profile — live when connected, last-known when
+    /// offline (the offline editing surface the Custom Routing tab reads). nil until first
+    /// capture.
+    func lastPushedIntent(for id: String) -> PushedIntentSnapshot? {
+        if let cached = pushedIntentCache[id] { return cached }
+        return pushedIntentStore.load(id)
+    }
+
+    /// Snapshot the pushed ROUTE intent (pre-filter). Persist on change; never clobber a
+    /// good snapshot with a transient empty (e.g. a just-connected engine that hasn't
+    /// reported its routes yet).
+    private func recordPushedRoutes(_ intent: RouteIntent) {
+        var snap = lastPushedIntent(for: intent.engine) ?? PushedIntentSnapshot()
+        let new = PushedIntentSnapshot.Routes(advertisedPrefixes: intent.advertisedPrefixes,
+                                              wantsDefault: intent.wantsDefault)
+        guard new != snap.routes else { return }
+        if new.isEmpty && !snap.routes.isEmpty { return }
+        snap.routes = new
+        persistPushedIntent(snap, for: intent.engine)
+    }
+
+    private func recordPushedDNS(_ intent: DNSIntent) {
+        var snap = lastPushedIntent(for: intent.engine) ?? PushedIntentSnapshot()
+        let new = PushedIntentSnapshot.DNS(resolvers: intent.resolvers,
+                                           searchDomains: intent.searchDomains,
+                                           matchDomains: intent.matchDomains)
+        guard new != snap.dns else { return }
+        if new.isEmpty && !snap.dns.isEmpty { return }
+        snap.dns = new
+        persistPushedIntent(snap, for: intent.engine)
+    }
+
+    private func recordPushedProxy(_ intent: ProxyIntent) {
+        var snap = lastPushedIntent(for: intent.engine) ?? PushedIntentSnapshot()
+        let new = PushedIntentSnapshot.Proxy(intent)   // nil ⇒ no proxy pushed
+        guard new != snap.proxy else { return }
+        if (new?.isEmpty ?? true) && !(snap.proxy?.isEmpty ?? true) { return }
+        snap.proxy = new
+        persistPushedIntent(snap, for: intent.engine)
+    }
+
+    private func persistPushedIntent(_ snapshot: PushedIntentSnapshot, for id: String) {
+        var snapshot = snapshot
+        snapshot.capturedAt = Date()
+        pushedIntentCache[id] = snapshot
+        pushedIntentStore.save(snapshot, for: id)
     }
 
     // MARK: Display name (deliberately NOT the connection host)
@@ -815,7 +1129,7 @@ final class VPNController {
         guard authConfig(for: id).protectWithBiometrics else { return false }
         let info = BiometricCredentialStore.info(profile: id)
         guard info.exists else { return false }
-        return !authConfig(for: id).requiresOTP || info.hasTOTP
+        return !requiresOTP(for: id) || info.hasTOTP
     }
 
     /// Set or replace the authenticator (TOTP) secret inside an existing
@@ -936,10 +1250,25 @@ final class VPNController {
             throw err("SimpleVPN needs its network extension approved before it can connect. Open System Settings ▸ General ▸ Login Items & Extensions ▸ Network Extensions and allow SimpleVPN.")
         }
         let raw = try await provider.resolve(profile: id, fields: request.fields)
-        let engine = request.assemble(from: raw)
-        guard !engine.username.isEmpty, !engine.password.isEmpty else { throw err("missing username or password") }
+        let staticChallenge = hasStaticChallenge(id)
+        let engine: EngineCredentials
+        if staticChallenge {
+            // static-challenge profiles: the OTP travels as the engine's
+            // challenge response (see the options below), never concatenated
+            // into the password — the template concat stays for profiles
+            // without one (GR Lab depends on {password}{otp}).
+            engine = EngineCredentials(username: raw.username ?? "", password: raw.password ?? "")
+        } else {
+            engine = request.assemble(from: raw)
+        }
+        // Autologin profiles authenticate with their certificate — empty
+        // credentials are the correct payload, not a user mistake.
+        let autologin = isAutologin(id)
+        guard autologin || (!engine.username.isEmpty && !engine.password.isEmpty) else {
+            throw err("missing username or password")
+        }
 
-        if remember {
+        if remember, !engine.username.isEmpty {
             try? KeychainCredentialStore.saveCredentials(profile: id, .init(username: engine.username, password: raw.password ?? ""))
         }
         // Session secrets ride startTunnel options — in-memory through the NE
@@ -952,6 +1281,11 @@ final class VPNController {
         ]
         if let p = secrets?.proxyPassword { options["proxyPassword"] = p as NSString }
         if let p = secrets?.privateKeyPassword { options["privateKeyPassword"] = p as NSString }
+        // The static-challenge response rides its own option so the bridge can
+        // hand it to the engine as ProvideCreds.response.
+        if staticChallenge, let otp = raw.otp?.trimmingCharacters(in: .whitespaces), !otp.isEmpty {
+            options["challengeResponse"] = otp as NSString
+        }
         // A password manager can also supply the private-key passphrase; it wins
         // over the keychain copy so the mapped 1Password field takes effect.
         if let p = raw.privateKeyPassphrase, !p.isEmpty { options["privateKeyPassword"] = p as NSString }
@@ -962,6 +1296,11 @@ final class VPNController {
         // point — the UI gates are only cosmetic.
         if ManagedPolicy.forceKeepInsideVPN { options["policyKeepInside"] = true as NSNumber }
         if ManagedPolicy.disableDivertRules { options["policyNoDiverts"] = true as NSNumber }
+
+        // Default-gateway ownership travels with the session so the extension sets
+        // its suppress gate at establish — the ≤1-owner invariant then holds from
+        // the very first tun build, before (or without) the app reconciling (RC3).
+        options["gatewayOwned"] = predictedGatewayOwned(id) as NSNumber
 
         mgr.isEnabled = true
         do {
@@ -1020,8 +1359,9 @@ final class VPNController {
         // setup key or a browser. Every connect entry point funnels here or to
         // one of the two below, so the branch belongs at each of them.
         if isTailscale(id) { try await connectTailscale(id: id); return }
+        if isProxyTunnel(id) { try await connectProxyTunnel(id: id); return }
         let c = transientCredentials(for: id)
-        let auth = authConfig(for: id)
+        let auth = effectiveAuthConfig(for: id)
         let provider = ManualCredentialProvider(username: c.username, password: c.password, otp: c.otp)
         try await connect(id: id, using: provider, request: auth.request,
                           remember: auth.rememberCredentials && allowsPasswordSave(id: id))
@@ -1034,6 +1374,50 @@ final class VPNController {
         allowsPasswordSaveEvaluator?(id) ?? true
     }
 
+    /// Engine-eval facts the connect flow branches on (autologin, static
+    /// challenge, userlocked username). Wired at launch like the evaluator
+    /// above; nil (unwired, or no .ovpn) degrades to the plain-credentials path.
+    var profileEvaluationProvider: ((String) -> ProfileEvaluation?)?
+    func profileEvaluation(for id: String) -> ProfileEvaluation? {
+        profileEvaluationProvider?(id)
+    }
+
+    /// Non-OpenVPN import handoff for the shared pipeline (main-window
+    /// drop/Import, Finder open): `importProfile` sniffs the config's real
+    /// kind with `ConfigDetector` first, and for anything but `.openVPN` hands
+    /// the raw text off here instead of always trying the OpenVPN evaluator.
+    /// Wired once at launch (SimpleVPNApp) to the same WireGuard/Cisco/native
+    /// stores ManageVPNsView's own importer already dispatches to; nil until
+    /// wired (or in tests) degrades to the previous OpenVPN-only behaviour.
+    var otherEngineImportHandler: ((DetectedConfigKind, String, String) -> ImportOutcome)?
+
+    /// Autologin profiles authenticate with their certificate alone — there is
+    /// no username or password to collect, gate on, or save.
+    func isAutologin(_ id: String) -> Bool {
+        profileEvaluation(for: id)?.autologin ?? false
+    }
+
+    /// The profile declares `static-challenge`: the server demands a challenge
+    /// response (the one-time code) alongside — not inside — the password.
+    func hasStaticChallenge(_ id: String) -> Bool {
+        !(profileEvaluation(for: id)?.staticChallenge.isEmpty ?? true)
+    }
+
+    /// The auth shape connect flows and forms should READ: the persisted config
+    /// with requiresOTP forced on when the profile itself declares a static
+    /// challenge — the server will demand the code regardless of the toggle,
+    /// and this is also what fixes profiles imported before the challenge was
+    /// wired up. Writes still go through setAuthConfig with the raw config.
+    func effectiveAuthConfig(for id: String) -> VPNAuthConfig {
+        var auth = authConfig(for: id)
+        if hasStaticChallenge(id) { auth.requiresOTP = true }
+        return auth
+    }
+
+    func requiresOTP(for id: String) -> Bool {
+        effectiveAuthConfig(for: id).requiresOTP
+    }
+
     /// Connect unattended (menu / sidebar quick-connect). Uses a configured
     /// password manager when it can run without typing, else remembered
     /// credentials. Returns false when a fresh OTP or manual entry is needed —
@@ -1044,7 +1428,24 @@ final class VPNController {
             do { try await connectTailscale(id: id); return true }
             catch { report(error, profile: id); return false }
         }
-        let auth = authConfig(for: id)
+        if isProxyTunnel(id) {
+            // A no-auth proxy connects unattended; an auth proxy connects with
+            // its stored credentials (there is no OTP to type).
+            do { try await connectProxyTunnel(id: id); return true }
+            catch { report(error, profile: id); return false }
+        }
+        // Autologin: nothing to look up — the profile's certificate IS the sign-in.
+        if isAutologin(id) {
+            do {
+                try await connect(id: id, using: ManualCredentialProvider(username: "", password: "", otp: ""),
+                                  request: .usernamePassword, remember: false)
+                return true
+            } catch {
+                report(error, profile: id)
+                return false
+            }
+        }
+        let auth = effectiveAuthConfig(for: id)
 
         // A password manager can auto-connect when the profile needs no OTP, or
         // when it can supply the OTP itself (1Password TOTP; the Touch ID store
@@ -1081,7 +1482,8 @@ final class VPNController {
     /// supply one. Manual sources fall back to the shared credential state.
     func connectUsingConfiguredSource(id: String, typedOTP: String) async throws {
         if isTailscale(id) { try await connectTailscale(id: id); return }
-        let auth = authConfig(for: id)
+        if isProxyTunnel(id) { try await connectProxyTunnel(id: id); return }
+        let auth = effectiveAuthConfig(for: id)
         guard let provider = managerProvider(for: id) else {
             try await connectWithTransientCredentials(id: id)
             return
@@ -1276,7 +1678,7 @@ final class VPNController {
     /// today). Say what actually happened and what to do.
     private func explainOTPReuseIfLikely(id: String) {
         guard incidents[id]?.category == .auth,
-              authConfig(for: id).requiresOTP,
+              requiresOTP(for: id),
               let lastUp = lastConnectedAt[id],
               Date().timeIntervalSince(lastUp) < 90 else { return }
         let name = profiles.first { $0.id == id }?.name ?? "The VPN"
@@ -1352,7 +1754,63 @@ final class VPNController {
     /// extension ↔ user app boundary. nil when not connected.
     func fetchStats(id: String) async -> TunnelStats? {
         guard let data = await sendMessageData("stats", to: id) else { return nil }
-        return try? JSONDecoder().decode(TunnelStats.self, from: data)
+        let stats = try? JSONDecoder().decode(TunnelStats.self, from: data)
+        // Fold the engine's ground-truth default-route ownership into the gateway
+        // coordinator on every poll: keeps the applied-role cache honest and heals
+        // any full/split desync live (RC1/RC4). The stats poll is the only channel
+        // that crosses the root-extension ↔ user-app boundary.
+        if let owned = stats?.effectiveDefaultOwned { routes.noteEngineDefaultOwned(id: id, owned: owned) }
+        // Fold the engine's ground-truth pushed proxy into the Proxy mediator, the same
+        // way as the default-route ownership above. Only kinds that PUSH a proxy
+        // structurally do this today (OpenVPN); OpenConnect is a marked TODO below.
+        if let stats { notePushedProxy(id: id, from: stats) }
+        return stats
+    }
+
+    /// Update the per-profile pushed-proxy cache from a stats sample and, when the
+    /// decision changed, ask the Proxy mediator to re-arbitrate + apply. Per-kind
+    /// (StateMediators.md › Pushed-proxy sources): OpenVPN carries structured
+    /// `dhcp-option PROXY_*` here; the SOCKS/native/none kinds contribute nothing.
+    private func notePushedProxy(id: String, from stats: TunnelStats) {
+        let kind = profiles.first { $0.id == id }?.kind
+        let newIntent: ProxyIntent?
+        switch kind {
+        case .openVPN:
+            newIntent = Self.proxyIntent(engine: id, from: stats)
+        // TODO(StateMediators.md › Pushed-proxy sources by VPN kind): OpenConnect
+        // (AnyConnect/GlobalProtect) can push a PAC/proxy, but the channel is
+        // vendor-specific and needs a real gateway to verify what libopenconnect
+        // surfaces — left uncaptured rather than half-implemented. Native IKEv2/IPsec
+        // proxy is OS-owned (we only OBSERVE via SCDynamicStore, never push). SSH /
+        // proxy-tunnel / Tailscale / WireGuard push no proxy — no intent by design.
+        default:
+            newIntent = nil
+        }
+        let changed = pushedProxyIntents[id] != newIntent
+        pushedProxyIntents[id] = newIntent
+        proxies.noteEnginePushedProxy(changed: changed)
+    }
+
+    /// Build a `ProxyIntent` from the structured pushed-proxy fields of a stats sample
+    /// (OpenVPN's `dhcp-option PROXY_HTTP/PROXY_HTTPS/PROXY_AUTO_CONFIG_URL/PROXY_BYPASS`).
+    /// PAC wins over manual. `nil` when nothing was pushed. No credentials ever — the
+    /// push carries none; a 407 is answered from the keychain.
+    nonisolated static func proxyIntent(engine: String, from stats: TunnelStats) -> ProxyIntent? {
+        let bypass = stats.proxyBypass ?? []
+        if let pac = stats.proxyPACURL, !pac.isEmpty {
+            return ProxyIntent(engine: engine, mode: .pac(pac),
+                               connectedAt: nil, bypass: bypass)
+        }
+        var manual = ProxyManual()
+        if let h = stats.proxyHTTPHost, !h.isEmpty {
+            manual.http = ProxyEndpoint(scheme: .http, host: h, port: stats.proxyHTTPPort ?? 0)
+        }
+        if let h = stats.proxyHTTPSHost, !h.isEmpty {
+            manual.https = ProxyEndpoint(scheme: .https, host: h, port: stats.proxyHTTPSPort ?? 0)
+        }
+        guard let representative = manual.representative else { return nil }
+        return ProxyIntent(engine: engine, mode: .manual(representative),
+                           connectedAt: nil, manual: manual, bypass: bypass)
     }
 
     /// The traffic flows the extension has observed for this VPN (header-only
@@ -1360,6 +1818,93 @@ final class VPNController {
     func fetchFlows(id: String) async -> [TrafficFlow] {
         guard let data = await sendMessageData("flows", to: id) else { return [] }
         return (try? JSONDecoder().decode([TrafficFlow].self, from: data)) ?? []
+    }
+
+    // MARK: Default gateway (PolicyRouting.md Tier 2 — the ≤1-default-owner invariant)
+    //
+    // At most ONE connected VPN owns 0.0.0.0/0 (full-tunnel) at a time — macOS
+    // will not arbitrate two full-tunnel providers, so this is enforced, not
+    // hoped for. Every other connected VPN is demoted to split (its own subnets
+    // only). The user picks the owner live between any connected VPN and Direct.
+    // The pure decision logic lives in GatewayPolicy; this owns the live NE side.
+
+    // The gateway decision + state now live in `routes` (RouteMediator). VPNController
+    // keeps only the thin forwarders the UI/menu already call, plus the profile-derived
+    // helpers the mediator asks it for through `RouteMediatorHost` (below). See
+    // Docs/StateMediators.md — this is the behavior-preserving P1 extraction.
+
+    /// Whether a connected profile can be the full-tunnel owner. (Delegates.)
+    func canBeDefaultGateway(_ id: String) -> Bool { routes.canBeDefaultGateway(id) }
+    /// The role a connected profile currently plays. (Delegates.)
+    func gatewayRole(for id: String) -> GatewayRole { routes.gatewayRole(for: id) }
+    /// The owner actually in force right now. (Delegates.)
+    var effectiveGatewayOwner: String? { routes.effectiveGatewayOwner }
+    /// What the traffic-path picture should show (engine truth). (Delegates.)
+    var displayedGatewayOwner: String? { routes.displayedGatewayOwner }
+    /// The owner the engines actually report. (Delegates.)
+    var engineReportedGatewayOwner: String? { routes.engineReportedGatewayOwner }
+    /// Show the default-gateway control when there's a choice to make. (Delegates.)
+    var showsDefaultGatewayControl: Bool { routes.showsDefaultGatewayControl }
+    /// Establish-time ownership prediction (RC3), passed via `startTunnel`. (Delegates.)
+    func predictedGatewayOwned(_ id: String) -> Bool { routes.predictedGatewayOwned(id) }
+    /// The user picked a new default-gateway owner. (Delegates the atomic switch.)
+    func setDefaultGateway(to newOwner: String?) async { await routes.setDefaultGateway(to: newOwner) }
+
+    /// Connected profiles, most-recently-connected FIRST (the deterministic
+    /// tiebreak for auto-promotion). Falls back to name order when recency is
+    /// unknown so the ordering is always total.
+    var connectedProfiles: [Profile] {
+        profiles.filter { $0.status == .connected }
+            .sorted { a, b in
+                let ta = lastConnectedAt[a.id] ?? .distantPast
+                let tb = lastConnectedAt[b.id] ?? .distantPast
+                if ta != tb { return ta > tb }
+                return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+            }
+    }
+
+    /// The exit node this Tailscale profile would use as a gateway: its
+    /// configured node if set, else the first available one the engine sees.
+    private func tailscaleExitNode(for id: String) -> String {
+        let c = tailscaleConfig(for: id)
+        if c.useExitNode, !c.exitNode.isEmpty { return c.exitNode }
+        return tailscaleStatuses[id]?.exitNodes.first(where: { $0.online })?.id
+            ?? tailscaleStatuses[id]?.exitNodes.first?.id ?? ""
+    }
+
+    /// Whether a profile's own config wants to carry everything (redirect-gateway
+    /// / default route / exit node). Drives the "wants everything but isn't the
+    /// default" demotion note and the initial-role assumption.
+    func profileWantsFullTunnel(_ id: String) -> Bool {
+        guard let p = profiles.first(where: { $0.id == id }) else { return false }
+        switch p.kind {
+        case .proxyTunnel:
+            return proxyTunnelConfig(for: id).includeDefaultRoute
+        case .tailscale:
+            let c = tailscaleConfig(for: id)
+            return c.useExitNode && !c.exitNode.isEmpty
+        case .openVPN:
+            return (ovpnText(id: id) ?? "").range(of: "redirect-gateway", options: .caseInsensitive) != nil
+        default:
+            return p.kind.isSSLVPN   // OpenConnect builds a full-tunnel by default
+        }
+    }
+
+    /// The specific subnets a connected VPN carries besides (or instead of) the
+    /// default route — the "X also routes …" line under the picker. Best-effort
+    /// per engine; empty when we can't enumerate them.
+    func gatewaySubnets(for id: String) -> [String] {
+        guard let p = profiles.first(where: { $0.id == id }) else { return [] }
+        switch p.kind {
+        case .proxyTunnel:
+            let c = proxyTunnelConfig(for: id)
+            return c.includeDefaultRoute ? [] : c.includedRoutes
+        case .tailscale:
+            let routes = tailscaleStatuses[id]?.config?.subnetRoutes ?? []
+            return routes.filter { $0 != "0.0.0.0/0" && $0 != "::/0" }
+        default:
+            return []
+        }
     }
 
     // MARK: Divert rules (route a destination around this VPN)
@@ -1466,7 +2011,7 @@ final class VPNController {
         // Prefer the in-memory credentials that actually brought this tunnel up
         // (a typed password that Remember didn't persist) over saved ones, so an
         // apply-triggered reconnect doesn't fail a no-save profile.
-        if let c = transientCreds[id], !c.password.isEmpty, !authConfig(for: id).requiresOTP {
+        if let c = transientCreds[id], !c.password.isEmpty, !requiresOTP(for: id) {
             do { try await connectWithTransientCredentials(id: id) }
             catch { lastError = error.localizedDescription }
             return
@@ -1480,7 +2025,8 @@ final class VPNController {
         // Once a Tailscale node is registered its key is on disk, so a
         // reconnect never needs the user.
         if isTailscale(id) { return true }
-        let auth = authConfig(for: id)
+        if isAutologin(id) { return true }   // the certificate is the sign-in
+        let auth = effectiveAuthConfig(for: id)
         if managerProvider(for: id) != nil {
             // 1Password can serve an OTP itself; Apple Passwords can't.
             return !auth.requiresOTP || credentialSource(for: id).kind == .onePassword
@@ -1557,6 +2103,11 @@ final class VPNController {
     private var resumeWatchdogs: [String: Task<Void, Never>] = [:]
     /// When each profile last reached .connected — feeds the OTP-reuse explanation.
     private var lastConnectedAt: [String: Date] = [:]
+    /// Per-profile pushed-proxy intent, sourced from the engine's ground-truth stats
+    /// (the structured `proxy*` fields). The Proxy mediator reads it through
+    /// `proxyProfiles` and re-arbitrates when it changes (see `fetchStats`). Absent ⇒
+    /// nothing pushed. This is the OpenVPN per-kind capture from StateMediators.md.
+    private var pushedProxyIntents: [String: ProxyIntent] = [:]
     /// How long to allow for a resumed session to settle before calling it failed.
     /// Long enough to cover NE's re-negotiation, short enough to still feel like a
     /// reaction to what the user just clicked.
@@ -1574,6 +2125,11 @@ final class VPNController {
             try? await Task.sleep(for: Self.connectTimeout)
             guard !Task.isCancelled, let self else { return }
             guard self.profiles.first(where: { $0.id == id })?.status == .connecting else { return }
+            // A pending browser sign-in is the USER's wait, not the network's —
+            // killing the tunnel mid-consent-page would strand the login. The
+            // sign-in watch has its own five-minute bound, and the connecting
+            // pill's ✕ stays available throughout.
+            guard self.tailscaleSignInURL[id] == nil else { return }
             let profile = self.profiles.first { $0.id == id }
             let name = profile?.name ?? "The VPN"
             let host = profile?.server ?? ""
@@ -1686,8 +2242,24 @@ final class VPNController {
         } else if s == .disconnected {
             extensionVersion = "unavailable"
             pausedProfiles.remove(id)      // pause never outlives its session
+            pushedProxyIntents[id] = nil   // pushed proxy never outlives its session
             incidents[id] = TunnelIncidentStore.read(profile: id)
             explainOTPReuseIfLikely(id: id)
+        }
+        // Keep the ≤1-default-owner invariant live across every up/down, and fall
+        // back (with a toast) when the picked owner drops. Runs after the blocks
+        // above so lastConnectedAt (the recency tiebreak) is already current.
+        // .reasserting is included: a reconnect rebuilds the tun, so the role must
+        // be re-read from engine truth and re-applied (RC5).
+        if s == .connected || s == .reasserting || s == .disconnected || s == .invalid {
+            routes.handleStatusChange(id: id,
+                                      connected: s == .connected,
+                                      reasserting: s == .reasserting,
+                                      disconnected: s == .disconnected || s == .invalid)
+            dns.handleStatusChange(id: id, connected: s == .connected,
+                                   disconnected: s == .disconnected || s == .invalid)
+            proxies.handleStatusChange(id: id, connected: s == .connected,
+                                       disconnected: s == .disconnected || s == .invalid)
         }
     }
 
@@ -1742,6 +2314,145 @@ final class VPNController {
     /// programmatic paths (Doctor fixes, undo) route through the same methods.
     static let configLocked = NSError(domain: "VPNController", code: 2,
         userInfo: [NSLocalizedDescriptionKey: "This connection's settings are locked by your organization."])
+}
+
+// MARK: - RouteMediatorHost (the live NE side for the Route mediator)
+
+extension VPNController: RouteMediatorHost {
+    /// Project the live profiles into the mediator's snapshot. Reads the observable
+    /// `profiles` (and `lastConnectedAt`) so the mediator's computeds stay tracked.
+    var routeProfiles: [RouteProfileInfo] {
+        profiles.map { p in
+            RouteProfileInfo(
+                id: p.id, name: p.name, kind: p.kind,
+                connected: p.status == .connected,
+                engaged: isEngaged(id: p.id),
+                lastConnectedAt: lastConnectedAt[p.id],
+                tailscaleHasExitNode: p.kind == .tailscale && !tailscaleExitNode(for: p.id).isEmpty)
+        }
+    }
+
+    func routeSendGateway(full: Bool, to id: String) async -> String? {
+        await sendMessage(full ? "gateway:full" : "gateway:split", to: id)
+    }
+
+    /// Apply gateway ownership to a Tailscale profile via its exit-node prefs path —
+    /// the exact patch the inline code built.
+    func routeApplyTailscaleGateway(full: Bool, to id: String) async -> String? {
+        let patch: TailscalePrefsPatch
+        if full {
+            let node = tailscaleExitNode(for: id)
+            guard !node.isEmpty else { return nil }   // not capable; leave as-is (no-op success)
+            patch = TailscalePrefsPatch(acceptRoutes: nil, acceptDNS: nil,
+                                        useExitNode: true, exitNode: node,
+                                        exitNodeAllowLANAccess: nil, advertiseRoutes: nil)
+        } else {
+            patch = TailscalePrefsPatch(acceptRoutes: nil, acceptDNS: nil,
+                                        useExitNode: false, exitNode: nil,
+                                        exitNodeAllowLANAccess: nil, advertiseRoutes: nil)
+        }
+        return await pushTailscalePrefs(patch, id: id)
+    }
+
+    func routeReconnect(id: String) async { await reconnect(id: id) }
+
+    @discardableResult
+    func routeSampleEffectiveOwned(id: String) async -> Bool? {
+        await fetchStats(id: id)?.effectiveDefaultOwned
+    }
+
+    func routeWantsFullTunnel(id: String) -> Bool { profileWantsFullTunnel(id) }
+    func routeAdvertisedPrefixes(id: String) -> [String] { gatewaySubnets(for: id) }
+}
+
+// MARK: - DNSMediatorHost (the live NE side for the DNS mediator)
+
+extension VPNController: DNSMediatorHost {
+    /// Project the live profiles into the DNS mediator's snapshot, sourcing each
+    /// tunnel's DNS intent from the config we hold app-side. Best-effort: proxy-tunnels
+    /// carry an explicit resolver list; other kinds' pushed DNS lands at the engine
+    /// bridge (the tier-3 `DNS_PUSHED` capture seam) and reads back through the observed
+    /// system resolvers the mediator already publishes.
+    var dnsProfiles: [DNSProfileInfo] {
+        profiles.map { p in
+            var resolvers: [String] = []
+            var matchDomains: [String] = []
+            var wantsCatchAll = false
+            if p.kind == .proxyTunnel {
+                let c = proxyTunnelConfig(for: p.id)
+                resolvers = c.dnsServers
+                wantsCatchAll = c.includeDefaultRoute && !c.dnsServers.isEmpty
+                matchDomains = wantsCatchAll ? [""] : []
+            }
+            return DNSProfileInfo(
+                id: p.id, name: p.name, kind: p.kind,
+                connected: p.status == .connected,
+                engaged: isEngaged(id: p.id),
+                lastConnectedAt: lastConnectedAt[p.id],
+                resolvers: resolvers, searchDomains: [],
+                matchDomains: matchDomains, wantsCatchAll: wantsCatchAll)
+        }
+    }
+
+    var dnsDefaultOwner: String? { routes.effectiveGatewayOwner }
+
+    /// SOLE-WRITER DNS apply: send ONE participant's arbitrated `NEDNSSettings` slice to
+    /// its live session via the `dns:apply:` IPC (nil/empty ⇒ `dns:clear`), the same
+    /// shape as `proxyApply`. Returns the engine ack, or `nil` when there is no live DNS
+    /// applier for this tunnel (native kinds have no NETunnelProviderSession; the
+    /// proxy-tunnel / Tailscale engines reply nil because they can't hot-swap DNS) — the
+    /// realizer reads that nil as "fall back to reconnect".
+    func dnsApply(_ request: DNSApplyRequest?, to id: String) async -> String? {
+        guard let request, !request.isEmpty else { return await sendMessage("dns:clear", to: id) }
+        guard let json = try? JSONEncoder().encode(request),
+              let text = String(data: json, encoding: .utf8) else { return nil }
+        return await sendMessage("dns:apply:\(text)", to: id)
+    }
+
+    func dnsReconnect(id: String) async { await reconnect(id: id) }
+}
+
+// MARK: - ProxyMediatorHost (the live NE side for the Proxy mediator)
+
+extension VPNController: ProxyMediatorHost {
+    /// Project the live profiles into the Proxy mediator's snapshot. Pushed/SOCKS proxy
+    /// detail for the subprocess kinds (SSH `-D`, ocproxy) is owned by the subprocess
+    /// manager, not this controller, so those arrive as `.none` here and the mediator
+    /// leans on the observed system proxy it publishes from SCDynamicStore — the
+    /// intent-capture seam for populating them live is deliberately left clean (tier-3
+    /// `PROXY_PUSHED`).
+    var proxyProfiles: [ProxyProfileInfo] {
+        profiles.map { p in
+            // The engine's ground-truth pushed proxy (from stats) is the OpenVPN
+            // per-kind capture; other kinds contribute nothing (mode .none).
+            let pushed = pushedProxyIntents[p.id]
+            return ProxyProfileInfo(
+                id: p.id, name: p.name, kind: p.kind,
+                connected: p.status == .connected,
+                engaged: isEngaged(id: p.id),
+                lastConnectedAt: lastConnectedAt[p.id],
+                mode: pushed?.mode ?? .none,
+                manual: pushed?.manual,
+                bypass: pushed?.bypass ?? [],
+                excludeSimpleHostnames: pushed?.excludeSimpleHostnames ?? false,
+                authSource: pushed?.authSource)
+        }
+    }
+
+    var proxyDefaultOwner: String? { routes.effectiveGatewayOwner }
+
+    func proxyReassert(owner: String) async { await reconnect(id: owner) }
+
+    /// SOLE-WRITER proxy apply: send the arbitrated `NEProxySettings` decision to ONE
+    /// tunnel's live session via the `proxy:apply:` IPC (nil ⇒ `proxy:clear`), the same
+    /// shape as the `gateway:full|split` + DNS re-apply paths. Returns the engine ack
+    /// (nil when there's no NE session — e.g. an SSH SOCKS kind that isn't ours to set).
+    func proxyApply(_ request: ProxyApplyRequest?, to id: String) async -> String? {
+        guard let request, !request.isEmpty else { return await sendMessage("proxy:clear", to: id) }
+        guard let json = try? JSONEncoder().encode(request),
+              let text = String(data: json, encoding: .utf8) else { return nil }
+        return await sendMessage("proxy:apply:\(text)", to: id)
+    }
 }
 
 /// Thread-safe "resume exactly once" guard for a continuation raced between a

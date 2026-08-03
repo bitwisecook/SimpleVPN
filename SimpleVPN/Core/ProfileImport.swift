@@ -18,20 +18,33 @@ enum ImportOutcome: Equatable, Sendable {
 
 extension VPNController {
 
-    /// Import an .ovpn from disk. Never throws — every failure mode is an outcome
-    /// the UI presents.
+    /// Import an .ovpn (or WireGuard / Cisco config — see below) from disk.
+    /// Never throws — every failure mode is an outcome the UI presents.
     func importProfile(from url: URL) async -> ImportOutcome {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         guard let text = try? String(contentsOf: url, encoding: .utf8) else {
             return .invalid(reason: "Could not read \(url.lastPathComponent).")
         }
-        return await importProfile(text: text,
-                                   suggestedName: url.deletingPathExtension().lastPathComponent)
+        // Sniff the real kind from the full filename (extension included) —
+        // ConfigDetector's own doc: content wins, the extension is only a weak
+        // hint — but name the profile from the extension-less form, same as
+        // ManageVPNsView's own importer.
+        let suggestedName = url.deletingPathExtension().lastPathComponent
+        if let outcome = routeNonOpenVPN(text: text, filename: url.lastPathComponent, suggestedName: suggestedName) {
+            return outcome
+        }
+        return await importProfile(text: text, suggestedName: suggestedName)
     }
 
     /// Import from raw profile text (also used by tests and future paste-import).
     func importProfile(text: String, suggestedName: String) async -> ImportOutcome {
+        // Same sniff for the text-only entry point (paste, discovery stubs):
+        // a WireGuard/Cisco config pasted or dropped here must reach its own
+        // store instead of always failing the OpenVPN evaluator below.
+        if let outcome = routeNonOpenVPN(text: text, filename: suggestedName, suggestedName: suggestedName) {
+            return outcome
+        }
         // Validate with the engine's own parser before anything else.
         let eval = ProfileEvaluation(bridging: OVPNProfileEvaluator.evaluate(text), ovpnText: text)
         if eval.error {
@@ -54,6 +67,16 @@ extension VPNController {
         let server = eval.remoteHostOrNil ?? name
         do {
             let id = try await importProfile(name: name, ovpn: text, server: server)
+            // A `static-challenge` directive means the server will demand a
+            // one-time code — default the OTP requirement on so the field shows
+            // and quick-connect never sends password-only. (Already-imported
+            // profiles are covered by effectiveAuthConfig, which re-reads the
+            // evaluation on every connect.)
+            if !eval.staticChallenge.isEmpty {
+                var auth = authConfig(for: id)
+                auth.requiresOTP = true
+                try? await setAuthConfig(auth, for: id)
+            }
             return .imported(profileID: id, name: name)
         } catch {
             return .invalid(reason: error.localizedDescription)
@@ -65,6 +88,20 @@ extension VPNController {
         if !eval.profileName.isEmpty { return eval.profileName }
         let trimmed = fallback.trimmingCharacters(in: .whitespaces)
         return trimmed.isEmpty ? "Imported VPN" : trimmed
+    }
+
+    /// WireGuard / Cisco configs are sniffed by content (`ConfigDetector`), the
+    /// same way `ManageVPNsView.importFile` already routes its own drops, and
+    /// handed to whichever store owns that engine — wired once at launch (see
+    /// `SimpleVPNApp`) via `otherEngineImportHandler` so this shared pipeline
+    /// (main-window drop/Import, Finder open) reaches the same stores instead
+    /// of only ever validating against the OpenVPN parser. Returns nil for
+    /// `.openVPN`, or when the handler isn't wired yet, so the caller falls
+    /// through to the OpenVPN evaluator exactly as before.
+    private func routeNonOpenVPN(text: String, filename: String, suggestedName: String) -> ImportOutcome? {
+        let kind = ConfigDetector.detect(text: text, filename: filename)
+        guard kind != .openVPN, let handler = otherEngineImportHandler else { return nil }
+        return handler(kind, text, suggestedName)
     }
 
     private func uniqueName(from base: String) -> String {

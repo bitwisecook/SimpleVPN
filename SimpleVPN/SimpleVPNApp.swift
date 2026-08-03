@@ -76,6 +76,7 @@ struct SimpleVPNApp: App {
     var body: some Scene {
         WindowGroup("SimpleVPN", id: "main") {
             ConnectionView(vpn: vpn, ext: ext, labels: labels)
+                .opensSSOWindow()
                 .environment(evaluator)
                 .environment(policy)
                 .environment(manualRouter)
@@ -101,6 +102,9 @@ struct SimpleVPNApp: App {
                         vpn?.isEngaged(id: id) ?? false
                     }
                     publicIP.startMonitoring()          // launch + every ~5 min
+                    vpn.routes.startMonitoring()        // PF_ROUTE default-route drift watch
+                    vpn.dns.startMonitoring()           // SCDynamicStore DNS drift watch
+                    vpn.proxies.startMonitoring()       // SCDynamicStore proxy drift watch
                     appDelegate.quitHandler = { reply in handleQuit(reply) }
                     // Wire the no-save (auth-nocache) policy at launch, before ANY
                     // surface — including the menu bar — can connect or persist
@@ -110,6 +114,51 @@ struct SimpleVPNApp: App {
                     vpn.allowsPasswordSaveEvaluator = { [weak vpn, weak evaluator] id in
                         guard let vpn, let evaluator, let text = vpn.ovpnText(id: id) else { return true }
                         return evaluator.evaluation(for: text).allowPasswordSave
+                    }
+                    // Same wiring for the full evaluation: the connect flow
+                    // branches on autologin and static-challenge (see
+                    // VPNController.profileEvaluationProvider).
+                    vpn.profileEvaluationProvider = { [weak vpn, weak evaluator] id in
+                        guard let vpn, let evaluator, let text = vpn.ovpnText(id: id) else { return nil }
+                        return evaluator.evaluation(for: text)
+                    }
+                    // The shared import pipeline (main-window drop/Import, Finder
+                    // open) sniffs a config's real kind before assuming OpenVPN;
+                    // anything else routes here to the same stores ManageVPNsView's
+                    // own importer already uses, so a WireGuard/Cisco file dropped
+                    // on the main window no longer fails with an OpenVPN-only error.
+                    vpn.otherEngineImportHandler = { [weak wireguard, weak tunnels, weak nativeVPN] kind, text, name in
+                        switch kind {
+                        case .wireGuard:
+                            guard let wireguard else { return .invalid(reason: "WireGuard isn't available right now.") }
+                            let c = WireGuardConfig.parse(text, name: name)
+                            wireguard.save(c)
+                            return .imported(profileID: c.id, name: c.name)
+                        case .cisco:
+                            guard let tunnels, let nativeVPN else {
+                                return .invalid(reason: "Import isn't available right now.")
+                            }
+                            switch CiscoImport.parse(text, name: name) {
+                            case .anyConnect(let configs):
+                                for c in configs { tunnels.save(c) }
+                                guard let first = configs.first else {
+                                    return .invalid(reason: "That file isn't a recognisable Cisco AnyConnect profile.")
+                                }
+                                return .imported(profileID: first.id, name: first.name)
+                            case .pcf(let config, let secret, _):
+                                nativeVPN.save(config)
+                                if let secret {
+                                    try? KeychainCredentialStore.saveCredentials(
+                                        profile: "native.\(config.id)",
+                                        .init(username: config.username, password: secret))
+                                }
+                                return .imported(profileID: config.id, name: config.name)
+                            case .unrecognized:
+                                return .invalid(reason: "That file isn't a recognisable Cisco .pcf or AnyConnect XML profile.")
+                            }
+                        case .openVPN:
+                            return .invalid(reason: "")   // unreachable — routeNonOpenVPN filters this out
+                        }
                     }
                 }
                 .task { GeoIP.warm() }                 // parse the ~10 MB DB off-main
@@ -168,6 +217,7 @@ struct SimpleVPNApp: App {
 
         Window("Manage VPNs", id: "manage") {
             ManageVPNsView(vpn: vpn, labels: labels)
+                .opensSSOWindow()
                 .environment(evaluator)
                 .environment(endpointLocator)
                 .environment(endpointProbes)
@@ -226,8 +276,10 @@ struct SimpleVPNApp: App {
             MenuBarLabel(vpn: vpn, reachability: reachability,
                          tunnelManager: tunnelManager, nativeVPN: nativeVPN)
                 // Menu-bar-only usage may never open the main window, so the
-                // label (alive whenever the icon is) wires the quit gate too.
+                // label (alive whenever the icon is) wires the quit gate too —
+                // and watches for SSO sign-ins for the same reason.
                 .task { appDelegate.quitHandler = { reply in handleQuit(reply) } }
+                .opensSSOWindow()
         }
         .menuBarExtraStyle(.window)
     }
@@ -446,6 +498,28 @@ private struct VPNCommands: Commands {
                 .disabled(!(vpn.selected.map { UI.isActive($0.status) } ?? false))
         }
     }
+}
+
+/// Raises the in-app "VPN Sign-In" window whenever an SSO request lands
+/// (the simplevpn-sso:// handler feeding SSOAuthModel). Attached to every
+/// long-lived surface — main window, Manage VPNs, the menu-bar label — because
+/// the observer used to live only in the main window: an SSO connect started
+/// from Manage VPNs or the menu bar with the main window closed sat at
+/// "Connecting…" with nowhere to sign in. Duplicate fires are harmless
+/// (openWindow on an open window just raises it).
+private struct SSOWindowOpener: ViewModifier {
+    @State private var sso = SSOAuthModel.shared
+    @Environment(\.openWindow) private var openWindow
+
+    func body(content: Content) -> some View {
+        content.onChange(of: sso.generation) {
+            if sso.pending != nil { openWindow(id: "sso") }
+        }
+    }
+}
+
+extension View {
+    func opensSSOWindow() -> some View { modifier(SSOWindowOpener()) }
 }
 
 // MenuBarView / MenuBarLabel live in MenuBarView.swift.

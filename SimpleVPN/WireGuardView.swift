@@ -13,6 +13,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct WireGuardView: View {
+    let vpn: VPNController
     @Bindable var store: WireGuardStore
     @State var draft: WireGuardConfig
 
@@ -20,6 +21,14 @@ struct WireGuardView: View {
     @State private var showImporter = false
     @State private var pasteText = ""
     @State private var showPaste = false
+    @State private var customRouting = CustomRoutingProfile()
+    @State private var crProxyAuthUsername = ""
+    @State private var crProxyAuthPassword = ""
+    /// Write-only entry: a private key typed/pasted here replaces the stored
+    /// one on Save, but the field itself never shows the value already in the
+    /// keychain — the same "set it, never reveal it" convention as any
+    /// password field.
+    @State private var newPrivateKey = ""
 
     var body: some View {
         Form {
@@ -51,8 +60,15 @@ struct WireGuardView: View {
                     textField(Self.specs["wg.fwmark"], $draft.fwMark, prompt: "off")
                 }
                 LabeledContent("Private key") {
-                    Text(draft.privateKey.isEmpty ? "not set" : "•••••• (in Keychain)")
+                    Text(draft.privateKey.isEmpty && newPrivateKey.isEmpty
+                         ? "not set" : "•••••• (in Keychain)")
                         .foregroundStyle(.secondary)
+                }
+                LabeledContent("Set / Replace Key") {
+                    SecureField("paste base64 private key", text: $newPrivateKey)
+                        .font(.callout.monospaced())
+                        .multilineTextAlignment(.trailing)
+                        .autocorrectionDisabled()
                 }
             }
 
@@ -85,10 +101,16 @@ struct WireGuardView: View {
                         .font(.callout).foregroundStyle(.secondary)
                 }
                 Button("Export .conf…") { export() }
-                    .disabled(draft.peerPublicKey.isEmpty)
+                    .disabled(draft.peerPublicKey.isEmpty || !hasPrivateKey)
             } footer: {
-                Text("Export produces a standard wg-quick file you can use with the official WireGuard app today.")
+                Text(hasPrivateKey
+                     ? "Export produces a standard wg-quick file you can use with the official WireGuard app today."
+                     : "Set a private key above before exporting — wg-quick refuses a config without one.")
             }
+
+            CustomRoutingTabView(vpn: vpn, profileID: draft.id, profile: $customRouting,
+                                proxyAuthUsername: $crProxyAuthUsername,
+                                proxyAuthPassword: $crProxyAuthPassword)
         }
         .formStyle(.grouped)
         .disabled(ManagedPolicy.lockConfiguration)
@@ -165,12 +187,16 @@ struct WireGuardView: View {
         } label: { EngineSettingLabel(spec: spec, changed: !binding.wrappedValue.isEmpty) }
     }
 
+    /// Whether a private key is available for export — either already in the
+    /// keychain (loaded into `draft` below) or freshly typed and not yet saved.
+    private var hasPrivateKey: Bool { !draft.privateKey.isEmpty || !newPrivateKey.isEmpty }
+
     private func loadOnce() {
         guard !loaded else { return }
         loaded = true
-        if draft.privateKey.isEmpty {
-            draft.privateKey = KeychainCredentialStore.loadCredentials(profile: "wg.\(draft.id)")?.password ?? ""
-        }
+        draft = draft.withSecretsFromKeychain()
+        customRouting = vpn.customRouting(for: draft.id)
+        (crProxyAuthUsername, crProxyAuthPassword) = loadCustomRoutingProxyAuthFields(profileID: draft.id)
     }
 
     private func importConf(_ url: URL) {
@@ -189,14 +215,23 @@ struct WireGuardView: View {
     }
 
     private func save() {
-        // Private key to the keychain; a redacted copy (no key) to the store.
-        if !draft.privateKey.isEmpty {
-            try? KeychainCredentialStore.saveCredentials(profile: "wg.\(draft.id)",
-                                                         .init(username: draft.name, password: draft.privateKey))
+        if !newPrivateKey.isEmpty {
+            draft.privateKey = newPrivateKey
+            newPrivateKey = ""
         }
-        var stored = draft
-        stored.privateKey = ""                    // never persisted outside the keychain
-        store.save(stored)
+        // store.save() moves the private/preshared key into the keychain and
+        // persists only a redacted copy — the same move on every save path.
+        store.save(draft)
+        // Fire-and-forget: save() is called synchronously from a plain Button
+        // action; commitCustomRouting is idempotent, and CustomRoutingTabView's
+        // own onDisappear covers the case where the view closes before this lands.
+        let id = draft.id
+        let user = crProxyAuthUsername, pass = crProxyAuthPassword
+        let toCommit = customRouting
+        Task { @MainActor in
+            customRouting = await commitCustomRouting(vpn, profileID: id, profile: toCommit,
+                                                      proxyAuthUsername: user, proxyAuthPassword: pass)
+        }
     }
 
     private func export() {
@@ -204,6 +239,8 @@ struct WireGuardView: View {
         panel.nameFieldStringValue = "\(draft.name).conf"
         panel.allowedContentTypes = [UTType(filenameExtension: "conf") ?? .data]
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        try? draft.serialize().write(to: url, atomically: true, encoding: .utf8)
+        var toExport = draft
+        if !newPrivateKey.isEmpty { toExport.privateKey = newPrivateKey }
+        try? toExport.serialize().write(to: url, atomically: true, encoding: .utf8)
     }
 }

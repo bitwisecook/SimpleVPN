@@ -222,14 +222,13 @@ nonisolated enum EndpointDiscovery {
                 vendor = .f5apm; vendorName = "F5 BIG-IP APM"; proto = "f5"
             }
         }
-        // Palo Alto GlobalProtect (OpenConnect --protocol=gp; no dedicated kind →
-        // created as an OpenConnect tunnel with sslProtocol "gp")
+        // Palo Alto GlobalProtect (OpenConnect --protocol=gp)
         if vendor == nil {
             let gp = await httpProbe(base + "/global-protect/prelogin.esp")
             let gp2 = await httpProbe(base + "/ssl-vpn/prelogin.esp")
             if has("globalprotect", gp) || has("prelogin", gp) || has("prelogin", gp2)
                 || has("global-protect", root) {
-                vendor = .ciscoAnyConnect; vendorName = "Palo Alto GlobalProtect"; proto = "gp"
+                vendor = .globalProtect; vendorName = "Palo Alto GlobalProtect"; proto = "gp"
             }
         }
         // Cisco ASA / AnyConnect / Secure Client

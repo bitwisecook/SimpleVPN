@@ -20,6 +20,8 @@
 #include <atomic>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Weverything"
@@ -56,6 +58,29 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
     std::mutex _statsMutex;
     int64_t _bytesIn, _bytesOut;
     NSMutableDictionary<NSString *, id> *_info;
+
+    // Default-gateway ownership + a snapshot of the negotiated IP config, so the
+    // tun settings can be rebuilt and re-applied live when the gateway role flips
+    // (setDefaultRouteOwned:) without re-calling into libopenconnect off the run
+    // thread. All guarded by _cfgMutex. Mirrors OpenVPN3Bridge's captured tun state.
+    std::mutex _cfgMutex;
+    BOOL _suppressDefault;            // demoted to split: drop the default route
+    BOOL _haveConfig;                 // a setup_tun has captured a config to rebuild from
+    NSString *_capRemote;
+    NSArray<NSString *> *_capV4Addrs, *_capV4Masks;   // parallel address/netmask
+    BOOL _capHaveV4Default;
+    NSString *_capV6Addr; NSInteger _capV6Prefix; BOOL _capHaveV6;
+    BOOL _capHaveV6Default;
+    NSArray<NEIPv4Route *> *_capV4Split;              // gateway split-include routes
+    NSArray<NEIPv6Route *> *_capV6Split;
+    NSArray<NSString *> *_capDNS;
+    NSArray<NSString *> *_capSearchDomains;
+    int _capMTU;
+    // App-arbitrated overrides (Docs/StateMediators.md), guarded by _cfgMutex like the
+    // captured config. When set they OVERRIDE what the push captured; nil restores it.
+    // Mirrors OpenVPN3Bridge's _proxySettings/_dnsOverride.
+    NEProxySettings *_proxySettings;   // Proxy mediator applier (owner egress only)
+    NEDNSSettings *_dnsOverride;       // DNS mediator applier (this engine's slice)
 }
 @end
 
@@ -210,7 +235,16 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
 }
 
 - (NSDictionary<NSString *, id> *)connectionInfo {
-    @synchronized (self) { return [_info copy]; }
+    NSMutableDictionary<NSString *, id> *out;
+    @synchronized (self) { out = [_info mutableCopy]; }
+    // Ground-truth default-route ownership (same channel as OpenVPN3Bridge): a
+    // default was advertised AND it is not suppressed. The app seeds its
+    // applied-role cache and traffic-path UI from this, never a config grep.
+    std::lock_guard<std::mutex> hold(_cfgMutex);
+    BOOL effectiveOwned = (_capHaveV4Default || _capHaveV6Default) && !_suppressDefault;
+    out[@"suppressDefault"] = @(_suppressDefault);
+    out[@"effectiveDefaultOwned"] = @(effectiveOwned);
+    return out;
 }
 
 // MARK: - Tun bring-up
@@ -223,38 +257,46 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
     NEPacketTunnelProvider *provider = _provider;
     if (!provider) return;
 
-    NEPacketTunnelNetworkSettings *settings =
-        [[NEPacketTunnelNetworkSettings alloc] initWithTunnelRemoteAddress:
-            (ip->gateway_addr ? @(ip->gateway_addr) : @"127.0.0.1")];
-
-    if (ip->addr && ip->netmask) {
-        NEIPv4Settings *v4 = [[NEIPv4Settings alloc] initWithAddresses:@[@(ip->addr)]
-                                                          subnetMasks:@[@(ip->netmask)]];
-        v4.includedRoutes = @[[NEIPv4Route defaultRoute]];   // split routing is a refinement
-        settings.IPv4Settings = v4;
-    }
-    if (ip->addr6) {
-        // netmask6 is "addr/prefix"; addr6 is the bare address.
-        NSInteger prefix = 128;
-        if (ip->netmask6) {
-            NSString *nm = @(ip->netmask6);
-            NSRange slash = [nm rangeOfString:@"/"];
-            if (slash.location != NSNotFound) prefix = [[nm substringFromIndex:slash.location + 1] integerValue];
-        }
-        NEIPv6Settings *v6 = [[NEIPv6Settings alloc] initWithAddresses:@[@(ip->addr6)]
-                                                 networkPrefixLengths:@[@(prefix)]];
-        v6.includedRoutes = @[[NEIPv6Route defaultRoute]];
-        settings.IPv6Settings = v6;
-    }
+    // Snapshot the negotiated config into ivars so the tun settings can be rebuilt
+    // and re-applied live when the gateway role flips, without re-entering
+    // libopenconnect off the run thread (the OpenVPN3Bridge captured-state pattern).
     NSMutableArray<NSString *> *dns = [NSMutableArray array];
     for (int i = 0; i < 3; i++) if (ip->dns[i]) [dns addObject:@(ip->dns[i])];
-    if (dns.count) {
-        NEDNSSettings *d = [[NEDNSSettings alloc] initWithServers:dns];
-        if (ip->domain) d.searchDomains = @[@(ip->domain)];
-        d.matchDomains = @[@""];
-        settings.DNSSettings = d;
+
+    NSMutableArray<NEIPv4Route *> *v4Split = [NSMutableArray array];
+    NSMutableArray<NEIPv6Route *> *v6Split = [NSMutableArray array];
+    for (struct oc_split_include *si = ip->split_includes; si; si = si->next) {
+        if (!si->route) continue;
+        [self appendSplitRoute:@(si->route) v4:v4Split v6:v6Split];
     }
-    if (ip->mtu > 0) settings.MTU = @(ip->mtu);
+
+    NSInteger v6prefix = 128;
+    if (ip->addr6 && ip->netmask6) {
+        NSString *nm = @(ip->netmask6);   // "addr/prefix"
+        NSRange slash = [nm rangeOfString:@"/"];
+        if (slash.location != NSNotFound) v6prefix = [[nm substringFromIndex:slash.location + 1] integerValue];
+    }
+
+    {
+        std::lock_guard<std::mutex> hold(_cfgMutex);
+        _capRemote = ip->gateway_addr ? @(ip->gateway_addr) : @"127.0.0.1";
+        if (ip->addr && ip->netmask) {
+            _capV4Addrs = @[@(ip->addr)]; _capV4Masks = @[@(ip->netmask)];
+            _capHaveV4Default = YES;   // OpenConnect brings up a full tunnel by default
+        } else {
+            _capV4Addrs = nil; _capV4Masks = nil; _capHaveV4Default = NO;
+        }
+        _capV6Addr = ip->addr6 ? @(ip->addr6) : nil;
+        _capV6Prefix = v6prefix;
+        _capHaveV6 = (ip->addr6 != NULL);
+        _capHaveV6Default = (ip->addr6 != NULL);
+        _capV4Split = [v4Split copy];
+        _capV6Split = [v6Split copy];
+        _capDNS = [dns copy];
+        _capSearchDomains = ip->domain ? @[@(ip->domain)] : @[];
+        _capMTU = ip->mtu;
+        _haveConfig = YES;
+    }
 
     @synchronized (self) {
         if (ip->addr) _info[@"tunnelIP"] = @(ip->addr);
@@ -264,15 +306,9 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
         if (dns.count) _info[@"dns"] = [dns copy];
     }
 
-    dispatch_semaphore_t done = dispatch_semaphore_create(0);
-    __block BOOL ok = NO;
-    [provider setTunnelNetworkSettings:settings completionHandler:^(NSError *e) {
-        ok = (e == nil);
-        if (e) OCLOG("setTunnelNetworkSettings failed: %{public}s", e.localizedDescription.UTF8String);
-        dispatch_semaphore_signal(done);
-    }];
-    dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC));
-    if (!ok) { [self fail:@"macOS refused the tunnel network settings."]; return; }
+    if (![self applySettings:[self buildCapturedSettings]]) {
+        [self fail:@"macOS refused the tunnel network settings."]; return;
+    }
 
     // openconnect calls this handler again on every CSTP reconnect. Cancel the
     // previous read source and close our previous socketpair end first, or each
@@ -333,6 +369,162 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
         close(fd);
     }
     _ocFD = -1;   // openconnect owns/closes its end
+}
+
+// MARK: - Route / DNS building (gated on default-route ownership)
+
+// Parse one libopenconnect split-include "route" string into an NE route and
+// append it to the matching family bucket. The field is "addr/mask" where the
+// mask is either a prefix length or (for v4) a dotted-quad netmask.
+- (void)appendSplitRoute:(NSString *)route
+                      v4:(NSMutableArray<NEIPv4Route *> *)v4
+                      v6:(NSMutableArray<NEIPv6Route *> *)v6 {
+    NSRange slash = [route rangeOfString:@"/" options:NSBackwardsSearch];
+    NSString *addr = slash.location == NSNotFound ? route : [route substringToIndex:slash.location];
+    NSString *maskPart = slash.location == NSNotFound ? @"" : [route substringFromIndex:slash.location + 1];
+    addr = [addr stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (!addr.length) return;
+
+    if ([addr containsString:@":"]) {                    // IPv6
+        NSInteger prefix = maskPart.length ? [maskPart integerValue] : 128;
+        if (prefix < 0 || prefix > 128) prefix = 128;
+        [v6 addObject:[[NEIPv6Route alloc] initWithDestinationAddress:addr networkPrefixLength:@(prefix)]];
+        return;
+    }
+    // IPv4: mask may be a prefix length or a dotted-quad netmask.
+    NSString *mask;
+    if ([maskPart containsString:@"."]) {
+        mask = maskPart;
+    } else {
+        NSInteger prefix = maskPart.length ? [maskPart integerValue] : 32;
+        if (prefix < 0 || prefix > 32) prefix = 32;
+        uint32_t m = prefix == 0 ? 0 : htonl(0xFFFFFFFFu << (32 - prefix));
+        struct in_addr a; a.s_addr = m; char buf[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &a, buf, sizeof(buf));
+        mask = @(buf);
+    }
+    [v4 addObject:[[NEIPv4Route alloc] initWithDestinationAddress:addr subnetMask:mask]];
+}
+
+// Build the tun settings from the captured config, honouring the ownership gate:
+// an owner (!_suppressDefault) advertises the default route; a demoted non-owner
+// drops the default but keeps every specific split-include subnet, and drops the
+// DNS catch-all so it can't hijack every lookup (mirrors OpenVPN3Bridge).
+- (NEPacketTunnelNetworkSettings *)buildCapturedSettings {
+    std::lock_guard<std::mutex> hold(_cfgMutex);
+    NEPacketTunnelNetworkSettings *settings =
+        [[NEPacketTunnelNetworkSettings alloc] initWithTunnelRemoteAddress:(_capRemote ?: @"127.0.0.1")];
+
+    if (_capV4Addrs.count) {
+        NEIPv4Settings *v4 = [[NEIPv4Settings alloc] initWithAddresses:_capV4Addrs subnetMasks:_capV4Masks];
+        NSMutableArray<NEIPv4Route *> *inc = [(_capV4Split ?: @[]) mutableCopy];
+        if (_capHaveV4Default && !_suppressDefault) [inc addObject:[NEIPv4Route defaultRoute]];
+        v4.includedRoutes = inc;
+        settings.IPv4Settings = v4;
+    }
+    if (_capHaveV6 && _capV6Addr) {
+        NEIPv6Settings *v6 = [[NEIPv6Settings alloc] initWithAddresses:@[_capV6Addr]
+                                                 networkPrefixLengths:@[@(_capV6Prefix)]];
+        NSMutableArray<NEIPv6Route *> *inc = [(_capV6Split ?: @[]) mutableCopy];
+        if (_capHaveV6Default && !_suppressDefault) [inc addObject:[NEIPv6Route defaultRoute]];
+        v6.includedRoutes = inc;
+        settings.IPv6Settings = v6;
+    }
+    // DNS: the app-arbitrated override (DNS mediator applier) is the sole writer when
+    // set, winning over the captured push; nil falls back to the captured DNS.
+    if (_dnsOverride) {
+        settings.DNSSettings = _dnsOverride;
+    } else if (_capDNS.count) {
+        NEDNSSettings *d = [[NEDNSSettings alloc] initWithServers:_capDNS];
+        if (_capSearchDomains.count) d.searchDomains = _capSearchDomains;
+        BOOL ownsDefault = (_capHaveV4Default || _capHaveV6Default) && !_suppressDefault;
+        if (ownsDefault) {
+            d.matchDomains = @[@""];              // owner: route ALL DNS through the tunnel
+            settings.DNSSettings = d;
+        } else if (_capSearchDomains.count) {
+            // Demoted / split: scope the tunnel's resolvers to its own search
+            // domains only. With none there is nothing safe to scope to, so the
+            // tunnel DNS is left off entirely.
+            d.matchDomains = _capSearchDomains;
+            settings.DNSSettings = d;
+        }
+    }
+    // System proxy: apply the app-arbitrated decision (owner egress only) whenever a
+    // config is in play (mirrors OpenVPN3Bridge).
+    if (_proxySettings) settings.proxySettings = _proxySettings;
+    if (_capMTU > 0) settings.MTU = @(_capMTU);
+    return settings;
+}
+
+// Apply settings synchronously (callers are off the main thread). Returns YES on
+// success. Must NOT be called while holding _cfgMutex (it blocks on completion).
+- (BOOL)applySettings:(NEPacketTunnelNetworkSettings *)settings {
+    NEPacketTunnelProvider *provider = _provider;
+    if (!provider) return NO;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    __block BOOL ok = NO;
+    [provider setTunnelNetworkSettings:settings completionHandler:^(NSError *e) {
+        ok = (e == nil);
+        if (e) OCLOG("setTunnelNetworkSettings failed: %{public}s", e.localizedDescription.UTF8String);
+        dispatch_semaphore_signal(done);
+    }];
+    dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC));
+    return ok;
+}
+
+// MARK: - Default-gateway ownership (StateMediators.md · Route mediator)
+
+- (void)setInitialDefaultRouteOwned:(BOOL)owned {
+    // Establish-time seed, BEFORE setup_tun builds the tun. No reapply: no tun yet.
+    std::lock_guard<std::mutex> hold(_cfgMutex);
+    _suppressDefault = !owned;
+    OCLOG("setInitialDefaultRouteOwned: %d (suppressDefault=%d)", owned, !owned);
+}
+
+- (BOOL)setDefaultRouteOwned:(BOOL)owned {
+    BOOL haveConfig;
+    {
+        std::lock_guard<std::mutex> hold(_cfgMutex);
+        _suppressDefault = !owned;
+        haveConfig = _haveConfig;
+    }
+    OCLOG("setDefaultRouteOwned: %d (suppressDefault=%d)", owned, !owned);
+    // Live: rebuild + re-apply the captured settings with the default-route gate
+    // flipped. No reconnect — the CSTP session and the packet pump are untouched.
+    // Before the first setup_tun there is nothing to rebuild; the flag we just
+    // stored will be honoured when the tun is first built.
+    if (!haveConfig) return YES;
+    return [self applySettings:[self buildCapturedSettings]];
+}
+
+// MARK: - Proxy / DNS mediator appliers (Docs/StateMediators.md)
+
+// Store the arbitrated system proxy and re-apply the captured settings live (no
+// reconnect); nil clears it. Mirrors OpenVPN3Bridge.applyProxySettings:.
+- (BOOL)applyProxySettings:(NEProxySettings *)proxy {
+    BOOL haveConfig;
+    {
+        std::lock_guard<std::mutex> hold(_cfgMutex);
+        _proxySettings = proxy;
+        haveConfig = _haveConfig;
+    }
+    OCLOG("applyProxySettings: %{public}s", proxy ? "set" : "cleared");
+    if (!haveConfig) return YES;   // no tun yet; honoured at first setup_tun
+    return [self applySettings:[self buildCapturedSettings]];
+}
+
+// Store the arbitrated per-tunnel DNS and re-apply the captured settings live (no
+// reconnect); nil restores the captured/pushed DNS. Mirrors OpenVPN3Bridge.
+- (BOOL)applyDNSSettings:(NEDNSSettings *)dns {
+    BOOL haveConfig;
+    {
+        std::lock_guard<std::mutex> hold(_cfgMutex);
+        _dnsOverride = dns;
+        haveConfig = _haveConfig;
+    }
+    OCLOG("applyDNSSettings: %{public}s", dns ? "set" : "cleared");
+    if (!haveConfig) return YES;
+    return [self applySettings:[self buildCapturedSettings]];
 }
 
 // MARK: - Delegate plumbing

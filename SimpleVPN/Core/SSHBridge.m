@@ -10,8 +10,10 @@
 #import <libssh2.h>
 #import <os/log.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <arpa/inet.h>
 
 static NSErrorDomain const kSSHErrorDomain = @"SSHBridge";
@@ -93,6 +95,7 @@ static NSString *hexTail(NSString *s) {
     NSString *_fp;
     NSString *_host;
     int _port;
+    BOOL _acceptedNewHostKey;
 }
 
 + (void)initialize { if (self == [SSHSession class]) libssh2_init(0); }
@@ -257,6 +260,7 @@ static NSString *hostKeyTypeName(int ktype) {
                              strict:(NSString *)strict
                               error:(NSError **)error {
     if (!_session) { if (error) *error = sshErr(@"No SSH session to verify."); return NO; }
+    _acceptedNewHostKey = NO;
 
     // Pin takes precedence: exact SHA-256 match or nothing.
     if (pinSHA256.length) {
@@ -294,9 +298,13 @@ static NSString *hostKeyTypeName(int ktype) {
         case LIBSSH2_KNOWNHOST_CHECK_NOTFOUND:
         default:
             if ([strict isEqualToString:@"yes"]) {
-                why = @"The SSH server's host key is not in known_hosts (StrictHostKeyChecking=yes).";
+                why = [NSString stringWithFormat:
+                       @"The SSH server's host key is not in known_hosts (StrictHostKeyChecking=yes). It offered %@ SHA256:%@.",
+                       [self hostKeyType] ?: @"a key", _fp ?: @"(unavailable)"];
             } else {
-                // accept-new / no: trust on first use and record it.
+                // accept-new / no: trust on first use and record it. The caller
+                // reads `acceptedNewHostKey` + the fingerprint to surface what
+                // was just trusted — TOFU must never be silent.
                 int keyenc = LIBSSH2_KNOWNHOST_TYPE_PLAIN | LIBSSH2_KNOWNHOST_KEYENC_RAW;
                 switch (ktype) {
                     case LIBSSH2_HOSTKEY_TYPE_RSA:        keyenc |= LIBSSH2_KNOWNHOST_KEY_SSHRSA; break;
@@ -307,10 +315,36 @@ static NSString *hostKeyTypeName(int ktype) {
                     case LIBSSH2_HOSTKEY_TYPE_ED25519:    keyenc |= LIBSSH2_KNOWNHOST_KEY_ED25519; break;
                     default: break;
                 }
-                if (libssh2_knownhost_addc(kh, _host.UTF8String, NULL, (char *)hostkey, klen,
-                                           NULL, 0, keyenc, NULL) == 0 && knownHostsPath.length) {
-                    libssh2_knownhost_writefile(kh, knownHostsPath.UTF8String, LIBSSH2_KNOWNHOST_FILE_OPENSSH);
+                // Non-standard ports are recorded the way OpenSSH does: "[host]:port".
+                NSString *entryHost = (_port == 22) ? _host
+                    : [NSString stringWithFormat:@"[%@]:%d", _host, _port];
+                struct libssh2_knownhost *added = NULL;
+                if (libssh2_knownhost_addc(kh, entryHost.UTF8String, NULL, (char *)hostkey, klen,
+                                           NULL, 0, keyenc, &added) == 0 && added && knownHostsPath.length) {
+                    // APPEND only the one new line. libssh2_knownhost_writefile
+                    // would rewrite the whole file from the parsed entries,
+                    // destroying comments, @cert-authority/@revoked markers and
+                    // any line it couldn't parse.
+                    char line[1024]; size_t outlen = 0;
+                    if (libssh2_knownhost_writeline(kh, added, line, sizeof(line), &outlen,
+                                                    LIBSSH2_KNOWNHOST_FILE_OPENSSH) == 0 && outlen > 0) {
+                        int fd = open(knownHostsPath.UTF8String,
+                                      O_WRONLY | O_APPEND | O_CREAT, 0600);
+                        if (fd >= 0) {
+                            // If the existing file doesn't end in a newline, add
+                            // one first so we don't glue onto its last entry.
+                            struct stat st; char last = 0;
+                            if (fstat(fd, &st) == 0 && st.st_size > 0 &&
+                                pread(fd, &last, 1, st.st_size - 1) == 1 && last != '\n') {
+                                write(fd, "\n", 1);
+                            }
+                            write(fd, line, outlen);
+                            if (line[outlen - 1] != '\n') write(fd, "\n", 1);
+                            close(fd);
+                        }
+                    }
                 }
+                _acceptedNewHostKey = YES;
                 trusted = YES;
             }
             break;

@@ -63,10 +63,13 @@ extension WireGuardConfig {
                 continue
             }
             guard let eq = line.firstIndex(of: "=") else { continue }
-            let key = line[..<eq].trimmingCharacters(in: .whitespaces).lowercased()
+            let rawKey = line[..<eq].trimmingCharacters(in: .whitespaces)
+            let key = rawKey.lowercased()
             let val = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
 
-            if section == .peer && peerIndex > 1 { c.rawExtraPeers.append("\(key) = \(val)"); continue }
+            // Extra peers round-trip verbatim — keep the key's original case
+            // rather than the lowercased copy used only to match known keys.
+            if section == .peer && peerIndex > 1 { c.rawExtraPeers.append("\(rawKey) = \(val)"); continue }
 
             switch (section, key) {
             case (.interface, "privatekey"): c.privateKey = val
@@ -107,11 +110,23 @@ extension WireGuardConfig {
         return out
     }
 
-    /// What the editor shows (private key redacted; it lives in the keychain).
-    func redactedConf() -> String {
+    /// Keychain identity for this profile's secrets — the "wg.<id>" convention
+    /// the editor already used for the private key alone; now the one place
+    /// every save/read path agrees on for both the key and the preshared key.
+    var keychainProfile: String { "wg.\(id)" }
+
+    /// This config with `privateKey`/`presharedKey` filled in from the keychain
+    /// when the in-memory copy has them redacted — which is the normal case for
+    /// anything loaded from `WireGuardStore`, since `save(_:)` never keeps them
+    /// in the persisted copy. Used by anything that needs the real secret
+    /// (export, the doctor/probe handshake), not just to display "set"/"not set".
+    func withSecretsFromKeychain() -> WireGuardConfig {
+        guard privateKey.isEmpty || presharedKey.isEmpty else { return self }
+        let creds = KeychainCredentialStore.loadCredentials(profile: keychainProfile)
         var c = self
-        if !c.privateKey.isEmpty { c.privateKey = "(stored in Keychain)" }
-        return c.serialize()
+        if c.privateKey.isEmpty { c.privateKey = creds?.password ?? "" }
+        if c.presharedKey.isEmpty { c.presharedKey = creds?.proxyPassword ?? "" }
+        return c
     }
 }
 
@@ -123,11 +138,29 @@ final class WireGuardStore {
 
     init() { load() }
 
+    /// Save a config. Secrets never reach UserDefaults on ANY save path: the
+    /// private key and preshared key (if set) move into the keychain under
+    /// this profile's "wg.<id>" identity, and only a redacted copy is persisted.
+    /// Callers that need the real values back (export, doctor/probe) use
+    /// `WireGuardConfig.withSecretsFromKeychain()`.
     func save(_ c: WireGuardConfig) {
-        if let i = configs.firstIndex(where: { $0.id == c.id }) { configs[i] = c } else { configs.append(c) }
+        if !c.privateKey.isEmpty || !c.presharedKey.isEmpty {
+            try? KeychainCredentialStore.saveCredentials(
+                profile: c.keychainProfile,
+                .init(username: c.name, password: c.privateKey,
+                      proxyPassword: c.presharedKey.isEmpty ? nil : c.presharedKey))
+        }
+        var stored = c
+        stored.privateKey = ""
+        stored.presharedKey = ""
+        if let i = configs.firstIndex(where: { $0.id == stored.id }) { configs[i] = stored } else { configs.append(stored) }
         persist()
     }
-    func remove(_ id: String) { configs.removeAll { $0.id == id }; persist() }
+    func remove(_ id: String) {
+        configs.removeAll { $0.id == id }
+        KeychainCredentialStore.deleteCredentials(profile: "wg.\(id)")
+        persist()
+    }
 
     private func load() {
         guard let d = UserDefaults.standard.data(forKey: Self.key),

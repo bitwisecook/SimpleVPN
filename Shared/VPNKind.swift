@@ -29,6 +29,10 @@ nonisolated enum VPNKind: String, Codable, Sendable, CaseIterable {
     // One kind, two control planes: Headscale is this engine pointed at a
     // self-hosted server, so it is a preset inside the editor — NOT a kind.
     case tailscale = "tailscale"   // Tailscale / Headscale mesh, in-process in our packet-tunnel sysext
+    // One kind, three schemes: the upstream URL's scheme (socks5/http/https)
+    // distinguishes SOCKS from CONNECT — a preset in the editor, NOT a kind
+    // (the "Headscale rule").
+    case proxyTunnel = "proxytunnel" // tun2socks: utun+routes, every flow dialled through a SOCKS5/HTTP(S) proxy, in-process
 
     var displayName: String {
         switch self {
@@ -46,6 +50,7 @@ nonisolated enum VPNKind: String, Codable, Sendable, CaseIterable {
         case .pulse: "Pulse Connect Secure"
         case .arrayNetworks: "Array Networks SSL VPN"
         case .tailscale: "Tailscale / Headscale"
+        case .proxyTunnel: "Proxy Tunnel"
         }
     }
 
@@ -56,6 +61,7 @@ nonisolated enum VPNKind: String, Codable, Sendable, CaseIterable {
         case .ssh: "terminal"
         case .fortinet, .f5apm, .ciscoAnyConnect, .globalProtect, .juniper, .pulse, .arrayNetworks: "building.2"
         case .tailscale: "point.3.connected.trianglepath.dotted"   // a mesh, not a hub-and-spoke
+        case .proxyTunnel: "arrow.triangle.branch"                  // flows fanned out through a proxy
         }
     }
 
@@ -82,7 +88,7 @@ nonisolated enum VPNKind: String, Codable, Sendable, CaseIterable {
     enum Transport { case packetTunnel, nativePersonalVPN, subprocess }
     var transport: Transport {
         switch self {
-        case .openVPN, .wireGuard, .tailscale: .packetTunnel
+        case .openVPN, .wireGuard, .tailscale, .proxyTunnel: .packetTunnel
         case .ikev2, .ipsec, .l2tp: .nativePersonalVPN
         case .ssh: .subprocess
         default: .subprocess   // the OpenConnect SSL-VPN kinds

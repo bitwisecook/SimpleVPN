@@ -79,6 +79,11 @@ typedef NS_ENUM(NSInteger, OVPNStatus) {
 @property (nullable, copy) NSString *proxyPassword;
 @property (nullable, copy) NSString *privateKeyPassword;
 
+// static-challenge response (the one-time code), rides startTunnel options in
+// memory like the passwords above. Handed to the engine as ProvideCreds.response
+// — NOT concatenated into the password (that concat is the non-challenge path).
+@property (nullable, copy) NSString *challengeResponse;
+
 @end
 
 @protocol OpenVPN3BridgeDelegate <NSObject>
@@ -129,6 +134,36 @@ NS_SWIFT_SENDABLE
 /// Returns NO if the settings could not be applied.
 - (BOOL)reapplyTunSettingsIncludingRoutes:(BOOL)includeRoutes;
 
+/// Default-gateway ownership (PolicyRouting.md Tier 2). owned=YES ⇒ this tunnel
+/// advertises the pushed default route (0.0.0.0/0 · ::/0) as usual — it is the
+/// full-tunnel owner. owned=NO ⇒ the default route is suppressed while every
+/// specific pushed subnet (`_v4Included`/`_v6Included`) is STILL advertised: the
+/// tunnel is transparently demoted to split, carrying only its own subnets. Live
+/// (re-applies the captured settings, no reconnect); returns NO on apply failure.
+- (BOOL)setDefaultRouteOwned:(BOOL)owned;
+
+/// Establish-time seed of the same ownership gate, set from the desired role the
+/// app passes in `startTunnel` options BEFORE `connectWithProfile:` builds the
+/// tun. Unlike `setDefaultRouteOwned:` this does NOT re-apply settings (there is
+/// no live tun yet) — it just records the flag so the very first establish honours
+/// it, keeping the ≤1-owner invariant robust to the app not reconciling live.
+- (void)setInitialDefaultRouteOwned:(BOOL)owned;
+
+/// Apply (or clear) the arbitrated system proxy on this tunnel's network settings
+/// (Proxy mediator P3, tier-2 sole-writer applier — Docs/StateMediators.md). The
+/// mediator computes ONE proxy decision and the provider sends it here for the OWNER
+/// egress only; `proxy == nil` clears it. Stored and merged into the captured tun
+/// settings, then re-applied live (no reconnect). Returns NO on apply failure.
+- (BOOL)applyProxySettings:(nullable NEProxySettings *)proxy NS_SWIFT_NAME(applyProxySettings(_:));
+
+/// Apply (or clear) the arbitrated per-tunnel DNS on this tunnel's network settings
+/// (DNS mediator applier, tier-2 sole writer — Docs/StateMediators.md). The mediator
+/// computes a per-participant split-DNS decision and the provider sends THIS engine's
+/// slice here; `dns == nil` clears the override and restores the captured/pushed DNS.
+/// Stored and merged into the captured tun settings, then re-applied live (no
+/// reconnect). Returns NO on apply failure.
+- (BOOL)applyDNSSettings:(nullable NEDNSSettings *)dns NS_SWIFT_NAME(applyDNSSettings(_:));
+
 /// Cumulative transport counters, for throughput sampling.
 - (void)transportBytesIn:(int64_t *)bytesIn bytesOut:(int64_t *)bytesOut;
 
@@ -145,7 +180,21 @@ NS_SWIFT_SENDABLE
 ///   "mtu"           → NSNumber  (tunnel MTU)
 ///   "dns"           → NSArray<NSString *>  (pushed DNS servers)
 ///   "searchDomains" → NSArray<NSString *>  (pushed DNS search domains)
-///   "proxies"       → NSArray<NSString *>  (pushed HTTP/HTTPS proxies or PAC URL)
+///   "proxies"       → NSArray<NSString *>  (pushed HTTP/HTTPS proxies or PAC URL,
+///                     display strings — kept for existing consumers)
+///   "proxyHTTPHost" → NSString  (pushed HTTP proxy host, or "")
+///   "proxyHTTPPort" → NSNumber  (pushed HTTP proxy port, 0 if none)
+///   "proxyHTTPSHost"→ NSString  (pushed HTTPS proxy host, or "")
+///   "proxyHTTPSPort"→ NSNumber  (pushed HTTPS proxy port, 0 if none)
+///   "proxyPAC"      → NSString  (pushed PAC / auto-config URL, or "")
+///   "proxyBypass"   → NSArray<NSString *>  (pushed proxy-bypass hosts)
+///   "defaultV4"     → NSNumber(bool)  (a v4 default route was pushed)
+///   "defaultV6"     → NSNumber(bool)  (a v6 default route was pushed)
+///   "suppressDefault" → NSNumber(bool)  (ownership demoted: default suppressed)
+///   "effectiveDefaultOwned" → NSNumber(bool)  (GROUND TRUTH: this tunnel actually
+///                     holds 0.0.0.0/0 · ::/0 right now — a pushed default AND not
+///                     suppressed. The app seeds its applied-role cache from this,
+///                     never the client-.ovpn text grep.)
 - (NSDictionary<NSString *, id> *)connectionInfo;
 
 /// Observed traffic flows since the tunnel came up, for the app's per-VPN traffic

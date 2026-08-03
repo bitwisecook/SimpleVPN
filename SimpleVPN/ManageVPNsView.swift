@@ -214,7 +214,6 @@ struct ManageVPNsView: View {
             t.kind = c.kind ?? .ciscoAnyConnect
             t.name = c.title
             t.server = "https://\(c.host):\(c.port)"
-            t.sslProtocol = c.facts["sslProtocol"] ?? "anyconnect"
             tunnels.save(t)
             selection = Self.tunnelTag + t.id
 
@@ -385,6 +384,7 @@ struct ManageVPNsView: View {
         Button("OpenVPN") { Task { await newEmpty() } }
         Button("WireGuard") { newWireGuard() }
         Button("Tailscale / Headscale") { Task { await newTailscale() } }
+        Button("Proxy Tunnel (SOCKS5 / HTTP)") { Task { await newProxyTunnel() } }
         Button("IKEv2") { newNative(.ikev2) }
         Button("IPsec (IKEv1)") { newNative(.ipsec) }
         Button("L2TP / IPsec") { newNative(.l2tp) }
@@ -409,13 +409,15 @@ struct ManageVPNsView: View {
     /// editor (raw .ovpn, certificates, engine overrides) applies to it.
     @ViewBuilder private var detailPane: some View {
         if let id = selection, let t = tunnelBinding(for: id) {
-            SubprocessTunnelView(store: tunnels, manager: tunnelManager, draft: t).id(id)
+            SubprocessTunnelView(vpn: vpn, store: tunnels, manager: tunnelManager, draft: t).id(id)
         } else if let id = selection, let c = nativeBinding(for: id) {
-            NativeVPNView(manager: nativeVPN, draft: c).id(id)
+            NativeVPNView(vpn: vpn, manager: nativeVPN, draft: c).id(id)
         } else if let id = selection, let w = wgBinding(for: id) {
-            WireGuardView(store: wireguard, draft: w).id(id)
+            WireGuardView(vpn: vpn, store: wireguard, draft: w).id(id)
         } else if let id = selection, vpn.isTailscale(id) {
             TailscaleView(vpn: vpn, profileID: id).id(id)
+        } else if let id = selection, vpn.isProxyTunnel(id) {
+            ProxyTunnelView(vpn: vpn, profileID: id).id(id)
         } else if let id = selection, vpn.profiles.contains(where: { $0.id == id }) {
             EditVPNView(vpn: vpn, labels: labels, profileID: id, embedded: true,
                         onSaved: { if totalVPNCount <= 1 { dismissWindow() } })
@@ -428,6 +430,11 @@ struct ManageVPNsView: View {
 
     private func newTailscale() async {
         do { selection = try await vpn.createTailscale() }
+        catch { vpn.lastError = error.localizedDescription }
+    }
+
+    private func newProxyTunnel() async {
+        do { selection = try await vpn.createProxyTunnel() }
         catch { vpn.lastError = error.localizedDescription }
     }
 

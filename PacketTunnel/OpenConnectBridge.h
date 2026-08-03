@@ -65,6 +65,36 @@ NS_SWIFT_SENDABLE
 /// Tear the connection down (returns quickly; final status via delegate).
 - (void)disconnect;
 
+/// Default-gateway ownership (PolicyRouting.md Tier 2 · Docs/StateMediators.md),
+/// mirroring OpenVPN3Bridge. owned=YES ⇒ this tunnel advertises the default route
+/// (0.0.0.0/0 · ::/0) — the full-tunnel owner. owned=NO ⇒ the default route is
+/// suppressed while every specific pushed subnet (the gateway's split-include
+/// routes) is STILL advertised: the tunnel is transparently demoted to split.
+/// Live — it re-applies the captured tun settings with no reconnect (the CSTP
+/// session and the packet pump are untouched); returns NO on apply failure.
+- (BOOL)setDefaultRouteOwned:(BOOL)owned;
+
+/// Establish-time seed of the same ownership gate, set from the desired role the
+/// app passes in `startTunnel` options BEFORE the tun is built. Unlike
+/// `setDefaultRouteOwned:` this does NOT re-apply settings (there is no live tun
+/// yet) — it just records the flag so the very first `setup_tun` honours it,
+/// keeping the ≤1-owner invariant robust to the app not reconciling live.
+- (void)setInitialDefaultRouteOwned:(BOOL)owned;
+
+/// Apply (or clear) the arbitrated system proxy on this tunnel's network settings
+/// (Proxy mediator applier — Docs/StateMediators.md), mirroring OpenVPN3Bridge. The
+/// mediator computes ONE proxy decision and the provider sends it here for the OWNER
+/// egress only; `proxy == nil` clears it. Stored and merged into the captured tun
+/// settings, then re-applied live (no reconnect). Returns NO on apply failure.
+- (BOOL)applyProxySettings:(nullable NEProxySettings *)proxy NS_SWIFT_NAME(applyProxySettings(_:));
+
+/// Apply (or clear) the arbitrated per-tunnel DNS on this tunnel's network settings
+/// (DNS mediator applier — Docs/StateMediators.md), mirroring OpenVPN3Bridge. The
+/// provider sends THIS engine's split-DNS slice here; `dns == nil` clears the override
+/// and restores the captured/pushed DNS. Re-applied live (no reconnect). Returns NO on
+/// apply failure.
+- (BOOL)applyDNSSettings:(nullable NEDNSSettings *)dns NS_SWIFT_NAME(applyDNSSettings(_:));
+
 /// Cumulative transport counters, for throughput sampling.
 - (void)transportBytesIn:(int64_t *)bytesIn bytesOut:(int64_t *)bytesOut;
 
