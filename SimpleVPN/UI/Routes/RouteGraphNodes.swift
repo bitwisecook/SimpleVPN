@@ -323,6 +323,10 @@ extension RouteGraphView {
         let slice = first < last ? Array(dest.routes[first..<last]) : []
         let sliceOffset = offset - CGFloat(first) * rowHeight
         let diff = customRoutingDiff(for: dest)
+        // Rows a Custom Routing Add injected that collide with a sibling row —
+        // computed once per card, like `diff`, and empty for every card whose
+        // interface isn't ours or has no filter (see RouteGraphOverlap.swift).
+        let overlaps = overlapMap(for: dest)
         // No card-level highlight any more: every destination card is a list of real
         // CIDRs, so the matching ROW is the answer. The one routeless answer — the
         // default — is the globe.
@@ -331,7 +335,7 @@ extension RouteGraphView {
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(slice) { row in
-                        routeRow(row, in: dest, outcome, diff: diff)
+                        routeRow(row, in: dest, outcome, diff: diff, overlaps: overlaps)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -383,9 +387,12 @@ extension RouteGraphView {
     /// above already started. Purely decorative (same fixed height either way), so
     /// it can't touch `destHeight`'s prediction.
     private func routeRow(_ row: RouteRow, in dest: GraphNode.Destination,
-                          _ outcome: SearchOutcome?, diff: ResourceDiff?) -> some View {
+                          _ outcome: SearchOutcome?, diff: ResourceDiff?,
+                          overlaps: [String: [String]]) -> some View {
         let lit = isHighlighted(row, in: dest, outcome)
         let delta = diff?.items.first { $0.value == Self.normCIDR(row.cidr) }?.delta
+        let victims = overlaps[Self.normCIDR(row.cidr)] ?? []
+        let focused = overlapFocus == overlapKey(dest, row.cidr)
         return HStack(spacing: 2) {
             Text(row.cidr)
                 .font(.caption2.monospaced())
@@ -398,6 +405,23 @@ extension RouteGraphView {
                     .help(delta == .added ? "Added by this VPN's Custom Routing rules"
                                           : "Replaced by this VPN's Custom Routing rules")
                     .accessibilityLabel(delta == .added ? "added by Custom Routing" : "replaced by Custom Routing")
+            }
+            // The overlap icon — same glyph, tints and toggle the editor's rule
+            // rows use, so the two surfaces read as one system. A .plain Button
+            // is allowed inside the scaled container; its click never reaches the
+            // card's own select() tap. Purely inline (smaller than the row), so
+            // the fixed rowHeight prediction is untouched.
+            if !victims.isEmpty {
+                Button { toggleOverlapFocus(dest, row.cidr) } label: {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(focused ? Color.accentColor : Color.orange)
+                        .frame(width: 12, height: 12)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(overlapHelp(victims))
+                .accessibilityLabel("Show what this overlaps")
             }
         }
             .padding(.horizontal, 3)

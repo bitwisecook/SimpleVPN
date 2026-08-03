@@ -123,6 +123,17 @@ struct RouteGraphView: View {
     /// The interface whose inspector popover is showing, by BSD name.
     @State var inspecting: String?   // was private — internal for the file split
     @State var searchText = ""   // was private — internal for the file split
+    /// The route row whose Custom-Routing overlap arrow is showing, keyed
+    /// "<dest.id>|<normalized cidr>"; nil = none. The Routes-window cousin of the
+    /// editor's `focusedRuleID` — same gesture (click the overlap icon), same
+    /// meaning ("show me what this Add collides with"). State lives here in the
+    /// shell; everything that reads it is in RouteGraphOverlap.swift.
+    @State var overlapFocus: String?
+    /// When the current arrow reveal began; nil once settled — which is what pauses
+    /// the reveal's TimelineView, so a shown-but-settled arrow costs zero redraws
+    /// (the same idle discipline edgeLayer keeps for its marching dashes).
+    @State var overlapRevealStart: Date?
+    @State var overlapSettle: Task<Void, Never>?
 
     var body: some View {
         // Resolved ONCE and handed down: every card, row and edge that lights up is
@@ -276,6 +287,10 @@ struct RouteGraphView: View {
                 edgeControl(e)
                     .offset(x: e.midpoint().x - 14, y: e.midpoint().y - 14)
             }
+            // The Custom-Routing overlap arrow, on top of the cards it connects —
+            // it points BETWEEN rows, so it can't sit under them. Pure Canvas
+            // (we are inside the scaled container) and hit-test-transparent.
+            overlapArrowLayer(layout)
         }
         .frame(width: layout.canvas.width, height: layout.canvas.height, alignment: .topLeading)
         .padding(canvasInset)

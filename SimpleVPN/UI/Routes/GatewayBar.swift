@@ -58,7 +58,11 @@ extension RouteGraphView {
                         .foregroundStyle(.secondary)
                         .help(reconcilingGatewayNote(effective: displayed))
                 }
-                Spacer(minLength: 0)
+                Spacer(minLength: 8)
+                // The picker's pick, as a picture: This Mac → [owner|Direct] →
+                // Internet, filling the air the bar always had at its trailing
+                // end. Animates only while a switch is happening (see the strip).
+                TrafficPathStrip(vpn: vpn)
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
