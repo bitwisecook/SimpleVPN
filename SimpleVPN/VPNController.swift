@@ -280,6 +280,18 @@ final class VPNController {
 
     var anyEngaged: Bool { profiles.contains { isEngaged(id: $0.id) } }
 
+    /// The status to DISPLAY — not the NE truth that drives routing/mediators.
+    /// Tailscale reports `.connected` the instant its extension starts, but the node
+    /// isn't really on the network until the backend reaches `.running`; it may still
+    /// be mid browser sign-in. So for a Tailscale profile we present `.connecting`
+    /// until Running, instead of a "Connected" badge over a machine that can't pass
+    /// traffic yet. Everything else passes through unchanged.
+    func displayStatus(for id: String) -> NEVPNStatus {
+        let raw = profiles.first { $0.id == id }?.status ?? .invalid
+        guard isTailscale(id), raw == .connected else { return raw }
+        return tailscaleStatuses[id]?.backendState == .running ? .connected : .connecting
+    }
+
     static func statusText(_ s: NEVPNStatus) -> String {
         switch s {
         case .invalid: return "Not configured"
@@ -588,7 +600,7 @@ final class VPNController {
                 // tick, and a re-keyed login (new URL) still surfaces.
                 guard let url, url != self.tailscaleSignInURL[id] else { continue }
                 self.tailscaleSignInURL[id] = url
-                NSWorkspace.shared.open(url)
+                self.openTailscaleURL(url, id: id)
             }
         }
     }
@@ -597,7 +609,15 @@ final class VPNController {
     /// when the tab was dismissed). No-op while there is nothing to sign in to.
     func openTailscaleSignIn(id: String) {
         guard let url = tailscaleSignInURL[id] else { return }
-        NSWorkspace.shared.open(url)
+        openTailscaleURL(url, id: id)
+    }
+
+    /// Open a Tailscale sign-in URL in the browser this VPN is configured to use.
+    /// Defaults to the OS default browser (its IdP login often needs your real
+    /// browser for passkeys/password managers); the user can pick a specific
+    /// browser+profile or the in-app window in the Tailscale editor.
+    private func openTailscaleURL(_ url: URL, id: String) {
+        BrowserCatalog.open(url, using: tailscaleConfig(for: id).signInBrowser)
     }
 
     @ObservationIgnored private var tailscaleSignInWatch: [String: Task<Void, Never>] = [:]

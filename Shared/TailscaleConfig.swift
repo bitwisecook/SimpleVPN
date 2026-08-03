@@ -70,6 +70,11 @@ nonisolated struct TailscaleConfig: Codable, Sendable, Equatable {
     var exitNodeAllowLANAccess: Bool = true
     /// Networks this Mac offers to share with the others (advanced).
     var advertiseRoutes: [String] = []
+    /// Which browser opens the sign-in page. Tailscale's identity-provider login
+    /// often needs your REAL browser (passkeys, password managers), so this defaults
+    /// to the OS default browser rather than the in-app window — but you can point it
+    /// at a specific browser/profile or the in-app sign-in window.
+    var signInBrowser: BrowserSelection = .osDefault
 
     /// The URL actually handed to the engine: the Tailscale preset always uses
     /// the service's own control plane regardless of any stale text left in the
@@ -95,6 +100,7 @@ nonisolated struct TailscaleConfig: Codable, Sendable, Equatable {
         exitNode = (try? c.decodeIfPresent(String.self, forKey: .exitNode)) ?? ""
         exitNodeAllowLANAccess = (try? c.decodeIfPresent(Bool.self, forKey: .exitNodeAllowLANAccess)) ?? true
         advertiseRoutes = (try? c.decodeIfPresent([String].self, forKey: .advertiseRoutes)) ?? []
+        signInBrowser = (try? c.decodeIfPresent(BrowserSelection.self, forKey: .signInBrowser)) ?? .osDefault
     }
 }
 

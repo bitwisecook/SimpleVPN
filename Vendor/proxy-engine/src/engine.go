@@ -307,6 +307,24 @@ func buildEngine(up *upstream, mtu int) (*engineState, error) {
 	})
 
 	ep := channel.New(512, uint32(mtu), "")
+	// CRITICAL — the tun-facing link endpoint MUST NOT advertise checksum
+	// offload or GSO. gVisor only writes a COMPLETE L4 checksum in software when
+	// the outgoing NIC lacks CapabilityTXChecksumOffload *and* GSO is off: see
+	// pkg/tcpip/transport/tcp/connect.go sendTCP, which — when GSO is active or
+	// RequiresTXTransportChecksum() is false — leaves only the pseudo-header
+	// "partial" checksum in the segment (Linux CHECKSUM_PARTIAL), expecting real
+	// hardware to finish it. Here there is NO real NIC: those bytes are read off
+	// this channel by startOutboundPump, handed to Swift, and written verbatim to
+	// the utun via NEPacketTunnelFlow.writePackets. A partial-checksum TCP packet
+	// injected into the host stack makes the kernel panic in in_finalize_cksum on
+	// the ip_output path ("proto 6 invalid ULP cksum offset (65520) cksum flags
+	// 0x1406 @ ip_output.c") — a whole-machine kernel panic, not just a dropped
+	// packet. channel.New already returns a zero-capability, GSONotSupported
+	// endpoint, so full software checksums are computed today; we assert it here
+	// so a future gVisor bump that changes those defaults can never silently
+	// re-enable offload and reintroduce the panic. Do NOT add these bits.
+	ep.LinkEPCapabilities &^= stack.CapabilityTXChecksumOffload | stack.CapabilityRXChecksumOffload
+	ep.SupportedGSOKind = stack.GSONotSupported
 	if err := s.CreateNICWithOptions(nicID, ep, stack.NICOptions{Name: "proxy0"}); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("create NIC: %s", err)

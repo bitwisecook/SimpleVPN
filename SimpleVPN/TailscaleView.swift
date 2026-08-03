@@ -75,6 +75,11 @@ struct TailscaleView: View {
                     Label("SimpleVPN will open a sign-in page the first time you connect. After that this Mac stays signed in.",
                           systemImage: "safari")
                         .font(.callout).foregroundStyle(.secondary)
+                    // Which browser opens that sign-in page. Defaults to your default
+                    // browser because Tailscale's login often needs passkeys or a
+                    // password manager living there; the in-app window is also offered.
+                    BrowserPicker(selection: $draft.signInBrowser,
+                                  systemDefaultLabel: "Default browser (\(BrowserCatalog.osDefaultName))")
                 }
                 signInStatusRow
             }

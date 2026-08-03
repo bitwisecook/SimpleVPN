@@ -12,7 +12,6 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
-import AppKit
 import os
 
 /// Settings key: open the live-details (inspector) pane when the window opens.
@@ -34,13 +33,6 @@ struct ConnectionView: View {
     /// the Settings toggle changes the launch state, the toolbar button the moment.
     @AppStorage(inspectorDefaultsKey) private var inspectorOpenByDefault = false
     @State private var showInspector = false
-    /// The window's width from just BEFORE the inspector opens. AppKit is supposed
-    /// to grow the window for `.inspector` and shrink it back on dismiss, but the
-    /// shrink-back half is unreliable (the window is left enlarged after toggling
-    /// the pane off) — so the pre-inspector width is captured here and force-
-    /// restored right after the pane closes, in `restoreWindowWidthAfterInspectorToggle`,
-    /// overriding whatever (wider) frame AppKit actually settled on.
-    @State private var widthBeforeInspector: CGFloat?
     /// Sidebar visibility — starts closed when there's only one VPN (a list of
     /// one is noise); the standard sidebar toolbar button reopens it.
     @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
@@ -55,7 +47,12 @@ struct ConnectionView: View {
     /// the header pill, the menu bar or the route graph (they all used to compute
     /// their own, with two different captive-portal predicates).
     private func rowDot(_ p: VPNController.Profile) -> DotState {
-        link?.dot(for: p.id) ?? .from(status: p.status)
+        // For Tailscale mid sign-in the display status (connecting) must win over the
+        // link monitor, which only knows the NE tunnel came up — not that the node
+        // isn't on the network yet.
+        let shown = vpn.displayStatus(for: p.id)
+        if shown != p.status { return .from(status: shown) }
+        return link?.dot(for: p.id) ?? .from(status: shown)
     }
 
     /// Active non-OpenVPN tunnels (SSH / OpenConnect subprocess, native IKEv2) so a
@@ -285,27 +282,10 @@ struct ConnectionView: View {
             showInspector = inspectorOpenByDefault
             if vpn.profiles.count <= 1 { columnVisibility = .detailOnly }
         }
-        .onChange(of: showInspector) { _, isShowing in
-            restoreWindowWidthAfterInspectorToggle(isShowing: isShowing)
-        }
-    }
-
-    /// See `widthBeforeInspector` for why this exists. Captures the width just
-    /// before the pane opens; on close, force-restores it — asynchronously, so
-    /// AppKit's own (partial) resize gets a chance to run first, and this simply
-    /// corrects whatever it left the frame at rather than fighting it mid-flight.
-    private func restoreWindowWidthAfterInspectorToggle(isShowing: Bool) {
-        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
-        if isShowing {
-            widthBeforeInspector = window.frame.width
-        } else if let target = widthBeforeInspector {
-            DispatchQueue.main.async {
-                var frame = window.frame
-                guard frame.width > target else { return }   // already restored / narrower
-                frame.size.width = target
-                window.setFrame(frame, display: true, animate: !reduceMotion)
-            }
-        }
+        // The window keeps AppKit's stock `.inspector` resize behaviour: opening the
+        // pane grows the window, closing it leaves the window as-is. Attempts to force
+        // it to shrink back on close were more trouble than they were worth, so this is
+        // deliberately left alone.
     }
 
     private func importConfig(_ result: Result<URL, Error>) {
@@ -467,6 +447,14 @@ private struct ConnectionDetailView: View {
     @State private var connectingTooLong = false
     @State private var netMemory = NetworkMemory.shared
 
+    /// An official Tailscale client is running. Refreshed on appear and whenever an
+    /// app launches/quits, so the warning appears/clears live. Only meaningful for a
+    /// Tailscale-kind profile (see `tailscaleConflict`).
+    @State private var tailscaleClientsRunning = false
+    /// Two-phase Connect for the conflict case: the first press ARMS this (the button
+    /// becomes a red "Connect anyway"); only the second press actually connects.
+    @State private var tailscaleConflictArmed = false
+
     /// State-change easing, honouring Reduce Motion (instant when reduced).
     private var stateEase: Animation? { reduceMotion ? nil : .smooth(duration: 0.35) }
 
@@ -592,6 +580,23 @@ private struct ConnectionDetailView: View {
         vpn.connectReadiness(for: profile.id) == .ready
     }
 
+    /// Warn (and gate Connect behind a second click): this is a Tailscale profile, an
+    /// official Tailscale client is already running, and we're not already up. Two
+    /// Tailscale datapaths at once conflict — it has panicked the kernel — so we don't
+    /// recommend starting ours alongside theirs.
+    private var tailscaleConflict: Bool {
+        profile.kind == .tailscale && tailscaleClientsRunning && !UI.isActive(profile.status)
+    }
+
+    /// Re-read whether an official Tailscale client is running; drop the two-phase arm
+    /// if the conflict has gone away (they quit their app), so a stale red "Connect
+    /// anyway" doesn't linger.
+    private func refreshTailscaleClients() {
+        let running = TailscaleConflict.isOfficialClientRunning
+        tailscaleClientsRunning = running
+        if !running { tailscaleConflictArmed = false }
+    }
+
     var body: some View {
         // Scroll rather than grow: a long detail (Doctor cards + incident +
         // endpoint + credentials) must stay inside the window, not resize it.
@@ -676,7 +681,7 @@ private struct ConnectionDetailView: View {
                 // button next to a green dot asks the user to know the iconography.
                 // Sits above the map; deliberately makes no claims about which
                 // traffic is protected (that's the tunnel-mode toggle's story).
-                if profile.status == .connected, !vpn.isReconfiguring(profile.id), !isPaused,
+                if vpn.displayStatus(for: profile.id) == .connected, !vpn.isReconfiguring(profile.id), !isPaused,
                    !bannerCollapsed {
                     ConnectedBanner(vpnName: profile.name, server: profile.server,
                                     uptime: reach?.stats(for: profile.id)?.uptime)
@@ -700,6 +705,21 @@ private struct ConnectionDetailView: View {
         .navigationTitle(profile.name)
         .disabled(busy)
         .task { loadOnce() }
+        // Detect a conflicting official Tailscale client with a light 2s poll (cheap:
+        // it reads an in-process array). NSWorkspace's launch/quit notifications are
+        // unreliable for menu-bar/agent apps like Tailscale, so polling is the honest
+        // approach — and it keeps this view pure SwiftUI. A profile switch also
+        // re-checks and resets the arm (see below).
+        .task {
+            while !Task.isCancelled {
+                refreshTailscaleClients()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+        .onChange(of: profile.id) { _, _ in
+            tailscaleConflictArmed = false
+            refreshTailscaleClients()
+        }
         // NetworkMemory now watches the path itself, so this is only the initial read;
         // switching Wi-Fi updates it without any view having to notice.
         .task(id: profile.id) { await netMemory.refresh() }
@@ -759,6 +779,10 @@ private struct ConnectionDetailView: View {
 
     /// Stall/captive-portal/pause aware dot state for this VPN's header badge.
     private var headerDotState: DotState {
+        // Tailscale mid sign-in: show the connecting dot, not the link monitor's
+        // "tunnel is up" (see `displayStatus`).
+        let shown = vpn.displayStatus(for: profile.id)
+        if shown != profile.status { return .from(status: shown) }
         if let link { return link.dot(for: profile.id) }
         let stalled = reach?.isStalled(profile.id) == true
         return .from(status: profile.status,
@@ -843,6 +867,10 @@ private struct ConnectionDetailView: View {
             connectControlContent
         }
         .animation(stateEase, value: profile.status)
+        // Tailscale's connecting→connected morph happens when the BACKEND reaches
+        // Running, not when NE status changes (it's already .connected), so animate
+        // on the display status too.
+        .animation(stateEase, value: vpn.displayStatus(for: profile.id))
         .animation(stateEase, value: vpn.isReconfiguring(profile.id))
         .animation(stateEase, value: isPaused)
     }
@@ -858,7 +886,11 @@ private struct ConnectionDetailView: View {
     }
 
     @ViewBuilder private var connectControlForStatus: some View {
-        switch profile.status {
+        // Display status, so a Tailscale node mid sign-in shows the "Connecting…" pill
+        // (with a cancel ✕) rather than the live Disconnect cluster over a node that
+        // can't pass traffic yet.
+        let shown = vpn.displayStatus(for: profile.id)
+        switch shown {
         case .connected, .reasserting:
             HStack(spacing: 8) {
                 // The shrunk-down "Connected" chip lands here once the big banner
@@ -883,12 +915,13 @@ private struct ConnectionDetailView: View {
             }
         case .connecting, .disconnecting:
             HStack(spacing: 8) {
-                workingPill(VPNController.statusText(profile.status),
-                            tint: profile.status == .connecting ? .yellow : .orange)
+                workingPill(VPNController.statusText(shown),
+                            tint: shown == .connecting ? .yellow : .orange)
                 // Connecting must always be escapable. OpenVPN retries a gateway it
                 // can't reach indefinitely (wrong Wi-Fi, no route to the
-                // concentrator), so without this the UI is a dead end.
-                if profile.status == .connecting { trailingStopButton }
+                // concentrator), so without this the UI is a dead end. For Tailscale
+                // the ✕ cancels the sign-in wait (the NE tunnel is already up).
+                if shown == .connecting { trailingStopButton }
             }
         default:   // disconnected / invalid
             connectButton
@@ -974,14 +1007,28 @@ private struct ConnectionDetailView: View {
         // NOT `.disabled(!canConnect)`: a dead button teaches nothing. It LOOKS
         // disabled while input is missing, but a click walks the user to the fix —
         // focus lands on the first empty required field and it gets a little shake.
+        // Two-phase when an official Tailscale client is already running: the first
+        // press ARMS (button turns red "Connect anyway"), the second actually connects.
+        // So a person can't start a conflicting second datapath with one absent-minded
+        // click — they have to see the warning and confirm they understand the risk.
+        let armed = tailscaleConflict && tailscaleConflictArmed
         return AnyView(
-            Button("Connect") {
-                if canConnect { connectTask = Task { await connect() } } else { nudgeMissingInput() }
+            Button(armed ? "Connect anyway" : "Connect") {
+                guard canConnect else { nudgeMissingInput(); return }
+                if tailscaleConflict && !tailscaleConflictArmed {
+                    withAnimation(reduceMotion ? nil : .snappy(duration: 0.2)) {
+                        tailscaleConflictArmed = true
+                    }
+                    return
+                }
+                connectTask = Task { await connect() }
             }
                 .buttonStyle(.glassProminent).controlSize(.large)
-                .tint(canConnect ? nil : .gray)
+                .tint(armed ? .red : (canConnect ? nil : .gray))
                 .opacity(canConnect ? 1 : 0.6)
-                .accessibilityHint(canConnect ? "" : (missingInputHint ?? ""))
+                .accessibilityHint(canConnect
+                                   ? (tailscaleConflict ? "Not recommended — the Tailscale app is already running" : "")
+                                   : (missingInputHint ?? ""))
         )
     }
 
@@ -1047,6 +1094,25 @@ private struct ConnectionDetailView: View {
         let status = vpn.tailscaleStatuses[profile.id]
         let signInURL = vpn.tailscaleSignInURL[profile.id]
         VStack(alignment: .leading, spacing: 8) {
+            if tailscaleConflict {
+                // The official Tailscale app is running. Starting ours as well puts two
+                // wireguard/gVisor datapaths on the same Mac — they fight over magicsock
+                // and the tun injection path, and in the field this has crashed the
+                // kernel. Steer hard away from it; Connect is two-phase below.
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("The official Tailscale app is already running.")
+                            .fontWeight(.semibold)
+                        Text("Running two Tailscale connections at once can conflict — it has crashed the Mac. We don't recommend starting this one alongside it.")
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.red.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+            }
             if let status, status.backendState.needsUserAction {
                 Label(status.backendState == .needsMachineAuth
                       ? "Waiting for someone to approve this Mac on your network."

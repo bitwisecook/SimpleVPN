@@ -10,7 +10,11 @@
 
 import Foundation
 
-struct BrowserSelection: Codable, Sendable, Equatable {
+// `nonisolated`: this value type is referenced from nonisolated shared code
+// (TailscaleConfig's `signInBrowser` default is `.osDefault`), and the app target
+// defaults to MainActor isolation — which would otherwise pin these statics to the
+// main actor and make them unusable from a nonisolated context.
+nonisolated struct BrowserSelection: Codable, Sendable, Equatable {
     /// Application bundle id (e.g. "com.google.Chrome"); nil ⇒ OS default browser.
     var bundleID: String? = nil
     /// Browser-specific profile key: Chromium `--profile-directory` dir (e.g.

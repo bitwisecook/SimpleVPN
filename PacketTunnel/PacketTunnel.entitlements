@@ -14,6 +14,12 @@
 	</array>
 	<key>com.apple.security.network.client</key>
 	<true/>
+	<!-- Tailscale's magicsock bind()s an unconnected UDP socket to receive from
+	     peers/DERP (server-side behavior); without this the sandbox denies bind()
+	     with EPERM ("operation not permitted") and the wireguard engine can't
+	     start. OpenVPN only needs network.client (it connect()s outbound UDP). -->
+	<key>com.apple.security.network.server</key>
+	<true/>
 	<!-- No keychain-access-groups: the extension runs as root in the system
 	     context and can't read the user's keychain anyway; credentials are handed
 	     to it in-memory via startTunnel(options:). Dropping the group is least-
