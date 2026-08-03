@@ -292,6 +292,42 @@ final class VPNController {
         return tailscaleStatuses[id]?.backendState == .running ? .connected : .connecting
     }
 
+    /// Control-plane liveness: installed by ControlPlaneDispatcher; every status
+    /// flip (and profile-list change) is reported here so the CLI's `watch`,
+    /// intents and future Tcl handlers hear exactly what the UI observes.
+    @ObservationIgnored var controlEventSink: ((ControlEvent) -> Void)?
+
+    /// The dispatcher's guard chain (MDM today, Tcl `CTL_*` later), installed at
+    /// startup. The lifecycle entries below consult it BEFORE acting, so the
+    /// guarantee is structural: every interface — UI buttons calling these
+    /// methods directly, the CLI, intents — is gated identically, and a future
+    /// view can't forget to check. nil (tests, previews) ⇒ allow.
+    @ObservationIgnored var controlGuard: ((ControlCommand) -> ControlDecision)?
+
+    /// Run the guard chain for a command; non-nil = the denial reason (already
+    /// broadcast to the event stream by the chain's runner).
+    private func controlDenied(_ command: ControlCommand) -> String? {
+        if case .deny(let why) = controlGuard?(command) ?? .allow {
+            Self.log.log("control: \(command.name, privacy: .public) denied — \(why, privacy: .public)")
+            return why
+        }
+        return nil
+    }
+
+    /// NEVPNStatus → the stable wire word (ControlStatusWord). Interfaces other
+    /// than the UI must never see a raw NE value.
+    nonisolated static func wireStatus(_ s: NEVPNStatus) -> String {
+        switch s {
+        case .invalid: ControlStatusWord.invalid
+        case .disconnected: ControlStatusWord.disconnected
+        case .connecting: ControlStatusWord.connecting
+        case .connected: ControlStatusWord.connected
+        case .reasserting: ControlStatusWord.reasserting
+        case .disconnecting: ControlStatusWord.disconnecting
+        @unknown default: ControlStatusWord.invalid
+        }
+    }
+
     static func statusText(_ s: NEVPNStatus) -> String {
         switch s {
         case .invalid: return "Not configured"
@@ -346,6 +382,7 @@ final class VPNController {
                 selectedID = profiles.first?.id
             }
             Self.log.log("loadAll: \(self.profiles.count) profile(s)")
+            controlEventSink?(.profilesChanged)
         } catch {
             lastError = "load failed: \(error.localizedDescription)"
             Self.log.error("loadAll failed: \(error.localizedDescription, privacy: .public)")
@@ -1255,6 +1292,10 @@ final class VPNController {
 
     func connect(id: String, using provider: CredentialProvider,
                  request: CredentialRequest, remember: Bool) async throws {
+        // The control-plane guard chain (MDM, future Tcl) — every connect path
+        // funnels through this method, so this one check covers the detail pane,
+        // sidebar, menu bar, compositions, CLI and intents alike.
+        if let why = controlDenied(.connect(profile: id)) { throw err(why) }
         guard let mgr = managers[id],
               mgr.protocolConfiguration is NETunnelProviderProtocol else {
             throw err("no such profile")
@@ -1703,6 +1744,7 @@ final class VPNController {
     private(set) var pausedProfiles: Set<String> = []
 
     func pause(id: String) async {
+        if let why = controlDenied(.pause(profile: id)) { lastError = why; return }
         guard let reply = await sendMessage("pause:bypass", to: id), reply == "ok" else {
             lastError = "Pause failed — the tunnel didn't acknowledge."
             return
@@ -1712,6 +1754,7 @@ final class VPNController {
     }
 
     func resume(id: String) async {
+        if let why = controlDenied(.resume(profile: id)) { lastError = why; return }
         let acknowledged = (await sendMessage("resume", to: id)) == "ok"
         pausedProfiles.remove(id)
         guard acknowledged else {
@@ -1918,7 +1961,12 @@ final class VPNController {
     /// Establish-time ownership prediction (RC3), passed via `startTunnel`. (Delegates.)
     func predictedGatewayOwned(_ id: String) -> Bool { routes.predictedGatewayOwned(id) }
     /// The user picked a new default-gateway owner. (Delegates the atomic switch.)
-    func setDefaultGateway(to newOwner: String?) async { await routes.setDefaultGateway(to: newOwner) }
+    func setDefaultGateway(to newOwner: String?) async {
+        // Guarded here (not just in the dispatcher): the Routes window's picker
+        // calls this directly, and MDM's ForceKeepInsideVPN must bind it too.
+        if let why = controlDenied(.setDefaultGateway(profile: newOwner)) { lastError = why; return }
+        await routes.setDefaultGateway(to: newOwner)
+    }
 
     /// Connected profiles, most-recently-connected FIRST (the deterministic
     /// tiebreak for auto-promotion). Falls back to name order when recency is
@@ -2130,6 +2178,7 @@ final class VPNController {
     }
 
     func disconnect(id: String) {
+        if let why = controlDenied(.disconnect(profile: id)) { lastError = why; return }
         // Cancelling a connect that was already grinding away is the same evidence the
         // watchdog collects — the user just got there first. Remember the network so the
         // next attempt from here is forewarned. Short cancels (changed my mind) don't
@@ -2284,6 +2333,7 @@ final class VPNController {
     private func handleStatusChange(id: String, status s: NEVPNStatus) {
         if let i = profiles.firstIndex(where: { $0.id == id }) { profiles[i].status = s }
         Self.log.log("status[\(id, privacy: .public)] → \(Self.statusText(s), privacy: .public)")
+        controlEventSink?(.statusChanged(profile: id, status: Self.wireStatus(s)))
         // A connect that can never succeed (wrong network, unreachable
         // gateway) is retried by the engine for ever, so the app has to
         // impose its own deadline — otherwise "Connecting…" is permanent.

@@ -1,15 +1,15 @@
-# Intents — App Intents / Shortcuts home (nothing here yet)
+# Intents — App Intents / Shortcuts surface
 
-Future Siri/Shortcuts/Spotlight surface: `ConnectVPNIntent`, `DisconnectVPNIntent`,
-`VPNStatusIntent`, an `AppShortcutsProvider`, and entity types (`VPNProfileEntity`)
-resolving against `VPNController.profiles`.
+`VPNIntents.swift`: `ConnectVPNIntent`, `DisconnectVPNIntent`, `VPNStatusIntent`,
+`VPNProfileEntity` (+ query), and `SimpleVPNShortcuts`. The dispatcher reaches the
+intents via `AppDependencyManager` (`VPNIntentSupport.register`, called at app init).
 
-Ground rules when this lands:
+Ground rules (binding):
 
-- Intents are a **thin adapter** over the control plane — they call the same
-  `VPNController` methods the UI does (`connect(id:)`, `disconnect(id:)`,
-  `connectReadiness(for:)`), never a parallel path.
-- Anything MDM locks (`MDM/ManagedPolicy`) is locked here too — an intent must not
-  become the side door around a managed restriction.
+- Intents are **thin adapters** over the control plane — they submit the same
+  `ControlCommand`/`ControlQuery` the UI and the `simplevpn` CLI use, through the
+  same `ControlPlaneDispatcher`. Never a parallel path.
+- Anything MDM locks (`MDM/ManagedPolicy`) is locked here too — the guard chain is
+  installed into `VPNController` itself, so there is no side door to forget.
 - Credential-requiring connects surface `needsSignIn` as a *result*, not a prompt
-  loop: Shortcuts can't type an OTP; the intent should open the app to the profile.
+  loop: Shortcuts can't type an OTP; the intent tells the user to open the app.

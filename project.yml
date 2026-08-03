@@ -271,12 +271,32 @@ targets:
         CODE_SIGN_IDENTITY: "Apple Development"
         PROVISIONING_PROFILE_SPECIFIER: ""
 
+  # ---- simplevpn: the command-line interface ----
+  # Talks to the running app over the control socket (ControlServer); compiles the
+  # wire contract (ControlSurface.swift) directly so app and CLI can never disagree
+  # about the protocol. No second control plane — see CLI/README.md.
+  SimpleVPNCLI:
+    type: tool
+    platform: macOS
+    sources:
+      - path: CLI
+        excludes:
+          - "README.md"
+      - path: SimpleVPN/ControlPlane/ControlSurface.swift
+    settings:
+      base:
+        PRODUCT_NAME: simplevpn
+        # A synchronous line-oriented tool: plain nonisolated code, no UI actor.
+        SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
+        ENABLE_HARDENED_RUNTIME: YES
+
 schemes:
   SimpleVPN:
     build:
       targets:
         SimpleVPN: all
         PacketTunnel: all
+        SimpleVPNCLI: all
     run:
       config: Debug
     test:

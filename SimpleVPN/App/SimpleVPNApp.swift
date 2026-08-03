@@ -28,6 +28,9 @@ func defaultsBool(_ key: String, initially: Bool) -> Bool {
 struct SimpleVPNApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var vpn = VPNController()
+    @State private var control: ControlPlaneDispatcher
+    /// The CLI's socket (ControlServer): hosts the SAME dispatcher out-of-process.
+    private let controlServer = ControlServer()
     @State private var labels = LabelStore()
     @State private var ext = ExtensionController()
     @State private var evaluator = ProfileEvaluator()
@@ -71,12 +74,18 @@ struct SimpleVPNApp: App {
         _vpn = State(initialValue: vpn)
         _reachability = State(initialValue: reach)
         _linkState = State(initialValue: LinkStateMonitor(vpn: vpn, reach: reach))
+        // The control plane's one entry (UI, CLI, intents, future Tcl all route
+        // through it) — built here so every surface shares the same instance.
+        let dispatcher = ControlPlaneDispatcher(vpn: vpn)
+        _control = State(initialValue: dispatcher)
+        VPNIntentSupport.register(dispatcher)   // Shortcuts route through the same entry
     }
 
     var body: some Scene {
         WindowGroup("SimpleVPN", id: "main") {
             ConnectionView(vpn: vpn, ext: ext, labels: labels)
                 .opensSSOWindow()
+                .environment(control)
                 .environment(evaluator)
                 .environment(policy)
                 .environment(manualRouter)
@@ -102,6 +111,7 @@ struct SimpleVPNApp: App {
                         vpn?.isEngaged(id: id) ?? false
                     }
                     publicIP.startMonitoring()          // launch + every ~5 min
+                    controlServer.start(dispatcher: control)   // the CLI's socket
                     vpn.routes.startMonitoring()        // PF_ROUTE default-route drift watch
                     vpn.dns.startMonitoring()           // SCDynamicStore DNS drift watch
                     vpn.proxies.startMonitoring()       // SCDynamicStore proxy drift watch

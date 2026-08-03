@@ -152,8 +152,14 @@ as `{password}{otp}` (no `static-challenge`). No client cert → `ENABLE_EXTERNA
     MenuBar/ Settings/ Components/`.
   - `SimpleVPN/ControlPlane/` — `VPNController`, engine managers (native/subprocess/SSH), compositions,
     the descriptor registry (`OpenVPNSettingDescriptors` — stable ids like `openvpn.compression` drive
-    the Options form, manual anchors, a11y labels, and future CLI/MDM addressing), `EngineSettings`,
-    profile evaluation (real `eval_config` via `OVPNProfileEvaluator.mm`).
+    the Options form, manual anchors, a11y labels, and CLI/MDM addressing), `EngineSettings` — plus the
+    **control surface**: `ControlSurface.swift` (commands/queries/events as pure data; the wire format
+    is a public contract pinned by ControlSurfaceTests), `ControlPlaneDispatcher` (THE single mutation
+    entry: guard chain [MDM now, Tcl `CTL_*` later] → readiness → execute → one event stream) and
+    `ControlServer` (unix-socket JSON-lines host for the CLI). CONSISTENCY IS STRUCTURAL: the
+    dispatcher installs its guard chain into `VPNController.controlGuard`, and the lifecycle entries
+    (connect/disconnect/pause/resume/setDefaultGateway) consult it — UI buttons, the `simplevpn` CLI,
+    App Intents and future interfaces are gated identically, with no bypass to forget.
   - `SimpleVPN/Credentials/` — provider seam (manual/1Password/Apple Passwords), TOTP, auth config,
     SSO browser launching.
   - `SimpleVPN/Mediators/` — the route/DNS/proxy system-state mediators (`Docs/StateMediators.md`) +

@@ -186,10 +186,20 @@ final class RouteMediator {
 
     // MARK: Persisted policy (the owner pick)
 
+    /// Control-plane liveness: fired with the EFFECTIVE owner whenever the owner
+    /// decision moves — explicit set, fallback promotion, drift re-assert. Installed
+    /// by ControlPlaneDispatcher; feeds the one event stream every interface
+    /// (CLI watch, intents, future Tcl) subscribes to.
+    @ObservationIgnored var onOwnerChange: ((String?) -> Void)?
+
     /// The profile that owns the default route. nil ⇒ Direct. UI policy, not a secret.
-    private(set) var defaultGatewayProfileID: String?
+    private(set) var defaultGatewayProfileID: String? {
+        didSet { if oldValue != defaultGatewayProfileID { onOwnerChange?(effectiveGatewayOwner) } }
+    }
     /// The user explicitly parked on Direct (vs. merely "unset").
-    private var gatewayUserChoseDirect = false
+    private var gatewayUserChoseDirect = false {
+        didSet { if oldValue != gatewayUserChoseDirect { onOwnerChange?(effectiveGatewayOwner) } }
+    }
 
     private static let gatewayDefaults = UserDefaults(suiteName: "group.com.bragi0.SimpleVPN")
     private static let gatewayOwnerKey = "gateway.ownerProfileID"
