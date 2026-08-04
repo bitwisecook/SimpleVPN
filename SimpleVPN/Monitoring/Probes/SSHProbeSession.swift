@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 //  SSHProbeSession.swift
-//  The SSH half of the staged probe: one libssh2 session, driven a rung at a
+//  The SSH half of the staged probe: one libssh session, driven a rung at a
 //  time so each rung can be reported separately (key exchange, host key,
 //  offered sign-in methods, the key itself) instead of collapsing into one
 //  "the SSH handshake failed".
@@ -16,14 +16,14 @@
 //      material and proves nothing is spent); a password attempt counts against
 //      the server's sign-in limits, so it lives behind the account boundary.
 //
-//  libssh2 is single-threaded per session, so every call is funnelled onto one
+//  libssh is single-threaded per session, so every call is funnelled onto one
 //  serial queue — the same rule SSHTunnelEngine follows.
 //
 
 import Foundation
 
 /// The read-only known_hosts answer, mirrored into Swift so the classification
-/// below can be tested without libssh2 (or a server) anywhere in sight.
+/// below can be tested without libssh (or a server) anywhere in sight.
 nonisolated enum SSHKnownHostResult: Sendable, Equatable {
     case match
     case mismatch
@@ -100,7 +100,7 @@ nonisolated enum SSHPrivateKeyFile {
     }
 }
 
-/// A libssh2 failure carried as a value. libssh2's own strings are terse and
+/// A libssh failure carried as a value. libssh's own strings are terse and
 /// occasionally quote the server, so they only ever reach a step's evidence,
 /// where the redactor sees them first.
 nonisolated struct SSHProbeFailure: Error, Sendable, Equatable {
@@ -109,7 +109,7 @@ nonisolated struct SSHProbeFailure: Error, Sendable, Equatable {
 
 // MARK: - The live session
 
-/// Owns one libssh2 session for the duration of a probe. `@unchecked Sendable`
+/// Owns one libssh session for the duration of a probe. `@unchecked Sendable`
 /// because every touch of the underlying session happens on `queue`.
 nonisolated final class SSHProbeSession: @unchecked Sendable {
 

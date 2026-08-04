@@ -20,7 +20,7 @@ PIN=v9.12                 # openconnect release tag — bump deliberately
 # OpenSSL and all three are linked into the same binaries; if two builds pick up
 # different OpenSSL point releases, the linker can resolve one engine's calls
 # against another's OpenSSL → ABI skew / corruption. Keep this constant IDENTICAL
-# across build-openvpn3 / build-openconnect / build-libssh2, and bump all three
+# across build-openvpn3 / build-openconnect / build-libssh, and bump all three
 # together. The guard below fails loudly if Homebrew drifts from the pin.
 OPENSSL_PIN="3.6.3"
 MIN=26.0

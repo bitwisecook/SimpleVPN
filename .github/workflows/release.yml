@@ -64,7 +64,7 @@ jobs:
   # Job 1: build the third-party engine xcframeworks. Holds NO signing
   # secrets at all — this is a deliberate security boundary, because this job
   # runs freshly-cloned upstream build scripts (openvpn3, openconnect,
-  # libssh2) and the Developer ID private key must never be reachable from a
+  # libssh) and the Developer ID private key must never be reachable from a
   # job that executes third-party build scripts.
   engines:
     # Runner choice: `macos-26`, not `macos-15`/`macos-latest`. The app's
@@ -145,8 +145,8 @@ jobs:
             Vendor/SSHEngine.xcframework
             Vendor/openvpn3-include
             Vendor/openconnect-include
-            Vendor/libssh2-include
-          key: engines-${{ runner.os }}-${{ runner.arch }}-xcode${{ steps.xc.outputs.version }}-${{ hashFiles('Tools/build-openvpn3-xcframework.sh', 'Tools/build-openconnect-xcframework.sh', 'Tools/build-libssh2-xcframework.sh') }}
+            Vendor/libssh-include
+          key: engines-${{ runner.os }}-${{ runner.arch }}-xcode${{ steps.xc.outputs.version }}-${{ hashFiles('Tools/build-openvpn3-xcframework.sh', 'Tools/build-openconnect-xcframework.sh', 'Tools/build-libssh-xcframework.sh') }}
 
       - name: Install pinned OpenSSL (cache miss only)
         if: steps.cache.outputs.cache-hit != 'true'
@@ -162,14 +162,14 @@ jobs:
 
       - name: Build SSHEngine.xcframework (cache miss only)
         if: steps.cache.outputs.cache-hit != 'true'
-        run: Tools/build-libssh2-xcframework.sh
+        run: Tools/build-libssh-xcframework.sh
 
       - name: Assert all engine artifacts exist
         run: |
           set -euo pipefail
           for p in Vendor/OpenVPNEngine.xcframework Vendor/OpenConnectEngine.xcframework \
                    Vendor/SSHEngine.xcframework Vendor/openvpn3-include \
-                   Vendor/openconnect-include Vendor/libssh2-include; do
+                   Vendor/openconnect-include Vendor/libssh-include; do
             if [ ! -e "$p" ]; then echo "FATAL: missing $p"; exit 1; fi
           done
 
@@ -182,7 +182,7 @@ jobs:
             Vendor/SSHEngine.xcframework
             Vendor/openvpn3-include
             Vendor/openconnect-include
-            Vendor/libssh2-include
+            Vendor/libssh-include
           retention-days: 1
 
   # Job 2: signs, notarizes, and releases. Holds all the secrets, and never
@@ -225,7 +225,7 @@ jobs:
       # These stay in THIS job rather than the secret-free `engines` job on
       # purpose, and it does not weaken that job's security boundary: the
       # boundary exists because `engines` runs freshly-cloned UPSTREAM build
-      # scripts (openvpn3/openconnect/libssh2 configure+make). Nothing of the
+      # scripts (openvpn3/openconnect/libssh configure+make). Nothing of the
       # sort happens here — `go build` compiles pinned, hash-verified module
       # source with no upstream build scripts of its own, driven by this repo's
       # own Tools/ script. If a Go module ever needed a `go generate` or a cgo

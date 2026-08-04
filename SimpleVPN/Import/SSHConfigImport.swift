@@ -209,7 +209,7 @@ nonisolated enum SSHConfigImport {
             if !config.sshExtraOptions.contains(opt) { config.sshExtraOptions.append(opt) }
         }
         if let jump = host.proxyJump {
-            // First hop only — libssh2 does a single jump. Note when a longer
+            // First hop only — libssh does a single jump. Note when a longer
             // chain was truncated rather than silently dropping hops.
             let hops = jump.split(separator: ",").map(String.init)
             if let first = hops.first {

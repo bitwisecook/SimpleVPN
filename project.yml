@@ -91,7 +91,7 @@ targets:
         CLANG_CXX_LIBRARY: "libc++"
         HEADER_SEARCH_PATHS:
           - "$(SRCROOT)/Vendor/openvpn3-include"
-          - "$(SRCROOT)/Vendor/libssh2-include"
+          - "$(SRCROOT)/Vendor/libssh-include"
         GCC_PREPROCESSOR_DEFINITIONS:
           - "$(inherited)"
           - "ASIO_STANDALONE=1"
@@ -154,11 +154,14 @@ targets:
       - framework: Vendor/OpenVPNEngine.xcframework
         embed: false
         link: true
-      # In-process SSH engine (SOCKS / port-forwards / net-tunnel) via libssh2.
+      # In-process SSH engine (SOCKS / port-forwards / net-tunnel) via libssh.
       - framework: Vendor/SSHEngine.xcframework
         embed: false
         link: true
       - sdk: libz.tbd
+      # libssh is built WITH_GSSAPI (Kerberos single sign-on); the gss_* symbols
+      # resolve against the SDK's MIT shim, which forwards to GSS.framework.
+      - sdk: libgssapi_krb5.tbd
 
   # ---- Packet tunnel provider (system extension, Developer ID) ----
   # Sysext is the DMG/sideload path. Appex variant for TestFlight/MAS is added later; both will

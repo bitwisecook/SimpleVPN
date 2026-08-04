@@ -241,7 +241,7 @@ nonisolated enum LogHighlighter {
             case .email:       return #"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"#
             case .path:        return #"(?:/Users/[^\s:,)\]]+|/(?:private|var|tmp|Applications|Library|etc|usr|opt|System)/[^\s:,)\]]*)"#
             // Versions before hosts, so "0.1" and "3.6.3" aren't read as domain names.
-            case .version:     return #"(?:\b(?:OpenSSH|OpenSSL|LibreSSL|OpenVPN|dropbear|libssh2)[-_/ ]?\d[0-9A-Za-z._+-]*)|(?:\bbuild \d+\b)|(?:\bv?\d+\.\d+(?:\.\d+){0,2}(?:[-_+][0-9A-Za-z.]+)?\b)"#
+            case .version:     return #"(?:\b(?:OpenSSH|OpenSSL|LibreSSL|OpenVPN|dropbear|libssh)[-_/ ]?\d[0-9A-Za-z._+-]*)|(?:\bbuild \d+\b)|(?:\bv?\d+\.\d+(?:\.\d+){0,2}(?:[-_+][0-9A-Za-z.]+)?\b)"#
             case .bundleID:    return #"\b(?:com|org|net|io|uk)\.[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+\b"#
             case .host:        return #"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b"#
             case .interface:   return #"\b(?:en|utun|awdl|llw|bridge|gif|stf|anpi|ap)\d+\b|\blo0\b"#

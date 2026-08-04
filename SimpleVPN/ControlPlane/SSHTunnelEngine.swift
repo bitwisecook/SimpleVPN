@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 //  SSHTunnelEngine.swift
-//  In-process SSH tunnels over libssh2 (SSHBridge) — no /usr/bin/ssh subprocess.
-//  A single serial queue owns the libssh2 session (it's single-threaded); local
+//  In-process SSH tunnels over libssh (SSHBridge) — no /usr/bin/ssh subprocess.
+//  A single serial queue owns the libssh session (it's single-threaded); local
 //  listeners run on Network.framework and hand each accepted connection a
 //  direct-tcpip channel:
 //    • SOCKS proxy (-D)   — a SOCKS5 server on socksPort
@@ -12,7 +12,7 @@
 //  where a utun is available. Auth tries key, then agent, then password.
 //
 //  Concurrency model: the session runs BLOCKING through handshake/host-key/auth,
-//  then switches to NON-BLOCKING (`enterDataMode`) for the data pump. Every libssh2
+//  then switches to NON-BLOCKING (`enterDataMode`) for the data pump. Every libssh
 //  call — reads, writes, channel open, channel close — is dispatched on the single
 //  `ssh` serial queue, and channels are freed there too (never in dealloc, which
 //  runs on an arbitrary thread). Non-blocking reads mean one idle channel can't
@@ -24,7 +24,7 @@ import Network
 import os
 
 // Safe to pass across the Network.framework callback queues and the `ssh` serial
-// queue: every libssh2 call on an SSHChannel is funnelled onto the `ssh` queue, so
+// queue: every libssh call on an SSHChannel is funnelled onto the `ssh` queue, so
 // it is never touched concurrently despite being handed between executors.
 extension SSHChannel: @unchecked Sendable {}
 
@@ -36,7 +36,7 @@ nonisolated struct SSHForwardError: LocalizedError {
     var errorDescription: String? { message }
 }
 
-/// Nonisolated: the whole engine lives on background queues (libssh2 serial queue +
+/// Nonisolated: the whole engine lives on background queues (libssh serial queue +
 /// Network.framework). `state` is observable for UI but published on the main queue.
 @Observable
 nonisolated final class SSHTunnelEngine: @unchecked Sendable {
@@ -204,7 +204,7 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
 
     /// Add a forward to the running session. "D" opens another SOCKS listener,
     /// "L" a fixed local→remote listener; both reuse the direct-tcpip pump.
-    /// "R" would need a `libssh2_channel_forward_listen` accept loop the data
+    /// "R" would need a `ssh_channel_listen_forward` accept loop the data
     /// pump doesn't run — refused honestly so the caller can say "reconnect
     /// required" (the subprocess path supports it live).
     func addForward(flag: String, spec: String) async throws {

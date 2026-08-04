@@ -49,7 +49,7 @@ final class SubprocessTunnelManager {
     private(set) var live: [String: Live] = [:]
 
     private var tasks: [String: TunnelProcess] = [:]
-    private var sshEngines: [String: SSHTunnelEngine] = [:]   // in-process libssh2 (SOCKS)
+    private var sshEngines: [String: SSHTunnelEngine] = [:]   // in-process libssh (SOCKS)
     private var inProcessNE: Set<String> = []                 // SSL VPNs running via the NE OpenConnect engine
     private var authTasks: [String: Task<Void, Never>] = [:]  // in-flight ocauth-helper sign-ins (SSO)
     private var proxiedIDs: Set<String> = []                  // ids whose SOCKS proxy we pointed the system at
@@ -67,7 +67,7 @@ final class SubprocessTunnelManager {
     // MARK: Connect / disconnect
 
     /// Prefer the linked in-process engine where we have one; otherwise the
-    /// subprocess path. SSH SOCKS runs on libssh2 (no /usr/bin/ssh); if it can't
+    /// subprocess path. SSH SOCKS runs on libssh (no /usr/bin/ssh); if it can't
     /// start, we fall back to the subprocess so nothing regresses.
     func connect(_ config: SubprocessTunnelConfig, password: String?) {
         guard tasks[config.id] == nil, sshEngines[config.id] == nil,
@@ -277,7 +277,7 @@ final class SubprocessTunnelManager {
         connectSubprocess(config, password: nil, command: Self.cookieCommand(for: config, auth: auth))
     }
 
-    /// The in-process libssh2 engine speaks plain host + auth + SOCKS only. Any
+    /// The in-process libssh engine speaks plain host + auth + SOCKS only. Any
     /// knob it can't express must route to /usr/bin/ssh instead — silently
     /// dropping a jump host would dial the target directly and bypass the
     /// bastion; compression and raw ssh_config options would just be ignored.

@@ -2,14 +2,16 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 //  SSHBridge.h
-//  Thin Objective-C surface over libssh2 for the in-process SSH engine. One
-//  SSHSession owns a connected socket + libssh2 session; it opens channels for
-//  the two transports we support in-process:
+//  Thin Objective-C surface over libssh for the in-process SSH engine. One
+//  SSHSession owns a connected libssh session; it opens channels for the two
+//  transports we support in-process:
 //    • direct-tcpip  — SOCKS (-D) and port-forwards (-L)
-//    • tun@openssh.com — the net-tunnel (-w) mode (OpenSSH has no library, so we
-//      speak its channel protocol directly on libssh2)
-//  libssh2 sessions are single-threaded: the caller MUST serialise every call on
-//  one queue. Blocking mode is used; timeouts bound the blocking calls.
+//    • tun@openssh.com — the net-tunnel (-w) mode (libssh has no public API for
+//      that channel type, so the build script compiles a tiny wrapper into the
+//      vendored library — see Tools/build-libssh-xcframework.sh)
+//  libssh sessions are not thread-safe: the caller MUST serialise every call on
+//  one queue. Blocking mode is used; SSH_OPTIONS_TIMEOUT bounds the blocking
+//  calls.
 //
 
 #import <Foundation/Foundation.h>
@@ -24,7 +26,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSInteger)write:(const void *)buffer length:(NSInteger)len;
 - (BOOL)isEOF;
 - (BOOL)isClosed;
-/// MUST be called on the session's serial queue (frees libssh2 channel state).
+/// MUST be called on the session's serial queue (frees libssh channel state).
 - (void)close;
 @end
 
@@ -42,7 +44,9 @@ typedef NS_ENUM(NSInteger, SSHHostKeyStatus) {
 
 @interface SSHSession : NSObject
 
-/// Connect a TCP socket to host:port and run the libssh2 handshake.
+/// Connect a TCP socket to host:port and run the SSH handshake. libssh's own
+/// ssh_config/ProxyCommand processing is disabled — the app's importer is the
+/// only thing that reads OpenSSH config, and nothing may exec from a config.
 - (BOOL)connectToHost:(NSString *)host port:(int)port
               timeout:(int)seconds error:(NSError * _Nullable * _Nullable)error;
 
@@ -50,12 +54,13 @@ typedef NS_ENUM(NSInteger, SSHHostKeyStatus) {
 @property (nullable, readonly) NSString *hostKeyFingerprintSHA256;
 
 /// The host key's algorithm ("ssh-ed25519", "ecdsa-sha2-nistp256", …) and its
-/// length in bytes — reported by the probe so a fingerprint has context.
+/// wire-blob length in bytes — reported by the probe so a fingerprint has context.
 @property (nullable, readonly) NSString *hostKeyType;
 @property (readonly) NSInteger hostKeyLength;
 
 /// What the handshake actually agreed on: keys "kex", "hostkey", "cipher",
-/// "mac", "compression". Empty when the session isn't up.
+/// "mac" (absent for AEAD ciphers, where the cipher authenticates itself).
+/// Empty when the session isn't up.
 @property (readonly) NSDictionary<NSString *, NSString *> *negotiatedMethods;
 
 /// READ-ONLY known_hosts/pin check — never writes, never trusts on first use.
@@ -64,16 +69,16 @@ typedef NS_ENUM(NSInteger, SSHHostKeyStatus) {
                                            pin:(nullable NSString *)pinSHA256;
 
 /// The authentication methods the server offers for `user` ("publickey",
-/// "password", "keyboard-interactive"…). This sends the standard "none"
-/// request every SSH client sends before choosing a method; it submits no
-/// credential. Returns an EMPTY array when the server let the user straight in
-/// without any authentication at all.
+/// "password", "keyboard-interactive", "gssapi-with-mic"…). This sends the
+/// standard "none" request every SSH client sends before choosing a method; it
+/// submits no credential. Returns an EMPTY array when the server let the user
+/// straight in without any authentication at all.
 - (nullable NSArray<NSString *> *)authMethodsForUser:(NSString *)user
                                                error:(NSError * _Nullable * _Nullable)error;
 
-/// Verify the server host key BEFORE authenticating (libssh2 does none of this
-/// itself — skipping it is a MITM hole). Precedence: an explicit pinned SHA-256
-/// wins; otherwise the OpenSSH known_hosts file at `knownHostsPath` is consulted.
+/// Verify the server host key BEFORE authenticating (skipping it is a MITM
+/// hole). Precedence: an explicit pinned SHA-256 wins; otherwise the OpenSSH
+/// known_hosts file at `knownHostsPath` is consulted.
 /// `strict` is "yes" (fail on unknown/mismatch), "accept-new" (pin unknown hosts,
 /// still fail on mismatch), or "no" (accept-new + tolerate, but mismatch still
 /// fails — a changed key is always refused). Returns YES if the host is trusted.
@@ -99,6 +104,10 @@ typedef NS_ENUM(NSInteger, SSHHostKeyStatus) {
             passphrase:(nullable NSString *)passphrase
                  error:(NSError * _Nullable * _Nullable)error;
 - (BOOL)authAgentForUser:(NSString *)user error:(NSError * _Nullable * _Nullable)error;
+/// Kerberos single sign-on (gssapi-with-mic) using the user's existing ticket —
+/// a libssh capability libssh2 never had. Needs a ticket (kinit / AD login);
+/// fails cleanly without one.
+- (BOOL)authGSSAPIForUser:(NSString *)user error:(NSError * _Nullable * _Nullable)error;
 
 /// Open a direct-tcpip channel to host:port through the server (SOCKS / -L).
 - (nullable SSHChannel *)openDirectTCPIPToHost:(NSString *)host port:(int)port
@@ -107,7 +116,7 @@ typedef NS_ENUM(NSInteger, SSHHostKeyStatus) {
 /// Open a tun@openssh.com channel for point-to-point net-tunnel (-w). `mode` is
 /// 1 (point-to-point) or 2 (ethernet); `remoteUnit` is the server tun unit or -1.
 - (nullable SSHChannel *)openTunChannelMode:(int)mode remoteUnit:(int)remoteUnit
-                                       error:(NSError * _Nullable * _Nullable)error;
+                                      error:(NSError * _Nullable * _Nullable)error;
 
 - (void)disconnect;
 

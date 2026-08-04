@@ -148,7 +148,7 @@ nonisolated enum ProbeStepStatus: String, Sendable, Codable, CaseIterable {
 /// Everything technical the ladder shows passes through here. The steps below
 /// are written not to produce secrets in the first place; this exists so a
 /// future one CAN'T, and so server-supplied text (a banner, a certificate
-/// subject, a libssh2 message) can never smuggle one onto the screen.
+/// subject, a libssh message) can never smuggle one onto the screen.
 nonisolated enum ProbeEvidence {
 
     /// Longest single token we'll show. A base64 blob past this is key material

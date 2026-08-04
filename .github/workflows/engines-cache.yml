@@ -62,8 +62,8 @@ jobs:
             Vendor/SSHEngine.xcframework
             Vendor/openvpn3-include
             Vendor/openconnect-include
-            Vendor/libssh2-include
-          key: engines-${{ runner.os }}-${{ runner.arch }}-xcode${{ steps.xc.outputs.version }}-${{ hashFiles('Tools/build-openvpn3-xcframework.sh', 'Tools/build-openconnect-xcframework.sh', 'Tools/build-libssh2-xcframework.sh') }}
+            Vendor/libssh-include
+          key: engines-${{ runner.os }}-${{ runner.arch }}-xcode${{ steps.xc.outputs.version }}-${{ hashFiles('Tools/build-openvpn3-xcframework.sh', 'Tools/build-openconnect-xcframework.sh', 'Tools/build-libssh-xcframework.sh') }}
 
       - name: Install pinned OpenSSL (cache miss only)
         if: steps.cache.outputs.cache-hit != 'true'
@@ -79,13 +79,13 @@ jobs:
 
       - name: Build SSHEngine.xcframework (cache miss only)
         if: steps.cache.outputs.cache-hit != 'true'
-        run: Tools/build-libssh2-xcframework.sh
+        run: Tools/build-libssh-xcframework.sh
 
       - name: Assert all engine artifacts exist
         run: |
           set -euo pipefail
           for p in Vendor/OpenVPNEngine.xcframework Vendor/OpenConnectEngine.xcframework \
                    Vendor/SSHEngine.xcframework Vendor/openvpn3-include \
-                   Vendor/openconnect-include Vendor/libssh2-include; do
+                   Vendor/openconnect-include Vendor/libssh-include; do
             if [ ! -e "$p" ]; then echo "FATAL: missing $p"; exit 1; fi
           done
