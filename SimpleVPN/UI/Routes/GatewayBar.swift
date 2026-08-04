@@ -32,32 +32,43 @@ extension RouteGraphView {
             let owner = vpn.effectiveGatewayOwner
             let displayed = vpn.displayedGatewayOwner
             HStack(spacing: 8) {
-                Label("Default gateway", systemImage: "arrow.triangle.branch")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
-                Picker("Default gateway", selection: Binding(
-                    get: { owner },
-                    set: { new in Task { await vpn.setDefaultGateway(to: new) } })
-                ) {
-                    ForEach(capable) { p in
-                        Text(p.name).tag(Optional(p.id))
-                    }
-                    Text("Direct").tag(String?.none)
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .fixedSize()
-                .controlSize(.small)
-                .help(gatewaySummary(owner: owner))
-                // Transient desync surfaced honestly, same as the old card: the
-                // engines currently route differently from the pick above while
-                // reconciliation converges them (RC4/RC5).
-                if displayed != owner {
-                    Label("Applying…", systemImage: "arrow.triangle.2.circlepath")
-                        .font(.caption2)
+                // The control cluster reads as ONE VoiceOver element (label =
+                // what it is, value = what it currently means, applying state
+                // included); the strip stays a second element of its own so
+                // the path-in-words survives independently of the picker. The
+                // nested HStack shares the outer one's spacing, so the pixels
+                // don't move.
+                HStack(spacing: 8) {
+                    Label("Default gateway", systemImage: "arrow.triangle.branch")
+                        .font(.caption.weight(.medium))
                         .foregroundStyle(.secondary)
-                        .help(reconcilingGatewayNote(effective: displayed))
+                    Picker("Default gateway", selection: Binding(
+                        get: { owner },
+                        set: { new in Task { await vpn.setDefaultGateway(to: new) } })
+                    ) {
+                        ForEach(capable) { p in
+                            Text(p.name).tag(Optional(p.id))
+                        }
+                        Text("Direct").tag(String?.none)
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .fixedSize()
+                    .controlSize(.small)
+                    .help(gatewaySummary(owner: owner))
+                    // Transient desync surfaced honestly, same as the old card: the
+                    // engines currently route differently from the pick above while
+                    // reconciliation converges them (RC4/RC5).
+                    if displayed != owner {
+                        Label("Applying…", systemImage: "arrow.triangle.2.circlepath")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .help(reconcilingGatewayNote(effective: displayed))
+                    }
                 }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Default gateway")
+                .accessibilityValue(gatewayAXValue(owner: owner, displayed: displayed))
                 Spacer(minLength: 8)
                 // The picker's pick, as a picture: This Mac → [owner|Direct] →
                 // Internet, filling the air the bar always had at its trailing
@@ -67,9 +78,20 @@ extension RouteGraphView {
             .padding(.horizontal, 12).padding(.vertical, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Default gateway: \(gatewaySummary(owner: owner))")
         }
+    }
+
+    /// The pick's live meaning, in the same words the tooltip uses — plus the
+    /// reconciliation note while the engines are still converging on it. (The
+    /// gateway CHANGE itself is spoken by AccessibilityAnnouncer, off the
+    /// control plane's gatewayChanged event — this value is what you read when
+    /// you come looking, not a second voice saying the same thing.)
+    private func gatewayAXValue(owner: String?, displayed: String?) -> String {
+        var value = gatewaySummary(owner: owner)
+        if displayed != owner {
+            value += " " + reconcilingGatewayNote(effective: displayed)
+        }
+        return value
     }
 
     private func gatewaySummary(owner: String?) -> String {

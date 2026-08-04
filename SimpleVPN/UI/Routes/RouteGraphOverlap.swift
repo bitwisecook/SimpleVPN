@@ -79,6 +79,14 @@ extension RouteGraphView {
             return
         }
         overlapFocus = key
+        // The arrow is drawn Canvas ink — invisible to VoiceOver — so the
+        // reveal SAYS what it shows, through the app's one announcement funnel
+        // (user-initiated, so it speaks immediately; the click is the debounce).
+        let norm = Self.normCIDR(cidr)
+        if let victims = overlapMap(for: dest)[norm], !victims.isEmpty {
+            AccessibilityAnnouncer.sayNow(
+                "\(cidr) overlaps \(victims.formatted(.list(type: .and)))")
+        }
         // Reduce Motion: no reveal to run — the layer draws the finished arrow.
         guard !reduceMotion else { overlapRevealStart = nil; return }
         overlapRevealStart = Date()

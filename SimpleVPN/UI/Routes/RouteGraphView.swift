@@ -134,6 +134,10 @@ struct RouteGraphView: View {
     /// (the same idle discipline edgeLayer keeps for its marching dashes).
     @State var overlapRevealStart: Date?
     @State var overlapSettle: Task<Void, Never>?
+    /// One namespace ties the rotor entries (below) to the elements they jump
+    /// to: interface cards, drift rows and overlap icons mark themselves with
+    /// `.accessibilityRotorEntry(id:in:)` against this.
+    @Namespace var rotorNamespace   // internal — the marks live in the split files
 
     var body: some View {
         // Resolved ONCE and handed down: every card, row and edge that lights up is
@@ -213,6 +217,13 @@ struct RouteGraphView: View {
         // not on the text, so retyping the same query doesn't re-yank a card the user
         // has since scrolled.
         .onChange(of: litSignature(outcome)) { _, _ in revealMatches(outcome) }
+        // VoiceOver rotors: jump straight to a VPN, or straight to what's wrong
+        // (a struggling connection, external drift, a Custom-Routing overlap)
+        // without walking the whole diagram. Entries are rebuilt from the same
+        // layout the drawing uses, so the rotor can never list a card that
+        // isn't on screen to land on.
+        .accessibilityRotor("VPNs") { rotorEntries(vpnRotorTargets(layout)) }
+        .accessibilityRotor("Problems") { rotorEntries(problemRotorTargets(layout)) }
         .background(Color(nsColor: .underPageBackgroundColor))
         .navigationTitle("Routes")
         .onAppear { topo?.startWatching() }
@@ -259,6 +270,7 @@ struct RouteGraphView: View {
                     }
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel("External \(label) change: \(drift.summary)")
+                    .accessibilityRotorEntry(id: "rotor-drift-\(label)", in: rotorNamespace)
                 }
             }
             .font(.caption)
@@ -294,6 +306,15 @@ struct RouteGraphView: View {
         }
         .frame(width: layout.canvas.width, height: layout.canvas.height, alignment: .topLeading)
         .padding(canvasInset)
+        // The diagram is a NAVIGABLE STRUCTURE for VoiceOver, not a labeled
+        // picture: one element per node (the cards are real SwiftUI views with
+        // label+value+actions in RouteGraphNodes), contained under one named
+        // group. Elements sit INSIDE the scaled container, and SwiftUI derives
+        // accessibility frames from the rendered geometry — scaleEffect/offset
+        // included — so pan and zoom move the AX frames with the pixels (the
+        // UITest audit's hitRegion check is the regression net for this).
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Route diagram")
     }
 
     // MARK: Top bar — search on the left, zoom on the right, both in fixed homes
@@ -454,5 +475,71 @@ struct RouteGraphView: View {
         // reduce-motion loses nothing here but the card borders' fade.
         if reduceMotion { inspecting = next }
         else { withAnimation(.easeOut(duration: 0.15)) { inspecting = next } }
+    }
+
+    // MARK: Rotors — VoiceOver's jump lists over the diagram
+
+    /// One rotor destination: the sentence VoiceOver lists, and the id of the
+    /// element it lands on (marked with `.accessibilityRotorEntry(id:in:)`
+    /// against `rotorNamespace` in RouteGraphNodes / the drift banner).
+    struct RotorTarget: Identifiable {
+        let id: String
+        let label: String
+    }
+
+    /// Targets → namespace-tied entries. A tiny function on purpose: inlining
+    /// this closure into `body`'s modifier chain blew the type-checker budget.
+    @AccessibilityRotorContentBuilder
+    private func rotorEntries(_ targets: [RotorTarget]) -> some AccessibilityRotorContent {
+        ForEach(targets) { target in
+            AccessibilityRotorEntry(Text(target.label), id: target.id, in: rotorNamespace)
+        }
+    }
+
+    /// "VPNs": every tunnel card — ours and Tailscale — under its user-facing
+    /// name, so "jump to Tig Lab" is one rotor turn instead of a walk.
+    func vpnRotorTargets(_ layout: Layout) -> [RotorTarget] {
+        layout.nodes.compactMap { node in
+            guard case .interfaceCard(let iface) = node.kind, iface.kind == .tunnel
+            else { return nil }
+            return RotorTarget(id: "rotor-if-\(iface.name)", label: label(for: iface))
+        }
+    }
+
+    /// "Problems": everything on the diagram a user would want to FIX — a
+    /// connection that exists but isn't carrying traffic (exactly the statuses
+    /// that grow a mid-edge fix control), external drift a mediator saw, and
+    /// Custom-Routing overlaps. Same judgements the drawing uses, so the rotor
+    /// and the picture can never disagree about what's wrong.
+    func problemRotorTargets(_ layout: Layout) -> [RotorTarget] {
+        var out: [RotorTarget] = []
+        for node in layout.nodes {
+            switch node.kind {
+            case .interfaceCard(let iface):
+                let state = status(for: iface)
+                if state.symbol != nil {
+                    out.append(RotorTarget(id: "rotor-if-\(iface.name)",
+                                           label: "\(label(for: iface)) — \(state.summary)"))
+                }
+            case .destination(let dest):
+                for (added, victims) in overlapMap(for: dest).sorted(by: { $0.key < $1.key }) {
+                    out.append(RotorTarget(
+                        id: "rotor-overlap-\(dest.id)|\(added)",
+                        label: "\(added) overlaps \(victims.formatted(.list(type: .and)))"))
+                }
+            default:
+                break
+            }
+        }
+        let drifts: [(String, MediatorDriftEvent)] = [
+            ("Routing", vpn.routes.lastDrift),
+            ("DNS", vpn.dns.lastDrift),
+            ("Proxy", vpn.proxies.lastDrift),
+        ].compactMap { resource, event in event.map { (resource, $0) } }
+        for (resource, drift) in drifts {
+            out.append(RotorTarget(id: "rotor-drift-\(resource)",
+                                   label: "External \(resource) change: \(drift.summary)"))
+        }
+        return out
     }
 }

@@ -119,6 +119,15 @@ extension RouteGraphView {
             }
         }
         .allowsHitTesting(false)
+        // Edges are FOLDED INTO THE NODES for VoiceOver rather than exposed as
+        // elements of their own: an edge's whole story — status, live rate,
+        // standby-ness — is already spoken by its endpoints (the interface
+        // card's value carries the state and rates, the globe names its owner
+        // and standbys, the destination card counts its routes), and a second
+        // element per edge would double the walk to say the same sentences
+        // again. The one CLICKABLE thing on an edge (the mid-edge fix control)
+        // is a real Button in the overlay below, so nothing actionable is lost.
+        .accessibilityHidden(true)
     }
 
     // MARK: Edge controls (the clickable status icons)
@@ -203,9 +212,10 @@ extension RouteGraphView {
         .buttonStyle(.plain)
         .contentShape(RoundedRectangle(cornerRadius: 10))
         .help("Traffic goes through this proxy on the way out")
-        .accessibilityLabel(proxies.count == 1
-            ? "Proxy \(proxies[0])"
-            : "Proxy \(proxies.first ?? ""), and \(proxies.count - 1) more")
+        .accessibilityLabel(proxies.count == 1 ? "Proxy" : "\(proxies.count) proxies")
+        .accessibilityValue(proxies.count == 1
+            ? (proxies.first ?? "")
+            : "\(proxies.first ?? ""), and \(proxies.count - 1) more")
         .popover(isPresented: Binding(
             get: { inspecting == proxyNodeID },
             set: { if !$0, inspecting == proxyNodeID { inspecting = nil } }
@@ -248,9 +258,11 @@ extension RouteGraphView {
         .help(via.map { "Internet egress via \($0)" } ?? "Nothing is carrying the default route")
         .accessibilityElement(children: .combine)
         // The dashed standby edges are information too, and a drawn line is invisible
-        // to VoiceOver — so it's said here.
-        .accessibilityLabel((via.map { "Internet, egress via \($0)" }
-            ?? "Internet, nothing is carrying the default route")
+        // to VoiceOver — so it's said here: label = what it is, value = who
+        // carries it now and who is waiting to.
+        .accessibilityLabel("Internet")
+        .accessibilityValue((via.map { "egress via \($0)" }
+            ?? "nothing is carrying the default route")
             + (standbys.isEmpty ? ""
                : ", standby \(standbys.map { label(for: $0) }.formatted(.list(type: .and)))"))
         .popover(isPresented: Binding(
@@ -290,12 +302,85 @@ extension RouteGraphView {
         .buttonStyle(.plain)
         .contentShape(RoundedRectangle(cornerRadius: 10))
         .help("Click for details")
+        // The node as VoiceOver hears it: label = what it is, value = what it
+        // is DOING right now. The value reads the same TopologyMonitor state
+        // the drawing does, so it ticks as the card redraws; the inbound
+        // edge's status is folded in here (see edgeLayer) instead of being an
+        // element of its own.
+        .accessibilityLabel(interfaceAXLabel(iface))
+        .accessibilityValue(interfaceAXValue(iface))
         .accessibilityHint("Shows addresses, live rates and available actions")
+        // Everything a click can reach, as named actions: the button itself
+        // opens the inspector, and the mid-edge fix control's action (plus the
+        // inspector's Disconnect) are mirrored so a VoiceOver user never has
+        // to find a separate 28-point circle on a bezier.
+        .accessibilityActions { interfaceAXActions(iface) }
+        .accessibilityRotorEntry(id: "rotor-if-\(iface.name)", in: rotorNamespace)
         .popover(isPresented: Binding(
             get: { inspecting == iface.name },
             set: { if !$0, inspecting == iface.name { inspecting = nil } }
         ), arrowEdge: .trailing) {
             interfaceInspector(iface)
+        }
+    }
+
+    /// "Tig Lab, VPN tunnel" / "Wi-Fi" — the name the user knows, plus what
+    /// kind of link it is when the name alone doesn't say.
+    private func interfaceAXLabel(_ iface: NetInterface) -> String {
+        let name = label(for: iface)
+        let kind = iface.isTailscale ? "Tailscale mesh"
+            : (iface.kind == .tunnel ? "VPN tunnel" : iface.displayName)
+        return name == kind ? name : "\(name), \(kind)"
+    }
+
+    /// Live state in plain words: connection health (ours only — a passive
+    /// link has no VPN state to report), address, both rates, and whether it
+    /// holds the default route.
+    private func interfaceAXValue(_ iface: NetInterface) -> String {
+        var parts: [String] = []
+        let state = status(for: iface)
+        if state != .passive { parts.append(state.summary) }
+        if let addr = iface.primaryAddress { parts.append(addr) }
+        parts.append("down \(Fmt.rate(iface.inRate)), up \(Fmt.rate(iface.outRate))")
+        if topo?.topology.carriesDefault(iface.name) == true {
+            parts.append("carries the default route")
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    /// The same verbs the mid-edge control and the inspector offer, in the
+    /// same states — built from `EdgeStatus` so the three surfaces can't
+    /// drift. Passive/healthy interfaces get Disconnect only where the
+    /// inspector would show it (a profile we own with a link judgement).
+    @ViewBuilder private func interfaceAXActions(_ iface: NetInterface) -> some View {
+        let state = status(for: iface)
+        switch state {
+        case .paused:
+            Button("Resume") { act(on: state) }
+        case .stalled:
+            Button("Reconnect") { act(on: state) }
+        case .down:
+            Button("Connect") { act(on: state) }
+        case .captivePortal:
+            Button("Open Sign-In Page") { act(on: state) }
+        case .healthy:
+            // healthy carries no profile id of its own; a healthy status means
+            // this IS one of ours with a live link judgement (see status(for:)).
+            if let id = profileID(for: iface) {
+                Button("Reconnect") { Task { await vpn.reconnect(id: id) } }
+            }
+        case .passive:
+            EmptyView()
+        }
+        // Disconnect, exactly where the inspector offers it: any owned tunnel
+        // that isn't already down (and never someone else's link).
+        let disconnectID: String? = switch state {
+        case .down, .passive: nil
+        case .healthy: profileID(for: iface)
+        case .paused(let id), .stalled(let id), .captivePortal(let id): id
+        }
+        if let disconnectID {
+            Button("Disconnect") { vpn.disconnect(id: disconnectID) }
         }
     }
 
@@ -378,6 +463,19 @@ extension RouteGraphView {
         .contentShape(RoundedRectangle(cornerRadius: 10))
         .onTapGesture { select(dest.id) }
         .help("Click to trace what feeds this")
+        // A named container, NOT a combined one: the rows are the point of
+        // this card, so each CIDR stays its own element (with the expander and
+        // overlap buttons still individually pressable). The tap above is a
+        // gesture VoiceOver can't see, so it's mirrored as a named action.
+        .accessibilityLabel("\(dest.title), via \(interfaceDisplayName(dest.interfaceName))")
+        .accessibilityValue("\(dest.routes.count) route\(dest.routes.count == 1 ? "" : "s")")
+        .accessibilityAction(named: "Trace what feeds this") { select(dest.id) }
+    }
+
+    /// What the user calls the interface behind a destination card — the same
+    /// profile-name-first lookup the cards themselves use.
+    private func interfaceDisplayName(_ bsd: String) -> String {
+        topo?.topology.interfaces.first { $0.name == bsd }.map { label(for: $0) } ?? bsd
     }
 
     /// One CIDR, exactly `rowHeight` tall and one line, always. When this row's
@@ -421,7 +519,9 @@ extension RouteGraphView {
                 }
                 .buttonStyle(.plain)
                 .help(overlapHelp(victims))
-                .accessibilityLabel("Show what this overlaps")
+                .accessibilityLabel("Show what \(row.cidr) overlaps")
+                .accessibilityRotorEntry(id: "rotor-overlap-\(overlapKey(dest, row.cidr))",
+                                         in: rotorNamespace)
             }
         }
             .padding(.horizontal, 3)
@@ -462,7 +562,12 @@ extension RouteGraphView {
                             @ViewBuilder body: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
+                // Decorative: the title beside it names the card, and in a
+                // `.contain` card the image would otherwise surface as its own
+                // element labeled with the raw SF-symbol name (the audit's
+                // "label not human-readable").
                 Image(systemName: symbol).foregroundStyle(tint)
+                    .accessibilityHidden(true)
                 Text(title).font(.callout.weight(.medium)).lineLimit(1)
             }
             .padding(.horizontal, 10).frame(height: headerHeight)

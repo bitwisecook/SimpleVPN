@@ -10,6 +10,7 @@
 
 import SwiftUI
 import Charts
+import Accessibility
 
 @MainActor
 @Observable
@@ -91,7 +92,9 @@ final class ThroughputMonitor {
     }
 }
 
-enum Fmt {
+// nonisolated: pure arithmetic-and-string work, and the audio-graph chart
+// descriptors below (a nonisolated protocol) format their axis values with it.
+nonisolated enum Fmt {
     /// e.g. "1.2 MB/s". Binary units, matching transport byte counters.
     static func rate(_ bytesPerSec: Double) -> String {
         byteCount(bytesPerSec) + "/s"
@@ -152,6 +155,72 @@ struct ThroughputGraph: View {
         .chartLegend(.hidden)
         .frame(height: compact ? 56 : 160)
         .clipped()
+        // A real audio graph, not a labeled picture: VoiceOver's "describe
+        // chart" / sonification reads both series with human axis units.
+        .accessibilityLabel("Throughput graph")
+        .accessibilityChartDescriptor(ThroughputChartDescriptor(samples: samples,
+                                                                scaleMax: scaleMax))
+    }
+}
+
+/// The audio-graph description of the throughput chart: download and upload as
+/// two continuous series over the rolling window, axes in seconds-ago and
+/// human byte rates, and a summary that answers "how fast, right now" first.
+/// nonisolated because AXChartDescriptorRepresentable is a nonisolated
+/// protocol — this is pure data-to-description work.
+nonisolated private struct ThroughputChartDescriptor: AXChartDescriptorRepresentable {
+    let samples: [ThroughputMonitor.Sample]
+    let scaleMax: Double
+
+    // Sample ids advance once per ~1 s poll, so the id axis IS a seconds axis;
+    // values are described relative to the newest sample ("12 seconds ago").
+    private func axes() -> (x: AXNumericDataAxisDescriptor, y: AXNumericDataAxisDescriptor) {
+        let newest = samples.last?.id ?? 0
+        let oldest = samples.first?.id ?? 0
+        let x = AXNumericDataAxisDescriptor(
+            title: "Time",
+            range: Double(oldest)...Double(max(oldest + 1, newest)),
+            gridlinePositions: []) { value in
+                let ago = Double(newest) - value
+                return ago < 1 ? "now" : "\(Int(ago)) seconds ago"
+            }
+        let y = AXNumericDataAxisDescriptor(
+            title: "Throughput",
+            range: 0...max(1_024, scaleMax),
+            gridlinePositions: []) { Fmt.rate($0) }
+        return (x, y)
+    }
+
+    private func series() -> [AXDataSeriesDescriptor] {
+        [AXDataSeriesDescriptor(
+            name: "Download", isContinuous: true,
+            dataPoints: samples.map { AXDataPoint(x: Double($0.id), y: $0.inRate) }),
+         AXDataSeriesDescriptor(
+            name: "Upload", isContinuous: true,
+            dataPoints: samples.map { AXDataPoint(x: Double($0.id), y: $0.outRate) })]
+    }
+
+    private var summary: String {
+        guard let last = samples.last else { return "No traffic samples yet." }
+        return "Downloading at \(Fmt.rate(last.inRate)) and uploading at "
+            + "\(Fmt.rate(last.outRate)), over the last \(samples.count) seconds."
+    }
+
+    func makeChartDescriptor() -> AXChartDescriptor {
+        let (x, y) = axes()
+        return AXChartDescriptor(title: "Connection throughput", summary: summary,
+                                 xAxis: x, yAxis: y, additionalAxes: [],
+                                 series: series())
+    }
+
+    // Rebuilt on every SwiftUI update so the audio graph tracks the live data
+    // the drawing tracks — the default no-op would leave it frozen at open.
+    func updateChartDescriptor(_ descriptor: AXChartDescriptor) {
+        let (x, y) = axes()
+        descriptor.xAxis = x
+        descriptor.yAxis = y
+        descriptor.series = series()
+        descriptor.summary = summary
     }
 }
 

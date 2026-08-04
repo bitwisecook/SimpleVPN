@@ -289,6 +289,7 @@ struct EndpointsEditor: View {
                             Text("checking…").font(.caption).foregroundStyle(.secondary)
                         } else if let rtt = item.measurement?.rttText {
                             Text(rtt).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                .accessibilityLabel("latency \(rtt)")
                         }
                         if item.endpoint.userAdded == true {
                             Button(role: .destructive) { remove(item.endpoint) } label: {
@@ -299,6 +300,12 @@ struct EndpointsEditor: View {
                         }
                     }
                     .padding(.vertical, 2)
+                    // A named container: the row announces which server it is
+                    // and everything known about it, while the flag button,
+                    // name field and remove button stay reachable children.
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel("Server \(item.endpoint.displayLabel)")
+                    .accessibilityValue(detail(item))
                 }
             }
 

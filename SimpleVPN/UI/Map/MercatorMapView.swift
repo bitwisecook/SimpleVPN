@@ -128,6 +128,50 @@ struct MercatorMapView: View {
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("World map of VPN endpoints. Use the endpoint menu for the full list.")
+        // The picture in one sentence — where you appear from, each gateway,
+        // the egress — built from the same pins the map draws, so it changes
+        // when they do. The pins stay individually reachable children (each is
+        // a real Button with its own label); this is the read-at-a-glance.
+        .accessibilityValue(accessibilitySummary)
+    }
+
+    /// "You appear from London. Tig Lab gateway, Zurich. Internet egress,
+    /// Frankfurt. 3 endpoints." — user first, then hops, then the crowd.
+    private var accessibilitySummary: String {
+        var parts: [String] = []
+        if let user = pins.first(where: { $0.kind == .user }) {
+            parts.append(user.subtitle.isEmpty
+                ? "You are at \(user.title)"
+                : "You appear from \(user.subtitle)")
+        }
+        // With explicit topology links this is the live map (home → VPN →
+        // egress): name every hop. Without them it's the endpoint picker map,
+        // where per-endpoint detail belongs to the pins and the menu — count
+        // them and call out the selection instead.
+        if !connections.isEmpty {
+            for pin in pins {
+                switch pin.kind {
+                case .endpoint:
+                    parts.append("\(pin.title) gateway"
+                        + (pin.subtitle.isEmpty ? "" : ", \(pin.subtitle)"))
+                case .egress:
+                    parts.append("Internet egress"
+                        + (pin.subtitle.isEmpty ? ", \(pin.title)" : ", \(pin.subtitle)"))
+                case .user:
+                    break
+                }
+            }
+        } else {
+            let endpoints = pins.filter { if case .endpoint = $0.kind { return true }; return false }
+            if !endpoints.isEmpty {
+                parts.append("\(endpoints.count) endpoint\(endpoints.count == 1 ? "" : "s") shown")
+            }
+            if let selected = endpoints.first(where: isSelected) {
+                parts.append("\(selected.title) selected"
+                    + (selected.subtitle.isEmpty ? "" : ", \(selected.subtitle)"))
+            }
+        }
+        return parts.joined(separator: ". ")
     }
 
     // MARK: Base map

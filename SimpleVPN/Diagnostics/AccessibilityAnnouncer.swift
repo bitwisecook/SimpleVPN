@@ -5,7 +5,7 @@
 //  State changes are ANNOUNCED, not discovered: a blind user must hear a
 //  connect succeed (or fail, or stop to wait on a code) without touching
 //  anything. This subscribes to the control plane's one event stream — the
-//  SAME `statusChanged` broadcast the CLI's `watch` and App Intents consume,
+//  SAME `statusChanged`/`gatewayChanged` broadcasts the CLI's `watch` and App Intents consume,
 //  via ControlPlaneDispatcher.subscribe() — so it can never disagree with what
 //  the app itself believes, and no status derivation is duplicated here.
 //
@@ -30,6 +30,20 @@ final class AccessibilityAnnouncer {
     /// Reconnect-churn quiet window: at most one announcement per profile per
     /// this many seconds; later transitions within it coalesce to the newest.
     static let quietWindow: TimeInterval = 3
+
+    /// Debounce key for gateway-change announcements. Starts with a control
+    /// character so it can never collide with a real profile id.
+    private static let gatewayKey = "\u{1}gateway"
+
+    /// The one path for USER-INITIATED speech (a reveal the user just clicked,
+    /// like the route graph's overlap arrow). Immediate on purpose: the click
+    /// itself is the debounce — one click, one sentence — and running it
+    /// through the per-profile churn window would only delay the answer to a
+    /// question the user just asked. Views never post announcements directly;
+    /// they call this, so the app's whole speaking voice stays in one file.
+    static func sayNow(_ sentence: String) {
+        AccessibilityNotification.Announcement(sentence).post()
+    }
 
     private weak var vpn: VPNController?
     private var listenTask: Task<Void, Never>?
@@ -58,12 +72,28 @@ final class AccessibilityAnnouncer {
     // MARK: Event → sentence
 
     private func handle(_ event: ControlEvent) {
-        guard case .statusChanged(let id, let status) = event else { return }
-        let previous = lastStatus[id]
-        lastStatus[id] = status
-        guard let previous, previous != status else { return }
-        guard let sentence = sentence(profile: id, from: previous, to: status) else { return }
-        announce(sentence, for: id)
+        switch event {
+        case .statusChanged(let id, let status):
+            let previous = lastStatus[id]
+            lastStatus[id] = status
+            guard let previous, previous != status else { return }
+            guard let sentence = sentence(profile: id, from: previous, to: status) else { return }
+            announce(sentence, for: id)
+        case .gatewayChanged(let owner):
+            // The dispatcher only broadcasts a REAL change (RC5 diffs before it
+            // publishes), so every one of these is worth a sentence. Same words
+            // as the gateway bar's own value, debounced under one key so a
+            // reconciliation wobble collapses to the state it settled on.
+            let sentence: String = if let owner,
+                let name = vpn?.profiles.first(where: { $0.id == owner })?.name {
+                "Default gateway is now \(name)"
+            } else {
+                "Default gateway is now direct — traffic goes out your normal connection"
+            }
+            announce(sentence, for: Self.gatewayKey)
+        default:
+            return
+        }
     }
 
     /// The transition in words, or nil for the transient states (connecting /

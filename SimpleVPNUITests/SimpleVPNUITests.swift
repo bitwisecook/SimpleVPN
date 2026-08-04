@@ -34,6 +34,32 @@ final class SimpleVPNUITests: XCTestCase {
     /// descriptions, action support, parent/child structure — must pass.
     @MainActor
     func testMainWindowAccessibilityAudit() throws {
+        let app = try launchOrSkip()
+        try runAccessibilityAudit(on: app)
+    }
+
+    /// The same gate over the Routes window — the wave-2 flagship (route
+    /// diagram, gateway bar, traffic-path strip), opened the way a user opens
+    /// it: VPN ▸ Routes…. The main window stays open beside it, which is fine —
+    /// it passes its own audit above, and auditing both together is strictly
+    /// more coverage, never less.
+    @MainActor
+    func testRoutesWindowAccessibilityAudit() throws {
+        let app = try launchOrSkip()
+
+        app.menuBarItems["VPN"].click()
+        app.menuBarItems["VPN"].menuItems["Routes…"].click()
+        guard app.windows["Routes"].waitForExistence(timeout: 10) else {
+            XCTFail("The Routes window didn't open from the VPN menu")
+            return
+        }
+
+        try runAccessibilityAudit(on: app)
+    }
+
+    /// Launches the app and skips (rather than flakes) where no UI can appear.
+    @MainActor
+    private func launchOrSkip() throws -> XCUIApplication {
         let app = XCUIApplication()
         app.launch()
 
@@ -46,7 +72,13 @@ final class SimpleVPNUITests: XCTestCase {
                 for real.
                 """)
         }
+        return app
+    }
 
+    /// The shared audit body: one exclusion list, applied identically to every
+    /// window, so a new surface can't quietly get a looser gate.
+    @MainActor
+    private func runAccessibilityAudit(on app: XCUIApplication) throws {
         let auditTypes: XCUIAccessibilityAuditType = [
             .elementDetection, .hitRegion, .sufficientElementDescription,
             .action, .parentChild,
@@ -94,17 +126,9 @@ final class SimpleVPNUITests: XCTestCase {
                 return true
             }
 
-            // Wave-2 surfaces (route diagram, Mercator maps, throughput charts,
-            // railroad view) get their navigable accessibilityChildren/
-            // AXChartDescriptor treatment in the next wave — until then their
-            // canvases are excluded by name rather than left to flake the gate.
-            let waveTwoSurfaces = ["MercatorMap", "RouteGraph", "ThroughputGraph", "Railroad"]
-            if let element = issue.element {
-                let identity = "\(element.identifier) \(element.label)"
-                if waveTwoSurfaces.contains(where: { identity.contains($0) }) {
-                    return true   // ignore: fixed in wave 2
-                }
-            }
+            // (The wave-2 by-name exclusions — MercatorMap, RouteGraph,
+            // ThroughputGraph, Railroad — are gone: those surfaces now carry
+            // their own navigable structure and are held to the full gate.)
             return false          // everything else is build-breaking
         }
     }

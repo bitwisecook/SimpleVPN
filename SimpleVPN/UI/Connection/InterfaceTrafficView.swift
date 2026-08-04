@@ -32,6 +32,7 @@
 
 import SwiftUI
 import Charts
+import Accessibility
 
 /// Settings keys: BSD names the user explicitly turned on / off in the graph.
 let shownInterfacesDefaultsKey = "graph.shownInterfaces"
@@ -243,6 +244,16 @@ struct InterfaceTrafficView: View {
         // axis stay exactly where they were (spatial memory).
         .overlay(alignment: .topTrailing) { nowButton }
         .accessibilityLabel("Throughput per network interface, scrollable in time")
+        // The audio graph mirrors exactly what's plotted: the visible window
+        // of every shown interface, one download + one upload series each,
+        // under the same names the legend chips use.
+        .accessibilityChartDescriptor(InterfaceTrafficChartDescriptor(
+            series: series.map { s in
+                (name: visible.first { $0.name == s.id }.map(chipLabel) ?? s.id,
+                 buckets: s.buckets)
+            },
+            window: scrollX...scrollX.addingTimeInterval(Self.visibleSpan),
+            peak: visiblePeak(series)))
         .onAppear { if following { scrollX = trailingEdge } }
         .onChange(of: newestTime) { _, _ in
             guard following else { return }
@@ -356,6 +367,78 @@ struct InterfaceTrafficView: View {
         var hash: UInt64 = 5381
         for byte in name.utf8 { hash = (hash << 5) &+ hash &+ UInt64(byte) }
         return palette[Int(hash % UInt64(palette.count))]
+    }
+}
+
+/// The audio-graph description of the per-interface chart: for each plotted
+/// interface, a download and an upload series over the visible five-minute
+/// window, axes in time-ago and human byte rates. Peaks aren't separate
+/// series — coarse buckets' peak envelope is a drawing nicety; the averages
+/// are the data. nonisolated because AXChartDescriptorRepresentable is a
+/// nonisolated protocol — pure data-to-description work.
+nonisolated private struct InterfaceTrafficChartDescriptor: AXChartDescriptorRepresentable {
+    let series: [(name: String, buckets: [TrafficHistory.Bucket])]
+    let window: ClosedRange<Date>
+    let peak: Double
+
+    private func axes() -> (x: AXNumericDataAxisDescriptor, y: AXNumericDataAxisDescriptor) {
+        let span = window.upperBound.timeIntervalSince(window.lowerBound)
+        let x = AXNumericDataAxisDescriptor(
+            title: "Time",
+            range: 0...max(1, span),
+            gridlinePositions: []) { value in
+                let ago = span - value
+                if ago < 1 { return "now" }
+                if ago < 120 { return "\(Int(ago)) seconds ago" }
+                return "\(Int(ago / 60)) minutes ago"
+            }
+        let y = AXNumericDataAxisDescriptor(
+            title: "Throughput",
+            range: 0...max(1_024, peak),
+            gridlinePositions: []) { Fmt.rate($0) }
+        return (x, y)
+    }
+
+    private func dataSeries() -> [AXDataSeriesDescriptor] {
+        series.flatMap { s -> [AXDataSeriesDescriptor] in
+            // Only the window's own buckets: the ±margin fetched so drags
+            // don't reveal blank would otherwise put points off the axis.
+            let visible = s.buckets.filter {
+                $0.end > window.lowerBound && $0.start < window.upperBound
+            }
+            func points(_ value: (TrafficHistory.Bucket) -> Double) -> [AXDataPoint] {
+                visible.map {
+                    AXDataPoint(x: max(0, $0.mid.timeIntervalSince(window.lowerBound)),
+                                y: value($0))
+                }
+            }
+            return [AXDataSeriesDescriptor(name: "\(s.name) download", isContinuous: true,
+                                           dataPoints: points(\.avgIn)),
+                    AXDataSeriesDescriptor(name: "\(s.name) upload", isContinuous: true,
+                                           dataPoints: points(\.avgOut))]
+        }
+    }
+
+    private var summary: String {
+        guard !series.isEmpty else { return "Nothing is plotted." }
+        let names = series.map(\.name).formatted(.list(type: .and))
+        return "Five minutes of traffic for \(names); scroll back for up to 24 hours."
+    }
+
+    func makeChartDescriptor() -> AXChartDescriptor {
+        let (x, y) = axes()
+        return AXChartDescriptor(title: "Interface traffic", summary: summary,
+                                 xAxis: x, yAxis: y, additionalAxes: [],
+                                 series: dataSeries())
+    }
+
+    // Rebuilt on every SwiftUI update: this chart both ticks live and scrolls.
+    func updateChartDescriptor(_ descriptor: AXChartDescriptor) {
+        let (x, y) = axes()
+        descriptor.xAxis = x
+        descriptor.yAxis = y
+        descriptor.series = dataSeries()
+        descriptor.summary = summary
     }
 }
 

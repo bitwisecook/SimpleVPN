@@ -185,7 +185,15 @@ struct RailroadView: View {
             }
             .frame(maxWidth: .infinity)
         }
+        // ONE element for the whole ladder: the headline as the label, every
+        // track as a sentence in the value — name, kind, where it goes — read
+        // from the same topology the tracks draw, so it stays live. The child
+        // nodes are fragments of a picture (icon + name + address), not a
+        // walkable structure; the route graph window is where per-node
+        // navigation lives.
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilitySummary)
+        .accessibilityValue(accessibilityLadder)
     }
 
     @ViewBuilder private func track(for row: Row) -> some View {
@@ -258,5 +266,41 @@ struct RailroadView: View {
             parts.append("Internet via \(iface.displayName)")
         }
         return parts.isEmpty ? "Network diagram" : parts.joined(separator: ". ")
+    }
+
+    /// The ladder in words, one sentence per track — the same rows, in the
+    /// same order, saying what each drawing says: what the interface is, and
+    /// where traffic on it ends up.
+    private var accessibilityLadder: String {
+        let sentences = rows.map { row -> String in
+            let iface = row.iface
+            let far = topology.farSideNetworks(via: iface.name)
+            let isDefault = topology.carriesDefault(iface.name)
+            switch row.role {
+            case .ourTunnel:
+                var s = "Your VPN on \(iface.friendlyName)"
+                if !serverEndpoint.isEmpty { s += " to \(serverEndpoint)" }
+                if paused { s += ", paused" }
+                if bypassing { s += ", traffic is bypassing it" }
+                var reaches: [String] = []
+                if !far.isEmpty {
+                    reaches.append(far.count == 1 ? far[0] : "\(far.count) networks")
+                }
+                if isDefault { reaches.append("the Internet as a full tunnel") }
+                if reaches.isEmpty { reaches.append("no routes yet") }
+                return s + ", reaching " + reaches.formatted(.list(type: .and))
+            case .defaultEgress:
+                return "\(iface.friendlyName) to the Internet"
+                    + (ourTunnel == nil ? "" : ", the split-tunnel egress")
+            case .otherTunnel:
+                let dest = far.isEmpty ? "no routes yet"
+                    : (far.count == 1 ? far[0] : "\(far.count) networks")
+                return "\(iface.friendlyName), another tunnel, to \(dest)"
+            case .local:
+                return "\(iface.friendlyName) to the local network"
+            }
+        }
+        return sentences.isEmpty ? "No active network interfaces"
+            : sentences.joined(separator: ". ")
     }
 }

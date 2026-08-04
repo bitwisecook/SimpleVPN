@@ -80,12 +80,18 @@ struct EndpointSection: View {
         )) {
             Text("Automatic — try in order").tag(String?.none)
             ForEach(groups) { group in
-                Section(group.region.name) {
+                // The heading looks the same but SAYS more: how many servers
+                // the region holds and the quickest measured one, so a
+                // VoiceOver user can pick a region without walking its rows.
+                Section {
                     ForEach(group.endpoints) { item in
                         Text(EndpointRowLabel.oneLine(
                             item, connected: connected && item.id == selection))
                             .tag(String?.some(item.id))
                     }
+                } header: {
+                    Text(group.region.name)
+                        .accessibilityLabel(regionHeading(group))
                 }
             }
             if let selection, !items.contains(where: { $0.id == selection }) {
@@ -93,6 +99,17 @@ struct EndpointSection: View {
             }
         }
         .accessibilityHint("Choosing an endpoint overrides the server, port and protocol for this VPN.")
+    }
+
+    /// "Europe, 3 servers, quickest 24 milliseconds" — the region heading as
+    /// VoiceOver reads it. The latency clause only appears when something was
+    /// actually measured; a nearest-first list must not invent numbers.
+    private func regionHeading(_ group: RegionGroup) -> String {
+        var s = "\(group.region.name), \(group.endpoints.count) server\(group.endpoints.count == 1 ? "" : "s")"
+        if let best = group.endpoints.compactMap(\.measurement?.rttMS).min() {
+            s += ", quickest \(Int(best.rounded())) milliseconds"
+        }
+        return s
     }
 
     // MARK: Selection ↔ overrides

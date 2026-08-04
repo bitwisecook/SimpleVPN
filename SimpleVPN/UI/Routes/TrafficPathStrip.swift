@@ -51,8 +51,14 @@ struct TrafficPathStrip: View {
             }
         }
         .frame(width: 260, height: 40)
+        // One element: label = what this is, value = the path in words. The
+        // value is derived from the same mediator-published owner the Canvas
+        // draws, so it updates the moment the picture does — and the CHANGE is
+        // announced by AccessibilityAnnouncer (gatewayChanged), never here,
+        // so a switch is spoken exactly once.
         .accessibilityElement()
-        .accessibilityLabel(pathDescription(ownerName: ownerName))
+        .accessibilityLabel("Internet traffic path")
+        .accessibilityValue(pathDescription(ownerName: ownerName))
         // A switch (or an owner-disconnect fallback) is exactly a change of the
         // effective owner — animate on that, then settle. onChange only, so the
         // strip's first appearance draws still.
@@ -70,8 +76,8 @@ struct TrafficPathStrip: View {
     }
 
     private func pathDescription(ownerName: String?) -> String {
-        if let ownerName { return "Traffic path: this Mac, through \(ownerName), to the Internet." }
-        return "Traffic path: this Mac, directly to the Internet."
+        if let ownerName { return "This Mac, through \(ownerName), to the Internet" }
+        return "This Mac, directly to the Internet"
     }
 
     // MARK: Drawing (Canvas/Text/shapes only)
