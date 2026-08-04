@@ -254,19 +254,21 @@ extension ConnectionDetailView {
         // NOT `.disabled(!canConnect)`: a dead button teaches nothing. It LOOKS
         // disabled while input is missing, but a click walks the user to the fix —
         // focus lands on the first empty required field and it gets a little shake.
-        // Two-phase when an official Tailscale client is already running: the first
-        // press ARMS (button turns yellow "Ignore Warning and Connect"), the second
-        // actually connects.
-        // So a person can't start a conflicting second datapath with one absent-minded
-        // click — they have to see the warning and confirm they understand the risk.
+        // Two-phase when an official Tailscale client is already running, both phases
+        // yellow: "Connect Anyway" → "I Understand". The first press does NOT connect —
+        // it arms, and bumps the warning below (a small double pulse) so the eye lands
+        // on WHY before the second press confirms. So a person can't start a
+        // conflicting second datapath with one absent-minded click.
         let armed = tailscaleConflict && tailscaleConflictArmed
+        let label = armed ? "I Understand" : (tailscaleConflict ? "Connect Anyway" : "Connect")
         return AnyView(
-            Button(armed ? "Ignore Warning and Connect" : "Connect") {
+            Button(label) {
                 guard canConnect else { nudgeMissingInput(); return }
                 if tailscaleConflict && !tailscaleConflictArmed {
                     withAnimation(reduceMotion ? nil : .snappy(duration: 0.2)) {
                         tailscaleConflictArmed = true
                     }
+                    conflictNudge += 1   // pulses the warning banner
                     return
                 }
                 connectTask = Task { await connect() }
@@ -284,8 +286,15 @@ extension ConnectionDetailView {
                 // The value is the VPN's live state, so a focused Connect button
                 // answers "what is this connection doing" without hunting for it.
                 .accessibilityValue(VPNController.statusText(vpn.displayStatus(for: profile.id)))
+                // VoiceOver can't see the banner pulse, so the hint says what the
+                // press will do at each phase — the same information the animation
+                // conveys visually.
                 .accessibilityHint(canConnect
-                                   ? (tailscaleConflict ? "Not recommended — the Tailscale app is already running" : "")
+                                   ? (armed
+                                      ? "Connects even though the Tailscale app is running"
+                                      : (tailscaleConflict
+                                         ? "Not recommended — the Tailscale app is already running. Shows the warning; press again to connect."
+                                         : ""))
                                    : (missingInputHint ?? ""))
         )
     }

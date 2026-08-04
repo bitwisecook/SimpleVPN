@@ -57,9 +57,12 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     /// app launches/quits, so the warning appears/clears live. Only meaningful for a
     /// Tailscale-kind profile (see `tailscaleConflict`).
     @State private var tailscaleClientsRunning = false
-    /// Two-phase Connect for the conflict case: the first press ARMS this (the button
-    /// becomes a red "Connect anyway"); only the second press actually connects.
+    /// Two-phase Connect for the conflict case: the first press ("Connect Anyway")
+    /// ARMS this and bumps the warning; only the second ("I Understand") connects.
     @State var tailscaleConflictArmed = false   // was private — internal for the file split
+    /// Bumped when the user presses "Connect Anyway", to pulse the warning banner.
+    /// A counter, not the armed flag: disarming must not replay the animation.
+    @State var conflictNudge = 0   // internal: the connect control triggers it
 
 
     enum CredentialField { case username, password, otp }   // was private — internal for the file split
@@ -465,6 +468,9 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
         let status = vpn.tailscaleStatuses[profile.id]
         let signInURL = vpn.tailscaleSignInURL[profile.id]
         VStack(alignment: .leading, spacing: 8) {
+            // Read out here: the keyframe closure below is @Sendable and can't
+            // touch the main-actor environment.
+            let pulses = !reduceMotion
             if tailscaleConflict {
                 // The official Tailscale app is running. Starting ours as well puts two
                 // wireguard/gVisor datapaths on the same Mac — they fight over magicsock
@@ -483,6 +489,22 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.red.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+                // "Connect Anyway" doesn't connect — it sends the user HERE, so the
+                // warning gives a small double bump ("bump-bump") to catch the eye
+                // before they confirm with "I Understand". Pure shapes and text, so
+                // scaling it is safe (no platform-backed views in a transform).
+                // Reduce Motion: no pulse — the button label change carries it.
+                .keyframeAnimator(initialValue: 1.0, trigger: conflictNudge) { view, scale in
+                    view.scaleEffect(pulses ? scale : 1, anchor: .center)
+                } keyframes: { _ in
+                    KeyframeTrack(\.self) {
+                        SpringKeyframe(1.045, duration: 0.11)
+                        SpringKeyframe(1.0, duration: 0.11)
+                        SpringKeyframe(1.045, duration: 0.11)
+                        SpringKeyframe(1.0, duration: 0.17)
+                    }
+                }
+                .accessibilityAddTraits(.isStaticText)
             }
             if let status, status.backendState.needsUserAction {
                 Label(status.backendState == .needsMachineAuth
