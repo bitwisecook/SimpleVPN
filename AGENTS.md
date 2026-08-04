@@ -188,3 +188,34 @@ as `{password}{otp}` (no `static-challenge`). No client cert → `ENABLE_EXTERNA
 - **Failure UX:** extension classifies openvpn3 events into `TunnelIncident`s (App Group); the app runs
   failure-time diagnostics (DNS/reach/TLS/captive-portal, baseline comparison) — active probes ONLY on
   failure; live link health is judged passively from byte counters.
+
+## Accessibility — a first-class requirement, not a pass
+
+The bar is WORLD CLASS: someone using VoiceOver (or switch control, or keyboard
+only) must be able to use the app normally — connect, configure, and UNDERSTAND
+ITS STATE — as quickly as a sighted mouse user. Rules, all binding:
+
+- **Every control**: `accessibilityLabel` (what it is), `accessibilityValue`
+  (its current state, live), `accessibilityHint` only when the outcome isn't
+  obvious from the label. Never leak internal jargon ("sysext", "IPC") into any
+  of them — same plain language as the visible UI.
+- **State changes are ANNOUNCED, not discovered**: connection status flips
+  (connected / disconnected / needs sign-in / doctor findings) post VoiceOver
+  announcements (`AccessibilityNotification.Announcement`) — a blind user must
+  hear the connect succeed without touching anything. Debounce so reconnect
+  churn doesn't spam.
+- **Custom-drawn surfaces are navigable structures, not labeled pictures**:
+  Canvas/graph views expose `accessibilityChildren`/rotors with one element per
+  meaningful node/edge, each with label+value+custom actions matching what a
+  click can do. Swift Charts get `AXChartDescriptor` (audio graphs).
+- **Grouping and order**: `.accessibilityElement(children: .combine)` on rows
+  so a row reads as one sentence, not five fragments; focus order follows the
+  visual reading order; sheets/popovers return focus to their opener.
+- **Full keyboard operability**: everything clickable is reachable and
+  activatable by keyboard (`focusable`, key equivalents, ESC dismisses).
+- **Visual accommodations**: Reduce Motion everywhere (house rule already);
+  Differentiate Without Color — the status-dot language ALWAYS pairs color
+  with a shape/symbol difference; respect Increase Contrast; no fixed tiny
+  fonts on informational text.
+- **Regression gate**: SimpleVPNUITests runs `performAccessibilityAudit()`
+  per window — new audit failures are build-breaking, same as warnings.
