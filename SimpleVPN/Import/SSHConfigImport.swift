@@ -204,7 +204,15 @@ nonisolated enum SSHConfigImport {
             config.identityFile = key
             applied.notes.append("key \((key as NSString).lastPathComponent)")
         }
-        for cert in host.certificateFiles {
+        // First certificate goes in the dedicated field (the in-process engine
+        // presents it); any extras stay ssh_config lines for /usr/bin/ssh.
+        // A certificate implies certificate sign-in — the method that uses it.
+        if let cert = host.certificateFiles.first {
+            config.sshCertificateFile = cert
+            config.sshAuthMethod = "certificate"
+            applied.notes.append("certificate \((cert as NSString).lastPathComponent)")
+        }
+        for cert in host.certificateFiles.dropFirst() {
             let opt = "CertificateFile \(cert)"
             if !config.sshExtraOptions.contains(opt) { config.sshExtraOptions.append(opt) }
         }

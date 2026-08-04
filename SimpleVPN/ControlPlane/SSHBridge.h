@@ -50,6 +50,16 @@ typedef NS_ENUM(NSInteger, SSHHostKeyStatus) {
 - (BOOL)connectToHost:(NSString *)host port:(int)port
               timeout:(int)seconds error:(NSError * _Nullable * _Nullable)error;
 
+/// Same, with an explicit key-exchange preference (OpenSSH KexAlgorithms
+/// syntax, comma-separated; nil/empty keeps libssh's default list — which
+/// already prefers the post-quantum hybrids this build ships). A list libssh
+/// can't parse or fulfil fails the connect with a clear error rather than
+/// silently negotiating something else.
+- (BOOL)connectToHost:(NSString *)host port:(int)port
+              timeout:(int)seconds
+        kexAlgorithms:(nullable NSString *)kexAlgorithms
+                error:(NSError * _Nullable * _Nullable)error;
+
 /// The server host key fingerprint (SHA-256, hex) for known-hosts verification.
 @property (nullable, readonly) NSString *hostKeyFingerprintSHA256;
 
@@ -101,6 +111,13 @@ typedef NS_ENUM(NSInteger, SSHHostKeyStatus) {
 - (BOOL)authPasswordForUser:(NSString *)user password:(NSString *)password
                       error:(NSError * _Nullable * _Nullable)error;
 - (BOOL)authKeyForUser:(NSString *)user privateKeyPath:(NSString *)keyPath
+            passphrase:(nullable NSString *)passphrase
+                 error:(NSError * _Nullable * _Nullable)error;
+/// Key auth presenting an OpenSSH certificate (…-cert.pub) alongside the
+/// private key — the CA-signed sign-in flow libssh2 never had. A nil/empty
+/// certificatePath is plain key auth.
+- (BOOL)authKeyForUser:(NSString *)user privateKeyPath:(NSString *)keyPath
+       certificatePath:(nullable NSString *)certificatePath
             passphrase:(nullable NSString *)passphrase
                  error:(NSError * _Nullable * _Nullable)error;
 - (BOOL)authAgentForUser:(NSString *)user error:(NSError * _Nullable * _Nullable)error;

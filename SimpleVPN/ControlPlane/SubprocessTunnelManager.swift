@@ -80,6 +80,19 @@ final class SubprocessTunnelManager {
                 "Verification-code token is set to \(config.tokenMode.uppercased()) but no token secret is stored — add it under Sign-In ▸ Token secret and save."))
             return
         }
+        // A pinned host key is enforced by the in-process engine only —
+        // /usr/bin/ssh has no pin-by-hash option, so a pinned config must never
+        // silently route to the subprocess (that would connect unpinned).
+        if config.kind == .ssh, let reason = Self.sshPinBlockReason(config) {
+            live[config.id] = Live(status: .failed(reason))
+            return
+        }
+        // An explicit sign-in method missing its material would fail deep in
+        // the engine — fail fast with the actual fix instead.
+        if config.kind == .ssh, let reason = Self.sshAuthBlockReason(config) {
+            live[config.id] = Live(status: .failed(reason))
+            return
+        }
         if config.kind == .ssh, config.sshMode == .socks, Self.inProcessSSHSupports(config) {
             connectInProcessSSH(config, password: password)
             return
@@ -281,11 +294,59 @@ final class SubprocessTunnelManager {
     /// knob it can't express must route to /usr/bin/ssh instead — silently
     /// dropping a jump host would dial the target directly and bypass the
     /// bastion; compression and raw ssh_config options would just be ignored.
-    private static func inProcessSSHSupports(_ c: SubprocessTunnelConfig) -> Bool {
+    /// (Certificate, Kerberos, kex preference and the host-key pin all ride
+    /// in-process since the libssh migration.)
+    static func inProcessSSHSupports(_ c: SubprocessTunnelConfig) -> Bool {
         if c.useJumpHost, !c.jumpHost.isEmpty { return false }
         if c.compression { return false }
         if c.sshExtraOptions.contains(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) { return false }
         return true
+    }
+
+    /// The tunnel's sign-in method, normalized: "" = automatic.
+    static func sshAuthMethod(_ c: SubprocessTunnelConfig) -> String {
+        (c.sshAuthMethod ?? "").trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Why the chosen sign-in method can't work as configured, or nil. The
+    /// single rule the editor's Connect button and connect() both consult, so
+    /// a doomed sign-in is refused with its fix rather than failing downstream.
+    static func sshAuthBlockReason(_ c: SubprocessTunnelConfig) -> String? {
+        switch sshAuthMethod(c) {
+        case "key" where c.identityFile.trimmingCharacters(in: .whitespaces).isEmpty:
+            return "Key sign-in needs an identity file — set it under Sign-In."
+        case "certificate" where c.identityFile.trimmingCharacters(in: .whitespaces).isEmpty
+            || (c.sshCertificateFile ?? "").trimmingCharacters(in: .whitespaces).isEmpty:
+            return "Certificate sign-in needs both an identity file and a certificate file — set them under Sign-In."
+        default:
+            return nil
+        }
+    }
+
+    /// The pinned host key, normalized to the bare lowercase hex the bridge
+    /// compares — tolerates "SHA256:"/"sha256:" prefixes and stray whitespace.
+    static func sshPinnedKey(_ c: SubprocessTunnelConfig) -> String? {
+        guard var pin = c.sshPinnedHostKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !pin.isEmpty else { return nil }
+        if let colon = pin.range(of: ":", options: .backwards) {
+            pin = String(pin[colon.upperBound...])
+        }
+        return pin.lowercased()
+    }
+
+    /// Why a pinned-host-key config can't connect right now, or nil when it can.
+    /// The pin is only enforceable by the in-process engine (SOCKS mode, no
+    /// jump host / compression / extra options); anything else must be refused
+    /// honestly — the single rule the editor's caveat and connect() both use.
+    static func sshPinBlockReason(_ c: SubprocessTunnelConfig) -> String? {
+        guard c.kind == .ssh, sshPinnedKey(c) != nil else { return nil }
+        if c.sshMode != .socks {
+            return "A pinned host key is only enforced in SOCKS proxy mode (the built-in SSH engine). Switch the mode, or clear the pin under Security."
+        }
+        if !inProcessSSHSupports(c) {
+            return "A pinned host key can't be combined with a jump host, compression, or extra options — those run through /usr/bin/ssh, which can't check the pin. Clear the pin under Security, or remove the conflicting option."
+        }
+        return nil
     }
 
     private func connectInProcessSSH(_ config: SubprocessTunnelConfig, password: String?) {
@@ -298,9 +359,13 @@ final class SubprocessTunnelManager {
             // "" would burn the whole in-process fallback timeout for nothing.
             username: config.username.isEmpty ? NSUserName() : config.username,
             password: password, identityFile: config.identityFile.isEmpty ? nil : config.identityFile,
+            certificateFile: (config.sshCertificateFile?.isEmpty == false) ? config.sshCertificateFile : nil,
             socksPort: config.socksPort,
+            pinnedHostKeySHA256: Self.sshPinnedKey(config),
             strictHostKey: config.strictHostKey,
-            connectTimeout: config.connectTimeout ?? 15)
+            connectTimeout: config.connectTimeout ?? 15,
+            authMethod: Self.sshAuthMethod(config).isEmpty ? nil : Self.sshAuthMethod(config),
+            kexAlgorithms: (config.sshKexAlgorithms?.trimmingCharacters(in: .whitespaces)).flatMap { $0.isEmpty ? nil : $0 })
         Task { [weak self] in
             do {
                 try await engine.startSOCKS(cfg)
@@ -323,8 +388,16 @@ final class SubprocessTunnelManager {
                 // Only fall back if this engine is still the active one; a user
                 // disconnect during connect must not spawn a zombie subprocess.
                 guard self.sshEngines[config.id] === engine else { return }
-                Self.log.error("in-process SSH failed, falling back to subprocess: \(error.localizedDescription, privacy: .public)")
                 self.sshEngines[config.id] = nil
+                // A pinned host key exists ONLY in-process — falling back to
+                // /usr/bin/ssh would connect without checking the pin. Fail
+                // with the engine's real reason instead.
+                if Self.sshPinnedKey(config) != nil {
+                    Self.log.error("in-process SSH failed with a pinned host key — not falling back: \(error.localizedDescription, privacy: .public)")
+                    self.live[config.id] = Live(status: .failed(error.localizedDescription))
+                    return
+                }
+                Self.log.error("in-process SSH failed, falling back to subprocess: \(error.localizedDescription, privacy: .public)")
                 self.live[config.id] = nil
                 self.connectSubprocess(config, password: password)
             }
@@ -891,7 +964,46 @@ final class SubprocessTunnelManager {
                  "-o", "ServerAliveInterval=\(max(0, c.serverAliveInterval))",
                  "-o", "StrictHostKeyChecking=\(c.strictHostKey)"]
         if let p = c.port { a += ["-p", "\(p)"] }
-        if !c.identityFile.isEmpty { a += ["-i", (c.identityFile as NSString).expandingTildeInPath] }
+        // Sign-in method → ssh options. An explicit method PINS ssh to it
+        // (PreferredAuthentications), otherwise OpenSSH's default order would
+        // contradict the UI — a lingering agent key silently "winning" over the
+        // password the user chose, or vice versa. IdentitiesOnly=yes stops ssh
+        // trying ~/.ssh/id_* defaults beyond the configured key.
+        // (The host-key PIN is deliberately absent throughout: ssh has no
+        // pin-by-hash option, and pinned configs never reach this builder —
+        // see sshPinBlockReason.)
+        let method = sshAuthMethod(c)
+        switch method {
+        case "password":
+            // keyboard-interactive included: many servers deliver their
+            // password prompt through it. The askpass answers those prompts
+            // with the stored password — the editor caveats the MFA case.
+            a += ["-o", "PreferredAuthentications=password,keyboard-interactive",
+                  "-o", "PubkeyAuthentication=no"]
+        case "key", "certificate":
+            a += ["-o", "PreferredAuthentications=publickey",
+                  "-o", "IdentitiesOnly=yes"]
+        case "agent":
+            // Agent keys only: publickey without -i (and without IdentitiesOnly,
+            // which would restrict ssh to explicitly-listed identities).
+            a += ["-o", "PreferredAuthentications=publickey"]
+        case "kerberos":
+            a += ["-o", "GSSAPIAuthentication=yes",
+                  "-o", "PreferredAuthentications=gssapi-with-mic"]
+        default:
+            break   // automatic — OpenSSH's default order
+        }
+        // The identity file rides along for automatic, key and certificate
+        // sign-in; the other explicit methods never use one.
+        if !c.identityFile.isEmpty, ["", "key", "certificate"].contains(method) {
+            a += ["-i", (c.identityFile as NSString).expandingTildeInPath]
+        }
+        if method == "certificate", let cert = c.sshCertificateFile, !cert.isEmpty {
+            a += ["-o", "CertificateFile=\((cert as NSString).expandingTildeInPath)"]
+        }
+        if let kex = c.sshKexAlgorithms?.trimmingCharacters(in: .whitespaces), !kex.isEmpty {
+            a += ["-o", "KexAlgorithms=\(kex)"]
+        }
         if c.useJumpHost, !c.jumpHost.isEmpty {
             // ProxyCommand (not -J) so the jump hop can use its own key. Its
             // password, if any, is matched by the host-aware askpass.
@@ -901,7 +1013,10 @@ final class SubprocessTunnelManager {
             // a hardcoded accept-new would silently weaken a "yes" config.
             var inner = "ssh -o \(Self.shellQuote("StrictHostKeyChecking=\(c.strictHostKey)"))"
             if !c.jumpIdentityFile.isEmpty {
+                // IdentitiesOnly so the CONFIGURED jump key is the one used —
+                // not whatever ~/.ssh/id_* or agent key happens to match first.
                 inner += " -i \(Self.shellQuote((c.jumpIdentityFile as NSString).expandingTildeInPath))"
+                inner += " -o IdentitiesOnly=yes"
             }
             if let jp = c.jumpPort { inner += " -p \(jp)" }
             let jumpTarget = c.jumpUsername.isEmpty ? c.jumpHost : "\(c.jumpUsername)@\(c.jumpHost)"

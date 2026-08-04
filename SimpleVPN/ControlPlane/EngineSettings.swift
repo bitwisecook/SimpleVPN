@@ -19,6 +19,10 @@ struct EngineSettingSpec: Identifiable, Sendable {
     let id: String        // e.g. "wg.mtu" — also the manual anchor (dots→dashes)
     let name: String
     let summary: String
+    /// Canonical taxonomy group (AGENTS.md "Config surfaces"). Optional because
+    /// some catalogs' forms are laid out by hand; a catalog that declares groups
+    /// (SSHSettings) can be section-checked by tests and future searches.
+    var group: SettingGroup? = nil
     var manualAnchor: String { id.replacingOccurrences(of: ".", with: "-") }
 }
 
@@ -38,6 +42,10 @@ struct EngineSettingCatalog: Sendable {
 struct EngineSettingRow<Control: View>: View {
     let spec: EngineSettingSpec
     var changed: Bool = false
+    /// Non-nil disables the control and says why — the reason replaces the
+    /// summary and rides `.help` + the control's `accessibilityValue`, the
+    /// same dead-control contract the OpenVPN form's SettingRow follows.
+    var disabledReason: String? = nil
     @ViewBuilder let control: Control
 
     var body: some View {
@@ -48,17 +56,24 @@ struct EngineSettingRow<Control: View>: View {
                 // VoiceOver name — wrap fields in LabeledContent { … } label: {
                 // EngineSettingLabel(spec:) } (the WireGuard pattern) or add
                 // .accessibilityLabel(spec.name) to the field.
-                control
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                if let reason = disabledReason {
+                    control
+                        .disabled(true)
+                        .accessibilityValue("unavailable — \(reason)")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    control
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 ManualLink(anchor: spec.manualAnchor, settingName: spec.name)
             }
-            Text(spec.summary)
+            Text(disabledReason ?? spec.summary)
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, 6)
-        .help(spec.summary)
+        .help(disabledReason ?? spec.summary)
         // Group the control with its summary so the explanation is the element
         // VoiceOver reaches next, matching SettingRow in the OpenVPN form.
         .accessibilityElement(children: .contain)

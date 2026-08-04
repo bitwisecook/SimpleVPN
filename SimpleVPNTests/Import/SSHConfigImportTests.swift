@@ -110,7 +110,10 @@ struct SSHConfigImportTests {
         #expect(config.username == "jimd")
         #expect(config.port == 2200)
         #expect(config.identityFile == "~/.ssh/id_ed25519")
-        #expect(config.sshExtraOptions.contains("CertificateFile ~/.ssh/id_ed25519-cert.pub"))
+        // First certificate lands in the dedicated field (so the in-process
+        // engine presents it); only extras would fall back to ssh_config lines.
+        #expect(config.sshCertificateFile == "~/.ssh/id_ed25519-cert.pub")
+        #expect(!config.sshExtraOptions.contains("CertificateFile ~/.ssh/id_ed25519-cert.pub"))
         #expect(config.useJumpHost)
         #expect(config.jumpHost == "bastion")
         // DynamicForward present → SOCKS mode, but the discovered forwards ride along.

@@ -69,6 +69,8 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
         var username: String
         var password: String?
         var identityFile: String?
+        /// OpenSSH certificate (…-cert.pub) presented alongside the identity key.
+        var certificateFile: String? = nil
         var socksPort: Int
         /// OpenSSH known_hosts file consulted when no explicit pin is set.
         var knownHostsPath: String? = (("~/.ssh/known_hosts") as NSString).expandingTildeInPath
@@ -78,6 +80,20 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
         var strictHostKey: String = "accept-new"
         /// TCP connect timeout in seconds (ssh's ConnectTimeout).
         var connectTimeout: Int = 15
+        /// How to sign in: nil/"" = automatic (key → agent → password);
+        /// "password" | "key" | "certificate" | "agent" | "kerberos" pin ONE
+        /// method — that method is used and nothing else, so what the user
+        /// chose is what actually authenticates. Kerberos is opt-in only.
+        var authMethod: String? = nil
+        /// Key-exchange preference (OpenSSH KexAlgorithms syntax); nil = libssh default.
+        var kexAlgorithms: String? = nil
+    }
+
+    /// A sign-in that can't proceed as configured — the message is user-facing.
+    nonisolated struct AuthError: LocalizedError {
+        let message: String
+        init(_ message: String) { self.message = message }
+        var errorDescription: String? { message }
     }
 
     /// Publish `state` on the main queue so the `@Observable` bookkeeping and any
@@ -96,7 +112,8 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
                 let s = SSHSession()
                 do {
                     try s.connect(toHost: config.host, port: Int32(config.port),
-                                  timeout: Int32(max(1, config.connectTimeout)))
+                                  timeout: Int32(max(1, config.connectTimeout)),
+                                  kexAlgorithms: config.kexAlgorithms)
                     // Verify the host key BEFORE auth — otherwise we'd hand
                     // credentials to whoever answered (MITM).
                     try s.verifyHostKey(withKnownHosts: config.knownHostsPath,
@@ -138,18 +155,49 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
         publish(.connected)
     }
 
+    /// An explicit method is used alone — a config that says "password" must
+    /// never quietly succeed with a key (or vice versa); the chosen method's
+    /// real failure surfaces instead. Automatic keeps the historical chain.
     private static func authenticate(_ s: SSHSession, _ c: Config) throws {
-        if let key = c.identityFile, !key.isEmpty {
-            if (try? s.authKey(forUser: c.username, privateKeyPath: key, passphrase: c.password)) != nil { return }
-        }
-        if (try? s.authAgent(forUser: c.username)) != nil { return }
-        if let pw = c.password, !pw.isEmpty {
+        switch c.authMethod ?? "" {
+        case "password":
+            guard let pw = c.password, !pw.isEmpty else {
+                throw AuthError("Password sign-in is selected but no password was provided.")
+            }
             try s.authPassword(forUser: c.username, password: pw)
-            return
+        case "key":
+            guard let key = c.identityFile, !key.isEmpty else {
+                throw AuthError("Key sign-in is selected but no identity file is set.")
+            }
+            try s.authKey(forUser: c.username, privateKeyPath: key,
+                          certificatePath: nil, passphrase: c.password)
+        case "certificate":
+            guard let key = c.identityFile, !key.isEmpty,
+                  let cert = c.certificateFile, !cert.isEmpty else {
+                throw AuthError("Certificate sign-in is selected but the identity file or certificate file is missing.")
+            }
+            try s.authKey(forUser: c.username, privateKeyPath: key,
+                          certificatePath: cert, passphrase: c.password)
+        case "agent":
+            try s.authAgent(forUser: c.username)
+        case "kerberos":
+            try s.authGSSAPI(forUser: c.username)
+        default:
+            // Automatic: key file, then agent, then password.
+            if let key = c.identityFile, !key.isEmpty {
+                if (try? s.authKey(forUser: c.username, privateKeyPath: key,
+                                   certificatePath: nil,
+                                   passphrase: c.password)) != nil { return }
+            }
+            if (try? s.authAgent(forUser: c.username)) != nil { return }
+            if let pw = c.password, !pw.isEmpty {
+                try s.authPassword(forUser: c.username, password: pw)
+                return
+            }
+            // authKey/authAgent throw on failure; reaching here with no
+            // password means nothing worked.
+            try s.authAgent(forUser: c.username)
         }
-        // authKey/authAgent throw on failure; reaching here with no password means
-        // nothing worked.
-        try s.authAgent(forUser: c.username)
     }
 
     /// Start the main SOCKS listener and return only once it is actually

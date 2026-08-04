@@ -37,6 +37,10 @@ struct SubprocessTunnelView: View {
     @State private var hostPicker: HostPickerPayload?
     // Debounce for live forward edits while connected.
     @State private var applyForwardsTask: Task<Void, Never>?
+    // Advanced disclosures: bound state so the whole header row is a hit
+    // target and a future search-reveal can open the container.
+    @State private var sshAdvancedExpanded = false
+    @State private var sslAdvancedExpanded = false
 
     private var live: SubprocessTunnelManager.Live? { manager.live[draft.id] }
     private var active: Bool { manager.isActive(draft.id) }
@@ -64,8 +68,9 @@ struct SubprocessTunnelView: View {
                 }
                 cliStatusRow
                 if draft.kind == .ssh {
-                    TextField("Server address", text: $draft.server, prompt: Text("ssh.example.com")).autocorrectionDisabled()
-                    portField
+                    row("ssh.server", text: $draft.server, prompt: "ssh.example.com")
+                    intRow("ssh.port", value: $draft.port, prompt: "22")
+                    intRow("ssh.connect-timeout", value: $draft.connectTimeout, prompt: "system default")
                     jumpHostRows
                 } else if draft.kind.isSSLVPN {
                     TextField("Server address", text: $draft.server, prompt: Text("vpn.example.com")).autocorrectionDisabled()
@@ -145,10 +150,14 @@ struct SubprocessTunnelView: View {
     /// SSH carries traffic three ways; the mode picks which fields matter.
     @ViewBuilder private var sshTrafficSection: some View {
         Section("Traffic") {
-            Picker("Mode", selection: $draft.sshMode) {
-                ForEach(SSHMode.allCases, id: \.self) { Text($0.label).tag($0) }
+            EngineSettingRow(spec: spec("ssh.mode"), changed: draft.sshMode != .socks) {
+                Picker(selection: $draft.sshMode) {
+                    ForEach(SSHMode.allCases, id: \.self) { Text($0.label).tag($0) }
+                } label: { EngineSettingLabel(spec: spec("ssh.mode"), changed: draft.sshMode != .socks) }
+                .pickerStyle(.segmented)
+                // Segmented pickers draw no label — give VoiceOver the name back.
+                .accessibilityLabel(spec("ssh.mode").name)
             }
-            .pickerStyle(.segmented)
             switch draft.sshMode {
             case .socks: socksSectionBody
             case .portForward: forwardsSectionBody
@@ -160,38 +169,134 @@ struct SubprocessTunnelView: View {
         }
     }
 
+    /// The picker's normalized value ("" = automatic).
+    private var sshMethod: String { SubprocessTunnelManager.sshAuthMethod(draft) }
+
     @ViewBuilder private var sshSignInSection: some View {
         Section("Sign-In") {
-            TextField("Username", text: $draft.username).textContentType(.username)
-            row("ssh.identity-file", text: $draft.identityFile, prompt: "~/.ssh/id_ed25519")
-            passwordRows
+            EngineSettingRow(spec: spec("ssh.auth-method"), changed: !sshMethod.isEmpty) {
+                Picker(selection: Binding(
+                    get: { sshMethod },
+                    set: { draft.sshAuthMethod = $0.isEmpty ? nil : $0 })) {
+                    Text("Automatic").tag("")
+                    Text("Password").tag("password")
+                    Text("Key file").tag("key")
+                    Text("Certificate").tag("certificate")
+                    Text("SSH agent").tag("agent")
+                    Text("Kerberos").tag("kerberos")
+                } label: { EngineSettingLabel(spec: spec("ssh.auth-method"), changed: !sshMethod.isEmpty) }
+            }
+            row("ssh.username", text: $draft.username, prompt: "alex")
+            // Each credential row is live only under the methods that use it —
+            // a disabled row says which choice re-enables it (.help + AX value).
+            row("ssh.identity-file", text: $draft.identityFile, prompt: "~/.ssh/id_ed25519",
+                disabled: ["", "key", "certificate"].contains(sshMethod) ? nil
+                    : "Not used when signing in with \(sshMethodLabel) — choose Automatic, “Key file” or “Certificate”.")
+            row("ssh.certificate-file", text: optionalText(\.sshCertificateFile), prompt: "~/.ssh/id_ed25519-cert.pub",
+                disabled: sshMethod == "certificate" ? nil
+                    : "Choose “Certificate” as the sign-in method to use an SSH certificate.")
+            sshPasswordRow
+        }
+    }
+
+    private var sshMethodLabel: String {
+        switch sshMethod {
+        case "password": "a password"
+        case "key": "a key file"
+        case "certificate": "a certificate"
+        case "agent": "the SSH agent"
+        case "kerberos": "Kerberos"
+        default: "this method"
+        }
+    }
+
+    /// Password + Remember for SSH, presented as a descriptor row (manual link,
+    /// summary) — the keychain path is unchanged. Disabled under methods that
+    /// never ask for one; caveated where the stored password answers prompts.
+    @ViewBuilder private var sshPasswordRow: some View {
+        let passwordUnused: String? = ["agent", "kerberos"].contains(sshMethod)
+            ? "Not used when signing in with \(sshMethodLabel)." : nil
+        EngineSettingRow(spec: spec("ssh.password"), changed: !password.isEmpty,
+                         disabledReason: passwordUnused) {
+            VStack(alignment: .leading, spacing: 6) {
+                LabeledContent {
+                    SecureField("optional", text: $password)
+                        .textContentType(.password)
+                        .multilineTextAlignment(.trailing)
+                } label: { EngineSettingLabel(spec: spec("ssh.password"), changed: !password.isEmpty) }
+                Toggle("Remember password", isOn: $remember)
+            }
+        }
+        if sshMethod == "password" {
+            SettingCaveat("If the server asks a follow-up question — a verification code, an MFA prompt — the stored password is what gets sent. Servers that need a code per sign-in aren't suited to a remembered password.")
         }
     }
 
     @ViewBuilder private var sshSecuritySection: some View {
         Section("Security") {
-            EngineSettingRow(spec: Self.specs["ssh.strict-host-key"], changed: draft.strictHostKey != "accept-new") {
+            EngineSettingRow(spec: spec("ssh.strict-host-key"), changed: draft.strictHostKey != "accept-new") {
                 Picker(selection: $draft.strictHostKey) {
                     Text("Trust on first use").tag("accept-new")
                     Text("Only known hosts").tag("yes")
                     Text("Never check (unsafe)").tag("no")
-                } label: { EngineSettingLabel(spec: Self.specs["ssh.strict-host-key"], changed: draft.strictHostKey != "accept-new") }
+                } label: { EngineSettingLabel(spec: spec("ssh.strict-host-key"), changed: draft.strictHostKey != "accept-new") }
+            }
+            pinnedHostKeyRow
+            row("ssh.key-exchange", text: optionalText(\.sshKexAlgorithms),
+                prompt: "mlkem768x25519-sha256,…")
+        }
+    }
+
+    /// Pinned host key: mono field with format validation (inline error +
+    /// accessibilityValue, per Docs/Accessibility.md) and the honesty caveat
+    /// when the pin can't be enforced alongside another choice.
+    @ViewBuilder private var pinnedHostKeyRow: some View {
+        let s = spec("ssh.pinned-host-key")
+        let pinned = SubprocessTunnelManager.sshPinnedKey(draft) != nil
+        EngineSettingRow(spec: s, changed: pinned) {
+            VStack(alignment: .leading, spacing: 4) {
+                LabeledContent {
+                    TextField("SHA256:… or 64 hex characters", text: optionalText(\.sshPinnedHostKey))
+                        .font(.callout.monospaced())
+                        .autocorrectionDisabled()
+                        .multilineTextAlignment(.trailing)
+                        .accessibilityValue(pinnedKeyError.map { "Problem: \($0)" } ?? "")
+                } label: { EngineSettingLabel(spec: s, changed: pinned) }
+                if let error = pinnedKeyError {
+                    Text(error)
+                        .font(.callout).foregroundStyle(.red)
+                        .accessibilityLabel("Error: \(error)")
+                } else if let conflict = SubprocessTunnelManager.sshPinBlockReason(draft) {
+                    Label(conflict, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout).foregroundStyle(.orange)
+                        .accessibilityLabel("Warning: \(conflict)")
+                }
             }
         }
     }
 
+    /// Why the typed pin isn't a usable SHA-256 fingerprint, or nil when it is
+    /// (or when the field is empty).
+    private var pinnedKeyError: String? {
+        guard let pin = SubprocessTunnelManager.sshPinnedKey(draft) else { return nil }
+        let hexCount = pin.filter(\.isHexDigit).count
+        guard pin.count != 64 || hexCount != 64 else { return nil }
+        return "A pinned key is the SHA-256 fingerprint: 64 hex characters (an optional “SHA256:” prefix is fine)."
+    }
+
     /// The jump-host rows live inside Connection — a jump host is part of how
     /// the tunnel reaches its server, like the SSL kinds' connection proxy.
+    /// The toggle reveals the fields; the host field carries the descriptor
+    /// (summary + manual link) for the whole concept.
     @ViewBuilder private var jumpHostRows: some View {
         Toggle("Connect via a jump host (bastion)", isOn: $draft.useJumpHost)
         if draft.useJumpHost {
-            TextField("Jump host", text: $draft.jumpHost, prompt: Text("bastion.example.com")).autocorrectionDisabled()
-            TextField("Jump port", value: $draft.jumpPort, format: .number.grouping(.never)).frame(maxWidth: 120)
-            TextField("Jump username", text: $draft.jumpUsername).textContentType(.username)
-            TextField("Jump identity file", text: $draft.jumpIdentityFile, prompt: Text("~/.ssh/id_bastion"))
-                .autocorrectionDisabled()
+            row("ssh.proxy-jump", text: $draft.jumpHost, prompt: "bastion.example.com")
+            intRow("ssh.jump-port", value: $draft.jumpPort, prompt: "22")
+            row("ssh.jump-username", text: $draft.jumpUsername, prompt: "alex")
+            row("ssh.jump-identity-file", text: $draft.jumpIdentityFile, prompt: "~/.ssh/id_bastion")
             SecureField("Jump password (optional)", text: $jumpPassword)
-            Text("SSH first connects to the jump host, then hops to the target. The jump host uses its own key and password above — independent of the target's.")
+            Text("The jump host signs in on its own — its key and password above are independent of the server's, and the password stays in your login keychain.")
                 .font(.callout).foregroundStyle(.secondary)
         }
     }
@@ -316,9 +421,12 @@ struct SubprocessTunnelView: View {
                 showFeedback("Replaced the target's key with \((path as NSString).lastPathComponent).", ok: true)
             }
         case .certificate(let path):
-            let opt = "CertificateFile \(path)"
-            if !draft.sshExtraOptions.contains(opt) { draft.sshExtraOptions.append(opt) }
-            showFeedback("Added the SSH certificate \((path as NSString).lastPathComponent).", ok: true)
+            // The dedicated field (not an extra option) so the in-process
+            // engine presents it too — extra options force /usr/bin/ssh.
+            // Dropping a certificate implies certificate sign-in.
+            draft.sshCertificateFile = path
+            draft.sshAuthMethod = "certificate"
+            showFeedback("Using \((path as NSString).lastPathComponent) as your SSH certificate — sign-in method set to Certificate.", ok: true)
         case .publicKey:
             showFeedback("That's the public half of a key — drop the private key (the file without .pub).", ok: false)
         case .unrecognized:
@@ -357,20 +465,62 @@ struct SubprocessTunnelView: View {
         }
     }
 
+    /// The local SOCKS listener binds without root, so the floor is 1024.
+    private var socksPortError: String? {
+        (1024...65535).contains(draft.socksPort) ? nil
+            : "Use a SOCKS port between 1024 and 65535 — ports below 1024 need root."
+    }
+
     @ViewBuilder private var socksSectionBody: some View {
-        intField("Local SOCKS port", value: $draft.socksPort, default: 1080)
-        Toggle("Route Mac traffic through this proxy", isOn: $draft.setSystemProxy)
+        EngineSettingRow(spec: spec("ssh.socks-port"), changed: draft.socksPort != 1080) {
+            VStack(alignment: .leading, spacing: 4) {
+                LabeledContent {
+                    TextField("1080", value: $draft.socksPort, format: .number.grouping(.never))
+                        .multilineTextAlignment(.trailing).frame(maxWidth: 120)
+                        // Validation rides the field's value (Docs/Accessibility.md).
+                        .accessibilityValue(socksPortError.map { "Problem: \($0)" } ?? "")
+                } label: { EngineSettingLabel(spec: spec("ssh.socks-port"), changed: draft.socksPort != 1080) }
+                if let error = socksPortError {
+                    Text(error)
+                        .font(.callout).foregroundStyle(.red)
+                        .accessibilityLabel("Error: \(error)")
+                }
+            }
+        }
+        EngineSettingRow(spec: spec("ssh.system-proxy"), changed: draft.setSystemProxy) {
+            Toggle(isOn: $draft.setSystemProxy) {
+                EngineSettingLabel(spec: spec("ssh.system-proxy"), changed: draft.setSystemProxy)
+            }
             // The toggle applies live to a connected tunnel — no reconnect.
             .onChange(of: draft.setSystemProxy) {
                 guard active else { return }
                 store.save(draft)
                 manager.setSystemProxyLive(draft, enabled: draft.setSystemProxy)
             }
-        Text("Points the active network service's SOCKS proxy at 127.0.0.1:\(draft.socksPort) while connected (asks for your admin password), and restores it on disconnect. Flipping it while connected applies immediately.")
-            .font(.callout).foregroundStyle(.secondary)
+        }
+        if active {
+            Text("Flipping it while connected applies immediately — no reconnect.")
+                .font(.callout).foregroundStyle(.secondary)
+        }
     }
 
+    /// The forwards list rides inside one descriptor row (summary + manual
+    /// link); every existing behaviour — live badges, debounced apply, the
+    /// per-row delete buttons with real hitboxes — is unchanged.
     @ViewBuilder private var forwardsSectionBody: some View {
+        EngineSettingRow(spec: spec("ssh.forwards"), changed: !draft.forwards.isEmpty) {
+            VStack(alignment: .leading, spacing: 4) {
+                EngineSettingLabel(spec: spec("ssh.forwards"), changed: !draft.forwards.isEmpty)
+                forwardEditorRows
+            }
+        }
+        if active {
+            Text("Changes apply to the live tunnel as you finish typing — no reconnect needed.")
+                .font(.callout).foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder private var forwardEditorRows: some View {
         ForEach(Array(draft.forwards.enumerated()), id: \.offset) { i, _ in
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
@@ -379,6 +529,8 @@ struct SubprocessTunnelView: View {
                         .font(.callout.monospaced())
                         .onSubmit { applyForwardsNow() }
                         .accessibilityLabel("Port forward \(i + 1)")
+                        // Validation rides the field's value (Docs/Accessibility.md).
+                        .accessibilityValue(forwardError(draft.forwards[i]).map { "Problem: \($0)" } ?? "")
                     // .onDelete draws NO affordance in a macOS Form — without
                     // this button a forward can't be removed by mouse or keyboard.
                     Button {
@@ -389,20 +541,31 @@ struct SubprocessTunnelView: View {
                         .buttonStyle(.plain).foregroundStyle(.secondary)
                         .accessibilityLabel("Remove port forward \(i + 1)")
                 }
-                if active, let phase = forwardPhase(draft.forwards[i]) {
+                // Say a bad spec is bad NOW — committed, it would kill the whole
+                // connect (ExitOnForwardFailure=yes on the subprocess path).
+                if let error = forwardError(draft.forwards[i]) {
+                    Text(error)
+                        .font(.caption).foregroundStyle(.red)
+                        .accessibilityLabel("Error: \(error)")
+                } else if active, let phase = forwardPhase(draft.forwards[i]) {
                     forwardBadge(phase)
                 }
             }
         }
         .onDelete { draft.forwards.remove(atOffsets: $0); applyForwardsNow() }
         Button("Add Forward") { draft.forwards.append("") }
-        Text(active
-             ? "Changes apply to the live tunnel as you finish typing — no reconnect needed."
-             : "One per line: “L localPort:host:port” (local → remote) or “R remotePort:host:port” (remote → local).")
-            .font(.callout).foregroundStyle(.secondary)
+            .controlSize(.small)
             // Debounced live apply: per-keystroke -O forward calls would thrash
             // half-typed specs; onSubmit above applies instantly.
             .onChange(of: draft.forwards) { scheduleApplyForwards() }
+    }
+
+    /// Why a forward line won't parse (same rules as connect), or nil when it's
+    /// fine or still empty.
+    private func forwardError(_ line: String) -> String? {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty, SubprocessTunnelManager.parseForward(t) == nil else { return nil }
+        return "Use “L localPort:host:port”, “R remotePort:host:port” or “D port”."
     }
 
     /// The live status of the forward a row currently describes, if any.
@@ -554,7 +717,13 @@ struct SubprocessTunnelView: View {
     /// port would collide on bind.
     @ViewBuilder private var sslTrafficSection: some View {
         Section("Traffic") {
-            intField("Local SOCKS port", value: $draft.socksPort, default: 1080)
+            intField("Local SOCKS port", value: $draft.socksPort)
+                .accessibilityValue(socksPortError.map { "Problem: \($0)" } ?? "")
+            if let error = socksPortError {
+                Text(error)
+                    .font(.callout).foregroundStyle(.red)
+                    .accessibilityLabel("Error: \(error)")
+            }
             Toggle("Route Mac traffic through this proxy", isOn: $draft.setSystemProxy)
                 // The toggle applies live to a connected tunnel — no reconnect.
                 .onChange(of: draft.setSystemProxy) {
@@ -571,13 +740,29 @@ struct SubprocessTunnelView: View {
 
     @ViewBuilder private var sshAdvanced: some View {
         Section {
-            DisclosureGroup("Advanced") {
+            DisclosureGroup(isExpanded: $sshAdvancedExpanded) {
+                // Clearing the field means "the default (30)", never 0 —
+                // 0 would silently turn keepalives off.
+                intRow("ssh.keepalive", value: Binding(get: { draft.serverAliveInterval }, set: { draft.serverAliveInterval = $0 ?? 30 }), prompt: "30",
+                       changed: draft.serverAliveInterval != 30)
                 toggleRow("ssh.compression", isOn: $draft.compression)
-                intRow("ssh.keepalive", value: Binding(get: { draft.serverAliveInterval }, set: { draft.serverAliveInterval = $0 ?? 0 }), prompt: "30")
-                intRow("ssh.connect-timeout", value: $draft.connectTimeout, prompt: "off")
                 linesRow("ssh.extra-options", $draft.sshExtraOptions, prompt: "Ciphers aes256-gcm@openssh.com")
+            } label: {
+                advancedDisclosureLabel($sshAdvancedExpanded)
             }
         }
+    }
+
+    /// A whole-row hit target for a disclosure header — a bare string label
+    /// leaves only the chevron and the word clickable (the hitbox rule).
+    private func advancedDisclosureLabel(_ expanded: Binding<Bool>) -> some View {
+        HStack {
+            Text("Advanced")
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onTapGesture { withAnimation(.snappy) { expanded.wrappedValue.toggle() } }
     }
 
     @ViewBuilder private var sslSecuritySection: some View {
@@ -591,7 +776,7 @@ struct SubprocessTunnelView: View {
 
     @ViewBuilder private var sslAdvanced: some View {
         Section {
-            DisclosureGroup("Advanced") {
+            DisclosureGroup(isExpanded: $sslAdvancedExpanded) {
                 row("oc.os", text: $draft.spoofOS, prompt: "mac-intel")
                 toggleRow("oc.no-dtls", isOn: $draft.disableDTLS)
                 toggleRow("oc.disable-csd", isOn: $draft.disableCSD)
@@ -637,6 +822,8 @@ struct SubprocessTunnelView: View {
                 intRow("oc.base-mtu", value: $draft.baseMTU, prompt: "auto")
                 intRow("oc.force-dpd", value: $draft.forceDPD, prompt: "off")
                 linesRow("oc.extra-args", $draft.extraArgs, prompt: "--no-http-keepalive")
+            } label: {
+                advancedDisclosureLabel($sslAdvancedExpanded)
             }
         }
     }
@@ -675,6 +862,27 @@ struct SubprocessTunnelView: View {
         if draft.kind == .ssh, draft.sshMode == .netTunnel {
             return "Network tunnel (-w) requires root for the utun device — not supported in this build."
         }
+        // A malformed pin, or a pin combined with an option only /usr/bin/ssh
+        // carries, would fail at connect — say so here instead (dead-button rule).
+        if draft.kind == .ssh, pinnedKeyError != nil {
+            return "The pinned host key isn't a valid SHA-256 fingerprint — fix it under Security."
+        }
+        if let reason = SubprocessTunnelManager.sshPinBlockReason(draft) {
+            return reason
+        }
+        // The chosen sign-in method missing its file(s) would fail at connect.
+        if draft.kind == .ssh, let reason = SubprocessTunnelManager.sshAuthBlockReason(draft) {
+            return reason
+        }
+        // One bad forward kills the whole session (ExitOnForwardFailure=yes).
+        if draft.kind == .ssh, draft.sshMode == .portForward,
+           let bad = SubprocessTunnelManager.invalidForwardLine(draft.forwards) {
+            return "Fix the forward “\(bad)” under Traffic — one bad forward stops the whole tunnel."
+        }
+        if (draft.kind == .ssh && draft.sshMode == .socks) || draft.kind.isSSLVPN,
+           let reason = socksPortError {
+            return reason
+        }
         if !requiredCLI.isAvailable {
             return "\(requiredCLI.rawValue) isn't installed. \(requiredCLI.installHint)"
         }
@@ -711,21 +919,19 @@ struct SubprocessTunnelView: View {
 
     // MARK: Spec catalog + row helpers
 
+    /// Resolve a spec id: ssh.* comes from the shared SSH catalog
+    /// (SSHSettingDescriptors — the CLI/MDM/manual contract); oc.* stays local.
+    private func spec(_ id: String) -> EngineSettingSpec {
+        id.hasPrefix("ssh.") ? SSHSettings.catalog[id] : Self.specs[id]
+    }
+
+    /// Bind an Optional config string as text: empty ↔ nil (never store "").
+    private func optionalText(_ keyPath: WritableKeyPath<SubprocessTunnelConfig, String?>) -> Binding<String> {
+        Binding(get: { draft[keyPath: keyPath] ?? "" },
+                set: { draft[keyPath: keyPath] = $0.isEmpty ? nil : $0 })
+    }
+
     static let specs = EngineSettingCatalog([
-        .init(id: "ssh.identity-file", name: "Identity File",
-              summary: "Path to a private key to authenticate with, instead of (or before) a password. Leave empty to use your default keys or a password."),
-        .init(id: "ssh.proxy-jump", name: "Jump Host",
-              summary: "Connect via a bastion first — SSH hops through it to reach the real host. Format: user@bastion[:port]."),
-        .init(id: "ssh.compression", name: "Compression",
-              summary: "Compress the SSH stream. Can help on very slow links; usually leave off on fast ones."),
-        .init(id: "ssh.keepalive", name: "Keepalive (seconds)",
-              summary: "How often to send a keepalive so idle tunnels aren't dropped by NAT/firewalls. 30 is a good default."),
-        .init(id: "ssh.connect-timeout", name: "Connect Timeout",
-              summary: "Give up establishing the SSH connection after this many seconds. Empty means the system default."),
-        .init(id: "ssh.strict-host-key", name: "Host Key Checking",
-              summary: "How to handle the server's identity key. “Trust on first use” accepts a new host once and pins it — the safe default."),
-        .init(id: "ssh.extra-options", name: "Extra Options",
-              summary: "Raw ssh_config lines (one per row, “Key Value”) for anything not covered here, e.g. Ciphers or MACs."),
         .init(id: "oc.cafile", name: "CA Certificate File",
               summary: "A PEM file of extra certificate authorities to trust for the VPN server, if it uses a private CA."),
         .init(id: "oc.os", name: "Reported OS",
@@ -746,30 +952,48 @@ struct SubprocessTunnelView: View {
               summary: "Raw OpenConnect flags (one per row) for site-specific needs not covered above."),
     ])
 
-    private func row(_ id: String, text: Binding<String>, prompt: String) -> some View {
-        EngineSettingRow(spec: Self.specs[id], changed: !text.wrappedValue.isEmpty) {
+    private func row(_ id: String, text: Binding<String>, prompt: String,
+                     disabled: String? = nil) -> some View {
+        EngineSettingRow(spec: spec(id), changed: !text.wrappedValue.isEmpty,
+                         disabledReason: disabled) {
             LabeledContent { TextField(prompt, text: text).multilineTextAlignment(.trailing).autocorrectionDisabled() }
-                label: { EngineSettingLabel(spec: Self.specs[id], changed: !text.wrappedValue.isEmpty) }
+                label: { EngineSettingLabel(spec: spec(id), changed: !text.wrappedValue.isEmpty) }
         }
     }
     private func toggleRow(_ id: String, isOn: Binding<Bool>) -> some View {
-        EngineSettingRow(spec: Self.specs[id], changed: isOn.wrappedValue) {
-            Toggle(isOn: isOn) { EngineSettingLabel(spec: Self.specs[id], changed: isOn.wrappedValue) }
+        EngineSettingRow(spec: spec(id), changed: isOn.wrappedValue) {
+            Toggle(isOn: isOn) { EngineSettingLabel(spec: spec(id), changed: isOn.wrappedValue) }
         }
     }
-    private func intRow(_ id: String, value: Binding<Int?>, prompt: String) -> some View {
-        EngineSettingRow(spec: Self.specs[id], changed: value.wrappedValue != nil) {
+    /// `changed` defaults to "a value is set"; pass it explicitly for fields
+    /// whose binding always has a value (e.g. keepalive's non-optional default).
+    private func intRow(_ id: String, value: Binding<Int?>, prompt: String,
+                        changed: Bool? = nil) -> some View {
+        let isChanged = changed ?? (value.wrappedValue != nil)
+        return EngineSettingRow(spec: spec(id), changed: isChanged) {
             LabeledContent { TextField(prompt, value: value, format: .number.grouping(.never)).multilineTextAlignment(.trailing).frame(maxWidth: 120) }
-                label: { EngineSettingLabel(spec: Self.specs[id], changed: value.wrappedValue != nil) }
+                label: { EngineSettingLabel(spec: spec(id), changed: isChanged) }
         }
     }
     private func linesRow(_ id: String, _ binding: Binding<[String]>, prompt: String) -> some View {
-        EngineSettingRow(spec: Self.specs[id], changed: !binding.wrappedValue.isEmpty) {
+        EngineSettingRow(spec: spec(id), changed: !binding.wrappedValue.isEmpty) {
             VStack(alignment: .leading, spacing: 4) {
-                EngineSettingLabel(spec: Self.specs[id], changed: !binding.wrappedValue.isEmpty)
+                EngineSettingLabel(spec: spec(id), changed: !binding.wrappedValue.isEmpty)
                 ForEach(Array(binding.wrappedValue.enumerated()), id: \.offset) { i, _ in
-                    TextField(prompt, text: Binding(get: { binding.wrappedValue[i] }, set: { binding.wrappedValue[i] = $0 }))
-                        .font(.callout.monospaced())
+                    HStack(spacing: 6) {
+                        TextField(prompt, text: Binding(get: { binding.wrappedValue[i] }, set: { binding.wrappedValue[i] = $0 }))
+                            .font(.callout.monospaced())
+                            .accessibilityLabel("\(spec(id).name) line \(i + 1)")
+                        // .onDelete draws NO affordance in a macOS Form — without
+                        // this button a line can't be removed by mouse or keyboard.
+                        Button {
+                            binding.wrappedValue.remove(at: i)
+                        } label: {
+                            Image(systemName: "trash").frame(width: 22, height: 22).contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                        .accessibilityLabel("Remove \(spec(id).name) line \(i + 1)")
+                    }
                 }
                 .onDelete { binding.wrappedValue.remove(atOffsets: $0) }
                 Button("Add") { binding.wrappedValue.append("") }.controlSize(.small)
@@ -781,7 +1005,7 @@ struct SubprocessTunnelView: View {
         TextField("Port", value: $draft.port, format: .number.grouping(.never))
             .frame(maxWidth: 120)
     }
-    private func intField(_ title: String, value: Binding<Int>, default def: Int) -> some View {
+    private func intField(_ title: String, value: Binding<Int>) -> some View {
         TextField(title, value: value, format: .number.grouping(.never)).frame(maxWidth: 160)
     }
 
@@ -804,6 +1028,17 @@ struct SubprocessTunnelView: View {
         }
         customRouting = vpn.customRouting(for: draft.id)
         (crProxyAuthUsername, crProxyAuthPassword) = loadCustomRoutingProxyAuthFields(profileID: draft.id)
+        // Open Advanced when it already holds changes — nothing the user set
+        // may hide behind a closed disclosure (the OpenVPN form's rule).
+        sshAdvancedExpanded = draft.serverAliveInterval != 30 || draft.compression
+            || draft.sshExtraOptions.contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        sslAdvancedExpanded = !draft.spoofOS.isEmpty || draft.disableDTLS || draft.disableCSD
+            || draft.preferInProcess || !draft.csdWrapper.isEmpty || !draft.usergroup.isEmpty
+            || !draft.ocCompression.isEmpty || draft.disableIPv6 || draft.noHTTPKeepalive
+            || !draft.localHostname.isEmpty || !draft.userAgent.isEmpty || !draft.versionString.isEmpty
+            || draft.reconnectTimeout != nil || draft.ocMTU != nil || draft.baseMTU != nil
+            || draft.forceDPD != nil
+            || draft.extraArgs.contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
     }
 
     private func save() {

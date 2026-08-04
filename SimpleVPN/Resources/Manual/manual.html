@@ -174,12 +174,27 @@
   <a href="#wg-keepalive">Persistent Keepalive</a>
 
   <h2>SSH Tunnels</h2>
-  <a href="#ssh-identity-file">Identity File</a>
-  <a href="#ssh-proxy-jump">Jump Host</a>
-  <a href="#ssh-compression">Compression</a>
-  <a href="#ssh-keepalive">Keepalive</a>
+  <a href="#ssh-server">Server Address</a>
+  <a href="#ssh-port">Port</a>
   <a href="#ssh-connect-timeout">Connect Timeout</a>
+  <a href="#ssh-proxy-jump">Jump Host</a>
+  <a href="#ssh-jump-port">Jump Host Port</a>
+  <a href="#ssh-jump-username">Jump Host Username</a>
+  <a href="#ssh-jump-identity-file">Jump Host Identity File</a>
+  <a href="#ssh-auth-method">Sign-In Method</a>
+  <a href="#ssh-username">Username</a>
+  <a href="#ssh-identity-file">Identity File</a>
+  <a href="#ssh-certificate-file">Certificate File</a>
+  <a href="#ssh-password">Password</a>
+  <a href="#ssh-mode">Mode</a>
+  <a href="#ssh-socks-port">Local SOCKS Port</a>
+  <a href="#ssh-system-proxy">Route Mac Traffic</a>
+  <a href="#ssh-forwards">Port Forwards</a>
   <a href="#ssh-strict-host-key">Host Key Checking</a>
+  <a href="#ssh-pinned-host-key">Pinned Host Key</a>
+  <a href="#ssh-key-exchange">Key Exchange</a>
+  <a href="#ssh-keepalive">Keepalive</a>
+  <a href="#ssh-compression">Compression</a>
   <a href="#ssh-extra-options">Extra Options</a>
 
   <h2>SSL VPN (OpenConnect)</h2>
@@ -512,36 +527,122 @@
 <p class="default">Default: off.</p>
 <p>How often (in seconds) to send a tiny keepalive so NAT routers and firewalls don't forget the tunnel and drop it. <code>25</code> is the usual value when you're behind NAT; leave it off on a server with a stable public address.</p>
 
-<!-- ══════════════════ SSH Tunnels ══════════════════ -->
+<!-- ══════════════════ SSH Tunnels ══════════════════
+     Anchors are generated from the SSHSettings descriptor ids
+     (SSHSettingDescriptors.swift, "ssh.server" → id="ssh-server");
+     SSHSettingDescriptorTests asserts every one exists here.
+     Order mirrors the editor: Connection → Sign-In → Traffic → Security → Advanced. -->
 
-<h2 id="ssh-identity-file">Identity File</h2>
-<p class="default">Optional.</p>
-<p>Path to an SSH private key to authenticate with (e.g. <code>~/.ssh/id_ed25519</code>). Leave empty to use your default keys or a password. Key auth is more secure and needs no typing.</p>
+<h2 id="ssh-server">Server Address</h2>
+<p class="default">Required.</p>
+<p>The computer this tunnel connects to — a name like <code>ssh.example.com</code>, or an IP address. This is the machine you'd reach with <code>ssh</code> in Terminal; the tunnel signs in to it the same way.</p>
 
-<h2 id="ssh-proxy-jump">Jump Host</h2>
-<p class="default">Optional.</p>
-<p>Reach the target through a bastion/jump server first: SSH connects to the jump host, then hops to the real host from there. Format <code>user@bastion</code> (add <code>:port</code> if non-standard). Common on locked-down networks where only the bastion is reachable.</p>
-
-<h2 id="ssh-compression">Compression</h2>
-<p class="default">Default: off.</p>
-<p>Compresses the SSH stream. Worth trying on very slow or high-latency links; on fast connections it just adds CPU work for no gain.</p>
-
-<h2 id="ssh-keepalive">Keepalive</h2>
-<p class="default">Default: 30 seconds.</p>
-<p>Sends a small keepalive at this interval so NAT routers and firewalls don't silently drop an idle tunnel. Lower it on aggressive networks; 0 disables it.</p>
+<h2 id="ssh-port">Port</h2>
+<p class="default">Default: 22.</p>
+<p>The port the server's SSH service answers on. Almost every server uses 22; only change it if whoever runs the server told you a different number.</p>
 
 <h2 id="ssh-connect-timeout">Connect Timeout</h2>
 <p class="default">Default: system default.</p>
 <p>How long to wait while establishing the SSH connection before giving up. Set a short value for a fast, clear failure when a host is unreachable.</p>
 
+<h2 id="ssh-proxy-jump">Jump Host</h2>
+<p class="default">Optional.</p>
+<p>A stepping-stone computer (a <em>bastion</em>) this connection goes through first: SSH signs in to the jump host, then hops on to the real server from there. Common on locked-down networks where only the bastion is reachable from outside.</p>
+<p>The jump host signs in independently of the server — it has its own <a href="#ssh-jump-username">username</a>, <a href="#ssh-jump-identity-file">key</a> and password. A configuration with a jump host runs through the system's <code>ssh</code> tool, so it can't be combined with a <a href="#ssh-pinned-host-key">pinned host key</a>.</p>
+
+<h2 id="ssh-jump-port">Jump Host Port</h2>
+<p class="default">Default: 22.</p>
+<p>The port the jump host's SSH service answers on, when it isn't the usual 22.</p>
+
+<h2 id="ssh-jump-username">Jump Host Username</h2>
+<p class="default">Default: the tunnel's username.</p>
+<p>The account to sign in to the jump host with, when it differs from your account on the server itself.</p>
+
+<h2 id="ssh-jump-identity-file">Jump Host Identity File</h2>
+<p class="default">Optional.</p>
+<p>A private key file for the jump host. It can be a different key than the server's — bastions often issue their own.</p>
+
+<h2 id="ssh-auth-method">Sign-In Method</h2>
+<p class="default">Default: Automatic.</p>
+<p>How this tunnel proves who you are. <strong>Automatic</strong> tries your <a href="#ssh-identity-file">identity file</a>, then any keys in the SSH agent, then the <a href="#ssh-password">password</a> — the classic order. Choosing a specific method uses <em>exactly</em> that method, and nothing else is attempted — so what you chose is what actually signs in, and its failure is reported honestly instead of another method quietly succeeding:</p>
+<ul>
+  <li><strong>Password</strong> — the saved or typed password only. Keys and the agent are never offered.</li>
+  <li><strong>Key file</strong> — the identity file only (other keys on your Mac are not tried).</li>
+  <li><strong>Certificate</strong> — the identity file plus its <a href="#ssh-certificate-file">certificate</a>.</li>
+  <li><strong>SSH agent</strong> — only keys held by the running SSH agent.</li>
+  <li><strong>Kerberos</strong> — your organisation's existing Kerberos ticket (the sign-on from Active Directory, or <code>kinit</code>); nothing to type at all. Never tried unless chosen.</li>
+</ul>
+<p>The editor greys out the fields a method doesn't use, and says which choice re-enables them.</p>
+
+<h2 id="ssh-username">Username</h2>
+<p class="default">Default: your Mac account name.</p>
+<p>The account name to sign in to the server with.</p>
+
+<h2 id="ssh-identity-file">Identity File</h2>
+<p class="default">Optional.</p>
+<p>A private key file that signs you in without typing anything (e.g. <code>~/.ssh/id_ed25519</code>). Leave empty to use your default keys, any keys in the SSH agent, or a password. Used by the Automatic, Key file and Certificate <a href="#ssh-auth-method">sign-in methods</a>.</p>
+
+<h2 id="ssh-certificate-file">Certificate File</h2>
+<p class="default">Optional.</p>
+<p>An OpenSSH certificate — a file ending in <code>-cert.pub</code> — that vouches for your key. Some organisations issue these instead of putting every user's key on every server: the server trusts the organisation's signing authority, and the certificate says your key belongs. Set it alongside the <a href="#ssh-identity-file">identity file</a> it certifies, and choose the <strong>Certificate</strong> <a href="#ssh-auth-method">sign-in method</a>. If you weren't given one, you don't need one.</p>
+
+<h2 id="ssh-password">Password</h2>
+<p class="default">Optional.</p>
+<p>Used when the server asks for a password, and to unlock a protected (passphrase-encrypted) key file. With <strong>Remember</strong> on it's kept in your login keychain — never in the tunnel's settings file — so you don't retype it.</p>
+<div class="warn">With the Password sign-in method, any follow-up question the server asks — a verification code, an MFA prompt — is answered with the stored password. Servers that require a fresh code per sign-in aren't suited to a remembered password.</div>
+
+<h2 id="ssh-mode">Mode</h2>
+<p class="default">Default: SOCKS proxy.</p>
+<p>How this tunnel carries traffic:</p>
+<ul>
+  <li><strong>SOCKS proxy</strong> — one local proxy any app can point at (see <a href="#ssh-socks-port">Local SOCKS Port</a>). The most flexible mode, and the one that can run entirely inside SimpleVPN.</li>
+  <li><strong>Port forwards</strong> — specific connections only (see <a href="#ssh-forwards">Port Forwards</a>).</li>
+  <li><strong>Network tunnel</strong> — a full point-to-point tunnel (ssh <code>-w</code>). It needs root for the network device and “PermitTunnel” on the server, so this build doesn't offer it yet.</li>
+</ul>
+
+<h2 id="ssh-socks-port">Local SOCKS Port</h2>
+<p class="default">Default: 1080.</p>
+<p>Where on this Mac the tunnel offers its proxy: point apps (or the whole Mac, below) at <code>127.0.0.1</code> and this port while connected. Two tunnels can't share a port — give each its own.</p>
+
+<h2 id="ssh-system-proxy">Route Mac Traffic Through This Proxy</h2>
+<p class="default">Default: off.</p>
+<p>Points the active network service's SOCKS proxy at the tunnel while it's connected (macOS asks for your admin password), and restores the old setting on disconnect. Flipping it while connected applies immediately. Off, only apps you point at the proxy yourself use the tunnel.</p>
+
+<h2 id="ssh-forwards">Port Forwards</h2>
+<p class="default">Optional.</p>
+<p>Specific connections to carry, one per row:</p>
+<ul>
+  <li><code>L localPort:host:port</code> — brings a remote service to this Mac: connecting to <code>127.0.0.1:localPort</code> here reaches <code>host:port</code> on the server's side.</li>
+  <li><code>R remotePort:host:port</code> — the reverse: publishes something reachable from this Mac onto the server's side.</li>
+</ul>
+<p>While connected, edits apply live — each row shows whether its forward is active — and no reconnect is needed.</p>
+
 <h2 id="ssh-strict-host-key">Host Key Checking</h2>
 <p class="default">Default: Trust on first use.</p>
-<p>How SSH treats the server's identity key: <strong>Trust on first use</strong> accepts an unknown host once and remembers it (warns if it ever changes) — the sensible default. <strong>Only known hosts</strong> refuses anything not already in your known_hosts. <strong>Never check</strong> disables verification entirely.</p>
+<p>How SSH treats the server's identity key: <strong>Trust on first use</strong> accepts an unknown host once and remembers it (a changed key is always refused — that's the signature of an interception) — the sensible default. <strong>Only known hosts</strong> refuses anything not already in your known_hosts. <strong>Never check</strong> disables verification entirely.</p>
 <div class="warn">“Never check” leaves you open to man-in-the-middle attacks. Use only for throwaway hosts you don't care about.</div>
+
+<h2 id="ssh-pinned-host-key">Pinned Host Key</h2>
+<p class="default">Optional.</p>
+<p>The strictest identity check: accept exactly one server key — the one whose SHA-256 fingerprint you paste here — and nothing else, not even entries in known_hosts. Get the fingerprint from the server's administrator, or from the server itself with <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code>. Both <code>SHA256:…</code> and bare 64-character hex forms are accepted.</p>
+<p>The pin is enforced by SimpleVPN's built-in SSH engine (SOCKS proxy mode), which checks it <em>before</em> signing in. The system <code>ssh</code> tool has no equivalent check, so a pinned tunnel refuses to run through it — a pin can't be combined with a <a href="#ssh-proxy-jump">jump host</a>, <a href="#ssh-compression">compression</a>, or <a href="#ssh-extra-options">extra options</a>, and it never falls back.</p>
+
+<h2 id="ssh-key-exchange">Key Exchange</h2>
+<p class="default">Default: empty — the engine's built-in preference.</p>
+<p>Which methods may be used to agree the session's encryption keys, as a comma-separated list in OpenSSH's <code>KexAlgorithms</code> syntax. Leave empty for the built-in choice, which already prefers the <strong>post-quantum hybrids</strong> (<code>mlkem768x25519-sha256</code>, <code>sntrup761x25519-sha512</code>) when the server supports them — protection against traffic recorded today being decrypted by future quantum computers.</p>
+<p>Only set this if an administrator gave you an exact list, or to <em>require</em> post-quantum protection by listing only those methods (the connection then fails against servers that can't do it). A list the server doesn't share any method with simply prevents connecting.</p>
+
+<h2 id="ssh-keepalive">Keepalive</h2>
+<p class="default">Default: 30 seconds.</p>
+<p>Sends a small keepalive at this interval so NAT routers and firewalls don't silently drop an idle tunnel. Lower it on aggressive networks; 0 disables it.</p>
+
+<h2 id="ssh-compression">Compression</h2>
+<p class="default">Default: off.</p>
+<p>Compresses the SSH stream. Worth trying on very slow or high-latency links; on fast connections it just adds CPU work for no gain.</p>
 
 <h2 id="ssh-extra-options">Extra Options</h2>
 <p class="default">Optional.</p>
-<p>Raw <code>ssh_config</code> directives, one per line as “Key Value” (e.g. <code>Ciphers aes256-gcm@openssh.com</code>, <code>MACs hmac-sha2-512</code>). An escape hatch for anything this screen doesn't expose.</p>
+<p>Raw <code>ssh_config</code> directives, one per line as “Key Value” (e.g. <code>Ciphers aes256-gcm@openssh.com</code>, <code>MACs hmac-sha2-512</code>). An escape hatch for anything this screen doesn't expose. A tunnel using extra options runs through the system <code>ssh</code> tool rather than the built-in engine.</p>
 
 <!-- ══════════════════ SSL VPN (OpenConnect) ══════════════════ -->
 

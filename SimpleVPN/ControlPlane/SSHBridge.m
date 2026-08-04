@@ -130,6 +130,11 @@ static NSString *hexTail(NSString *s) {
 }
 
 - (BOOL)connectToHost:(NSString *)host port:(int)port timeout:(int)seconds error:(NSError **)error {
+    return [self connectToHost:host port:port timeout:seconds kexAlgorithms:nil error:error];
+}
+
+- (BOOL)connectToHost:(NSString *)host port:(int)port timeout:(int)seconds
+        kexAlgorithms:(NSString *)kexAlgorithms error:(NSError **)error {
     _session = ssh_new();
     if (!_session) { if (error) *error = sshErr(@"Couldn't initialise the SSH session."); return NO; }
     _host = [host copy];
@@ -151,6 +156,15 @@ static NSString *hexTail(NSString *s) {
     ssh_options_set(_session, SSH_OPTIONS_HOST, host.UTF8String);
     ssh_options_set(_session, SSH_OPTIONS_PORT, &p);
     ssh_options_set(_session, SSH_OPTIONS_TIMEOUT, &tmo);   // connect + blocking calls
+    // Key-exchange preference (OpenSSH KexAlgorithms syntax). A list libssh
+    // rejects fails HERE, loudly — never a silent fall-through to defaults.
+    if (kexAlgorithms.length) {
+        if (ssh_options_set(_session, SSH_OPTIONS_KEY_EXCHANGE,
+                            kexAlgorithms.UTF8String) != SSH_OK) {
+            if (error) *error = sshErrDetail(@"The key-exchange list wasn't accepted.", _session);
+            return NO;
+        }
+    }
 
     ssh_set_blocking(_session, 1);
     if (ssh_connect(_session) != SSH_OK) {
@@ -352,6 +366,13 @@ static NSString *hexTail(NSString *s) {
 
 - (BOOL)authKeyForUser:(NSString *)user privateKeyPath:(NSString *)keyPath
             passphrase:(NSString *)passphrase error:(NSError **)error {
+    return [self authKeyForUser:user privateKeyPath:keyPath certificatePath:nil
+                     passphrase:passphrase error:error];
+}
+
+- (BOOL)authKeyForUser:(NSString *)user privateKeyPath:(NSString *)keyPath
+       certificatePath:(NSString *)certificatePath
+            passphrase:(NSString *)passphrase error:(NSError **)error {
     NSString *path = keyPath.stringByExpandingTildeInPath;
     ssh_key key = NULL;
     // libssh derives the public half from the private key — no .pub file needed.
@@ -361,10 +382,31 @@ static NSString *hexTail(NSString *s) {
         if (error) *error = sshErr(@"Couldn't read the SSH private key (wrong passphrase, or an unsupported format).");
         return NO;
     }
+    // OpenSSH certificate sign-in: graft the …-cert.pub onto the private key so
+    // the userauth request presents the CA-signed certificate, not the bare key.
+    if (certificatePath.length) {
+        ssh_key cert = NULL;
+        if (ssh_pki_import_cert_file(certificatePath.stringByExpandingTildeInPath.UTF8String,
+                                     &cert) != SSH_OK || !cert) {
+            ssh_key_free(key);
+            if (error) *error = sshErr(@"Couldn't read the SSH certificate file (expected an OpenSSH …-cert.pub).");
+            return NO;
+        }
+        int copied = ssh_pki_copy_cert_to_privkey(cert, key);
+        ssh_key_free(cert);
+        if (copied != SSH_OK) {
+            ssh_key_free(key);
+            if (error) *error = sshErr(@"The SSH certificate doesn't go with that private key.");
+            return NO;
+        }
+    }
     int rc = ssh_userauth_publickey(_session, user.UTF8String, key);
     ssh_key_free(key);
     if (rc != SSH_AUTH_SUCCESS) {
-        if (error) *error = sshErr(@"SSH key authentication was rejected."); return NO;
+        if (error) *error = sshErr(certificatePath.length
+            ? @"SSH certificate authentication was rejected."
+            : @"SSH key authentication was rejected.");
+        return NO;
     }
     return YES;
 }

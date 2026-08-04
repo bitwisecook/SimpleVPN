@@ -78,6 +78,25 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     var strictHostKey = "accept-new" // -o StrictHostKeyChecking: accept-new | yes | no
     var sshExtraOptions: [String] = []  // extra "-o Key=Value" lines
 
+    // SSH — libssh-era additions. All Optional so configs saved before the
+    // fields existed still decode (the proxyPasswordInArgv precedent); nil
+    // means "off / engine default".
+    //
+    // How this tunnel signs in. nil = automatic (key file → agent → password,
+    // the historical chain). Explicit values pin ONE method — both connect
+    // paths then use exactly that method and nothing else (PreferredAuthentications
+    // on the subprocess, a single bridge call in-process):
+    //   "password" | "key" | "certificate" | "agent" | "kerberos"
+    // Kerberos (gssapi-with-mic) is never tried unless chosen — opt-in.
+    var sshAuthMethod: String? = nil
+    var sshCertificateFile: String? = nil // OpenSSH certificate (…-cert.pub) presented with the key
+    // SHA-256 host-key pin (hex, optional "SHA256:" prefix). Enforced by the
+    // in-process libssh engine ONLY — /usr/bin/ssh has no pin-by-hash option,
+    // so a pinned config must never silently route to the subprocess
+    // (SubprocessTunnelManager.sshPinBlockReason is the single gate).
+    var sshPinnedHostKey: String? = nil
+    var sshKexAlgorithms: String? = nil   // KexAlgorithms / SSH_OPTIONS_KEY_EXCHANGE list
+
     // SSL-VPN (OpenConnect / openfortivpn). The --protocol value comes from
     // `kind.openconnectProtocol` — the kind IS the protocol, nothing stored here.
     // How the SSL-VPN authenticates: password, a client certificate, or single
