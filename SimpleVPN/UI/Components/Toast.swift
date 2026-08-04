@@ -80,7 +80,9 @@ private struct ToastLayer: ViewModifier {
                             Button(title) { action(); center.dismiss() }
                                 .buttonStyle(.glass).controlSize(.small)
                         }
-                        Button { center.dismiss() } label: { Image(systemName: "xmark") }
+                        Button { center.dismiss() } label: {
+                            Image(systemName: "xmark").frame(width: 22, height: 22).contentShape(Rectangle())
+                        }
                             .buttonStyle(.plain).foregroundStyle(.secondary)
                             .help("Dismiss")
                             .accessibilityLabel("Dismiss")

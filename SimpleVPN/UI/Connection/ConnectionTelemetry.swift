@@ -357,7 +357,9 @@ struct ConnectionDetailsPanel: View {
                     } else {
                         Button {
                             Task { await publicIP.refresh() }
-                        } label: { Image(systemName: "arrow.clockwise") }
+                        } label: {
+                            Image(systemName: "arrow.clockwise").frame(width: 22, height: 22).contentShape(Rectangle())
+                        }
                             .buttonStyle(.borderless)
                             .help("Check again")
                     }

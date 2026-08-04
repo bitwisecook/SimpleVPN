@@ -621,7 +621,9 @@ struct MenuBarView: View {
                 // The dot is hidden — its state rides here in words.
                 .accessibilityLabel("\(name), \(dot.accessibilityDescription)")
             Spacer(minLength: 8)
-            Button(action: stop) { Image(systemName: "stop.circle.fill") }
+            Button(action: stop) {
+                Image(systemName: "stop.circle.fill").frame(width: 22, height: 22).contentShape(Rectangle())
+            }
                 .buttonStyle(.plain).foregroundStyle(.secondary)
                 .help("Disconnect")
                 .accessibilityLabel("Disconnect \(name)")

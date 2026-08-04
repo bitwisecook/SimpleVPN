@@ -360,7 +360,12 @@ struct RouteGraphView: View {
                     .accessibilityLabel("Find an IPv4 or IPv6 address or CIDR in the routing table")
                 if !searchText.isEmpty {
                     Button { searchText = "" } label: {
+                        // A 22pt visual frame would swell the capsule the moment the
+                        // first character is typed (the button is conditional), so
+                        // only the HIT AREA grows: the negative inset extends the
+                        // ~10pt glyph to a ~22pt target without moving a pixel.
                         Image(systemName: "xmark.circle.fill").font(.caption)
+                            .contentShape(Rectangle().inset(by: -6))
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
@@ -380,7 +385,10 @@ struct RouteGraphView: View {
             Spacer(minLength: 8)
 
             HStack(spacing: 4) {
-                Button { setZoom(zoom / 1.25) } label: { Image(systemName: "minus") }
+                // Content-shaped frame so the hit target isn't the bare hairline glyph.
+                Button { setZoom(zoom / 1.25) } label: {
+                    Image(systemName: "minus").frame(width: 22, height: 22).contentShape(Rectangle())
+                }
                     .disabled(zoom <= minZoom + 0.001)
                     .keyboardShortcut("-", modifiers: .command)
                     .help("Zoom out (⌘−)")
@@ -388,7 +396,9 @@ struct RouteGraphView: View {
                 Text("\(Int((zoom * 100).rounded()))%")
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                     .frame(width: 42)
-                Button { setZoom(zoom * 1.25) } label: { Image(systemName: "plus") }
+                Button { setZoom(zoom * 1.25) } label: {
+                    Image(systemName: "plus").frame(width: 22, height: 22).contentShape(Rectangle())
+                }
                     .disabled(zoom >= maxZoom - 0.001)
                     .keyboardShortcut("=", modifiers: .command)
                     .help("Zoom in (⌘+)")

@@ -84,7 +84,12 @@ struct TrafficLogView: View {
                             .accessibilityLabel("Diverted: \(ruleLabel(rule))")
                             Button {
                                 Task { await vpn.removeRoutingRule(id: rule.id, for: profileID) }
-                            } label: { Image(systemName: "xmark.circle.fill") }
+                            } label: {
+                                // A 22pt visual frame would fatten every capsule chip;
+                                // grow only the HIT AREA instead (glyph unchanged).
+                                Image(systemName: "xmark.circle.fill")
+                                    .contentShape(Rectangle().inset(by: -5))
+                            }
                                 .buttonStyle(.plain).foregroundStyle(.secondary)
                                 .accessibilityLabel("Remove diversion for \(ruleLabel(rule))")
                         }

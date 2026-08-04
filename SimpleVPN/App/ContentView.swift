@@ -481,6 +481,7 @@ struct CopyableValue: View {
             } label: {
                 Image(systemName: copied ? "checkmark" : "doc.on.doc")
                     .foregroundStyle(copied ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
+                    .frame(width: 22, height: 22).contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
             .opacity(hovering || copied ? 1 : 0)

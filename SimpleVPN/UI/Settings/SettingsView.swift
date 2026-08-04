@@ -237,7 +237,9 @@ private struct LabelsSettings: View {
                         TextField("Name", text: nameBinding(l))
                             .accessibilityLabel("Name of the \(l.name) label")
                         Spacer()
-                        Button(role: .destructive) { labels.remove(l.id) } label: { Image(systemName: "trash") }
+                        Button(role: .destructive) { labels.remove(l.id) } label: {
+                            Image(systemName: "trash").frame(width: 22, height: 22).contentShape(Rectangle())
+                        }
                             .buttonStyle(.borderless)
                             .accessibilityLabel("Delete the \(l.name) label")
                     }

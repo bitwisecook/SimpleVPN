@@ -44,7 +44,9 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                 Label("Before your first connect", systemImage: "hand.wave")
                     .font(.callout.weight(.semibold))
                 Spacer()
-                Button { dismissed = true } label: { Image(systemName: "xmark") }
+                Button { dismissed = true } label: {
+                    Image(systemName: "xmark").frame(width: 22, height: 22).contentShape(Rectangle())
+                }
                     .buttonStyle(.borderless)
                     .help("Hide until next launch — this card comes back until a connect succeeds")
                     .accessibilityLabel("Hide setup card")

@@ -308,6 +308,7 @@ struct CustomRoutingTabView: View {
                     } label: {
                         Image(systemName: "arrow.triangle.branch")
                             .foregroundStyle(focusedRuleID == r.id ? Color.accentColor : Color.orange)
+                            .frame(width: 22, height: 22).contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help(overlapHelp(overlaps))
@@ -321,7 +322,7 @@ struct CustomRoutingTabView: View {
                     if focusedRuleID == r.id { focusedRuleID = nil }
                     profile.routes.rules.removeAll { $0.id == r.id }
                 } label: {
-                    Image(systemName: "trash")
+                    Image(systemName: "trash").frame(width: 22, height: 22).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
@@ -595,7 +596,7 @@ struct CustomRoutingTabView: View {
                 Button {
                     profile.dns.resolverRules.removeAll { $0.id == r.id }
                 } label: {
-                    Image(systemName: "trash")
+                    Image(systemName: "trash").frame(width: 22, height: 22).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain).foregroundStyle(.secondary)
                 .accessibilityLabel("Delete the \(sentence) rule")

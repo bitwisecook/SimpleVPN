@@ -95,6 +95,7 @@ struct OpenVPNOptionsForm: View {
                 if !search.query.isEmpty {
                     Button { search.query = "" } label: {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                            .frame(width: 22, height: 22).contentShape(Rectangle())
                     }
                     .buttonStyle(.borderless)
                     .accessibilityLabel("Clear search")

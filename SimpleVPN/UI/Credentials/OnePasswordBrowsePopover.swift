@@ -106,7 +106,13 @@ struct OnePasswordBrowsePopover: View {
                 // enough to see what you wanted.
                 .onSubmit { if let first = visible.first { onPick(first) } }
             if !query.isEmpty {
-                Button { query = "" } label: { Image(systemName: "xmark.circle.fill") }
+                Button { query = "" } label: {
+                    // A 22pt visual frame would make the search box jump taller the
+                    // moment the (conditional) button appears; grow only the HIT
+                    // AREA instead — the glyph and box stay pixel-identical.
+                    Image(systemName: "xmark.circle.fill")
+                        .contentShape(Rectangle().inset(by: -6))
+                }
                     .buttonStyle(.borderless)
                     .foregroundStyle(.secondary)
                     .help("Clear the search")

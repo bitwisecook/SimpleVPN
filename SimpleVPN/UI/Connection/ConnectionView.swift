@@ -99,7 +99,9 @@ struct ConnectionView: View {
             .accessibilityElement(children: .combine)
             .accessibilityLabel("\(name), \(kindLabel), \(dot.accessibilityDescription)")
             Spacer(minLength: 8)
-            Button(action: stop) { Image(systemName: "stop.fill") }
+            Button(action: stop) {
+                Image(systemName: "stop.fill").frame(width: 22, height: 22).contentShape(Rectangle())
+            }
                 .buttonStyle(.borderless).foregroundStyle(.secondary)
                 .help("Disconnect")
                 .accessibilityLabel("Disconnect \(name)")

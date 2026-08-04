@@ -383,7 +383,9 @@ struct SubprocessTunnelView: View {
                     // this button a forward can't be removed by mouse or keyboard.
                     Button {
                         draft.forwards.remove(at: i); applyForwardsNow()
-                    } label: { Image(systemName: "trash") }
+                    } label: {
+                        Image(systemName: "trash").frame(width: 22, height: 22).contentShape(Rectangle())
+                    }
                         .buttonStyle(.plain).foregroundStyle(.secondary)
                         .accessibilityLabel("Remove port forward \(i + 1)")
                 }

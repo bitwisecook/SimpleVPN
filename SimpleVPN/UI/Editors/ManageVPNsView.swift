@@ -127,10 +127,18 @@ struct ManageVPNsView: View {
             .focused($sidebarFocused)
             .toolbar {
                 ToolbarItemGroup {
-                    Menu { addMenu } label: { Image(systemName: "plus") }
+                    Menu { addMenu } label: {
+                        Image(systemName: "plus").frame(width: 22, height: 22).contentShape(Rectangle())
+                    }
                         .help("Add a connection, or import a config file (any supported type)")
                         .accessibilityLabel("Add VPN")
-                    Button { removeSelection() } label: { Image(systemName: "minus") }
+                    // A bare "minus" Image is a ~2pt-tall hairline, so its intrinsic
+                    // hit area is nearly unclickable; a fixed square frame + rectangular
+                    // content shape gives it a real target (the "plus" Menu above gets
+                    // the same frame for parity).
+                    Button { removeSelection() } label: {
+                        Image(systemName: "minus").frame(width: 22, height: 22).contentShape(Rectangle())
+                    }
                         .disabled(!canRemoveSelection)
                         .help("Remove the selected VPN")
                         .accessibilityLabel("Remove the selected VPN")
@@ -193,11 +201,15 @@ struct ManageVPNsView: View {
             .accessibilityLabel("\(comp.name), composition of \(comp.members.count) VPNs, \(active ? "connected" : "disconnected")")
             Spacer(minLength: 6)
             if active {
-                Button { vpn.disconnectComposition(comp) } label: { Image(systemName: "stop.circle.fill") }
+                Button { vpn.disconnectComposition(comp) } label: {
+                    Image(systemName: "stop.circle.fill").frame(width: 22, height: 22).contentShape(Rectangle())
+                }
                     .buttonStyle(.borderless).help("Disconnect all")
                     .accessibilityLabel("Disconnect all of \(comp.name)")
             } else {
-                Button { Task { await vpn.connectComposition(comp) } } label: { Image(systemName: "play.circle.fill") }
+                Button { Task { await vpn.connectComposition(comp) } } label: {
+                    Image(systemName: "play.circle.fill").frame(width: 22, height: 22).contentShape(Rectangle())
+                }
                     .buttonStyle(.borderless).help("Connect all")
                     .accessibilityLabel("Connect all of \(comp.name)")
             }
@@ -206,7 +218,9 @@ struct ManageVPNsView: View {
             Menu {
                 Button("Edit…") { editingComposition = comp }
                 Button("Remove", role: .destructive) { compositions.remove(comp.id) }
-            } label: { Image(systemName: "ellipsis.circle") }
+            } label: {
+                Image(systemName: "ellipsis.circle").frame(width: 28, height: 22).contentShape(Rectangle())
+            }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                 .accessibilityLabel("Actions for \(comp.name)")
         }

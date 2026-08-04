@@ -109,7 +109,9 @@ struct CompositionEditor: View {
                 // button a member could never be removed by mouse or keyboard.
                 Button {
                     draft.members.removeAll { $0.profileID == member.wrappedValue.profileID }
-                } label: { Image(systemName: "trash") }
+                } label: {
+                    Image(systemName: "trash").frame(width: 22, height: 22).contentShape(Rectangle())
+                }
                     .buttonStyle(.plain).foregroundStyle(.secondary)
                     .accessibilityLabel("Remove \(memberName) from the composition")
             }

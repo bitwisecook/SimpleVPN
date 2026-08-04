@@ -519,7 +519,11 @@ extension RouteGraphView {
                         .font(.system(size: 8, weight: .bold))
                         .foregroundStyle(focused ? Color.accentColor : Color.orange)
                         .frame(width: 12, height: 12)
-                        .contentShape(Rectangle())
+                        // The row is a fixed 16pt (rowHeight) — a 22pt visual frame
+                        // would clip or break the destHeight prediction, so the
+                        // frame stays 12pt and only the HIT AREA grows: a negative
+                        // inset extends the target to ~22pt without moving a pixel.
+                        .contentShape(Rectangle().inset(by: -5))
                 }
                 .buttonStyle(.plain)
                 .help(overlapHelp(victims))

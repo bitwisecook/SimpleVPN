@@ -410,13 +410,16 @@ struct MercatorMapView: View {
 
     private var controls: some View {
         VStack(spacing: 0) {
+            // Square, content-shaped frames: a borderless button's hit area is the
+            // bare glyph, and "minus" is a ~2pt-tall hairline that's nearly impossible
+            // to land on. 22pt gives both a real target.
             Button { camera.zoom(by: 1.5, anchor: nil, viewSize: nil) } label: {
-                Image(systemName: "plus")
+                Image(systemName: "plus").frame(width: 22, height: 22).contentShape(Rectangle())
             }
             .accessibilityLabel("Zoom in")
             Divider().frame(width: 16)
             Button { camera.zoom(by: 1 / 1.5, anchor: nil, viewSize: nil) } label: {
-                Image(systemName: "minus")
+                Image(systemName: "minus").frame(width: 22, height: 22).contentShape(Rectangle())
             }
             .accessibilityLabel("Zoom out")
         }
@@ -533,7 +536,13 @@ private struct PinView: View {
 
     var body: some View {
         Button(action: action) {
+            // A plain endpoint dot is 10pt — far too small a click target. The
+            // min-frame guarantees a 28pt target; because pins are placed with
+            // .position() (center-anchored) and a frame centers its content, the
+            // drawn marker stays exactly on its map coordinate.
             marker
+                .frame(minWidth: 28, minHeight: 28)
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }

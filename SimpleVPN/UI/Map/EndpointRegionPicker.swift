@@ -295,7 +295,7 @@ struct EndpointsEditor: View {
                         }
                         if item.endpoint.userAdded == true {
                             Button(role: .destructive) { remove(item.endpoint) } label: {
-                                Image(systemName: "trash")
+                                Image(systemName: "trash").frame(width: 22, height: 22).contentShape(Rectangle())
                             }
                             .buttonStyle(.borderless)
                             .help("Remove this server (you added it by hand).")

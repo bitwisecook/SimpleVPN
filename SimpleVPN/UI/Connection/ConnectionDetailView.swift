@@ -613,7 +613,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                         }
                     }
                 } label: {
-                    Image(systemName: "ellipsis.circle")
+                    Image(systemName: "ellipsis.circle").frame(width: 28, height: 22).contentShape(Rectangle())
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()

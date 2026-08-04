@@ -60,7 +60,9 @@ struct ConnectionIncidentCard: View {
                 Spacer(minLength: 0)
                 Button {
                     vpn.dismissIncident(id: profile.id)
-                } label: { Image(systemName: "xmark") }
+                } label: {
+                    Image(systemName: "xmark").frame(width: 22, height: 22).contentShape(Rectangle())
+                }
                     .buttonStyle(.borderless)
                     .help("Dismiss")
                     .accessibilityLabel("Dismiss connection problem")
