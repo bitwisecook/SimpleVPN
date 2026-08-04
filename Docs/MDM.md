@@ -57,4 +57,3 @@ same-named local default).
 - Locking the *set* of connections a user may have (deploying the profiles
   themselves) is a separate concern from these behavioural locks and is a future
   addition (managed profile provisioning).
-```

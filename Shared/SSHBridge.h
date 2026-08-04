@@ -3,8 +3,9 @@
 //
 //  SSHBridge.h
 //  Thin Objective-C surface over libssh for the in-process SSH engine. One
-//  SSHSession owns a connected libssh session; it opens channels for the two
-//  transports we support in-process.
+//  SSHSession owns a connected libssh session. `direct-tcpip` is the transport both
+//  in-process callers actually use; the tun@openssh.com channel is built but unused
+//  (see the channel-type list below).
 //
 //  WHY THIS LIVES IN Shared/ AND NOT IN THE APP: two targets drive libssh now —
 //  the app (SSHTunnelEngine: SOCKS, port forwards, the staged probe) and the
@@ -25,9 +26,11 @@
 //
 //  The channel types:
 //    • direct-tcpip  — SOCKS (-D) and port-forwards (-L)
-//    • tun@openssh.com — the net-tunnel (-w) mode (libssh has no public API for
-//      that channel type, so the build script compiles a tiny wrapper into the
-//      vendored library — see Tools/build-libssh-xcframework.sh)
+//    • tun@openssh.com — the net-tunnel (-w) mode. Built and available (libssh has no
+//      public API for that channel type, so the build script compiles a tiny wrapper
+//      into the vendored library — see Tools/build-libssh-xcframework.sh) but with NO
+//      CALLER yet: `-w` still runs through /usr/bin/ssh, and the SSH Network Tunnel
+//      kind uses per-flow direct-tcpip instead (no server-side root / PermitTunnel)
 //  libssh sessions are not thread-safe: the caller MUST serialise every call on
 //  one queue. Blocking mode is used; SSH_OPTIONS_TIMEOUT bounds the blocking
 //  calls.

@@ -2,10 +2,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 //  SubprocessTunnel.swift
-//  Config for VPN kinds carried by a managed command-line process rather than a
-//  NetworkExtension: SSH (dynamic SOCKS `-D`, or `-L/-R` port forwards) and the
-//  SSL-VPNs reachable through OpenConnect / openfortivpn (FortiGate, F5 BIG-IP
-//  APM, and friends). The no-root path exposes a local SOCKS proxy (ssh -D, or
+//  Config for the "command-line" VPN kinds: SSH (dynamic SOCKS `-D`, or `-L/-R` port
+//  forwards) and the SSL-VPNs reachable through OpenConnect / openfortivpn (FortiGate,
+//  F5 BIG-IP APM, and friends). "Command-line" is now about the CONFIG's origin, not
+//  the runtime: the same config drives an in-process path wherever the engine can
+//  express it — libssh for SOCKS (`inProcessSSHSupports`) and the packet-tunnel
+//  extension for OpenConnect (`preferInProcess`). Genuinely subprocess-only:
+//  `.netTunnel`, SSH configs with a jump host or raw extra-options, and SSL-VPNs that
+//  have not opted in. The no-root subprocess path exposes a local SOCKS proxy (ssh -D, or
 //  `openconnect --script-tun --script "ocproxy -D <port>"`), which SimpleVPN can
 //  optionally wire in as the system SOCKS proxy. Secrets live in the keychain
 //  (CredentialSource), never here.

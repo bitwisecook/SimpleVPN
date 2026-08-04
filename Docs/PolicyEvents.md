@@ -369,9 +369,10 @@ per-VPN aggregates.
   lookups deferred.
 - **Rug-pull caveat:** reliable `down_reason` needs a graceful server teardown; a silent
   drop is indistinguishable from network loss → `unknown`.
-- **Interp locality (impl):** in-extension engines (openvpn3/tailscale/proxy) reach the interp
-  directly; app-side engines (SSH/openconnect/native) need the event bridged app→extension —
-  a later phase.
+- **Interp locality (impl):** in-extension engines (openvpn3 / tailscale / proxy / sshnet, and
+  OpenConnect whenever `SubprocessTunnelManager.willRunInProcess` holds) reach the interp
+  directly; app-side engines (the SSH subprocess, the ocproxy OpenConnect fallback, native) need
+  the event bridged app→extension — a later phase.
 
 ## Example — steer a full establishment
 

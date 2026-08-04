@@ -3,10 +3,11 @@
 //
 //  StateMediator.swift
 //  The GENERIC five-stage mediator shape (Docs/StateMediators.md), factored so the
-//  three system-state mediators — Routes (P1, here), DNS (P2), Proxy (P3) — are the
-//  same object graph with different concrete `Intent`/`Plan`/`Realizer` types. Only
-//  the Route instance is built now; DNS/Proxy slot in by conforming to these
-//  protocols without reshaping anything.
+//  three system-state mediators — Routes (P1), DNS (P2), Proxy (P3) — are the same
+//  object graph with different concrete `Intent`/`Plan`/`Realizer` types. ALL THREE
+//  are built and owned by the controller (`VPNController.routes`/`.dns`/`.proxies`),
+//  each conforming to these protocols without reshaping anything. `PBRRealizer` (P4)
+//  is the only piece still outstanding.
 //
 //  The five stages, each a protocol below:
 //    1. Intent capture   — engines SUBMIT structured intent through ONE hookable

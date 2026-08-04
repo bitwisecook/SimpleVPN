@@ -1,8 +1,11 @@
 # SimpleVPN — Agent & Contributor Guide
 
-Native **macOS 26** SwiftUI app (Swift 6, strict concurrency) that opens **OpenVPN** tunnels — a
-Tunnelblick replacement. First target config: GR Lab (`tig-vpn.grlab.co.uk:1197 udp4`, TLS client +
-username/password + OTP, inline CA/tls-auth, AES-128-GCM).
+Native **macOS 26** SwiftUI app (Swift 6, strict concurrency) that opens VPN tunnels — a Tunnelblick
+replacement. It started as OpenVPN-only and now covers the 16 kinds in `Shared/VPNKind.swift` across
+six engines (OpenVPN 3, OpenConnect SSL-VPNs, WireGuard, Tailscale/Headscale, SSH, native
+IKEv2/IPsec/L2TP, plus the Proxy Tunnel and SSH Network Tunnel netstack kinds). First target config:
+GR Lab (`tig-vpn.grlab.co.uk:1197 udp4`, TLS client + username/password + OTP, inline CA/tls-auth,
+AES-128-GCM).
 
 ## Build system: XcodeGen — do NOT hand-edit the Xcode project
 
@@ -23,10 +26,39 @@ username/password + OTP, inline CA/tls-auth, AES-128-GCM).
 | Target | Type | Notes |
 |---|---|---|
 | `SimpleVPN` | app | SwiftUI, `MainActor` default isolation. macOS only. |
-| `PacketTunnel` | **system extension** | `NEPacketTunnelProvider`. `SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated` (no UI/main actor). Product name **must equal the bundle id** so the bundle is `com.bragi0.SimpleVPN.PacketTunnel.systemextension`. |
+| `PacketTunnel` | **system extension** | `NEPacketTunnelProvider` — ONE provider driving every in-process engine. `SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated` (no UI/main actor). Product name **must equal the bundle id** so the bundle is `com.bragi0.SimpleVPN.PacketTunnel.systemextension`. |
+| `OPNativeHelper` | tool | `opnative-helper`, the 1Password Go SDK. The **only** binary carrying the library-validation relaxation (AMFI forbids it on a sysext-embedding app) — that is why it is a separate process at all. Rides in `Contents/MacOS`. |
+| `OCAuthHelper` | tool | `ocauth-helper`, OpenConnect conversational SSO over stdin/stdout. **HARD POLICY: no entitlements, ever** — libopenconnect is statically linked and dlopens nothing. Rides in `Contents/MacOS`. |
+| `SimpleVPNCLI` | tool | `simplevpn`. Ships in **`Contents/Helpers`, never `Contents/MacOS`** — "simplevpn" and "SimpleVPN" differ only by case, so a `MacOS/` copy silently overwrites the app binary. `PRODUCT_MODULE_NAME` must differ from the app's by more than case too. |
+| `SimpleVPNTests` | unit tests | Swift Testing + XCTest, `@testable import SimpleVPN`. |
+| `SimpleVPNUITests` | UI tests | `performAccessibilityAudit()` per window (see Accessibility below). |
 
 Team `QVUFB5676H`, bundles `com.bragi0.SimpleVPN[.PacketTunnel]`, App Group `group.com.bragi0.SimpleVPN`,
 keychain group `$(AppIdentifierPrefix)com.bragi0.SimpleVPN.shared`.
+
+## Zero warnings is ENFORCED, not aspirational
+
+`SWIFT_TREAT_WARNINGS_AS_ERRORS: YES` + `GCC_TREAT_WARNINGS_AS_ERRORS: YES` are set on **all seven of
+our targets** in `project.yml` — per-target, deliberately not project-wide, so the Sparkle SPM
+dependency is never compiled under `-Werror`. A new warning is a build failure; treat it as one.
+
+- **Third-party headers we don't control** (openvpn3/asio/openssl via `client/ovpncli.hpp`,
+  `openconnect.h`) are silenced **at the `#include`** with a narrow
+  `#pragma clang diagnostic push` / `ignored "-Weverything"` / `pop` and a comment — see
+  `PacketTunnel/Bridges/OpenVPN3Bridge.mm`, `OpenConnectBridge.mm`,
+  `SimpleVPN/Import/OVPNProfileEvaluator.mm`, `OCAuthHelper/OCAuthShim.h`. That is the ONLY sanctioned
+  suppression shape. Never relax a target's `-Werror`, and never add a project-wide `-Wno-`.
+- **Deprecations kept on purpose** (a deprecated NE API we still need, deliberately-kept AES-128) get a
+  narrow, commented suppression at the use site stating WHY and what would replace it.
+- **One benign toolchain notice remains and cannot be silenced:** building `PacketTunnel` prints
+  `appintentsmetadataprocessor … warning: Metadata extraction skipped. No AppIntents.framework
+  dependency found.` Xcode adds `ExtractAppIntentsMetadata` to every bundle target with Swift sources,
+  the phase cannot be turned off, and the xcspec's `LM_FILTER_WARNINGS` (`--quiet-warnings`) does *not*
+  suppress this particular line (verified). It is correct — a packet-tunnel system extension has no App
+  Intents surface; App Intents live in the app (`SimpleVPN/Intents/`). Do not chase it, and do not
+  filter it out of a build log in a way that would also hide real warnings.
+- When grepping a build log for warnings, **do not** filter `Vendor/` wholesale: `Vendor/*/src/*.go`
+  and the build scripts' output are OUR sources.
 
 ## Signing — the load-bearing gotcha
 
@@ -173,10 +205,13 @@ as `{password}{otp}` (no `static-challenge`). No client cert → `ENABLE_EXTERNA
   - `SimpleVPN/Import/` — config importers (ovpn/cisco/ssh/cert) + detector.
   - `SimpleVPN/MDM/` — `ManagedPolicy` (forced defaults) + `Policy` (the seam every enable/disable
     routes through).
-  - `SimpleVPN/Intents/`, `SimpleVPN/PBR/`, top-level `CLI/` — charter READMEs for pieces designed
-    but not built (App Intents; the tier-3 PBR engine; the `simplevpn` CLI target). Read the README
-    before adding code there. When the CLI/API lands, the non-UI directories become the
-    `TunnelCore`-style framework boundary.
+  - `SimpleVPN/Intents/` — App Intents / Shortcuts (`VPNIntents.swift`), thin adapters over the
+    dispatcher. **Built.**
+  - top-level `CLI/` — the `simplevpn` tool (target `SimpleVPNCLI`), a thin control-socket client.
+    **Built**; it compiles `ControlSurface.swift` directly rather than importing a framework.
+  - `SimpleVPN/PBR/` — the tier-3 policy-routing engine. Still a **charter README only** (design done,
+    engine not built). Read the README before adding code there. The `TunnelCore`-style framework
+    boundary is likewise still unextracted.
 - **Naming rule:** protocol-specific code carries the protocol's name (`OpenVPN*`/`OVPN*`); shared
   infrastructure stays protocol-neutral. New VPN kinds (WireGuard, IPsec, …) switch on `VPNKind` at
   four seams: NE protocol object, editor form, importer, connect flow.
@@ -209,9 +244,12 @@ OMITS it — never an empty section):
 5. **Advanced** — keep-alives, engine internals, spoofing, escape hatches, rarely-touched.
 
 **Custom Routing stays its own tab everywhere it exists** — enforced, not aspirational.
-It was a tab in EditVPNView and appended `Section`s in the other five, which is the same
-surface wearing two shapes. All six now put the canonical groups in one `TabView` tab
-("Settings") and `CustomRoutingTabView` in a second ("Custom Routing"); the host still
+It was a tab in EditVPNView and appended `Section`s in the others, which is the same
+surface wearing two shapes. **All seven** hosts now put the canonical groups in one
+`TabView` tab ("Settings") and `CustomRoutingTabView` in a second ("Custom Routing") —
+EditVPNView, WireGuardView, NativeVPNView, SubprocessTunnelView, TailscaleView,
+ProxyTunnelView, SSHNetworkTunnelView. The count is load-bearing: adding an editor means
+adding it to the MDM-lock test that asserts every host disables under lock. The host still
 owns the draft and commits from Save (see `CustomRoutingTabView.swift`'s header — tab
 switches fire its `onDisappear` commit, which is idempotent). Live STATUS blocks
 ("This Network", "Right Now") are not config groups: they go AFTER the canonical groups,
@@ -275,8 +313,11 @@ ids, so renames only touch heading/link text.
 ### Adding a new engine's options (e.g. the libssh SSH engine)
 
 1. Declare an `EngineSettingCatalog` (`EngineSettings.swift`) — one spec per option with a
-   stable id (`ssh2.keepalive`-style namespace), a display name from the glossary above,
-   and a one-sentence plain-English summary. Render every row through
+   stable id in a per-engine namespace bound 1:1 to a `SettingSurface` (the shipped ones are
+   `ssh.keepalive`, `sshnet.mtu`, `oc.*`, `wg.*`, `px.*`, `native.*`, `openvpn.*`). Namespaces are
+   GLOBAL and cannot be reused across engines; register the new one in `SettingSurface` and in
+   `ManualAnchorParityTests.catalogs` or that test fails. Give it a display name from the glossary
+   below and a one-sentence plain-English summary. Render every row through
    `EngineSettingRow`/`EngineSettingLabel` (bold-when-changed, summary, manual link, a11y
    built in; wrap bare TextFields in `LabeledContent` so the example prompt never becomes
    the VoiceOver name).

@@ -5,7 +5,7 @@
 //  Which of an editor's OWN settings are NOT on screen right now, and why.
 //
 //  "Take me to that setting" (SettingReveal.swift) can only scroll to, pulse and
-//  focus a row that EXISTS. Five of the six editors render a good number of their
+//  focus a row that EXISTS. Five of the seven editors render a good number of their
 //  rows conditionally — behind a toggle, behind the selected protocol, behind the
 //  Headscale preset — and the reveal machinery had no idea: a search hit or a
 //  related-settings link naming a gated row did nothing at all, while the scroll

@@ -8,8 +8,14 @@
 //  direct-tcpip channel:
 //    • SOCKS proxy (-D)   — a SOCKS5 server on socksPort
 //    • port-forward (-L)  — a fixed local→remote mapping
-//  The net-tunnel (-w) mode uses the bridge's tun@openssh.com channel and is wired
-//  where a utun is available. Auth tries key, then agent, then password.
+//  The net-tunnel (-w) mode is NOT served here — it still runs through /usr/bin/ssh
+//  (`SubprocessTunnelManager`, `-o Tunnel=point-to-point -w any:any`). The bridge's
+//  tun@openssh.com channel (`openTunChannelMode:`) is built but has no caller yet;
+//  the SSH Network Tunnel kind uses per-flow direct-tcpip instead (see
+//  PacketTunnel/Engines/SSHNetworkTunnelEngine.swift), which needs no server-side
+//  root or PermitTunnel.
+//  Auth honours the PINNED method when one is set (password / key / certificate /
+//  agent / kerberos); unpinned it tries key, then agent, then password.
 //
 //  Concurrency model: the session runs BLOCKING through handshake/host-key/auth,
 //  then switches to NON-BLOCKING (`enterDataMode`) for the data pump. Every libssh

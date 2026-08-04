@@ -2,17 +2,26 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 //  SubprocessTunnelManager.swift
-//  Runs and supervises the command-line VPN kinds (SSH SOCKS / port forwards,
-//  and the OpenConnect / openfortivpn SSL-VPNs — FortiGate, F5 BIG-IP APM, …).
-//  Each tunnel is one child process; we build its argv, feed the password
-//  headlessly (SSH via a locked-down SSH_ASKPASS script, OpenConnect via
-//  --passwd-on-stdin), watch its output for the "up" signal, keep a rolling log,
-//  and — for SOCKS kinds — optionally point the active network service's SOCKS
-//  proxy at the local port while connected (restored on disconnect).
+//  Owns the command-line VPN kinds (SSH SOCKS / port forwards, and the OpenConnect /
+//  openfortivpn SSL-VPNs — FortiGate, F5 BIG-IP APM, …) — but `start` no longer means
+//  "spawn a child" for all of them. Three cases are dispatched away from any subprocess:
+//    • SSH SOCKS            → the in-process libssh engine (`connectInProcessSSH`),
+//                             when `inProcessSSHSupports` accepts the config (no jump
+//                             host, no raw extra-options).
+//    • SSL-VPN SSO          → `connectSSO` / ocauth-helper; the old
+//                             `openconnect --external-browser` subprocess is retired.
+//    • OpenConnect opted in → `connectInProcessOpenConnect`, the packet-tunnel
+//                             extension's in-process bridge (`willRunInProcess`). That
+//                             is a FULL-ROUTES path and needs no privileged helper —
+//                             NetworkExtension is the privilege.
+//  Everything else is one child process: we build its argv, feed the password headlessly
+//  (SSH via a locked-down SSH_ASKPASS script, OpenConnect via --passwd-on-stdin), watch
+//  its output for the "up" signal, keep a rolling log, and — for SOCKS kinds — optionally
+//  point the active network service's SOCKS proxy at the local port while connected
+//  (restored on disconnect).
 //
-//  The SOCKS path needs no root: `ssh -D` and `openconnect --script-tun --script
-//  "ocproxy -D <port>"` both expose a userspace proxy. (A full-routes path would
-//  need a privileged helper; that's a later addition — see connect notes.)
+//  The subprocess SOCKS path needs no root either: `ssh -D` and `openconnect
+//  --script-tun --script "ocproxy -D <port>"` both expose a userspace proxy.
 //
 
 import Foundation

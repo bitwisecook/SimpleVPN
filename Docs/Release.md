@@ -34,6 +34,7 @@ message if any is missing.
 | `ASC_API_KEY_P8_BASE64` | base64 of the App Store Connect API `.p8` private key used for notarization |
 | `ASC_API_KEY_ID` | that key's Key ID |
 | `ASC_API_ISSUER_ID` | that key's Issuer ID |
+| `SPARKLE_ED_PRIVATE_KEY` | the Sparkle EdDSA private key, fed to `sign_update --ed-key-file -` to sign the DMG for the appcast. **This one does NOT fail fast** — the appcast step runs after signing and notarization, so a missing value wastes a whole release run under `set -euo pipefail`. |
 
 `gh release create` needs no secret of its own — it authenticates with the
 workflow's built-in `${{ github.token }}`, scoped by the job's
@@ -101,13 +102,20 @@ git push origin v0.2.0
 
 Pushing a tag matching `v*` triggers `.github/workflows/release.yml`. The
 version embedded in the app (`MARKETING_VERSION`) comes from the tag with the
-leading `v` stripped; the build number (`CURRENT_PROJECT_VERSION`) comes from
-`github.run_number`, which is monotonic per-workflow but otherwise unrelated
-to the counter `Tools/build-notarize-install.sh` keeps in
-`build/buildnumber.txt` for local live-test builds — a CI build number and a
-local build number being numerically close is coincidence, not a shared
-sequence. If that ever causes confusion, the local script's counter is the
-one to reconsider (CI now owns what "release build N" means).
+leading `v` stripped; the build number (`CURRENT_PROJECT_VERSION`) is the
+**committed `BUILDNUMBER` file at the repo root**, read verbatim by
+`release.yml` (`CURRENT_PROJECT_VERSION="$(cat BUILDNUMBER)"`). That is the
+same counter `Tools/build-notarize-install.sh` bumps on every local live-test
+build, and the sharing is deliberate: a released app reports the same
+`v0.3 (114)` the dev loop showed, and the appcast's `sparkle:version` is that
+same number, so Sparkle's version comparison lines up with what users see.
+`github.run_number` is deliberately NOT used. (`Tools/build-release-dmg.sh`
+has a `build/buildnumber.txt` fallback for standalone local runs; CI always
+sets `CURRENT_PROJECT_VERSION`, so that path never fires in CI.)
+
+The Sparkle appcast is generated in the same job: it is written to
+`build/dist/appcast.xml`, uploaded as an artifact, and served from
+`releases/latest/download/appcast.xml`.
 
 Pre-release tags (`v1.2.3-beta.1`, `v1.2.3-rc1`, …) are automatically created
 as GitHub prereleases.

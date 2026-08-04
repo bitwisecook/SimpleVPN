@@ -2,10 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 //  CredentialProvider.swift
-//  A source of credentials. Manual entry is the only concrete provider today;
-//  password managers (1Password, Apple Passwords) implement the same protocol
-//  later without changing the connect flow. The connect flow depends only on
-//  `CredentialProvider` + `CredentialRequest` (see Credentials.swift).
+//  A source of credentials. FIVE providers ship, all behind this one protocol:
+//  manual entry (`ManualCredentialProvider`), the Touch ID-gated keychain
+//  (`BiometricCredentialProvider`), 1Password (`OnePasswordProvider`, via
+//  opnative-helper), Apple Passwords (`ApplePasswordsProvider`) and KeePassXC
+//  (`KeePassXCProvider`) — selected in `VPNController+Connect`. The connect flow
+//  depends only on `CredentialProvider` + `CredentialRequest` (see
+//  Credentials.swift), which is what makes adding a sixth cheap.
 
 import Foundation
 import Security
@@ -207,9 +210,9 @@ struct BiometricCredentialProvider: CredentialProvider {
     }
 }
 
-// MARK: - Future providers (see M9)
+// MARK: - Provider notes
 //
-// 1Password (M8, shipped): `OnePasswordProvider` — the official SDK over local
+// 1Password (shipped): `OnePasswordProvider` — the official SDK over local
 //   IPC to the 1Password app (OnePasswordNative / opnative-helper); no `op`
 //   CLI, works fully offline.
 //
@@ -217,7 +220,7 @@ struct BiometricCredentialProvider: CredentialProvider {
 //   over KeePassXC's unix socket (KeePassXCProtocol/KeePassXCCrypto); pairing
 //   lives in the keychain, per-database.
 //
-// Apple Passwords (M9): `ApplePasswordsCredentialProvider`
+// Apple Passwords (shipped): `ApplePasswordsProvider`
 //   - username/password/otp are best sourced via native AutoFill on the text fields
 //     (textContentType .username/.password/.oneTimeCode + associated-domains), so this
 //     provider mostly configures the UI rather than fetching.

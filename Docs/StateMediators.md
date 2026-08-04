@@ -7,13 +7,19 @@ guarantees (never two default gateways, coherent DNS, one proxy decision), stay 
 react the instant something else changes the system. It is backing-agnostic: the same mediator
 API is realized by today's multi-tunnel model and, later, by the PBR utun (`PolicyRouting.md`).
 
-## The problem it fixes
+## The problem it fixed
 
-Today each engine mutates the host on its own — openvpn3's `TunBuilder` route/DNS callbacks,
-Tailscale's `CallbackRouter`, OpenConnect's vpnc-script, native `NEVPNManager`, each building
-its own `NEPacketTunnelNetworkSettings`. Nobody owns the merged result, so states fight and
-desync (the OpenVPN full/split bug: two notions of "who holds the default", neither sourced
-from reality). Three mediators replace that with one authority per resource.
+**P1–P3 are built.** All three mediators are owned by the controller (`VPNController.routes` /
+`.dns` / `.proxies`), `VPNController` conforms to `RouteMediatorHost`/`DNSMediatorHost`/
+`ProxyMediatorHost`, and both monitors exist (`Mediators/PFRouteMonitor.swift`,
+`Mediators/SCStoreMonitor.swift`). P4 (PBR realizers) is the only open phase. Read the rest of
+this doc as the design record plus the shape you must keep.
+
+Before them, each engine mutated the host on its own — openvpn3's `TunBuilder` route/DNS
+callbacks, Tailscale's `CallbackRouter`, OpenConnect's vpnc-script, native `NEVPNManager`, each
+building its own `NEPacketTunnelNetworkSettings`. Nobody owned the merged result, so states
+fought and desynced (the OpenVPN full/split bug: two notions of "who holds the default", neither
+sourced from reality). Three mediators replaced that with one authority per resource.
 
 ## The common shape (all three mediators)
 
@@ -58,17 +64,18 @@ from reality). Three mediators replace that with one authority per resource.
   arm). Atomic switch = strip-old → add-new (never two defaults). This is the just-fixed
   gateway logic, promoted to the arbiter; `GatewayPolicy` stays the pure role/invariant math.
 - **Applier:** per-tunnel `NEPacketTunnelNetworkSettings.includedRoutes` + default suppression
-  (`_suppressDefault` / `gateway:full|split` IPC), native-manager `includeAllNetworks`, and —
-  the enforcement teeth — a **pf anchor** (root sysext) that only permits egress where policy
-  says, so "no two default gateways" holds at the firewall even if the kernel route table is
-  perturbed.
+  (`_suppressDefault` / `gateway:full|split` IPC) and native-manager `includeAllNetworks`.
+  A **pf anchor** (root sysext) that only permits egress where policy says — so "no two default
+  gateways" would hold at the firewall even if the kernel route table were perturbed — is the
+  planned enforcement floor and is **NOT BUILT**: there is no `pfctl`/`/dev/pf` code anywhere in
+  the tree. It belongs to P4, with the kill switch.
 - **Monitor:** a **`PF_ROUTE` socket** (route add/delete/change messages) — immediate external
   drift detection; fallback periodic `NET_RT_DUMP` diff. External default-route changes are
   caught and re-asserted (or surfaced) at once.
 - **macOS honesty:** we are not the kernel and cannot *forbid* another process writing the
   route table — but we are the sole writer for *our* tunnels, we detect foreign changes
-  instantly, we re-assert, and pf enforces the actual egress. That combination is the
-  guarantee.
+  instantly, and we re-assert. That combination is today's guarantee; pf, when it lands, adds
+  the enforcement floor underneath it.
 
 ## DNS mediator
 
@@ -117,6 +124,7 @@ host:port(+auth)** per scheme, or **none**.
 | **WireGuard** | ⛔ none | — | ⛔ | — (config has no proxy directive) |
 | **SSH** | ⛔ | — | ⛔ | it *provides* a SOCKS proxy (`-D`), it doesn't *push* one to the client |
 | **Proxy-tunnel** | ⛔ | — | ⛔ | it dials *through* an upstream proxy; not a pushed-proxy source |
+| **SSH Network Tunnel** | ⛔ | — | ⛔ | SSH pushes nothing; `ProxyArbiter` classifies it `.none` — deliberately **not** `.egressItself` |
 
 Notes: OpenVPN's pushed proxy carries no credentials (only an NTLM hint) — proxy auth (a 407)
 is answered from stored creds / the keychain, never from the push. `NEProxySettings` (native)
@@ -141,6 +149,7 @@ route-participants.
 | SSH | ➖ no default route | ➖ | ✅ **proxy** (SOCKS `-D`) | Proxy-mediator participant |
 | Native IKEv2/IPsec/L2TP | ~ coarse (full/split via `includeAllNetworks`; no live demote) | ~ (`NEDNSSettings`) | ~ (`NEProxySettings`) | OS-run via NEVPNManager; entitlement-gated |
 | WireGuard | ✅ full | ✅ (`DNS=` servers → catch-all) | ➖ (no proxy directive) | `WireGuardNetworkSettings` `suppressDefaultRoute` — demotes live like the proxy tunnel |
+| SSH Network Tunnel | ✅ full | ✅ (DNS-over-TCP / far-side sentinel) | ➖ (`.none`) | netstack + one `direct-tcpip` channel per flow; TCP only, non-DNS UDP refused per flow |
 
 **Route-mediator classification rule:** only kinds with a real default-route capability get a
 gateway role and enter ≤1-owner arbitration. Kinds with no default route (SSH, subprocess
@@ -151,7 +160,8 @@ silently no-op a kind — every kind resolves to one bucket, surfaced in the UI.
 
 ## Guarantees this buys
 
-- **One default gateway, always** — computed invariant + pf enforcement + drift re-assert.
+- **One default gateway** — computed invariant + sole writer + `PF_ROUTE` drift re-assert. (pf
+  enforcement is the planned floor, not yet built — see the Applier bullet above.)
 - **In sync** — single writer per resource; effective state is observed, not assumed.
 - **Live UI** — the Publisher pushes real state; the picture can't say split while routing full.
 - **Foreign-change resilience** — the Monitors catch anything external and self-heal.
@@ -168,20 +178,21 @@ silently no-op a kind — every kind resolves to one bucket, surfaced in the UI.
 
 ## Build phasing
 
-- **P1 — Route mediator (formalize + monitor).** Extract the just-fixed gateway logic into a
-  `RouteMediator` (arbiter + `MultiTunnelRealizer`), add the `PF_ROUTE` monitor + live publish.
-  Behavior-preserving; adds drift detection and the clean seam. Highest value (it's the
-  resource with a live invariant).
-- **P2 — DNS mediator.** Capture per-engine DNS intent, arbitrate split-DNS, `SCDynamicStore`
-  monitor. Precursor to PBR DNS listeners.
-- **P3 — Proxy mediator.** Capture proxy intent, owner-proxy applier, `SCDynamicStore` monitor.
-- **P4 — PBR realizers.** Add `PBRRealizer` for each; policy flips the backing, API unchanged.
+- **P1 — Route mediator (formalize + monitor). DONE.** `RouteMediator` (arbiter +
+  `MultiTunnelRealizer`) with the `PF_ROUTE` monitor + live publish.
+- **P2 — DNS mediator. DONE.** `DNSMediator`/`DNSArbiter` + `SCStoreMonitor`. Precursor to PBR
+  DNS listeners.
+- **P3 — Proxy mediator. DONE.** `ProxyMediator`/`ProxyArbiter`/`ProxyRealizer`, realizing onto
+  the owner egress over the `proxy:apply:` IPC (`Shared/ProxyApply.swift`). The per-flow
+  per-egress PAC applier is the remaining tier-3 slice.
+- **P4 — PBR realizers. OPEN.** Add `PBRRealizer` for each; policy flips the backing, API
+  unchanged. The pf anchor lands here too.
 
 ## Boundaries & notes
 
 - Native `NEVPNManager` tunnels participate through the same intents (the manager is their
   applier); they're part of the ≤1-owner plan.
-- pf programming lives in the **root sysext** (already root — no separate daemon), shared with
-  the kill switch (`PolicyRouting.md`).
+- pf programming will live in the **root sysext** (already root — no separate daemon), shared
+  with the kill switch (`PolicyRouting.md`). Not built yet — see P4.
 - The mediators are the *implementation* substrate; `PolicyRouting.md`/`PolicyEvents.md`
   describe the tier-3 policy that sits on top. Same plan objects flow through both.

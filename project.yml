@@ -74,6 +74,13 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.bragi0.SimpleVPN
+        # Zero warnings is ENFORCED, not aspirational (see AGENTS.md). Set per OUR
+        # targets rather than project-wide so the Sparkle SPM dependency is never
+        # compiled under -Werror. Third-party headers reached through our bridging
+        # headers are silenced at the #include (narrow #pragma clang diagnostic),
+        # never by relaxing this.
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GCC_TREAT_WARNINGS_AS_ERRORS: YES
         PRODUCT_NAME: SimpleVPN
         GENERATE_INFOPLIST_FILE: YES                 # synthesize the standard keys onto our plist
         INFOPLIST_FILE: SimpleVPN/Info.plist         # hand-authored: .ovpn document type / UTI
@@ -187,8 +194,18 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.bragi0.SimpleVPN.PacketTunnel
+        # Zero warnings is ENFORCED, not aspirational (see AGENTS.md).
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GCC_TREAT_WARNINGS_AS_ERRORS: YES
         PRODUCT_NAME: com.bragi0.SimpleVPN.PacketTunnel
         SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated   # NE extension has no main actor/UI
+        # NOTE: this target's build prints one unsuppressable toolchain notice —
+        # appintentsmetadataprocessor "Metadata extraction skipped. No
+        # AppIntents.framework dependency found." It is correct and permanent (a
+        # packet-tunnel system extension has no App Intents surface), the
+        # ExtractAppIntentsMetadata phase cannot be turned off, and the xcspec's
+        # LM_FILTER_WARNINGS/--quiet-warnings does NOT silence this particular
+        # line (verified). Documented in AGENTS.md; do not chase it.
         GENERATE_INFOPLIST_FILE: YES                 # synthesize CFBundleIdentifier/Version/etc onto our plist
         INFOPLIST_FILE: PacketTunnel/Info.plist
         ENABLE_APP_SANDBOX: YES
@@ -284,6 +301,9 @@ targets:
     settings:
       base:
         PRODUCT_NAME: opnative-helper
+        # Zero warnings is ENFORCED, not aspirational (see AGENTS.md).
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GCC_TREAT_WARNINGS_AS_ERRORS: YES
         SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
         SWIFT_OBJC_BRIDGING_HEADER: "OPNativeHelper/OPNativeHelper-Bridging-Header.h"
         CODE_SIGN_ENTITLEMENTS: OPNativeHelper/OPNativeHelper.entitlements
@@ -319,6 +339,9 @@ targets:
     settings:
       base:
         PRODUCT_NAME: ocauth-helper
+        # Zero warnings is ENFORCED, not aspirational (see AGENTS.md).
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GCC_TREAT_WARNINGS_AS_ERRORS: YES
         # A synchronous line-oriented tool: plain nonisolated code, no UI actor.
         SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
         SWIFT_OBJC_BRIDGING_HEADER: "OCAuthHelper/OCAuthHelper-Bridging-Header.h"
@@ -349,6 +372,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.bragi0.SimpleVPNTests
+        # Zero warnings is ENFORCED, not aspirational (see AGENTS.md).
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GCC_TREAT_WARNINGS_AS_ERRORS: YES
         GENERATE_INFOPLIST_FILE: YES
         # @testable import SimpleVPN re-scans the app's bridging header, which
         # now includes opnative.h (in-process 1Password SDK).
@@ -367,6 +393,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.bragi0.SimpleVPNUITests
+        # Zero warnings is ENFORCED, not aspirational (see AGENTS.md).
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GCC_TREAT_WARNINGS_AS_ERRORS: YES
         GENERATE_INFOPLIST_FILE: YES
         SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated   # XCTest template overrides are nonisolated
         CODE_SIGN_STYLE: Automatic
@@ -388,6 +417,9 @@ targets:
     settings:
       base:
         PRODUCT_NAME: simplevpn
+        # Zero warnings is ENFORCED, not aspirational (see AGENTS.md).
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GCC_TREAT_WARNINGS_AS_ERRORS: YES
         # NOT "simplevpn": the module name must differ from the app's by more than
         # case, or the CLI's swiftmodule emit lands inside SimpleVPN.swiftmodule/
         # on the case-insensitive filesystem and clobbers the app's module (tests

@@ -2,12 +2,19 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 //  Policy.swift
-//  Management policy seam. Always-permissive today; when MDM support lands this is
-//  the one file that grows a reader for managed app configuration (the
-//  "com.apple.configuration.managed" defaults domain) plus change notifications.
-//  Every enable/disable/edit decision in the app already routes through it:
-//  setting rows check forcedSettings, the editor/save/delete paths check
-//  lockedProfileIDs, and import/kind choices check allowedKinds.
+//  The FINE-GRAINED management policy seam: per-setting forced values, per-profile
+//  locks, and an allow-list of kinds.
+//
+//  NOT the landed MDM reader — that is `ManagedPolicy.swift`, which reads forced
+//  defaults (`objectIsForced(forKey:)`) and is what the editors, Settings and the
+//  VPNController lifecycle actually consult today. Docs/MDM.md documents that one.
+//
+//  Honest state of THIS file: `forcedValue`/`forcedSettings` has exactly one
+//  production call site (`OpenVPNSettingDescriptors.swift`, the OpenVPN options
+//  form), and `lockedProfileIDs`/`allowedKinds` have NO call sites at all — nothing
+//  populates `PolicyStore.policy` yet either. It is the shape a future managed-app-
+//  configuration reader ("com.apple.configuration.managed" + change notifications)
+//  fills in; do not describe it as if every gate already routed through it.
 //
 
 import Foundation

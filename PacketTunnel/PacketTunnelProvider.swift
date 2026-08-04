@@ -3,7 +3,11 @@
 
 //
 //  PacketTunnelProvider.swift
-//  SimpleVPN system extension — drives the OpenVPN 3 engine via OpenVPN3Bridge.
+//  SimpleVPN system extension — ONE provider driving every in-process engine:
+//  OpenVPN 3 (OpenVPN3Bridge), OpenConnect (OpenConnectBridge), Tailscale/Headscale,
+//  plain WireGuard, the Proxy Tunnel and the SSH Network Tunnel. It also hosts the
+//  route/DNS/proxy applier IPC the mediators write through (`gateway:…`,
+//  `proxy:apply:` — see Docs/StateMediators.md).
 //
 
 import NetworkExtension

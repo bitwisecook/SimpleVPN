@@ -7,10 +7,11 @@
 //  pumped between openconnect and NEPacketTunnelFlow over a socketpair (same shape
 //  as OpenVPN3Bridge). In-process — no `openconnect` subprocess.
 //
-//  Runtime note: the exact tun framing over a provided fd and the finer points of
-//  SAML/SSO auth need validation against a live gateway; the structure below is the
-//  standard libopenconnect embedding (obtain_cookie → make_cstp_connection →
-//  setup_tun → mainloop).
+//  Runtime note: SSO is signed in OUT of process now (ocauth-helper) and arrives here
+//  as a cookie, so `openconnect_obtain_cookie` below is only the non-SSO fallback. The
+//  structure is otherwise the standard libopenconnect embedding (obtain_cookie →
+//  make_cstp_connection → setup_tun → mainloop). Still wanting validation against a
+//  live gateway: the exact tun framing over a provided fd.
 //
 
 #import "OpenConnectBridge.h"

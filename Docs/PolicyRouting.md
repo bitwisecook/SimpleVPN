@@ -19,6 +19,7 @@ once per connect (`DivertPlan`, `Shared/RoutingRule.swift`) and applied per kind
 | Tailscale | yes (joins the engine's `localRoutes`) | **no** — the netmap decides what a tailnet carries (subnet router / exit node) |
 | IKEv2 / IPsec / L2TP | no — macOS owns the routes | no |
 | SSH | no — forwards/SOCKS, not a route-carrying interface | no |
+| SSH Network Tunnel | yes — the excluded routes are ours to write | yes — each routed-in destination is re-dialled as a fresh `direct-tcpip` channel. Caveat: TCP (and DNS) only; a UDP-only destination is refused per flow, surfaced by `SSHNetworkTunnelConfig.udpCaveat` |
 
 The "no" cells are `VPNKind.canDivertOutside` / `canAcceptRoutedInTraffic` returning
 false with a user-facing reason; the traffic-log menu shows the reason in place of the

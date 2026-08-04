@@ -9,13 +9,14 @@
 //  `State:/Network/Global/Proxies` + per-service proxy keys watches the real system
 //  proxy for external drift and asks it to re-assert.
 //
-//  Applier note (tier-2, honest): today the SOCKS kinds set the system proxy through
-//  `SubprocessTunnelManager` (`networksetup`), and pushed proxies ride each engine's
-//  `NEProxySettings` at establish. The re-assert lever the app holds now is to ask the
-//  host to re-apply the owner's proxy (re-point / reconnect). The per-flow per-egress
-//  PAC (JavaScriptCore) applier is the P3-tier-3 seam — left clean here, like the Route
-//  mediator's `PBRRealizer`. Arbitration, drift detection and the effective publish are
-//  the real tier-2 deliverables.
+//  Applier: the arbitrated decision is realized LIVE by `ProxyRealizer` below — the SOLE
+//  writer — which sends `proxy:apply:` to the OWNER egress (wire type in
+//  `Shared/ProxyApply.swift`, applied onto that engine's `NEProxySettings` in
+//  `PacketTunnelProvider`). The subprocess SOCKS kinds still set the host's system proxy
+//  through `SubprocessTunnelManager` (`networksetup`), and re-point/reconnect survives as
+//  the fallback lever for an engine that doesn't ack. The per-flow per-egress PAC
+//  (JavaScriptCore) applier is the remaining P3-tier-3 seam — left clean here, like the
+//  Route mediator's `PBRRealizer`.
 //
 //  Concurrency: MainActor. The SCDynamicStore monitor reads off-main and hops back here.
 //
