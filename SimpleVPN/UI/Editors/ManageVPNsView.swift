@@ -17,9 +17,12 @@ struct ManageVPNsView: View {
     @Environment(SubprocessTunnelStore.self) private var tunnels
     @Environment(SubprocessTunnelManager.self) private var tunnelManager
     @Environment(NativeVPNManager.self) private var nativeVPN
+    @Environment(SettingsRouter.self) private var settingsRouter: SettingsRouter?
     @Environment(\.dismiss) private var dismissWindow
     @State private var selection: String?
     @FocusState private var sidebarFocused: Bool
+    /// The app-wide "Find a Setting…" sheet (⌘⇧F, or the toolbar).
+    @State private var showFindSetting = false
 
     /// Every configured VPN across all backends — "only one VPN" for the
     /// save-closes-the-window behaviour.
@@ -41,85 +44,7 @@ struct ManageVPNsView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $selection) {
-                Section("VPNs") {
-                    ForEach(vpn.profiles) { p in
-                        HStack(spacing: 8) {
-                            VPNRow(profile: p, labelDefs: labels.labels(for: p.id))
-                            CertExpiryBadge(ovpn: vpn.ovpnText(id: p.id))
-                        }
-                            .tag(p.id)
-                            .contextMenu {
-                                Button("Export .ovpn…") { export(p) }
-                                Button("Remove", role: .destructive) { Task { try? await vpn.remove(id: p.id) } }
-                            }
-                    }
-                }
-                if !tunnels.tunnels.isEmpty {
-                    Section("Tunnels") {
-                        ForEach(tunnels.tunnels) { t in
-                            let st = tunnelManager.status(t.id)
-                            HStack(spacing: 8) {
-                                StatusDot(state: .from(subprocess: st))
-                                Image(systemName: t.kind.systemImage)
-                                    .foregroundStyle(tunnelManager.isActive(t.id) ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                                    .accessibilityHidden(true)
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(t.name)
-                                    Text(st.isFailed ? (st.failureText ?? "Failed") : t.kind.displayName)
-                                        .font(.caption)
-                                        .foregroundStyle(st.isFailed ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
-                                        .lineLimit(1)
-                                }
-                            }
-                            // One sentence, dot state in words (the dot is hidden).
-                            .accessibilityElement(children: .combine)
-                            .accessibilityLabel("\(t.name), \(t.kind.displayName), \(DotState.from(subprocess: st).accessibilityDescription)\(st.isFailed ? ", \(st.failureText ?? "failed")" : "")")
-                            .tag(Self.tunnelTag + t.id)
-                            .contextMenu {
-                                Button("Remove", role: .destructive) {
-                                    tunnelManager.disconnect(t.id); tunnels.remove(t.id)
-                                }
-                            }
-                        }
-                    }
-                }
-                if !nativeVPN.configs.isEmpty {
-                    Section("Native (IKEv2 / IPsec)") {
-                        ForEach(nativeVPN.configs) { c in
-                            // Reflect real status, not just activeConfigID — an
-                            // OS-side drop clears activeConfigID, and connecting/
-                            // failed now read distinctly.
-                            let isThis = nativeVPN.activeConfigID == c.id
-                            HStack(spacing: 8) {
-                                StatusDot(status: isThis ? nativeVPN.status : .disconnected)
-                                Image(systemName: c.kind.systemImage)
-                                    .foregroundStyle(isThis && nativeVPN.status == .connected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                                    .accessibilityHidden(true)
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(c.name)
-                                    Text(c.kind.displayName).font(.caption).foregroundStyle(.secondary)
-                                }
-                            }
-                            // One sentence incl. the dot's state in words — the
-                            // hidden dot and icon tint said "connected" to nobody.
-                            .accessibilityElement(children: .combine)
-                            .accessibilityLabel("\(c.name), \(c.kind.displayName), \(DotState.from(status: isThis ? nativeVPN.status : .disconnected).accessibilityDescription)")
-                            .tag(Self.nativeTag + c.id)
-                            .contextMenu {
-                                Button("Remove", role: .destructive) { nativeVPN.remove(c.id) }
-                            }
-                        }
-                    }
-                }
-                if !compositions.compositions.isEmpty {
-                    Section("Compositions") {
-                        ForEach(compositions.compositions) { comp in
-                            compositionRow(comp)
-                        }
-                    }
-                }
-            }
+            sidebarList
             .navigationSplitViewColumnWidth(min: 200, ideal: 240)
             // One focus section per column (Tab: sidebar → editor), and the
             // list takes initial focus so arrow keys pick a VPN immediately.
@@ -147,6 +72,16 @@ struct ManageVPNsView: View {
                     }
                     .disabled(!vpn.profiles.contains { $0.id == selection })
                     .help("Save the selected VPN's configuration as a file")
+                    // Discoverable AND keyboard-reachable: a toolbar button here
+                    // and ⌘⇧F in the VPN menu, both opening the same sheet.
+                    Button {
+                        showFindSetting = true
+                    } label: {
+                        Image(systemName: "text.magnifyingglass")
+                            .frame(width: 22, height: 22).contentShape(Rectangle())
+                    }
+                    .help("Find a setting in any VPN editor (\u{2318}\u{21E7}F)")
+                    .accessibilityLabel("Find a setting")
                 }
             }
         } detail: {
@@ -172,6 +107,18 @@ struct ManageVPNsView: View {
         .sheet(item: $editingComposition) { comp in
             CompositionEditor(vpn: vpn, store: compositions, draft: comp) {}
         }
+        .sheet(isPresented: $showFindSetting) { GlobalSettingsSearchView() }
+        .onChange(of: settingsRouter?.findGeneration ?? 0) { showFindSetting = true }
+        // A route arriving from a related-settings link in another editor, or from
+        // the global search: this window owns profile SELECTION, so it resolves
+        // "which VPN has this setting" and leaves the tab and the reveal to the
+        // editor (SettingsEditorShell).
+        .onChange(of: settingsRouter?.generation ?? 0) { selectProfileForRoute() }
+        .alert("No VPN for that setting", isPresented: Binding(
+            get: { settingsRouter?.unroutableMessage != nil },
+            set: { if !$0 { settingsRouter?.unroutableMessage = nil } })) {
+            Button("OK", role: .cancel) { settingsRouter?.unroutableMessage = nil }
+        } message: { Text(settingsRouter?.unroutableMessage ?? "") }
         .task {
             await vpn.loadAll()
             compositions.prune(existingProfileIDs: Set(vpn.profiles.map(\.id)))
@@ -182,6 +129,91 @@ struct ManageVPNsView: View {
                 sidebarFocused = true
             }
         }
+    }
+
+    /// The sidebar list. Extracted from `body` because SwiftUI type-checks a
+    /// `NavigationSplitView` plus its toolbar as one expression, and the added
+    /// toolbar item pushed it past what the compiler will do in reasonable time.
+    private var sidebarList: some View {
+                List(selection: $selection) {
+                    Section("VPNs") {
+                        ForEach(vpn.profiles) { p in
+                            HStack(spacing: 8) {
+                                VPNRow(profile: p, labelDefs: labels.labels(for: p.id))
+                                CertExpiryBadge(ovpn: vpn.ovpnText(id: p.id))
+                            }
+                                .tag(p.id)
+                                .contextMenu {
+                                    Button("Export .ovpn…") { export(p) }
+                                    Button("Remove", role: .destructive) { Task { try? await vpn.remove(id: p.id) } }
+                                }
+                        }
+                    }
+                    if !tunnels.tunnels.isEmpty {
+                        Section("Tunnels") {
+                            ForEach(tunnels.tunnels) { t in
+                                let st = tunnelManager.status(t.id)
+                                HStack(spacing: 8) {
+                                    StatusDot(state: .from(subprocess: st))
+                                    Image(systemName: t.kind.systemImage)
+                                        .foregroundStyle(tunnelManager.isActive(t.id) ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                                        .accessibilityHidden(true)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(t.name)
+                                        Text(st.isFailed ? (st.failureText ?? "Failed") : t.kind.displayName)
+                                            .font(.caption)
+                                            .foregroundStyle(st.isFailed ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                                            .lineLimit(1)
+                                    }
+                                }
+                                // One sentence, dot state in words (the dot is hidden).
+                                .accessibilityElement(children: .combine)
+                                .accessibilityLabel("\(t.name), \(t.kind.displayName), \(DotState.from(subprocess: st).accessibilityDescription)\(st.isFailed ? ", \(st.failureText ?? "failed")" : "")")
+                                .tag(Self.tunnelTag + t.id)
+                                .contextMenu {
+                                    Button("Remove", role: .destructive) {
+                                        tunnelManager.disconnect(t.id); tunnels.remove(t.id)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !nativeVPN.configs.isEmpty {
+                        Section("Native (IKEv2 / IPsec)") {
+                            ForEach(nativeVPN.configs) { c in
+                                // Reflect real status, not just activeConfigID — an
+                                // OS-side drop clears activeConfigID, and connecting/
+                                // failed now read distinctly.
+                                let isThis = nativeVPN.activeConfigID == c.id
+                                HStack(spacing: 8) {
+                                    StatusDot(status: isThis ? nativeVPN.status : .disconnected)
+                                    Image(systemName: c.kind.systemImage)
+                                        .foregroundStyle(isThis && nativeVPN.status == .connected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                                        .accessibilityHidden(true)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(c.name)
+                                        Text(c.kind.displayName).font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
+                                // One sentence incl. the dot's state in words — the
+                                // hidden dot and icon tint said "connected" to nobody.
+                                .accessibilityElement(children: .combine)
+                                .accessibilityLabel("\(c.name), \(c.kind.displayName), \(DotState.from(status: isThis ? nativeVPN.status : .disconnected).accessibilityDescription)")
+                                .tag(Self.nativeTag + c.id)
+                                .contextMenu {
+                                    Button("Remove", role: .destructive) { nativeVPN.remove(c.id) }
+                                }
+                            }
+                        }
+                    }
+                    if !compositions.compositions.isEmpty {
+                        Section("Compositions") {
+                            ForEach(compositions.compositions) { comp in
+                                compositionRow(comp)
+                            }
+                        }
+                    }
+                }
     }
 
     /// A composition row: single Connect/Disconnect for the whole group, plus edit/remove.
@@ -231,6 +263,73 @@ struct ManageVPNsView: View {
             Button("Edit…") { editingComposition = comp }
             Button("Remove", role: .destructive) { compositions.remove(comp.id) }
         }
+    }
+
+    // MARK: Routing to a setting
+
+    /// Select a VPN that HAS the routed setting. The sidebar's selection is this
+    /// window's own business — the editor can't select itself — so the route is
+    /// resolved here and the editor picks up the tab and the reveal from the same
+    /// (sticky) route.
+    ///
+    /// A route that already names a profile is honoured as-is; one that doesn't
+    /// (every global-search hit) takes the first VPN of a kind whose editor shows
+    /// the surface, keeping the current selection when it already qualifies — so
+    /// following a Custom Routing relation never jumps you to a different VPN.
+    private func selectProfileForRoute() {
+        guard let router = settingsRouter, let route = router.route,
+              let surface = SettingSurface(rawValue: route.surface) else { return }
+        if let wanted = route.profileID {
+            selection = wanted
+            return
+        }
+        if let current = selection, tagMatches(current, surface: surface) { return }
+        guard let tag = firstSelection(for: surface) else {
+            router.unroutableMessage =
+                "There's no \(surface.title) VPN configured yet, so \u{201C}\(AllSettings.byID[route.settingID]?.setting.name ?? route.settingID)\u{201D} has nothing to apply to. Add one with + first."
+            router.clear()
+            return
+        }
+        selection = tag
+    }
+
+    /// Whether the currently-selected row's editor shows this surface.
+    private func tagMatches(_ tag: String, surface: SettingSurface) -> Bool {
+        guard let kind = kind(ofSelection: tag) else { return false }
+        return surface.kinds.contains(kind)
+    }
+
+    /// The VPN kind behind a sidebar selection tag, across all four stores.
+    private func kind(ofSelection tag: String) -> VPNKind? {
+        if tag.hasPrefix(Self.tunnelTag) {
+            return tunnelBinding(for: tag)?.kind
+        }
+        if tag.hasPrefix(Self.nativeTag) {
+            return nativeBinding(for: tag)?.kind
+        }
+        guard vpn.profiles.contains(where: { $0.id == tag }) else { return nil }
+        if vpn.isWireGuard(tag) { return .wireGuard }
+        if vpn.isTailscale(tag) { return .tailscale }
+        if vpn.isProxyTunnel(tag) { return .proxyTunnel }
+        return .openVPN
+    }
+
+    /// The first sidebar row whose editor shows this surface, as a selection tag.
+    private func firstSelection(for surface: SettingSurface) -> String? {
+        // Custom Routing is every kind's second tab, so anything selectable will
+        // do — prefer whatever is already selected (handled by the caller).
+        let kinds = Set(surface.kinds)
+        for p in vpn.profiles {
+            guard let k = kind(ofSelection: p.id), kinds.contains(k) else { continue }
+            return p.id
+        }
+        for t in tunnels.tunnels where kinds.contains(t.kind) {
+            return Self.tunnelTag + t.id
+        }
+        for c in nativeVPN.configs where kinds.contains(c.kind) {
+            return Self.nativeTag + c.id
+        }
+        return nil
     }
 
     /// The − button removes whatever the sidebar has selected — VPN profiles,

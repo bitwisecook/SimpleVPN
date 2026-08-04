@@ -168,9 +168,9 @@ struct UserFacingErrorSheet: View {
             openWindow?("manage")
             dismiss()
         case .networkSettings:
-            if let url = URL(string: "x-apple.systempreferences:com.apple.Network-Settings.extension") {
-                openURL(url)
-            }
+            SystemSettingsPane.networkVPN.open()
+        case .loginItems:
+            SystemSettingsPane.loginItems.open()
         case .openURL(let url):
             openURL(url)
         }

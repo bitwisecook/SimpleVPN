@@ -457,8 +457,13 @@ private struct PrivateKeyCard: View {
                 .font(.callout).foregroundStyle(.orange)
         case .none:
             if summary.encrypted {
-                Text("Enter its password in Options ▸ Sign-In to use it.")
-                    .font(.callout).foregroundStyle(.secondary)
+                // Was a sentence naming a place the user then had to go and
+                // find. Now it goes there — the shared jump link selects the
+                // Options tab and reveals the row (scroll, focus, pulse).
+                SettingJumpLink(
+                    title: "Enter its password in Options \u{25B8} Sign-In to use it.",
+                    settingID: "openvpn.private-key-password",
+                    accessibilityLabel: "Enter its password in Options, Sign-In, to use it")
             }
         }
     }

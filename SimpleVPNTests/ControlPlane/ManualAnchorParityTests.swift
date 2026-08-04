@@ -28,14 +28,38 @@ struct ManualAnchorParityTests {
     /// Every catalog in the app, by its id namespace. Adding an engine means
     /// adding it here — which is what makes the reverse check total.
     private static let catalogs: [(namespace: String, specs: [EngineSettingSpec])] = [
-        ("wg.", WireGuardView.specs.all),
+        ("wg.", WireGuardSettings.all),
         ("ssh.", SSHSettings.all),
-        ("oc.", SubprocessTunnelView.specs.all),
-        ("native.", NativeVPNView.specs.all),
-        ("ts.", TailscaleView.specs.all),
-        ("px.", ProxyTunnelView.specs.all),
+        ("oc.", OpenConnectSettings.all),
+        ("native.", NativeVPNSettings.all),
+        ("ts.", TailscaleSettings.all),
+        ("px.", ProxyTunnelSettings.all),
         ("cr.", CustomRoutingSettings.all),
     ]
+
+    /// …and the table is TOTAL, checked against the app-wide surface registry
+    /// rather than trusted. Every catalog moved out of its View into ControlPlane
+    /// so app-wide search could reach it; a new one that is registered as a
+    /// `SettingSurface` but not listed above would ship undocumented.
+    @Test func theCatalogTableCoversEverySurface() {
+        let listed = Set(Self.catalogs.map(\.namespace))
+            .union(["openvpn."])   // the OpenVPN descriptors are walked separately
+        let registered = Set(SettingSurface.allCases.map(\.namespace))
+        #expect(registered.subtracting(listed).isEmpty,
+                "these surfaces aren't in the parity table: \(registered.subtracting(listed).sorted())")
+        #expect(listed.subtracting(registered).isEmpty,
+                "the parity table lists namespaces no surface registers: \(listed.subtracting(registered).sorted())")
+    }
+
+    /// The aliases the six editors still call (`WireGuardView.specs["wg.mtu"]`) are
+    /// the SAME tables, not copies — a second copy would drift.
+    @Test func theEditorAliasesPointAtTheMovedCatalogs() {
+        #expect(WireGuardView.specs.all.map(\.id) == WireGuardSettings.all.map(\.id))
+        #expect(TailscaleView.specs.all.map(\.id) == TailscaleSettings.all.map(\.id))
+        #expect(ProxyTunnelView.specs.all.map(\.id) == ProxyTunnelSettings.all.map(\.id))
+        #expect(NativeVPNView.specs.all.map(\.id) == NativeVPNSettings.all.map(\.id))
+        #expect(SubprocessTunnelView.specs.all.map(\.id) == OpenConnectSettings.all.map(\.id))
+    }
 
     /// Manual sections that are prose, not settings: chapters, troubleshooting
     /// pages and per-engine introductions. Anything else with a namespaced anchor

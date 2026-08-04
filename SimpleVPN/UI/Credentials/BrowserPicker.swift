@@ -15,6 +15,11 @@ struct BrowserPicker: View {
     /// When set, the "System Default" row shows what it resolves to (e.g. the app
     /// default) — used in a per-VPN picker to reveal the inherited choice.
     var systemDefaultLabel: String?
+    /// Per-VPN pickers OVERRIDE an app-wide choice made in Settings. Saying so and
+    /// leaving the user to find Settings is one step too few — `SettingsLink` is
+    /// the only supported way to open that window, and it belongs here, next to
+    /// the setting it defers to.
+    var showsAppDefaultLink = false
 
     private var installed: [InstalledBrowser] { BrowserCatalog.installed }
     private var chosen: InstalledBrowser? { BrowserCatalog.browser(selection.bundleID) }
@@ -39,6 +44,21 @@ struct BrowserPicker: View {
                 Text("Default").tag(String?.none)
                 ForEach(profiles) { p in Text(p.name).tag(Optional(p.id)) }
             }
+        }
+
+        if showsAppDefaultLink {
+            SettingsLink {
+                Label("Change the browser SimpleVPN uses by default\u{2026}",
+                      systemImage: "gearshape")
+                    .font(.callout)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.tint)
+            .help("Opens SimpleVPN Settings \u{25B8} General, where the app-wide sign-in browser is chosen")
+            .accessibilityLabel("Change the browser SimpleVPN uses by default")
+            .accessibilityHint("Opens SimpleVPN Settings")
         }
     }
 }

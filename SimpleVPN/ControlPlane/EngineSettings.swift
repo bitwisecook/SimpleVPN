@@ -25,6 +25,16 @@ struct EngineSettingSpec: Identifiable, Sendable {
     var group: SettingGroup? = nil
     var manualAnchor: String { id.replacingOccurrences(of: ".", with: "-") }
 
+    /// Ids of the settings a reader of THIS one needs to know about — rendered as
+    /// the "Related settings" links in the help popover.
+    ///
+    /// Computed from `SettingRelations`, not stored per spec, and deliberately:
+    /// relations are symmetric, and a stored list makes symmetry something every
+    /// declaration has to remember (get it wrong once and the link works one way
+    /// and dead-ends the other). The map declares cliques; both directions fall
+    /// out. See SettingRelations.swift's header.
+    var related: [String] { SettingRelations.related[id] ?? [] }
+
     /// The engine/OS default, type-erased behind its own comparison. "Changed"
     /// used to be hand-wired at every call site (`changed: !draft.acceptRoutes`,
     /// `changed: draft.useExitNode`, …) — thirty-odd derivations, several of them
@@ -92,6 +102,11 @@ struct EngineSettingRow<Control: View>: View {
     var disabledReason: String? = nil
     @ViewBuilder let control: Control
 
+    /// Keyboard focus for the search/related-link reveal. Lives here rather than
+    /// at each call site, so ONE edit gave every row in five editors a focusable
+    /// jump target (see UI/Components/SettingReveal.swift).
+    @FocusState private var controlFocused: Bool
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .center, spacing: 8) {
@@ -105,11 +120,13 @@ struct EngineSettingRow<Control: View>: View {
                         .disabled(true)
                         .accessibilityValue("unavailable — \(reason)")
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .settingRevealFocus(spec.id, focused: $controlFocused)
                 } else {
                     control
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .settingRevealFocus(spec.id, focused: $controlFocused)
                 }
-                ManualLink(anchor: spec.manualAnchor, settingName: spec.name)
+                ManualLink(setting: spec)
             }
             Text(disabledReason ?? spec.summary)
                 .font(.callout).foregroundStyle(.secondary)
@@ -118,6 +135,10 @@ struct EngineSettingRow<Control: View>: View {
         }
         .padding(.vertical, 6)
         .help(disabledReason ?? spec.summary)
+        // Identity for the scroll, the pulse and VoiceOver focus. INSIDE the
+        // shared row, so adding search to an editor is one line in that editor
+        // rather than a `.id()` on every row it renders.
+        .settingReveal(spec.id)
         // Group the control with its summary so the explanation is the element
         // VoiceOver reaches next, matching SettingRow in the OpenVPN form.
         .accessibilityElement(children: .contain)

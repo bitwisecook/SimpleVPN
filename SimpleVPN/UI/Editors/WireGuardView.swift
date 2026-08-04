@@ -45,11 +45,21 @@ struct WireGuardView: View {
     /// three of six used to save with no visible acknowledgement at all.
     @State private var savedTick = false
 
+    /// Which tab is showing. A binding, so a related-settings link or a search
+    /// hit on the Custom Routing tab can select it (no TabView in the app could
+    /// be selected in code before this).
+    @State private var tab: SettingsTab = .settings
+    /// This editor's search catalog: its own surface plus Custom Routing, which
+    /// is its second tab — one field finds everything this editor shows.
+    @State private var search = SettingsSearch(surfaces: [.wireGuard, .customRouting],
+                                               kind: .wireGuard)
+
     /// The config surface: the canonical groups, in order (AGENTS.md "Config
     /// surfaces"). No Security group — WireGuard's cryptography is fixed by
     /// design, so there is nothing to choose and the group is omitted.
     private var configForm: some View {
         Form {
+            SettingsSearchSection(search: search)
             Section("Connection") {
                 TextField("Name", text: $draft.name)
                 HStack {
@@ -126,6 +136,7 @@ struct WireGuardView: View {
                              range: WireGuardConfig.mtuRange, prompt: "1420",
                              invalidMessage: "Enter an MTU between 1280 and 1500. Below 1280 the tunnel can't carry IPv6 at all, and the engine would silently drop packets.")
                 }
+                TrafficCrossLinks(gatewayNote: gatewayNote)
             }
 
             CollapsibleSettingsSection(group: .advanced, changedCount: advancedChangedCount) {
@@ -172,6 +183,7 @@ struct WireGuardView: View {
             }
         }
         .formStyle(.grouped)
+        .revealsSettings()
         .disabled(ManagedPolicy.lockConfiguration)
     }
 
@@ -179,8 +191,9 @@ struct WireGuardView: View {
         // Custom Routing is its own TAB in every editor (AGENTS.md "Config
         // surfaces") — appending it as sections put a second, differently-shaped
         // config surface inside the run of canonical groups.
-        TabView {
+        TabView(selection: $tab) {
             configForm
+                .tag(SettingsTab.settings)
                 .tabItem { Label("Settings", systemImage: "slider.horizontal.3") }
             Form {
                 CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
@@ -188,9 +201,13 @@ struct WireGuardView: View {
                                     proxyAuthPassword: $crProxyAuthPassword)
             }
             .formStyle(.grouped)
+            .revealsSettings()
             .disabled(ManagedPolicy.lockConfiguration)
+            .tag(SettingsTab.customRouting)
             .tabItem { Label("Custom Routing", systemImage: "arrow.triangle.branch") }
         }
+        .settingsEditor(search: search, tab: $tab,
+                        surfaces: [.wireGuard, .customRouting], profileID: profileID)
         .padding(.top, 10)
         .navigationTitle(draft.name)
         .task { loadOnce() }
@@ -302,6 +319,15 @@ struct WireGuardView: View {
         let s = draft.fwMark.trimmingCharacters(in: .whitespaces)
         if s.isEmpty || WireGuardConfig.isValidFwMark(s) { return nil }
         return "Enter a whole number up to 4294967295, in decimal or as 0x-prefixed hex — or choose \u{201C}off\u{201D} above."
+    }
+
+    /// Whether this VPN is carrying everything right now — the question the
+    /// Traffic group answers only in theory. nil when it isn't connected.
+    private var gatewayNote: String? {
+        guard vpn.profiles.first(where: { $0.id == profileID })?.status == .connected else { return nil }
+        return vpn.gatewayRole(for: profileID) == .full
+            ? "Right now this VPN carries ALL traffic \u{2014} it owns the default route."
+            : "Right now this VPN carries only the networks above \u{2014} something else owns the default route."
     }
 
     /// The Advanced badge count, from the specs' own declared defaults.
@@ -476,66 +502,11 @@ struct WireGuardView: View {
 
     // MARK: Spec catalog + typed field helpers
 
-    /// In canonical group order (AGENTS.md "Config surfaces"). WireGuard's keys
-    /// ARE its sign-in, so they group there; the wg-quick Interface/Peer split
-    /// survives only in the .conf round-trip, not in the form.
-    static let specs = EngineSettingCatalog([
-
-        // MARK: Connection
-
-        .init(id: "wg.endpoint", name: "Server Address",
-              summary: "The server's public address and port, host:port (e.g. vpn.example.com:51820) — the Endpoint line of a wg-quick file.",
-              group: .connection, default: ""),
-        .init(id: "wg.listen-port", name: "Listen Port",
-              summary: "UDP port WireGuard listens on locally, 0–65535. Leave empty (or 0) to let the system pick one.",
-              group: .connection, default: Int?.none),
-
-        // MARK: Sign-In
-
-        // The single most important field in this editor, and the last one still
-        // hand-rolled: no spec meant no manual anchor, no search hit, and no way
-        // for the CLI or MDM to name it.
-        .init(id: "wg.private-key", name: "Private Key",
-              summary: "This device's own secret key (base64) — the other half of the public key you gave your provider. Kept in your Keychain and never shown again once saved.",
-              group: .signIn, default: false),
-        .init(id: "wg.public-key", name: "Peer Public Key",
-              summary: "The server peer's public key (base64). Identifies and encrypts to the server. From your provider.",
-              group: .signIn, default: ""),
-        .init(id: "wg.preshared-key", name: "Pre-shared Key",
-              summary: "Optional extra symmetric key (base64) added on top for post-quantum resistance. Only if your provider gives you one.",
-              group: .signIn, default: false),
-
-        // MARK: Traffic
-
-        .init(id: "wg.address", name: "Addresses",
-              summary: "The in-tunnel IP address(es) this device is assigned, with prefix (e.g. 10.0.0.2/32). From your provider.",
-              group: .traffic, default: [String]()),
-        .init(id: "wg.allowed-ips", name: "Allowed IPs",
-              summary: "Which destinations go through this peer. 0.0.0.0/0, ::/0 sends everything (full tunnel); specific subnets make it split.",
-              group: .traffic, default: [String]()),
-        .init(id: "wg.dns", name: "DNS Servers",
-              summary: "DNS servers to use while connected. Often points inside the tunnel so private names resolve.",
-              group: .traffic, default: [String]()),
-        .init(id: "wg.mtu", name: "MTU",
-              summary: "Largest packet size on the tunnel, 1280–1500. Leave empty for the standard 1420; lower it (e.g. 1380) if some sites hang.",
-              group: .traffic, default: Int?.none),
-
-        // MARK: Advanced
-        //
-        // Both are routing escape hatches that this app's engine never reads, and
-        // they are each other's siblings — the routing table sat under Traffic
-        // beside the Allowed IPs it can silently make inert.
-
-        .init(id: "wg.table", name: "Routing Table",
-              summary: "“auto” installs routes for the allowed IPs; “off” installs none (you manage routing yourself). Only applies to configurations you export for other WireGuard clients — SimpleVPN's own engine doesn't use it.",
-              group: .advanced, default: ""),
-        .init(id: "wg.fwmark", name: "Firewall Mark",
-              summary: "A firewall mark placed on the tunnel's own packets, for advanced policy routing. Rarely needed. Only applies to configurations you export for other WireGuard clients — SimpleVPN's own engine doesn't use it.",
-              group: .advanced, default: ""),
-        .init(id: "wg.keepalive", name: "Persistent Keepalive",
-              summary: "Seconds between keepalive packets to hold the tunnel open through NAT/firewalls, 0–65535. 25 is typical behind NAT; empty or 0 = off.",
-              group: .advanced, default: Int?.none),
-    ])
+    /// The catalog now lives in `ControlPlane/WireGuardSettingDescriptors.swift`
+    /// (a catalog private to a View can only be searched by that View — which is
+    /// why app-wide search needed every table out here). This alias keeps the
+    /// form's call sites reading `Self.specs["wg.…"]`.
+    static var specs: EngineSettingCatalog { WireGuardSettings.catalog }
 
     /// `wg.table` and `wg.fwmark` never reach our engine — `WireGuardStartConfig`
     /// has no such fields — so they only round-trip into an exported .conf. Said

@@ -70,6 +70,12 @@ struct SettingDescriptor: Identifiable {
     /// Manual deep-link anchor, generated from the id ("openvpn.compression" → "openvpn-compression").
     var manualAnchor: String { id.replacingOccurrences(of: ".", with: "-") }
 
+    /// Ids of the settings a reader of THIS one needs to know about — the
+    /// "Related settings" links in the help popover. Same source and same reason
+    /// as `EngineSettingSpec.related`: one symmetric map (SettingRelations), so a
+    /// relation cannot be declared in only one direction.
+    var related: [String] { SettingRelations.related[id] ?? [] }
+
     /// Policy always wins; then the setting's own rule.
     func availability(in context: SettingsContext) -> SettingAvailability {
         if context.policy.forcedValue(for: id) != nil {

@@ -32,6 +32,18 @@ struct EditVPNView: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(ProfileEvaluator.self) private var evaluator
+
+    /// Which tab is showing. A binding, so the cross-links below (Sign-In →
+    /// Options ▸ Sign-In, Certificates → the private-key password, Traffic ↔
+    /// Custom Routing) and app-wide search can select one.
+    @State private var tab: SettingsTab = .general
+    /// The editor's search catalog — the OpenVPN engine options AND the Custom
+    /// Routing tab, so one field finds everything this editor holds and a hit on
+    /// the other tab selects it. Owned HERE rather than inside
+    /// OpenVPNOptionsForm, which is what confined search to that one form.
+    @State private var search = SettingsSearch(surfaces: [.openVPN, .customRouting],
+                                               kind: .openVPN)
+
     @State private var name = ""
     @State private var ovpn = ""
     @State private var username = ""
@@ -179,35 +191,37 @@ struct EditVPNView: View {
 
     var body: some View {
         NavigationStack {
-            TabView {
+            TabView(selection: $tab) {
                 generalTab
+                    .tag(SettingsTab.general)
                     .tabItem { Label("General", systemImage: "info.circle") }
                 // Saves as it goes (see EndpointsEditor) — no draft to reconcile
                 // with this sheet's Save button.
                 EndpointsEditor(vpn: vpn, profileID: profileID)
+                    .tag(SettingsTab.servers)
                     .tabItem { Label("Servers", systemImage: "mappin.and.ellipse") }
                 credentialsTab
+                    .tag(SettingsTab.signIn)
                     .tabItem { Label("Sign-In", systemImage: "person.badge.key") }
-                OpenVPNOptionsForm(draft: $draft,
-                                   proxyPassword: $proxyPassword,
-                                   privateKeyPassword: $privateKeyPassword,
-                                   evaluation: evaluation)
-                    .disabled(ManagedPolicy.lockConfiguration)
+                optionsTab
+                    .tag(SettingsTab.options)
                     .tabItem { Label("Options", systemImage: "slider.horizontal.3") }
                 CertificatesTab(ovpn: $ovpn, evaluation: evaluation)
                     .disabled(ManagedPolicy.lockConfiguration)
+                    .tag(SettingsTab.certificates)
                     .tabItem { Label("Certificates", systemImage: "checkmark.seal") }
                 configurationTab
                     .disabled(ManagedPolicy.lockConfiguration)
+                    .tag(SettingsTab.configuration)
                     .tabItem { Label("Configuration", systemImage: "doc.text") }
-                Form {
-                    CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
-                                        proxyAuthUsername: $crProxyAuthUsername,
-                                        proxyAuthPassword: $crProxyAuthPassword)
-                }
-                .formStyle(.grouped)
-                .tabItem { Label("Custom Routing", systemImage: "arrow.triangle.branch") }
+                customRoutingTab
+                    .tag(SettingsTab.customRouting)
+                    .tabItem { Label("Custom Routing", systemImage: "arrow.triangle.branch") }
             }
+            // Publishes `search` to every row, follows a reveal across tabs, and
+            // serves incoming SettingsRoutes (UI/Components/SettingsEditorShell.swift).
+            .settingsEditor(search: search, tab: $tab,
+                            surfaces: [.openVPN, .customRouting], profileID: profileID)
             // Clear the toolbar's scroll-edge shadow band — without this the
             // segmented tab strip sits flush under the title bar and the edge
             // effect overlays its top pixels.
@@ -275,6 +289,28 @@ struct EditVPNView: View {
 
     // MARK: Tabs
 
+    /// Extracted (like `customRoutingTab` below) because SwiftUI type-checks a
+    /// `TabView`'s whole builder as ONE expression: adding the selection binding
+    /// and the tags pushed the seven-tab body past what the compiler will do in
+    /// reasonable time.
+    private var optionsTab: some View {
+        OpenVPNOptionsForm(draft: $draft,
+                           proxyPassword: $proxyPassword,
+                           privateKeyPassword: $privateKeyPassword,
+                           evaluation: evaluation)
+            .disabled(ManagedPolicy.lockConfiguration)
+    }
+
+    private var customRoutingTab: some View {
+        Form {
+            CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
+                                 proxyAuthUsername: $crProxyAuthUsername,
+                                 proxyAuthPassword: $crProxyAuthPassword)
+        }
+        .formStyle(.grouped)
+        .revealsSettings()
+    }
+
     private var generalTab: some View {
         Form {
             // The name is purely what YOU call this VPN — the addresses it
@@ -325,6 +361,23 @@ struct EditVPNView: View {
 
     @ViewBuilder private var credentialsTab: some View {
         Form {
+            // Three sign-in settings live on the OPTIONS tab, because they are
+            // engine overrides: keep retrying after a failed sign-in, server
+            // session tokens, and the private key's password. Someone looking for
+            // them on the tab called "Sign-In" could not find them — so this tab
+            // now says where they are and takes you there.
+            Section {
+                SettingJumpLink(title: "Keep retrying after a failed sign-in",
+                                settingID: "openvpn.retry-on-auth-failed")
+                SettingJumpLink(title: "Use server session tokens",
+                                settingID: "openvpn.autologin-sessions")
+                SettingJumpLink(title: "Private Key Password",
+                                settingID: "openvpn.private-key-password")
+            } header: {
+                Text("Also in Options \u{25B8} Sign-In")
+            } footer: {
+                Text("These three are engine options, so they live on the Options tab. Choosing one opens it there.")
+            }
             if evaluation?.autologin == true {
                 Section {
                     Label("This VPN signs in automatically — no username or password is needed.",

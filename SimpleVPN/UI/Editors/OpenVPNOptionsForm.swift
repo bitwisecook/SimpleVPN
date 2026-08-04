@@ -34,7 +34,11 @@ struct OpenVPNOptionsForm: View {
     let evaluation: ProfileEvaluation?
 
     @Environment(PolicyStore.self) private var policyStore
-    @State private var search = SettingsSearch()
+    /// The search model is the HOST's (EditVPNView), not this form's: its catalog
+    /// spans the Options tab AND the Custom Routing tab, so one field finds both
+    /// and the host switches tabs for a hit on the other one. Owning it here is
+    /// what confined search to this single form in the first place.
+    @Environment(SettingsSearch.self) private var search: SettingsSearch?
     @State private var cipherStringsExpanded = false
 
     private var context: SettingsContext {
@@ -42,85 +46,33 @@ struct OpenVPNOptionsForm: View {
     }
 
     var body: some View {
-        ScrollViewReader { proxy in
-            Form {
-                searchSection
-                connectionSection
-                signInSection
-                trafficSection
-                securitySection
-                advancedSection
-                resetSection
-            }
-            .formStyle(.grouped)
-            .environment(search)
-            .onAppear {
-                proxyOn = draft.proxyHost != nil
-                cipherStringsExpanded = draft.tlsCipherList != nil || draft.tlsCiphersuitesList != nil
-            }
-            .onChange(of: draft.proxyHost != nil) { _, hasHost in
-                if hasHost { proxyOn = true }   // draft loaded/replaced externally
-            }
-            .onChange(of: search.revealGeneration) {
-                guard let id = search.revealTargetID else { return }
-                // Open any container hiding the target, let it expand, then scroll.
-                if id.hasPrefix("openvpn.proxy-") { proxyOn = true }
-                if id == "openvpn.tls-cipher-list" || id == "openvpn.tls-ciphersuites" {
-                    cipherStringsExpanded = true
-                }
-                Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(80))
-                    withAnimation { proxy.scrollTo(id, anchor: .center) }
-                    // The reveal is a scroll + a colour wash — imperceptible to
-                    // VoiceOver. Say where we landed.
-                    if let d = OpenVPNSettings.byID[id] {
-                        AccessibilityAnnouncer.sayNow("Showing \(d.name), in \(d.group.title)")
-                    }
-                }
-            }
+        Form {
+            if let search { SettingsSearchSection(search: search) }
+            connectionSection
+            signInSection
+            trafficSection
+            securitySection
+            advancedSection
+            resetSection
         }
-    }
-
-    // MARK: Search
-
-    @ViewBuilder private var searchSection: some View {
-        Section {
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-                TextField("Search settings", text: $search.query)
-                    .textFieldStyle(.plain)
-                    .autocorrectionDisabled()
-                    .onSubmit { if let first = search.matches.first { search.reveal(first) } }
-                if !search.query.isEmpty {
-                    Button { search.query = "" } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                            .frame(width: 22, height: 22).contentShape(Rectangle())
-                    }
-                    .buttonStyle(.borderless)
-                    .accessibilityLabel("Clear search")
-                }
-            }
-            ForEach(search.matches) { d in
-                Button { search.reveal(d) } label: {
-                    VStack(alignment: .leading, spacing: 1) {
-                        HStack(spacing: 6) {
-                            Text(d.name)
-                            Text("· \(d.group.title)").foregroundStyle(.secondary).font(.callout)
-                        }
-                        Text(d.summary).font(.callout).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityHint("Jump to this setting")
-            }
-            if !search.query.trimmingCharacters(in: .whitespaces).isEmpty,
-               search.query.trimmingCharacters(in: .whitespaces).count >= 2,
-               search.matches.isEmpty {
-                Text("No settings match \u{201C}\(search.query)\u{201D}")
-                    .font(.callout).foregroundStyle(.secondary)
+        .formStyle(.grouped)
+        // The ScrollViewReader + scroll + announcement are one shared modifier
+        // now (UI/Components/SettingReveal.swift), so every editor gets them.
+        .revealsSettings()
+        .onAppear {
+            proxyOn = draft.proxyHost != nil
+            cipherStringsExpanded = draft.tlsCipherList != nil || draft.tlsCiphersuitesList != nil
+        }
+        .onChange(of: draft.proxyHost != nil) { _, hasHost in
+            if hasHost { proxyOn = true }   // draft loaded/replaced externally
+        }
+        .onChange(of: search?.revealGeneration ?? 0) {
+            guard let id = search?.revealTargetID else { return }
+            // UNHIDE the target before the shared scroll runs: a row behind a
+            // toggle or a disclosure isn't in the hierarchy for scrollTo to find.
+            if id.hasPrefix("openvpn.proxy-") { proxyOn = true }
+            if id == "openvpn.tls-cipher-list" || id == "openvpn.tls-ciphersuites" {
+                cipherStringsExpanded = true
             }
         }
     }
@@ -784,7 +736,9 @@ private struct SettingRow<Control: View, Caveat: View>: View {
     }
 
     private var descriptor: SettingDescriptor { OpenVPNSettings.byID[id]! }
-    private var highlighted: Bool { search?.highlightedID == id }
+    /// Keyboard focus for a search/related-link reveal — same contract as
+    /// EngineSettingRow's (UI/Components/SettingReveal.swift).
+    @FocusState private var controlFocused: Bool
 
     var body: some View {
         switch descriptor.availability(in: context) {
@@ -810,11 +764,13 @@ private struct SettingRow<Control: View, Caveat: View>: View {
                         .disabled(true)
                         .accessibilityValue("unavailable — \(reason)")
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .settingRevealFocus(id, focused: $controlFocused)
                 } else {
                     control
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .settingRevealFocus(id, focused: $controlFocused)
                 }
-                ManualLink(anchor: descriptor.manualAnchor, settingName: descriptor.name)
+                ManualLink(setting: descriptor)
             }
             Text(disabledReason ?? descriptor.summary)
                 .font(.callout)
@@ -825,8 +781,11 @@ private struct SettingRow<Control: View, Caveat: View>: View {
         }
         .padding(.vertical, 6)   // grouped-form rows with stacked summary need extra air
         .help(disabledReason ?? descriptor.summary)
-        .id(id)
-        .listRowBackground(highlighted ? Color.accentColor.opacity(0.16) : nil)
+        // The `.id` + highlight pair used to be written out here, which is why
+        // only this form could be searched. It is one shared modifier now — and
+        // the highlight is an animated PULSE plus keyboard/VoiceOver focus
+        // (UI/Components/SettingReveal.swift), not a static colour wash.
+        .settingReveal(id)
         .contextMenu {
             Button("Reset to Default") { descriptor.reset(&draft) }
                 .disabled(!descriptor.isSet(draft))
@@ -875,30 +834,9 @@ struct ChangeCountBadge: View {
     }
 }
 
-/// "Learn more" deep link into the bundled manual.
-struct ManualLink: View {
-    let anchor: String
-    let settingName: String
-    @Environment(ManualRouter.self) private var router: ManualRouter?
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some View {
-        Button {
-            router?.navigate(to: anchor)
-            openWindow(id: "manual")
-        } label: {
-            // The glyph is ~13pt; the app-wide minimum hit target is 22×22 (the
-            // hitbox sweep's rule). This one button repeats ~55 times across five
-            // editors, so it is the single biggest target-size win in the app.
-            Image(systemName: "questionmark.circle")
-                .frame(width: 22, height: 22)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.borderless)
-        .help("Learn more about \u{201C}\(settingName)\u{201D} in the manual")
-        .accessibilityLabel("Learn more about \(settingName)")
-    }
-}
+// ManualLink — the "?" beside every row — is now a POPOVER (name, summary,
+// related-settings links, "Open the manual") and lives in
+// UI/Components/ManualLink.swift, shared by all six editors.
 
 // ValidatedNumberField — the shared range-validating numeric control — now lives
 // in UI/Components/ValidatedNumberField.swift so every editor uses the same one.

@@ -20,6 +20,17 @@ struct SubprocessTunnelView: View {
     @State private var crProxyAuthUsername = ""
     @State private var crProxyAuthPassword = ""
 
+    /// Which tab is showing. A binding, so a related-settings link or a search
+    /// hit on the other tab can select it — no TabView in the app could be
+    /// selected in code before this.
+    @State private var tab: SettingsTab = .settings
+    /// This editor's search catalog. It is the ONE editor serving two surfaces —
+    /// SSH and the seven OpenConnect SSL-VPN kinds — so both are in the catalog,
+    /// plus Custom Routing (its second tab). `kind` follows the Kind picker (set
+    /// in `loadOnce` and on change) so the related links track what you switch to.
+    @State private var search = SettingsSearch(surfaces: [.ssh, .openConnect, .customRouting],
+                                               kind: .ssh)
+
     @State private var password = ""
     @State private var proxyPassword = ""
     @State private var jumpPassword = ""
@@ -52,6 +63,7 @@ struct SubprocessTunnelView: View {
     /// surfaces") — Connection → Sign-In → Traffic → Security → Advanced.
     private var configForm: some View {
         Form {
+            SettingsSearchSection(search: search)
             Section("Connection") {
                 TextField("Name", text: $draft.name)
                 Picker("Kind", selection: $draft.kind) {
@@ -109,6 +121,7 @@ struct SubprocessTunnelView: View {
             if let log = live?.log, !log.isEmpty { logSection(log) }
         }
         .formStyle(.grouped)
+        .revealsSettings()
         .disabled(ManagedPolicy.lockConfiguration)
     }
 
@@ -116,8 +129,9 @@ struct SubprocessTunnelView: View {
         // Custom Routing is its own TAB in every editor (AGENTS.md "Config
         // surfaces") — appending it as sections put a second, differently-shaped
         // config surface inside the run of canonical groups.
-        TabView {
+        TabView(selection: $tab) {
             configForm
+                .tag(SettingsTab.settings)
                 .tabItem { Label("Settings", systemImage: "slider.horizontal.3") }
             Form {
                 CustomRoutingTabView(vpn: vpn, profileID: draft.id, profile: $customRouting,
@@ -125,9 +139,16 @@ struct SubprocessTunnelView: View {
                                     proxyAuthPassword: $crProxyAuthPassword)
             }
             .formStyle(.grouped)
+            .revealsSettings()
             .disabled(ManagedPolicy.lockConfiguration)
+            .tag(SettingsTab.customRouting)
             .tabItem { Label("Custom Routing", systemImage: "arrow.triangle.branch") }
         }
+        .settingsEditor(search: search, tab: $tab,
+                        surfaces: [.ssh, .openConnect, .customRouting], profileID: draft.id)
+        // The Kind picker turns an SSH tunnel into a FortiGate one and back, so
+        // which related links are reachable has to follow it.
+        .onChange(of: draft.kind) { search.kind = draft.kind }
         .padding(.top, 10)
         .navigationTitle(draft.name)
         .task { loadOnce() }
@@ -154,20 +175,44 @@ struct SubprocessTunnelView: View {
 
     @ViewBuilder private var cliStatusRow: some View {
         let cli = requiredCLI
-        HStack(spacing: 6) {
-            Image(systemName: cli.isAvailable ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                .foregroundStyle(cli.isAvailable ? .green : .orange)
-                .accessibilityHidden(true)
-            Text(cli.isAvailable ? "\(cli.rawValue) found" : cli.installHint)
-                .font(.callout).foregroundStyle(.secondary)
-            if draft.kind.isSSLVPN, !TunnelCLI.ocproxy.isAvailable {
-                Spacer()
-                // Symbol + text — orange alone said "warning" to nobody colourblind.
-                Label("ocproxy not found — needs root without it", systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(.orange)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: cli.isAvailable ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(cli.isAvailable ? .green : .orange)
+                    .accessibilityHidden(true)
+                Text(cli.isAvailable ? "\(cli.rawValue) found" : cli.installHint)
+                    .font(.callout).foregroundStyle(.secondary)
+                if draft.kind.isSSLVPN, !TunnelCLI.ocproxy.isAvailable {
+                    Spacer()
+                    // Symbol + text — orange alone said "warning" to nobody colourblind.
+                    Label("ocproxy not found — needs root without it", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            // "Install with: brew install openconnect" was a string in a caption:
+            // true, and unusable to anyone who doesn't live in a terminal and
+            // can't select half a sentence. Two rows can be missing at once
+            // (the tool itself, and ocproxy for the no-root path), so each gets
+            // its own copy button.
+            missingCLICommands(cli)
+        }
+    }
+
+    /// A "Copy Install Command" button per tool this kind needs and doesn't have.
+    @ViewBuilder private func missingCLICommands(_ cli: TunnelCLI) -> some View {
+        let missing: [TunnelCLI] = {
+            var out: [TunnelCLI] = []
+            if !cli.isAvailable { out.append(cli) }
+            if draft.kind.isSSLVPN, !TunnelCLI.ocproxy.isAvailable { out.append(.ocproxy) }
+            return out
+        }()
+        ForEach(missing, id: \.self) { tool in
+            if let command = tool.installCommand {
+                CopyCommandLink(command: command,
+                                title: "Copy \u{201C}\(command)\u{201D}")
             }
         }
-        .accessibilityElement(children: .combine)
     }
 
     private var requiredCLI: TunnelCLI {
@@ -197,6 +242,7 @@ struct SubprocessTunnelView: View {
                       systemImage: "exclamationmark.triangle")
                     .font(.callout).foregroundStyle(.secondary)
             }
+            TrafficCrossLinks()
         }
     }
 
@@ -707,7 +753,8 @@ struct SubprocessTunnelView: View {
                              disabledReason: ssoBrowserUnused) {
                 VStack(alignment: .leading, spacing: 4) {
                     BrowserPicker(selection: $draft.browser,
-                                  systemDefaultLabel: "App default (\(appBrowserSummary))")
+                                  systemDefaultLabel: "App default (\(appBrowserSummary))",
+                                  showsAppDefaultLink: true)
                     Text("“App default” follows Settings; pick a specific browser here to override it for this VPN.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -885,6 +932,7 @@ struct SubprocessTunnelView: View {
                          range: SubprocessTunnelConfig.ocMTURange, prompt: "auto",
                          invalidMessage: "Enter an MTU between 576 and 1500. Leave empty to let OpenConnect work it out.")
             }
+            TrafficCrossLinks()
         }
     }
 
@@ -1143,76 +1191,12 @@ struct SubprocessTunnelView: View {
                 set: { draft[keyPath: keyPath] = $0.isEmpty ? nil : $0 })
     }
 
-    /// In canonical group order (AGENTS.md "Config surfaces"). Note the MTU split
-    /// documented there: `oc.mtu` is the user-facing tunnel MTU and lives in
-    /// Traffic (it is the one someone is told to lower when transfers stall);
-    /// `oc.base-mtu` describes the network path UNDERNEATH the tunnel and stays in
-    /// Advanced.
-    static let specs = EngineSettingCatalog([
-
-        // MARK: Connection
-
-        .init(id: "oc.reconnect-timeout", name: "Reconnect Timeout",
-              summary: "How long (0–86400 seconds) to keep retrying a dropped tunnel before giving up.",
-              group: .connection, default: Int?.none),
-
-        // MARK: Sign-In
-
-        .init(id: "oc.password", name: "Password",
-              summary: "The password for this VPN. Used by password sign-in only — a client certificate or single sign-on doesn't send it.",
-              group: .signIn, default: ""),
-        .init(id: "oc.client-cert", name: "Client Certificate",
-              summary: "A certificate file (PEM or .p12) that identifies YOU to the gateway, instead of a password. Used by certificate sign-in only.",
-              group: .signIn, default: ""),
-        .init(id: "oc.client-key", name: "Client Private Key",
-              summary: "The private key for the client certificate, when it isn't inside the certificate file itself.",
-              group: .signIn, default: ""),
-        .init(id: "oc.key-password", name: "Key / PKCS#12 Passphrase",
-              summary: "The passphrase protecting your client key or .p12 file. Stored in your login keychain.",
-              group: .signIn, default: ""),
-        .init(id: "oc.sso-browser", name: "Sign-In Browser",
-              summary: "Which browser (and profile) opens the single sign-on page, so passkeys and saved passwords are where you keep them.",
-              group: .signIn),
-        .init(id: "oc.token-mode", name: "Verification-Code Token",
-              summary: "Have OpenConnect produce the verification code (TOTP, HOTP, OIDC, RSA SecurID or a YubiKey) instead of you typing it. Used alongside password or certificate sign-in.",
-              group: .signIn, default: ""),
-        .init(id: "oc.token-secret", name: "Token Secret",
-              summary: "The seed your verification codes are generated from. Stored in your login keychain and handed over in a private file — never on the command line. Not needed for a YubiKey, which holds its own.",
-              group: .signIn, default: ""),
-
-        // MARK: Traffic
-
-        .init(id: "oc.mtu", name: "MTU",
-              summary: "Largest tunnel packet size, 576–1500. Leave empty to auto-detect; lower it if transfers stall.",
-              group: .traffic, default: Int?.none),
-
-        // MARK: Security
-
-        .init(id: "oc.cafile", name: "CA Certificate File",
-              summary: "A PEM file of extra certificate authorities to trust for the VPN server, if it uses a private CA.",
-              group: .security, default: ""),
-
-        // MARK: Advanced
-
-        .init(id: "oc.os", name: "Reported OS",
-              summary: "The operating system OpenConnect claims to be, which some servers policy-check. Pick one only if your gateway refuses a Mac; anything else isn't a value OpenConnect accepts.",
-              group: .advanced, default: ""),
-        .init(id: "oc.no-dtls", name: "Disable DTLS",
-              summary: "Force the slower-but-more-compatible TLS transport instead of UDP DTLS. Turn on only if DTLS is blocked or flaky.",
-              group: .advanced, default: false),
-        .init(id: "oc.disable-csd", name: "Skip Host Checker",
-              summary: "Bypass the server's endpoint-posture/host-checker script. May be required to connect from an unmanaged Mac; some servers refuse without it.",
-              group: .advanced, default: false),
-        .init(id: "oc.base-mtu", name: "Base MTU",
-              summary: "The MTU of the underlying network path (576–9000, allowing jumbo frames), used to size the tunnel. Leave empty to auto-detect.",
-              group: .advanced, default: Int?.none),
-        .init(id: "oc.force-dpd", name: "Dead-Peer Detection (seconds)",
-              summary: "Send a liveness probe this often (0–3600 seconds) and reconnect fast if the server stops answering. Empty leaves the protocol default.",
-              group: .advanced, default: Int?.none),
-        .init(id: "oc.extra-args", name: "Extra Arguments",
-              summary: "Raw OpenConnect flags (one per row) for site-specific needs not covered above.",
-              group: .advanced, default: [String]()),
-    ])
+    /// The catalog now lives in
+    /// `ControlPlane/OpenConnectSettingDescriptors.swift` so app-wide search can
+    /// reach it; this alias keeps the form's call sites reading
+    /// `Self.specs["oc.…"]`. (The SSH half of this editor already rendered from
+    /// `SSHSettings`, which was out here from the start.)
+    static var specs: EngineSettingCatalog { OpenConnectSettings.catalog }
 
     /// `warning` is a NON-blocking caption under the field — used for "No file at
     /// that path.", which must never stop a save (the file may appear before the
@@ -1302,6 +1286,7 @@ struct SubprocessTunnelView: View {
     private func loadOnce() {
         guard !loaded else { return }
         loaded = true
+        search.kind = draft.kind
         if let c = KeychainCredentialStore.loadCredentials(profile: "tunnel." + draft.id) {
             password = c.password
         }

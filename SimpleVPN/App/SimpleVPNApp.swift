@@ -42,6 +42,11 @@ struct SimpleVPNApp: App {
     @State private var evaluator = ProfileEvaluator()
     @State private var policy = PolicyStore()
     @State private var manualRouter = ManualRouter()
+    /// "Take me to that setting" — the one intent behind the related-settings
+    /// links in every help popover and the app-wide ⌘⇧F search. Shared, because
+    /// the sender (a popover in any editor, or the search sheet) and the receiver
+    /// (Manage VPNs, then the editor, then its tab) are different windows.
+    @State private var settingsRouter = SettingsRouter()
     @State private var publicIP = PublicIPMonitor()
     @State private var endpointLocator = EndpointLocator()
     /// Endpoint speed measurements, shared so every server list agrees (and so a
@@ -107,6 +112,7 @@ struct SimpleVPNApp: App {
                 .environment(evaluator)
                 .environment(policy)
                 .environment(manualRouter)
+                .environment(settingsRouter)
                 .environment(publicIP)
                 .environment(endpointLocator)
                 .environment(endpointProbes)
@@ -215,7 +221,7 @@ struct SimpleVPNApp: App {
             CommandGroup(after: .appInfo) {
                 Button("Install CLI…") { CLIInstaller.install() }
             }
-            VPNCommands(vpn: vpn, updater: updaterController)
+            VPNCommands(vpn: vpn, updater: updaterController, settingsRouter: settingsRouter)
             DiagnosticsCommands(vpn: vpn, tunnels: tunnels)
         }
 
@@ -274,6 +280,7 @@ struct SimpleVPNApp: App {
                 .environment(publicIP)
                 .environment(policy)
                 .environment(manualRouter)
+                .environment(settingsRouter)
                 .environment(compositions)
                 .environment(tunnels)
                 .environment(tunnelManager)
@@ -522,6 +529,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 private struct VPNCommands: Commands {
     @Bindable var vpn: VPNController
     let updater: SPUStandardUpdaterController
+    let settingsRouter: SettingsRouter
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
@@ -542,6 +550,14 @@ private struct VPNCommands: Commands {
                 .keyboardShortcut("t", modifiers: [.command, .shift])
             Button("Routes…") { openWindow(id: "routes") }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
+            // Every setting in every editor, searchable from anywhere — the
+            // answer to "SimpleVPN has a setting for X, where is it?", which
+            // used to require knowing which of six editors owned it.
+            Button("Find a Setting\u{2026}") {
+                openWindow(id: "manage")
+                settingsRouter.requestFind()
+            }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
             Divider()
             Button("Disconnect") { if let id = vpn.selectedID { vpn.disconnect(id: id) } }
                 .keyboardShortcut("k", modifiers: [.command, .shift])

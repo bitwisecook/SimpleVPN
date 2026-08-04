@@ -31,6 +31,15 @@ struct TailscaleView: View {
     @State private var crProxyAuthUsername = ""
     @State private var crProxyAuthPassword = ""
 
+    /// Which tab is showing. A binding, so a related-settings link or a search
+    /// hit on the other tab can select it — no TabView in the app could be
+    /// selected in code before this.
+    @State private var tab: SettingsTab = .settings
+    /// This editor's search catalog: its own surface plus Custom Routing, which
+    /// is its second tab — one field finds everything this editor shows.
+    @State private var search = SettingsSearch(surfaces: [.tailscale, .customRouting],
+                                               kind: .tailscale)
+
     /// The config surface: the canonical groups, in order (AGENTS.md "Config
     /// surfaces"). Security and Advanced have no content for this engine and are
     /// omitted; the live "This Network" status is NOT a config group and lives
@@ -38,6 +47,7 @@ struct TailscaleView: View {
     /// i.e. inside the run of config groups).
     private var configForm: some View {
         Form {
+            SettingsSearchSection(search: search)
             Section("Connection") {
                 TextField("Name", text: $name)
                 EngineSettingRow(spec: Self.specs["ts.preset"], value: draft.preset) {
@@ -92,6 +102,19 @@ struct TailscaleView: View {
                 }
                 // Non-blocking: Headscale's keys legitimately look different.
                 if let w = authKeyWarning { SettingCaveat(w) }
+                // "An optional key from your network's admin page" — so link the
+                // admin page. Headscale only when its control URL is a valid one:
+                // a link built from a half-typed address goes nowhere.
+                if let admin = adminPageURL {
+                    Link(destination: admin) {
+                        Label(draft.preset == .headscale
+                              ? "Open your Headscale server to create a setup key"
+                              : "Open the Tailscale admin page to create a setup key",
+                              systemImage: "arrow.up.forward.square")
+                            .font(.callout)
+                    }
+                    .help("Opens \(admin.absoluteString)")
+                }
                 if !authKey.isEmpty {
                     // The converse of the browser story below, which is correctly
                     // hidden here — but hiding it said nothing about WHY, and a
@@ -110,7 +133,8 @@ struct TailscaleView: View {
                     // browser because Tailscale's login often needs passkeys or a
                     // password manager living there; the in-app window is also offered.
                     BrowserPicker(selection: $draft.signInBrowser,
-                                  systemDefaultLabel: "Default browser (\(BrowserCatalog.osDefaultName))")
+                                  systemDefaultLabel: "Default browser (\(BrowserCatalog.osDefaultName))",
+                                  showsAppDefaultLink: true)
                 }
                 signInStatusRow
             }
@@ -170,6 +194,18 @@ struct TailscaleView: View {
                         .font(.callout).foregroundStyle(.orange)
                         .accessibilityLabel("Problem: \(problem)")
                 }
+                // The admin page is where a shared network is APPROVED — until
+                // then this field is a request nobody has answered. It was said in
+                // the summary and left as an instruction.
+                if let admin = adminPageURL {
+                    Link(destination: admin) {
+                        Label("Approve shared networks on the admin page",
+                              systemImage: "arrow.up.forward.square")
+                            .font(.callout)
+                    }
+                    .help("Opens \(admin.absoluteString)")
+                }
+                TrafficCrossLinks(gatewayNote: gatewayNote)
             }
 
             // Live status, AFTER the canonical config groups. It used to sit
@@ -180,6 +216,7 @@ struct TailscaleView: View {
             }
         }
         .formStyle(.grouped)
+        .revealsSettings()
         .disabled(ManagedPolicy.lockConfiguration)
     }
 
@@ -187,8 +224,9 @@ struct TailscaleView: View {
         // Custom Routing is its own TAB in every editor (AGENTS.md "Config
         // surfaces") — appending it as sections put a second, differently-shaped
         // config surface inside the run of canonical groups.
-        TabView {
+        TabView(selection: $tab) {
             configForm
+                .tag(SettingsTab.settings)
                 .tabItem { Label("Settings", systemImage: "slider.horizontal.3") }
             Form {
                 CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
@@ -196,9 +234,13 @@ struct TailscaleView: View {
                                     proxyAuthPassword: $crProxyAuthPassword)
             }
             .formStyle(.grouped)
+            .revealsSettings()
             .disabled(ManagedPolicy.lockConfiguration)
+            .tag(SettingsTab.customRouting)
             .tabItem { Label("Custom Routing", systemImage: "arrow.triangle.branch") }
         }
+        .settingsEditor(search: search, tab: $tab,
+                        surfaces: [.tailscale, .customRouting], profileID: profileID)
         .padding(.top, 10)
         .navigationTitle(name.isEmpty ? "Tailscale" : name)
         .task { loadOnce() }
@@ -334,6 +376,29 @@ struct TailscaleView: View {
         return list.isEmpty ? nil : TailscaleConfig.routesProblem(list)
     }
 
+    /// Where setup keys are made and shared networks approved. Tailscale's own
+    /// console has one fixed address; Headscale's is the server the user runs —
+    /// and ONLY when the control URL is actually valid, because a link built from
+    /// a half-typed address is a broken link with a confident label.
+    private var adminPageURL: URL? {
+        switch draft.preset {
+        case .tailscale:
+            return URL(string: "https://login.tailscale.com/admin/machines")
+        case .headscale:
+            guard draft.controlURLProblem == nil, !draft.controlURL.isEmpty else { return nil }
+            return URL(string: draft.controlURL)
+        }
+    }
+
+    /// Whether this VPN is carrying everything right now — the question the
+    /// Traffic group answers only in theory. nil when it isn't connected.
+    private var gatewayNote: String? {
+        guard vpn.profiles.first(where: { $0.id == profileID })?.status == .connected else { return nil }
+        return vpn.gatewayRole(for: profileID) == .full
+            ? "Right now this VPN carries ALL traffic \u{2014} it owns the default route."
+            : "Right now this VPN carries only its own networks \u{2014} something else owns the default route."
+    }
+
     /// Non-blocking nudges (the name is legal; the key may be a Headscale one).
     private var hostnameWarning: String? { TailscaleConfig.hostnameWarning(draft.hostname) }
     private var authKeyWarning: String? {
@@ -412,52 +477,8 @@ struct TailscaleView: View {
 
     // MARK: Manual-linked specs (anchors: ts.x → #ts-x in manual.html)
 
-    /// In canonical group order (AGENTS.md "Config surfaces"). There is no
-    /// Security content and — with Share Networks moved to Traffic, where a
-    /// decision about which networks this Mac carries belongs — no Advanced
-    /// content either, so both groups are OMITTED rather than shown empty.
-    static let specs = EngineSettingCatalog([
-
-        // MARK: Connection
-
-        .init(id: "ts.preset", name: "Service",
-              summary: "Tailscale's own coordination service, or a Headscale server you run yourself. It is the same engine either way — this only decides whether you're asked for a server address.",
-              group: .connection, default: TailscaleConfig.Preset.tailscale),
-        .init(id: "ts.control-url", name: "Server Address",
-              summary: "The web address of your own Tailscale-compatible server (Headscale). Must start with https://.",
-              group: .connection, default: ""),
-        .init(id: "ts.hostname", name: "Name on the Network",
-              summary: "What this Mac is called to the other machines on your network. Defaults to your Mac's name.",
-              group: .connection, default: ""),
-
-        // MARK: Sign-In
-
-        .init(id: "ts.auth-key", name: "Setup Key",
-              summary: "An optional key from your network's admin page that signs this Mac in without a browser. Leave empty and you'll sign in the usual way, once.",
-              group: .signIn, default: ""),
-
-        // MARK: Traffic
-
-        .init(id: "ts.accept-routes", name: "Use Shared Networks",
-              summary: "Some machines share the office or home network they sit on. With this on, those networks are reachable through this VPN too.",
-              group: .traffic, default: true),
-        .init(id: "ts.accept-dns", name: "Use This Network's DNS",
-              summary: "Lets you reach the other machines by name instead of by address, and uses the DNS servers your network specifies.",
-              group: .traffic, default: true),
-        .init(id: "ts.exit-node", name: "Send Internet Traffic Elsewhere",
-              summary: "Route everything — not just traffic to your own machines — through another machine on the network, the way a traditional VPN would.",
-              group: .traffic, default: false),
-        .init(id: "ts.exit-node-machine", name: "Machine",
-              summary: "Which machine on your network carries your internet traffic. It has to be offering to, and be approved on the admin page — SimpleVPN can only list the ones that are while connected.",
-              group: .traffic, default: ""),
-        .init(id: "ts.exit-node-lan", name: "Allow Local Network Access",
-              summary: "While your internet traffic goes through another machine, keep the network you are physically on — printers, file shares — directly reachable.",
-              group: .traffic, default: true),
-        // Sharing the networks this Mac can reach is a decision about which
-        // traffic this tunnel carries, so it sits with the other traffic
-        // decisions rather than alone under an "Advanced" heading.
-        .init(id: "ts.advertise-routes", name: "Share Networks From This Mac",
-              summary: "Offer the networks this Mac can reach (like your home LAN) to the other machines. They still have to be approved on the admin page.",
-              group: .traffic, default: ""),
-    ])
+    /// The catalog now lives in `ControlPlane/TailscaleSettingDescriptors.swift`
+    /// so app-wide search can reach it; this alias keeps the form's call sites
+    /// reading `Self.specs["ts.…"]`.
+    static var specs: EngineSettingCatalog { TailscaleSettings.catalog }
 }

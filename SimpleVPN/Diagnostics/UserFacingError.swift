@@ -57,6 +57,10 @@ nonisolated struct UserFacingError: Identifiable, Sendable, Equatable {
         case openKeePassXC
         case manageVPNs
         case networkSettings
+        /// System Settings > General > Login Items & Extensions — where the
+        /// network extension is approved. Four connect paths told the user those
+        /// four levels of navigation in prose and gave them nothing to click.
+        case loginItems
         case openURL(URL)
 
         var title: String {
@@ -65,6 +69,7 @@ nonisolated struct UserFacingError: Identifiable, Sendable, Equatable {
             case .openKeePassXC: "Open KeePassXC"
             case .manageVPNs: "Open Manage VPNs"
             case .networkSettings: "Open Network Settings"
+            case .loginItems: "Open Login Items & Extensions"
             case .openURL: "Open Download Page"
             }
         }
@@ -75,6 +80,7 @@ nonisolated struct UserFacingError: Identifiable, Sendable, Equatable {
             case .openKeePassXC: "key.horizontal.fill"
             case .manageVPNs: "slider.horizontal.3"
             case .networkSettings: "wifi"
+            case .loginItems: "puzzlepiece.extension"
             case .openURL: "arrow.down.circle"
             }
         }
@@ -152,6 +158,12 @@ nonisolated extension UserFacingError {
         }
         if s.contains("offline") || s.contains("not connected to the internet") {
             return offline(detail: detail, occurred: occurred)
+        }
+        // The connect paths for all four packet-tunnel kinds throw this exact
+        // sentence when the system extension hasn't been approved. It named the
+        // System Settings pane in prose; now it opens it.
+        if s.contains("network extension approved") {
+            return extensionNotApproved(detail: detail, occurred: occurred)
         }
         return generic(raw: raw, detail: detail, occurred: occurred)
     }
@@ -584,6 +596,19 @@ nonisolated extension UserFacingError {
             ],
             category: .configuration, symbol: "lock.fill",
             technicalDetail: detail, occurred: occurred)
+    }
+
+    private static func extensionNotApproved(detail: String, occurred: Date) -> UserFacingError {
+        UserFacingError(
+            title: "SimpleVPN\u{2019}s network extension needs approving",
+            explanation: "macOS keeps the part of SimpleVPN that builds tunnels switched off until you allow it, once.",
+            steps: [
+                .init("Open **System Settings \u{25B8} General \u{25B8} Login Items & Extensions**."),
+                .init("Under **Network Extensions**, turn SimpleVPN on."),
+                .init("Come back here and click **Connect** again."),
+            ],
+            action: .loginItems, canRetry: true, category: .configuration,
+            symbol: "puzzlepiece.extension", technicalDetail: detail, occurred: occurred)
     }
 
     private static func offline(detail: String, occurred: Date) -> UserFacingError {

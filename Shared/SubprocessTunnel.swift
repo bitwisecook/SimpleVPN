@@ -290,6 +290,19 @@ nonisolated enum TunnelCLI: String, CaseIterable, Sendable {
         case .ocproxy: "Install with: brew install ocproxy (enables the no-root SOCKS path)"
         }
     }
+
+    /// The bare command, for the "Copy Install Command" button. `installHint` is
+    /// a sentence with the command inside it — readable, and unusable to anyone
+    /// who can't select half a caption. nil for the tools macOS ships, which have
+    /// nothing to install.
+    var installCommand: String? {
+        switch self {
+        case .ssh, .networksetup: nil
+        case .openconnect: "brew install openconnect"
+        case .openfortivpn: "brew install openfortivpn"
+        case .ocproxy: "brew install ocproxy"
+        }
+    }
 }
 
 @MainActor

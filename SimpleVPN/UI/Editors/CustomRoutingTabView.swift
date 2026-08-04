@@ -202,6 +202,9 @@ struct CustomRoutingTabView: View {
     var kind: VPNKind? = nil
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The host editor's search model — which kind's editor this tab is inside,
+    /// and the reveal path for the cross-links below.
+    @Environment(SettingsSearch.self) private var search: SettingsSearch?
 
     /// The route rule whose overlap arrow(s) are currently shown; nil = none focused.
     @State private var focusedRuleID: UUID?
@@ -221,6 +224,7 @@ struct CustomRoutingTabView: View {
             routesSection
             dnsSection
             proxySection
+            crossLinksSection
         }
         .onChange(of: focusedRuleID) { _, new in
             guard new != nil else { return }
@@ -241,6 +245,32 @@ struct CustomRoutingTabView: View {
         }
     }
 
+    /// The other half of the Traffic ↔ Custom Routing pair. This tab EDITS what
+    /// the kind's Traffic group produces, and the two sat in separate tabs with
+    /// nothing pointing either way — so a user changing routes here had no way
+    /// back to the setting that decides what there is to change, and no way to
+    /// see what finally got installed.
+    ///
+    /// The Traffic target is derived from the kind (AllSettings), not hard-coded
+    /// per editor, so this one view serves all six.
+    @ViewBuilder private var crossLinksSection: some View {
+        let traffic = AllSettings.firstTrafficSetting(for: search?.kind ?? kind)
+        Section {
+            if let traffic {
+                SettingJumpLink(title: "\(traffic.surface.title) Traffic settings \u{2014} what this VPN offers before these rules run",
+                                settingID: traffic.setting.id,
+                                systemImage: "slider.horizontal.3",
+                                accessibilityLabel: "\(traffic.surface.title) Traffic settings: what this VPN offers before these rules run")
+            }
+            WindowJumpLink(title: "Routes \u{2014} see what these rules actually installed",
+                           windowID: "routes",
+                           systemImage: "point.topleft.down.to.point.bottomright.curvepath",
+                           accessibilityLabel: "Routes: see what these rules actually installed")
+        } header: {
+            Text("Related")
+        }
+    }
+
     // MARK: Routes
 
     /// The spec catalog for this whole surface, in one place
@@ -258,7 +288,7 @@ struct CustomRoutingTabView: View {
             HStack(alignment: .center, spacing: 8) {
                 EngineSettingLabel(spec: spec, changed: changed)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                ManualLink(anchor: spec.manualAnchor, settingName: spec.name)
+                ManualLink(setting: spec)
             }
             Text(spec.summary)
                 .font(.callout).foregroundStyle(.secondary)
@@ -267,6 +297,9 @@ struct CustomRoutingTabView: View {
         }
         .padding(.top, 4)
         .help(spec.summary)
+        // These list controls are the reveal targets for the rule editors, so
+        // they carry the same identity/pulse/AX-focus contract as a row.
+        .settingReveal(spec.id)
         .accessibilityElement(children: .contain)
     }
 

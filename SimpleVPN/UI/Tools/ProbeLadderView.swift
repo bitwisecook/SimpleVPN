@@ -279,10 +279,10 @@ struct ProbeStepRow: View {
         case .openOnePassword: UserFacingErrorSheet.openOnePassword()
         case .openKeePassXC: UserFacingErrorSheet.openKeePassXC()
         case .manageVPNs: openWindow?(id: "manage")
-        case .networkSettings:
-            if let url = URL(string: "x-apple.systempreferences:com.apple.Network-Settings.extension") {
-                openURL?(url)
-            }
+        // The panes live in SystemSettingsPane now (UI/Components/CrossLinks.swift)
+        // rather than as x-apple.systempreferences literals in each view.
+        case .networkSettings: SystemSettingsPane.networkVPN.open()
+        case .loginItems: SystemSettingsPane.loginItems.open()
         case .openURL(let url): openURL?(url)
         }
     }

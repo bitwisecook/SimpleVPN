@@ -36,10 +36,20 @@ struct ProxyTunnelView: View {
     @State private var crProxyAuthUsername = ""
     @State private var crProxyAuthPassword = ""
 
+    /// Which tab is showing. A binding, so a related-settings link or a search
+    /// hit on the other tab can select it — no TabView in the app could be
+    /// selected in code before this.
+    @State private var tab: SettingsTab = .settings
+    /// This editor's search catalog: its own surface plus Custom Routing, which
+    /// is its second tab — one field finds everything this editor shows.
+    @State private var search = SettingsSearch(surfaces: [.proxyTunnel, .customRouting],
+                                               kind: .proxyTunnel)
+
     /// The config surface: the canonical groups, in order (AGENTS.md "Config
     /// surfaces"). Security and Advanced have no content for this engine.
     private var configForm: some View {
         Form {
+            SettingsSearchSection(search: search)
             Section("Connection") {
                 TextField("Name", text: $name)
                 EngineSettingRow(spec: Self.specs["px.kind"], value: preset) {
@@ -174,6 +184,7 @@ struct ProxyTunnelView: View {
                         engineDefault: ProxyTunnelStartConfig.defaultMTU,
                         invalidMessage: "Enter an MTU between \(ProxyTunnelConfig.mtuRange.lowerBound) and \(ProxyTunnelConfig.mtuRange.upperBound). Leave empty for the standard \(ProxyTunnelStartConfig.defaultMTU).")
                 }
+                TrafficCrossLinks(gatewayNote: gatewayNote)
             }
 
             // Live status, AFTER the canonical config groups — it is not one of
@@ -183,6 +194,7 @@ struct ProxyTunnelView: View {
             }
         }
         .formStyle(.grouped)
+        .revealsSettings()
         .disabled(ManagedPolicy.lockConfiguration)
     }
 
@@ -190,8 +202,9 @@ struct ProxyTunnelView: View {
         // Custom Routing is its own TAB in every editor (AGENTS.md "Config
         // surfaces") — appending it as sections put a second, differently-shaped
         // config surface inside the run of canonical groups.
-        TabView {
+        TabView(selection: $tab) {
             configForm
+                .tag(SettingsTab.settings)
                 .tabItem { Label("Settings", systemImage: "slider.horizontal.3") }
             Form {
                 CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
@@ -199,9 +212,13 @@ struct ProxyTunnelView: View {
                                     proxyAuthPassword: $crProxyAuthPassword)
             }
             .formStyle(.grouped)
+            .revealsSettings()
             .disabled(ManagedPolicy.lockConfiguration)
+            .tag(SettingsTab.customRouting)
             .tabItem { Label("Custom Routing", systemImage: "arrow.triangle.branch") }
         }
+        .settingsEditor(search: search, tab: $tab,
+                        surfaces: [.proxyTunnel, .customRouting], profileID: profileID)
         .padding(.top, 10)
         .navigationTitle(name.isEmpty ? "Proxy Tunnel" : name)
         .task { loadOnce() }
@@ -374,52 +391,21 @@ struct ProxyTunnelView: View {
         }
     }
 
+    /// Whether this VPN is carrying everything right now — the question the
+    /// Traffic group answers only in theory. nil when it isn't connected.
+    private var gatewayNote: String? {
+        guard vpn.profiles.first(where: { $0.id == profileID })?.status == .connected else { return nil }
+        return vpn.gatewayRole(for: profileID) == .full
+            ? "Right now this VPN carries ALL traffic \u{2014} it owns the default route."
+            : "Right now this VPN carries only the networks above \u{2014} something else owns the default route."
+    }
+
     // MARK: Manual-linked specs (anchors: px.x → #px-x in manual.html)
 
-    /// In canonical group order (AGENTS.md "Config surfaces"): Connection →
-    /// Sign-In → Traffic. No Security or Advanced content — DNS and MTU are
-    /// user-facing traffic knobs here — so both groups are omitted.
-    static let specs = EngineSettingCatalog([
-
-        // MARK: Connection
-
-        .init(id: "px.kind", name: "Kind",
-              summary: "Which kind of proxy this is: SOCKS5, HTTP CONNECT or HTTPS CONNECT. Match what your proxy's own documentation calls it.",
-              group: .connection, default: ProxyTunnelConfig.Preset.socks5),
-        .init(id: "px.address", name: "Proxy Address",
-              summary: "The proxy that carries your traffic, as host or host:port. Pick the kind above to match your proxy (SOCKS5 or HTTP CONNECT).",
-              group: .connection, default: ""),
-
-        // MARK: Sign-In
-
-        .init(id: "px.requires-auth", name: "Requires Sign-In",
-              summary: "Turn on if your proxy asks for a username and password. Leave off for an open proxy.",
-              group: .signIn, default: false),
-        .init(id: "px.username", name: "Username",
-              summary: "The username your proxy expects.",
-              group: .signIn, default: ""),
-        .init(id: "px.password", name: "Password",
-              summary: "The password your proxy expects. Stored in your Keychain, handed to the proxy only in memory.",
-              group: .signIn, default: ""),
-
-        // MARK: Traffic
-
-        .init(id: "px.default-route", name: "Send All Traffic",
-              summary: "Route everything on this Mac through the proxy (full tunnel). Turn off to send only specific networks through it and leave the rest direct (split tunnel).",
-              group: .traffic, default: true),
-        .init(id: "px.included", name: "Networks Through the Proxy",
-              summary: "When not sending all traffic, these networks (as CIDRs) go through the proxy and nothing else does.",
-              group: .traffic, default: ""),
-        .init(id: "px.excluded", name: "Networks Kept Direct",
-              summary: "Networks to send straight out, never through the proxy — even when \u{201C}Send all traffic\u{201D} is on.",
-              group: .traffic, default: ""),
-        .init(id: "px.dns", name: "DNS Servers",
-              summary: "Name servers to use while connected. Lookups to them go through the proxy too, so they don't leak. Leave empty to keep your Mac's own DNS.",
-              group: .traffic, default: ""),
-        .init(id: "px.mtu", name: "MTU",
-              summary: "The tunnel's maximum packet size. 1500 suits almost everything; lower it only if a network in the path needs smaller packets.",
-              group: .traffic, default: ProxyTunnelStartConfig.defaultMTU),
-    ])
+    /// The catalog now lives in `ControlPlane/ProxyTunnelSettingDescriptors.swift`
+    /// so app-wide search can reach it; this alias keeps the form's call sites
+    /// reading `Self.specs["px.…"]`.
+    static var specs: EngineSettingCatalog { ProxyTunnelSettings.catalog }
 
     /// The house text-field idiom (`LabeledContent` + trailing plain field), so a
     /// text row looks the same here as in the OpenVPN, WireGuard, SSH and
