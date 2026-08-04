@@ -64,11 +64,21 @@ struct ProbeLadderCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Text(subtitle).font(.caption).foregroundStyle(.secondary)
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+            // The headline icon (hidden above) is the ONLY carrier of "security
+            // finding" at card level — the summary never says it. Say it here.
+            .accessibilityLabel(ladder.securityFindings.isEmpty
+                ? "\(ladder.summary). \(subtitle)"
+                : "Security finding. \(ladder.summary). \(subtitle)")
             Spacer(minLength: 8)
             if isRunning {
                 HStack(spacing: 6) {
+                    // The spinner already says "In progress"; a second voice
+                    // saying "Checking…" would double-announce the same fact.
                     DrawnSpinner()
                     Text("Checking\u{2026}").font(.caption).foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
                 }
             } else if let rerun {
                 Button("Check Again", action: rerun).controlSize(.small)
@@ -110,10 +120,14 @@ struct ProbeLadderCard: View {
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                .accessibilityElement(children: .combine)
                 Spacer(minLength: 8)
                 Button("Test Sign-In Too", action: testSignIn)
                     .buttonStyle(.glass)
                     .controlSize(.small)
+                    // The outcome is genuinely not obvious: it spends a real
+                    // sign-in attempt (and a one-time code, where one is used).
+                    .accessibilityHint(signInCaution)
             }
         }
     }
@@ -147,7 +161,7 @@ struct ProbeStepRow: View {
                 }
                 Spacer(minLength: 8)
                 if step.securityFinding {
-                    Text("Security")
+                    Label("Security", systemImage: "exclamationmark.shield.fill")
                         .font(.caption2.weight(.medium))
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(.red.opacity(0.15), in: Capsule())
@@ -159,6 +173,10 @@ struct ProbeStepRow: View {
                         .foregroundStyle(.tertiary)
                 }
             }
+            // The sentence covers this header line only — a row-wide .combine
+            // swallowed the Details disclosure and the remedy button.
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(headerSentence)
             if !step.evidence.isEmpty {
                 DisclosureGroup("Details", isExpanded: $showEvidence) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -181,8 +199,16 @@ struct ProbeStepRow: View {
             }
         }
         .padding(.vertical, 7)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(accessibleStatus). \(step.title). \(step.detail)")
+        .accessibilityElement(children: .contain)
+    }
+
+    /// Status first ("Failed. Server certificate…"), then the security flag and
+    /// duration — everything the header line shows, in one sentence.
+    private var headerSentence: String {
+        var bits = ["\(accessibleStatus). \(step.title). \(step.detail)"]
+        if step.securityFinding { bits.append("Security finding") }
+        if let duration = step.duration { bits.append(format(duration)) }
+        return bits.joined(separator: ". ")
     }
 
     private var glyph: some View {
@@ -231,6 +257,9 @@ struct ProbeStepRow: View {
                     Text(LocalizedStringKey("\u{2022} " + s.text))
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                        // The bullet is spoken as "bullet"; the **bold** marks
+                        // are literal to VoiceOver — strip both.
+                        .accessibilityLabel(s.text.replacingOccurrences(of: "**", with: ""))
                 }
             }
             Spacer(minLength: 8)

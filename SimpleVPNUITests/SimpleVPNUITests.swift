@@ -18,6 +18,7 @@
 //
 
 import XCTest
+import CoreGraphics   // CGSessionCopyCurrentDictionary — the locked-console pre-check
 
 final class SimpleVPNUITests: XCTestCase {
 
@@ -57,9 +58,59 @@ final class SimpleVPNUITests: XCTestCase {
         try runAccessibilityAudit(on: app)
     }
 
+    /// The same gate over the Settings window (wave 3: editors + settings),
+    /// opened the way a user opens it: SimpleVPN ▸ Settings… (⌘,). The window's
+    /// title is macOS-version-dependent (the selected tab's name vs
+    /// "SimpleVPN Settings"), so the wait matches either.
+    @MainActor
+    func testSettingsWindowAccessibilityAudit() throws {
+        let app = try launchOrSkip()
+
+        app.menuBarItems["SimpleVPN"].click()
+        app.menuBarItems["SimpleVPN"].menuItems["Settings…"].click()
+        let settings = app.windows.matching(
+            NSPredicate(format: "title == 'General' OR title CONTAINS 'Settings'")
+        ).firstMatch
+        guard settings.waitForExistence(timeout: 10) else {
+            XCTFail("The Settings window didn't open from the app menu")
+            return
+        }
+
+        try runAccessibilityAudit(on: app)
+    }
+
+    /// The same gate over the Manage VPNs window (wave 3: the management
+    /// surface — list, editor tabs, import), opened via VPN ▸ Manage VPNs….
+    @MainActor
+    func testManageVPNsWindowAccessibilityAudit() throws {
+        let app = try launchOrSkip()
+
+        app.menuBarItems["VPN"].click()
+        app.menuBarItems["VPN"].menuItems["Manage VPNs…"].click()
+        guard app.windows["Manage VPNs"].waitForExistence(timeout: 10) else {
+            XCTFail("The Manage VPNs window didn't open from the VPN menu")
+            return
+        }
+
+        try runAccessibilityAudit(on: app)
+    }
+
     /// Launches the app and skips (rather than flakes) where no UI can appear.
     @MainActor
     private func launchOrSkip() throws -> XCUIApplication {
+        // A locked console (screen asleep behind a password) can spawn the
+        // process but never foreground it — launch() itself then fails the
+        // test after a 60 s activation timeout, which is an environment
+        // problem, not an accessibility regression. Skip up front instead.
+        if let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+           (session["CGSSessionScreenIsLocked"] as? Bool) == true {
+            throw XCTSkip("""
+                The console session is locked — macOS won't bring any app to \
+                the foreground, so the audit can't run here. It runs wherever \
+                UI tests run for real.
+                """)
+        }
+
         let app = XCUIApplication()
         app.launch()
 
@@ -77,6 +128,16 @@ final class SimpleVPNUITests: XCTestCase {
 
     /// The shared audit body: one exclusion list, applied identically to every
     /// window, so a new surface can't quietly get a looser gate.
+    ///
+    /// `.contrast` stays EXCLUDED (wave 3 re-attempted enabling it): the app's
+    /// status language rides on Liquid Glass materials whose effective
+    /// background is composited at draw time; the audit checker samples static
+    /// colors and misfires on glass (observed in wave 1). Wave 3 did the manual
+    /// pass instead: the worst caption-on-glass offenders now honor Increase
+    /// Contrast (ProblemPill/working-pill text promotes to primary), LabelPill
+    /// picks its text color from the pill's own WCAG luminance, and no
+    /// information rides on .tertiary text over glass. Re-attempt when the
+    /// audit learns to sample composited backgrounds.
     @MainActor
     private func runAccessibilityAudit(on app: XCUIApplication) throws {
         let auditTypes: XCUIAccessibilityAuditType = [

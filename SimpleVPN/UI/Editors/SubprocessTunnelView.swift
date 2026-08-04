@@ -90,6 +90,13 @@ struct SubprocessTunnelView: View {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") { save() }
                     .disabled(draft.name.trimmingCharacters(in: .whitespaces).isEmpty || draft.server.isEmpty)
+                    // A dead button must say why (the rule ConnectionView follows).
+                    .help(draft.name.trimmingCharacters(in: .whitespaces).isEmpty ? "Give this tunnel a name first."
+                          : draft.server.isEmpty ? "Enter the server address first."
+                          : "Save changes to this tunnel")
+                    .accessibilityValue(draft.name.trimmingCharacters(in: .whitespaces).isEmpty
+                          ? "unavailable — give this tunnel a name first"
+                          : draft.server.isEmpty ? "unavailable — enter the server address first" : "")
             }
         }
     }
@@ -101,14 +108,17 @@ struct SubprocessTunnelView: View {
         HStack(spacing: 6) {
             Image(systemName: cli.isAvailable ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                 .foregroundStyle(cli.isAvailable ? .green : .orange)
+                .accessibilityHidden(true)
             Text(cli.isAvailable ? "\(cli.rawValue) found" : cli.installHint)
                 .font(.callout).foregroundStyle(.secondary)
             if draft.kind.isSSLVPN, !TunnelCLI.ocproxy.isAvailable {
                 Spacer()
-                Text("ocproxy not found — needs root without it")
+                // Symbol + text — orange alone said "warning" to nobody colourblind.
+                Label("ocproxy not found — needs root without it", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(.orange)
             }
         }
+        .accessibilityElement(children: .combine)
     }
 
     private var requiredCLI: TunnelCLI {
@@ -243,11 +253,17 @@ struct SubprocessTunnelView: View {
                         hostPicker = nil
                     }
                     .buttonStyle(.glassProminent).controlSize(.small)
+                    // Every row's button says "Use" — name the host it uses.
+                    .accessibilityLabel("Use \(host.alias)")
                 }
                 .padding(.vertical, 2)
             }
             .frame(minHeight: 220)
-            HStack { Spacer(); Button("Cancel") { hostPicker = nil }.buttonStyle(.glass) }
+            HStack {
+                Spacer()
+                Button("Cancel") { hostPicker = nil }.buttonStyle(.glass)
+                    .keyboardShortcut(.cancelAction)
+            }
         }
         .padding(16)
         .frame(width: 440, height: 340)
@@ -335,10 +351,20 @@ struct SubprocessTunnelView: View {
     @ViewBuilder private var forwardsSectionBody: some View {
         ForEach(Array(draft.forwards.enumerated()), id: \.offset) { i, _ in
             VStack(alignment: .leading, spacing: 2) {
-                TextField("L 8080:internal.host:80", text: Binding(
-                    get: { draft.forwards[i] }, set: { draft.forwards[i] = $0 }))
-                    .font(.callout.monospaced())
-                    .onSubmit { applyForwardsNow() }
+                HStack(spacing: 6) {
+                    TextField("L 8080:internal.host:80", text: Binding(
+                        get: { draft.forwards[i] }, set: { draft.forwards[i] = $0 }))
+                        .font(.callout.monospaced())
+                        .onSubmit { applyForwardsNow() }
+                        .accessibilityLabel("Port forward \(i + 1)")
+                    // .onDelete draws NO affordance in a macOS Form — without
+                    // this button a forward can't be removed by mouse or keyboard.
+                    Button {
+                        draft.forwards.remove(at: i); applyForwardsNow()
+                    } label: { Image(systemName: "trash") }
+                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                        .accessibilityLabel("Remove port forward \(i + 1)")
+                }
                 if active, let phase = forwardPhase(draft.forwards[i]) {
                     forwardBadge(phase)
                 }

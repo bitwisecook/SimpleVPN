@@ -258,6 +258,10 @@ struct ConnectionView: View {
                 otherConnectionsSection
             }
             .navigationSplitViewColumnWidth(min: 220, ideal: 260)
+            // Tab moves column by column — the whole sidebar is one focus
+            // section, so Tab from the list lands in the detail pane instead of
+            // walking every row.
+            .focusSection()
             .toolbar {
                 ToolbarItem {
                     Button { openWindow(id: "manage") } label: { Image(systemName: "slider.horizontal.3") }

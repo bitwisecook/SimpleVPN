@@ -86,9 +86,13 @@ extension RouteGraphView {
                         else if solid { e.tint.opacity(onPath ? 1 : 0.55 + 0.45 * load) }
                         else { e.status.tint.opacity(onPath ? 1 : 0.75) }
                     let ink = offPath ? base.opacity(0.5) : base
+                    // Differentiate Without Color: per-status dash rhythms, so
+                    // stalled/paused/down/portal never differ by hue alone.
+                    let dash: [CGFloat] = solid ? []
+                        : (differentiateWithoutColor && !e.standby ? e.status.accessibleDash : [6, 7])
                     ctx.stroke(path, with: .color(ink),
                                style: StrokeStyle(lineWidth: width, lineCap: .round,
-                                                  dash: solid ? [] : [6, 7], dashPhase: phase))
+                                                  dash: dash, dashPhase: phase))
                     // Ports, like a patch bay — they make the attachment points obvious.
                     let portBase: Color = e.highlighted
                         ? (e.standby ? Color.accentColor.opacity(0.5) : .accentColor)

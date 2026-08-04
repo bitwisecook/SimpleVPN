@@ -263,11 +263,17 @@ struct AboutView: View {
                 HStack(spacing: 14) {
                     Image(nsImage: NSApp.applicationIconImage)
                         .resizable().frame(width: 64, height: 64)
+                        .accessibilityHidden(true)   // decorative; the title says the name
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("SimpleVPN").font(.largeTitle.bold())
-                        Text(UI.appVersion).foregroundStyle(.secondary)
-                        Text("© 2026 James Deucker · AGPL-3.0")
-                            .font(.callout).foregroundStyle(.secondary)
+                        // Name + version + copyright read as one identity block.
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("SimpleVPN").font(.largeTitle.bold())
+                                .accessibilityAddTraits(.isHeader)
+                            Text(UI.appVersion).foregroundStyle(.secondary)
+                            Text("© 2026 James Deucker · AGPL-3.0")
+                                .font(.callout).foregroundStyle(.secondary)
+                        }
+                        .accessibilityElement(children: .combine)
                         HStack(spacing: 12) {
                             Link("Source Code", destination: URL(string: Acknowledgements.sourceURL)!)
                             // Opens GitHub's new-issue form pre-filled with versions
@@ -275,6 +281,8 @@ struct AboutView: View {
                             Button("Report an Issue…") { showReport = true }
                             .buttonStyle(.link)
                             .help("Opens a new GitHub issue pre-filled with your app, extension and macOS versions plus which VPN types you have configured — no names, addresses or credentials.")
+                            // The privacy promise shouldn't be hover-only.
+                            .accessibilityHint("Opens a new GitHub issue pre-filled with version numbers only — no names, addresses or credentials")
                         }
                         .font(.callout)
                     }
@@ -297,6 +305,10 @@ struct AboutView: View {
                                     .background(.quaternary, in: Capsule())
                             }
                             .padding(.vertical, 6)
+                            // One sentence per component, not three fragments ×13
+                            // rows; the element keeps the link's activation.
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel("\(c.name), \(c.role), licence \(c.license)")
                             if c.id != Acknowledgements.components.last?.id { Divider() }
                         }
                     }

@@ -21,6 +21,7 @@ struct CertificatesTab: View {
     @State private var pkcs12Data: Data?
     @State private var pkcs12Password = ""
     @State private var pkcs12Error: String?
+    @FocusState private var pkcs12Focused: Bool
     @State private var wrongSlot: WrongSlotOffer?
     @State private var tlsModeChoice: SniffedPayload?
     @State private var importError: String?
@@ -115,8 +116,11 @@ struct CertificatesTab: View {
                 Text(populated ? "Drop a file to replace" : "Drop a file, or")
                     .font(.callout).foregroundStyle(.secondary)
                 ChooseFileButton(slot: slot) { url in ingest(url, into: slot) }
+                    // Four slots, four "Choose File…" buttons — name the slot.
+                    .accessibilityLabel("Choose \(slot.title) file")
                 if populated {
                     Button("Remove", role: .destructive) { clear(slot) }
+                        .accessibilityLabel("Remove \(slot.title)")
                 }
             }
             Spacer(minLength: 0)
@@ -225,6 +229,10 @@ struct CertificatesTab: View {
                 .fixedSize(horizontal: false, vertical: true)
             SecureField("Password", text: $pkcs12Password)
                 .onSubmit(openPKCS12)
+                .focused($pkcs12Focused)
+                // A wrong password is the FIELD's problem: the error rides its
+                // AX value, not just red text below it.
+                .accessibilityValue(pkcs12Error ?? "")
             if let pkcs12Error {
                 Label(pkcs12Error, systemImage: "exclamationmark.triangle.fill")
                     .font(.callout).foregroundStyle(.red)
@@ -232,13 +240,17 @@ struct CertificatesTab: View {
             HStack {
                 Spacer()
                 Button("Cancel") { pkcs12Data = nil; pkcs12Password = ""; pkcs12Error = nil }
+                    .keyboardShortcut(.cancelAction)
                 Button("Open", action: openPKCS12)
                     .buttonStyle(.glassProminent)
                     .disabled(pkcs12Data == nil)
+                    .keyboardShortcut(.defaultAction)
             }
         }
         .padding(20)
         .frame(width: 380)
+        // The password is the only thing to do here — the cursor starts in it.
+        .onAppear { pkcs12Focused = true }
     }
 
     private func openPKCS12() {
@@ -326,17 +338,24 @@ private struct CertificateCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(summary.displayName).font(.body.weight(.semibold))
-                if summary.isSelfSigned {
-                    TagBadge(text: "Self-signed", style: .neutral)
+            // The header block combines into one sentence; the Details
+            // disclosure (and the Copy buttons inside it) must stay individually
+            // operable, so the combine is scoped here and the card is a plain
+            // container — a card-wide .combine made them unreachable.
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(summary.displayName).font(.body.weight(.semibold))
+                    if summary.isSelfSigned {
+                        TagBadge(text: "Self-signed", style: .neutral)
+                    }
+                    Spacer(minLength: 8)
+                    expiryBadge
                 }
-                Spacer(minLength: 8)
-                expiryBadge
+                if !subtitle.isEmpty {
+                    Text(subtitle).font(.callout).foregroundStyle(.secondary)
+                }
             }
-            if !subtitle.isEmpty {
-                Text(subtitle).font(.callout).foregroundStyle(.secondary)
-            }
+            .accessibilityElement(children: .combine)
             if !summary.sans.isEmpty {
                 SANChips(names: summary.sans)
             }
@@ -350,6 +369,7 @@ private struct CertificateCard: View {
                         .font(.callout).foregroundStyle(.secondary)
                 }
             }
+            .accessibilityElement(children: .combine)
             DisclosureGroup("Details") {
                 VStack(alignment: .leading, spacing: 6) {
                     LabeledContent("Serial") { CopyableValue(value: summary.serialHex) }
@@ -366,7 +386,7 @@ private struct CertificateCard: View {
             .font(.callout)
         }
         .padding(.vertical, 4)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
     }
 
     private var subtitle: String {
@@ -497,6 +517,9 @@ private struct SANChips: View {
                     .background(.quaternary, in: Capsule())
             }
         }
+        // One element, one sentence — without .ignore each chip also announces,
+        // so every name arrived twice.
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel("Covers \(names.joined(separator: ", "))")
     }
 }

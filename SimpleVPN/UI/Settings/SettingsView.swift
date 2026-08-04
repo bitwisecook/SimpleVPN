@@ -158,10 +158,11 @@ private struct ExtensionsSettings: View {
 
                 case .waiting:
                     HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
+                        ProgressView().controlSize(.small).accessibilityHidden(true)
                         Text("Waiting for your answer to the macOS prompt\u{2026}")
                             .font(.callout).foregroundStyle(.secondary)
                     }
+                    .accessibilityElement(children: .combine)
 
                 case .denied:
                     // macOS records the first refusal permanently; nothing in-app can
@@ -232,11 +233,17 @@ private struct LabelsSettings: View {
             List {
                 ForEach(labels.labels) { l in
                     HStack(spacing: 10) {
+                        // Every row has the same three controls — each must say
+                        // WHICH label it edits, or the list is ten anonymous
+                        // colour wells and ten fields all called "Name".
                         ColorPicker("", selection: colorBinding(l)).labelsHidden()
+                            .accessibilityLabel("Colour for the \(l.name) label")
                         TextField("Name", text: nameBinding(l))
+                            .accessibilityLabel("Name of the \(l.name) label")
                         Spacer()
                         Button(role: .destructive) { labels.remove(l.id) } label: { Image(systemName: "trash") }
                             .buttonStyle(.borderless)
+                            .accessibilityLabel("Delete the \(l.name) label")
                     }
                     .padding(.vertical, 5)
                 }
@@ -246,11 +253,17 @@ private struct LabelsSettings: View {
             Divider()
             HStack(spacing: 10) {
                 ColorPicker("", selection: $newColor).labelsHidden()
+                    .accessibilityLabel("Colour for the new label")
                 TextField("New label", text: $newName)
                 Button("Add") {
                     labels.addLabel(name: newName, resolved: newColor.resolve(in: environment)); newName = ""
                 }
                 .disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty)
+                // A dead button must say why.
+                .help(newName.trimmingCharacters(in: .whitespaces).isEmpty
+                      ? "Type a name for the new label first" : "Add the label")
+                .accessibilityValue(newName.trimmingCharacters(in: .whitespaces).isEmpty
+                      ? "unavailable — type a name first" : "")
             }
             .padding(16)
         }

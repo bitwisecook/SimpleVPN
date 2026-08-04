@@ -90,6 +90,12 @@ struct NativeVPNView: View {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") { save() }
                     .disabled(draft.name.isEmpty || draft.server.isEmpty)
+                    // A dead Save must say why — hover AND VoiceOver.
+                    .help(draft.name.isEmpty ? "Give this VPN a name first."
+                          : draft.server.isEmpty ? "Enter the server address first."
+                          : "Save changes to this VPN")
+                    .accessibilityValue(draft.name.isEmpty ? "unavailable — give this VPN a name first"
+                          : draft.server.isEmpty ? "unavailable — enter the server address first" : "")
             }
         }
     }
@@ -221,13 +227,16 @@ struct NativeVPNView: View {
                     }
                         .buttonStyle(.glassProminent)   // primary "go" — consistent with OpenVPN Connect
                         .disabled(missingFieldCaption != nil)
+                        .accessibilityValue(missingFieldCaption ?? "")
                 }
             }
             if !isActive, let caption = missingFieldCaption {
                 Text(caption).font(.caption).foregroundStyle(.secondary)
             }
             if let err = manager.lastError {
-                Text(err).font(.callout).foregroundStyle(.red)
+                Label(err, systemImage: "xmark.circle.fill")
+                    .font(.callout).foregroundStyle(.red)
+                    .accessibilityLabel("Error: \(err)")
             }
             Text("macOS runs one app-managed personal VPN at a time — connecting this one replaces any other native VPN this app started.")
                 .font(.caption).foregroundStyle(.secondary)
@@ -237,7 +246,9 @@ struct NativeVPNView: View {
     @ViewBuilder private var nativeStatus: some View {
         switch manager.status {
         case .connected where isActive: Label("Connected", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-        case .connecting where isActive: HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Connecting…") }
+        case .connecting where isActive:
+            HStack(spacing: 6) { ProgressView().controlSize(.small).accessibilityHidden(true); Text("Connecting…") }
+                .accessibilityElement(children: .combine)
         default: Label("Disconnected", systemImage: "circle").foregroundStyle(.secondary)
         }
     }

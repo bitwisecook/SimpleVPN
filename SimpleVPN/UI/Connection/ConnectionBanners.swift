@@ -230,11 +230,15 @@ struct ProblemPill: View {   // was private — internal for the file split
     let text: String
     let dot: DotState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         HStack(spacing: 5) {
             StatusDot(state: dot, size: 7)
-            Text(text).font(.callout).foregroundStyle(.secondary)
+            // Increase Contrast: secondary-on-tinted-glass is the app's worst
+            // text contrast — promote to full strength under the accommodation.
+            Text(text).font(.callout)
+                .foregroundStyle(contrast == .increased ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
         }
         .padding(.horizontal, 10).padding(.vertical, 5)
         .glassEffect(.regular.tint(dot.color.opacity(0.18)), in: .capsule)

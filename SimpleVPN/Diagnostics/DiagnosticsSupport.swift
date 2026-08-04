@@ -209,6 +209,7 @@ struct UIIssueSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
                 Button("Open GitHub…") {
                     if let url = IssueReport.uiIssueURL(facts) { openURL(url) }
                     dismiss()
@@ -282,6 +283,7 @@ struct IssueReportSheet: View {
                 if copied { Label("Log copied", systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.green) }
                 Spacer()
                 Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
                 Button("Open GitHub…") { open() }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.glassProminent)

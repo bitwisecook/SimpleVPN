@@ -26,6 +26,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     @Environment(ExtensionController.self) var ext: ExtensionController?   // was private — internal for the file split
     @Environment(ExtensionDoctor.self) private var extDoctor: ExtensionDoctor?
     @Environment(\.accessibilityReduceMotion) var reduceMotion   // was private — internal for the file split
+    @Environment(\.colorSchemeContrast) var contrast   // read by the glass pills (ConnectControl)
     @State var busy = false   // was private — internal for the file split
     /// The in-flight connect, so the busy pill's ✕ can cancel the credential lookup.
     @State var connectTask: Task<Void, Never>?   // was private — internal for the file split
@@ -639,6 +640,9 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Same courtesy as the typed form: if a code is needed, the cursor is
+        // already in the field that needs it.
+        .onAppear { focusedField = firstMissingField }
     }
 
     private var typedCredentialForm: some View {
@@ -724,7 +728,9 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
 
     private func attemptConnect() {
         if canConnect {
-            Task { await connect() }
+            // Through connectTask, same as the Connect button: an Enter-initiated
+            // connect must be cancellable by the same ✕ a clicked one is.
+            connectTask = Task { await connect() }
         } else {
             nudgeMissingInput()
         }

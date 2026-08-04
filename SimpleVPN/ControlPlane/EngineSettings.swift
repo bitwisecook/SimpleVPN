@@ -43,6 +43,11 @@ struct EngineSettingRow<Control: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .center, spacing: 8) {
+                // NOTE for callers: a bare TextField whose title is an example
+                // value ("https://vpn.example.com") makes that example its
+                // VoiceOver name — wrap fields in LabeledContent { … } label: {
+                // EngineSettingLabel(spec:) } (the WireGuard pattern) or add
+                // .accessibilityLabel(spec.name) to the field.
                 control
                     .frame(maxWidth: .infinity, alignment: .leading)
                 ManualLink(anchor: spec.manualAnchor, settingName: spec.name)
@@ -54,6 +59,9 @@ struct EngineSettingRow<Control: View>: View {
         }
         .padding(.vertical, 6)
         .help(spec.summary)
+        // Group the control with its summary so the explanation is the element
+        // VoiceOver reaches next, matching SettingRow in the OpenVPN form.
+        .accessibilityElement(children: .contain)
     }
 
     /// The row's control label, bold when the value differs from the default.
@@ -64,5 +72,9 @@ struct EngineSettingRow<Control: View>: View {
 struct EngineSettingLabel: View {
     let spec: EngineSettingSpec
     var changed = false
-    var body: some View { Text(spec.name).bold(changed) }
+    var body: some View {
+        Text(spec.name).bold(changed)
+            // Bold weight is invisible to VoiceOver — say the state too.
+            .accessibilityLabel(changed ? "\(spec.name), changed from default" : spec.name)
+    }
 }

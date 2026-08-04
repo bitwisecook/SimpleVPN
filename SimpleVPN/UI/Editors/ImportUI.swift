@@ -26,6 +26,10 @@ extension VPNController {
                     // has no row here to select, so don't clobber whatever
                     // profile was showing.
                     if profiles.contains(where: { $0.id == id }) { selectedID = id }
+                    // Success shows no dialog, which for VoiceOver was silence —
+                    // a new row appearing off-screen isn't a confirmation.
+                    let name = profiles.first { $0.id == id }?.name
+                    AccessibilityAnnouncer.sayNow("Imported \(name ?? "the configuration")")
                 case .duplicate, .invalid:
                     // First problem wins in a multi-file drop — don't clobber an
                     // alert the user hasn't acknowledged yet.
@@ -135,7 +139,7 @@ private struct ImportOutcomeAlert: ViewModifier {
                    isPresented: Binding(get: { vpn.importOutcome != nil },
                                         set: { if !$0 { vpn.importOutcome = nil } })) {
                 if case .duplicate(let id, _) = vpn.importOutcome {
-                    Button("Show") {
+                    Button("Show the existing VPN") {
                         vpn.selectedID = id
                         openWindow(id: "main")
                     }

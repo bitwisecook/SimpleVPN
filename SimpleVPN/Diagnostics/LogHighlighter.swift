@@ -289,7 +289,8 @@ nonisolated enum LogHighlighter {
     /// One string rather than a view per line is what makes ⌘A, click-drag across lines
     /// and ⌘F work — which matters more than anything else here, because the entire
     /// point of this text is that the user copies it into a bug report.
-    static func nsAttributed(_ text: String, font: NSFont) -> NSAttributedString {
+    static func nsAttributed(_ text: String, font: NSFont,
+                             differentiateWithoutColor: Bool = false) -> NSAttributedString {
         let out = NSMutableAttributedString(string: text, attributes: [
             .font: font,
             .foregroundColor: NSColor.labelColor,
@@ -305,6 +306,20 @@ nonisolated enum LogHighlighter {
             if bgLength > 0, let tint = line.severity.nsTint() {
                 out.addAttribute(.backgroundColor, value: tint,
                                  range: NSRange(location: lineStart, length: bgLength))
+            }
+            // Differentiate Without Color: the red/orange bands gain an
+            // underline channel — thick for fault/error, single for warning —
+            // so severity survives without hue.
+            if differentiateWithoutColor, lineLength > 0 {
+                let style: NSUnderlineStyle? = switch line.severity {
+                case .fault, .error: .thick
+                case .warning: .single
+                default: nil
+                }
+                if let style {
+                    out.addAttribute(.underlineStyle, value: style.rawValue,
+                                     range: NSRange(location: lineStart, length: lineLength))
+                }
             }
             if line.severity == .heading, lineLength > 0 {
                 out.addAttributes([.font: NSFont.monospacedSystemFont(ofSize: font.pointSize,

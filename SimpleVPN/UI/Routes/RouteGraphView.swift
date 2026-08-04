@@ -53,6 +53,8 @@ struct RouteGraphView: View {
     @Environment(ReachabilityMonitor.self) var reach: ReachabilityMonitor?   // was private — internal for the file split
     @Bindable var vpn: VPNController
     @Environment(\.accessibilityReduceMotion) var reduceMotion   // was private — internal for the file split
+    @Environment(\.accessibilityDifferentiateWithoutColor) var differentiateWithoutColor   // read by the edge Canvas (RouteGraphNodes)
+    @FocusState private var searchFocused: Bool
     @Environment(\.openURL) var openURL   // was private — internal for the file split
     @Environment(LinkStateMonitor.self) var link: LinkStateMonitor?   // was private — internal for the file split
 
@@ -183,6 +185,31 @@ struct RouteGraphView: View {
                         .onEnded { _ in dragBase = nil }
                 )
                 .onTapGesture(count: 2) { toggleZoom() }
+                // Keyboard equivalents for the mouse-only gestures: Tab focuses
+                // the diagram, arrows pan, +/− zoom, 0 fits — mirroring the
+                // toolbar's ⌘−/⌘=/⌘0 but usable without modifiers once focused.
+                .focusable()
+                .onMoveCommand { direction in
+                    let step: CGFloat = 48
+                    let delta: CGSize = switch direction {
+                    case .left: CGSize(width: step, height: 0)
+                    case .right: CGSize(width: -step, height: 0)
+                    case .up: CGSize(width: 0, height: step)
+                    case .down: CGSize(width: 0, height: -step)
+                    @unknown default: .zero
+                    }
+                    pan = clampedPan(CGSize(width: pan.width + delta.width,
+                                            height: pan.height + delta.height))
+                }
+                .onKeyPress(characters: CharacterSet(charactersIn: "+-=0")) { press in
+                    switch press.characters {
+                    case "+", "=": setZoom(zoom * 1.25)
+                    case "-": setZoom(zoom / 1.25)
+                    case "0": setZoom(fitScale)
+                    default: return .ignored
+                    }
+                    return .handled
+                }
                 .background(PanZoomEventCatcher(
                     onPan: { delta in
                         pan = clampedPan(CGSize(width: pan.width + delta.width,
@@ -226,7 +253,9 @@ struct RouteGraphView: View {
         .accessibilityRotor("Problems") { rotorEntries(problemRotorTargets(layout)) }
         .background(Color(nsColor: .underPageBackgroundColor))
         .navigationTitle("Routes")
-        .onAppear { topo?.startWatching() }
+        // Initial focus: the search field — typing filters at once, and the
+        // diagram (arrows/+/−) is one Tab away.
+        .onAppear { topo?.startWatching(); searchFocused = true }
         .onDisappear { topo?.stopWatching() }
         .overlay {
             if layout.nodes.count <= 1 {
@@ -327,6 +356,7 @@ struct RouteGraphView: View {
                 TextField("Find an IP address or network", text: $searchText)
                     .textFieldStyle(.plain)
                     .frame(width: 210)
+                    .focused($searchFocused)
                     .accessibilityLabel("Find an IPv4 or IPv6 address or CIDR in the routing table")
                 if !searchText.isEmpty {
                     Button { searchText = "" } label: {

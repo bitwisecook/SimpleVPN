@@ -52,10 +52,16 @@ struct TailscaleView: View {
                         TextField("https://vpn.example.com", text: $draft.controlURL)
                             .textFieldStyle(.roundedBorder)
                             .autocorrectionDisabled()
+                            // The title is an EXAMPLE — the spec name is the name.
+                            .accessibilityLabel(Self.specs["ts.control-url"].name)
+                            // A malformed address is the FIELD's problem.
+                            .accessibilityValue(draft.controlURL.isEmpty ? ""
+                                : (draft.controlURLProblem.map { "\(draft.controlURL). Problem: \($0)" } ?? draft.controlURL))
                     }
                     if let problem = draft.controlURLProblem, !draft.controlURL.isEmpty {
                         Label(problem, systemImage: "exclamationmark.triangle.fill")
                             .font(.callout).foregroundStyle(.orange)
+                            .accessibilityLabel("Problem: \(problem)")
                     }
                 }
 
@@ -63,6 +69,7 @@ struct TailscaleView: View {
                     TextField(VPNController.defaultTailscaleHostname(), text: $draft.hostname)
                         .textFieldStyle(.roundedBorder)
                         .autocorrectionDisabled()
+                        .accessibilityLabel(Self.specs["ts.hostname"].name)
                 }
             }
 
@@ -70,6 +77,8 @@ struct TailscaleView: View {
                 EngineSettingRow(spec: Self.specs["ts.auth-key"], changed: !authKey.isEmpty) {
                     SecureField("Leave empty to sign in with a browser", text: $authKey)
                         .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel(Self.specs["ts.auth-key"].name)
+                        .accessibilityValue(authKey.isEmpty ? "not set — sign in with a browser" : "set")
                 }
                 if authKey.isEmpty {
                     Label("SimpleVPN will open a sign-in page the first time you connect. After that this Mac stays signed in.",
@@ -105,10 +114,13 @@ struct TailscaleView: View {
                     TextField("192.168.1.0/24, 10.0.0.0/8", text: $advertiseText)
                         .textFieldStyle(.roundedBorder)
                         .autocorrectionDisabled()
+                        .accessibilityLabel(Self.specs["ts.advertise-routes"].name)
+                        .accessibilityValue(advertiseProblem.map { "\(advertiseText). Problem: \($0)" } ?? advertiseText)
                 }
                 if let problem = advertiseProblem {
                     Label(problem, systemImage: "exclamationmark.triangle.fill")
                         .font(.callout).foregroundStyle(.orange)
+                        .accessibilityLabel("Problem: \(problem)")
                 }
             }
 
@@ -133,6 +145,7 @@ struct TailscaleView: View {
                 .buttonStyle(.glassProminent)
                 .disabled(saveDisabledReason != nil)
                 .help(saveDisabledReason ?? "Save changes to this VPN")
+                .accessibilityValue(saveDisabledReason ?? "")
             }
         }
         .safeAreaInset(edge: .bottom) {
@@ -157,10 +170,15 @@ struct TailscaleView: View {
         if let status {
             let state = status.backendState
             HStack(spacing: 6) {
-                Image(systemName: state.isConnected ? "checkmark.circle.fill"
-                        : (state.needsUserAction ? "person.crop.circle.badge.questionmark" : "clock"))
-                    .foregroundStyle(state.isConnected ? .green : (state.needsUserAction ? .orange : .secondary))
-                Text(state.displayText).font(.callout).foregroundStyle(.secondary)
+                // Icon + text read as ONE sentence; the button stays separate.
+                HStack(spacing: 6) {
+                    Image(systemName: state.isConnected ? "checkmark.circle.fill"
+                            : (state.needsUserAction ? "person.crop.circle.badge.questionmark" : "clock"))
+                        .foregroundStyle(state.isConnected ? .green : (state.needsUserAction ? .orange : .secondary))
+                        .accessibilityHidden(true)
+                    Text(state.displayText).font(.callout).foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
                 if state == .needsLogin {
                     Spacer()
                     // The engine's login URL, in the default browser (the SSO
@@ -168,6 +186,10 @@ struct TailscaleView: View {
                     // Disabled until the engine has issued a URL to open.
                     Button("Open Sign-In…") { vpn.openTailscaleSignIn(id: profileID) }
                         .disabled(vpn.tailscaleSignInURL[profileID] == nil)
+                        // A dead button must say why.
+                        .help(vpn.tailscaleSignInURL[profileID] == nil
+                              ? "Connect first — the sign-in page's address comes from the connection attempt."
+                              : "Open the sign-in page in your browser")
                 }
             }
         }
@@ -186,6 +208,7 @@ struct TailscaleView: View {
             TextField("Machine address (100.x.y.z)", text: $draft.exitNode)
                 .textFieldStyle(.roundedBorder)
                 .autocorrectionDisabled()
+                .accessibilityLabel("Exit machine address")
         } else {
             Picker("Machine", selection: $draft.exitNode) {
                 Text("Choose…").tag("")

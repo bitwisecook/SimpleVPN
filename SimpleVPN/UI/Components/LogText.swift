@@ -22,12 +22,14 @@ struct LogText: NSViewRepresentable {
     let text: String
     /// Point size; callers use the same scale as the surrounding UI.
     var fontSize: CGFloat = 11
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
 
     final class Coordinator {
         /// What we last pushed into the view, so a SwiftUI re-render doesn't rebuild the
         /// attributed string and wipe the user's selection mid-drag.
         var rendered: String?
         var renderedSize: CGFloat = 0
+        var renderedDWC = false
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -58,6 +60,10 @@ struct LogText: NSViewRepresentable {
         textView.textContainer?.containerSize = NSSize(width: 0,
                                                       height: CGFloat.greatestFiniteMagnitude)
 
+        // Without a name VoiceOver introduces this as a bare "text" — say what
+        // it holds (the content itself is readable/selectable as usual).
+        textView.setAccessibilityLabel("Log")
+
         let scroll = NSScrollView()
         scroll.documentView = textView
         scroll.hasVerticalScroller = true
@@ -71,12 +77,15 @@ struct LogText: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let textView = scroll.documentView as? NSTextView else { return }
         let coordinator = context.coordinator
-        guard coordinator.rendered != text || coordinator.renderedSize != fontSize else { return }
+        guard coordinator.rendered != text || coordinator.renderedSize != fontSize
+                || coordinator.renderedDWC != differentiateWithoutColor else { return }
         coordinator.rendered = text
         coordinator.renderedSize = fontSize
+        coordinator.renderedDWC = differentiateWithoutColor
         let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         textView.textStorage?.setAttributedString(
-            LogHighlighter.nsAttributed(text, font: font))
+            LogHighlighter.nsAttributed(text, font: font,
+                                        differentiateWithoutColor: differentiateWithoutColor))
     }
 }
 
@@ -92,6 +101,8 @@ struct CopyLogButton: View {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
             copied = true
+            // The label morphing to "Copied" is silent for VoiceOver.
+            AccessibilityAnnouncer.sayNow("Log copied")
         } label: {
             Label(copied ? "Copied" : "Copy All",
                   systemImage: copied ? "checkmark" : "doc.on.doc")

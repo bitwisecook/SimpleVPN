@@ -201,7 +201,7 @@ struct EditVPNView: View {
             }
             .alert("Couldn’t save changes", isPresented: Binding(
                 get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
-                Button("OK") { saveError = nil }
+                Button("OK", role: .cancel) { saveError = nil }
             } message: { Text(saveError ?? "") }
             .fileImporter(isPresented: $showLogoImporter, allowedContentTypes: [.image], onCompletion: importLogo)
             .toolbar {
@@ -210,6 +210,7 @@ struct EditVPNView: View {
                         Button("Revert") { loaded = false; load() }
                     } else {
                         Button("Cancel") { dismiss() }
+                            .keyboardShortcut(.cancelAction)
                     }
                 }
                 ToolbarItem(placement: .confirmationAction) { saveButton }
@@ -257,7 +258,10 @@ struct EditVPNView: View {
                     LogoWell(image: logo, pick: { showLogoImporter = true }, drop: { importLogoFile($0) })
                     VStack(alignment: .leading, spacing: 6) {
                         Button("Choose Image…") { showLogoImporter = true }
-                        if logo != nil { Button("Remove", role: .destructive) { LogoStore.delete(profileID); logo = nil } }
+                        if logo != nil {
+                            Button("Remove", role: .destructive) { LogoStore.delete(profileID); logo = nil }
+                                .accessibilityLabel("Remove logo")
+                        }
                     }
                 }
             }
@@ -341,12 +345,20 @@ struct EditVPNView: View {
                                 SecureField("Authenticator setup key (otpauth:// link or secret)",
                                             text: $totpSecretInput)
                                     .autocorrectionDisabled()
+                                    .accessibilityLabel("Authenticator setup key")
+                                    // The invalid-key warning is the FIELD's
+                                    // problem — it rides the value, not just
+                                    // orange text further down.
+                                    .accessibilityValue(totpSecretInput.isEmpty ? "not set"
+                                        : (TOTPConfiguration.canonicalStorageString(from: totpSecretInput) == nil
+                                           ? "set, but it doesn't look like a valid setup key" : "set"))
                                 Text("Paste the setup key your authenticator was enrolled with and the fingerprint covers the one-time code too — no more typing codes. Saved only inside the Touch ID-locked item.")
                                     .font(.callout).foregroundStyle(.secondary)
                                 if !totpSecretInput.isEmpty && TOTPConfiguration.canonicalStorageString(from: totpSecretInput) == nil {
                                     Label("That doesn't look like a valid setup key (otpauth:// link or base32 secret).",
                                           systemImage: "exclamationmark.triangle.fill")
                                         .font(.callout).foregroundStyle(.orange)
+                                        .accessibilityLabel("Problem: that doesn't look like a valid setup key")
                                 }
                             }
                         }
@@ -369,12 +381,15 @@ struct EditVPNView: View {
                                 .font(.body.monospaced())
                                 .autocorrectionDisabled()
                                 .padding(.top, 4)
+                                .accessibilityValue(templateValid ? passwordTemplate
+                                    : "\(passwordTemplate). Problem: the template must contain {otp}")
                             Text("How the sign-in password is assembled from your password and the code. \u{201C}{password}{otp}\u{201D} sends them joined together — what most OTP-enabled servers (LinOTP, privacyIDEA) expect.")
                                 .font(.callout).foregroundStyle(.secondary)
                             if !templateValid {
                                 Label("The template must contain {otp} — the default will be used instead.",
                                       systemImage: "exclamationmark.triangle.fill")
                                     .font(.callout).foregroundStyle(.orange)
+                                    .accessibilityLabel("Problem: the template must contain {otp} — the default will be used instead.")
                             }
                         } label: {
                             // The whole row toggles, not just the chevron.
@@ -413,6 +428,7 @@ struct EditVPNView: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: mapped == nil ? "questionmark.circle.fill" : "arrow.right.circle")
                     .foregroundStyle(mapped == nil ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                    .accessibilityHidden(true)   // the text states the same thing
                 VStack(alignment: .leading, spacing: 2) {
                     if let mapped {
                         Text("Code comes from the \u{201C}\(mapped)\u{201D} field in 1Password")
@@ -428,12 +444,16 @@ struct EditVPNView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                .accessibilityElement(children: .combine)
                 Spacer(minLength: 8)
                 if !noItemYet {
                     Button(mapped == nil ? "Choose Field\u{2026}" : "Change\u{2026}") {
                         Task { await loadOPFieldsAndShowSheet() }
                     }
                     .disabled(!opAvailable || loadingOPFields)
+                    // "Change…" alone answers nothing — change WHAT?
+                    .accessibilityLabel(mapped == nil ? "Choose the 1Password field holding the code"
+                                                      : "Change the 1Password field holding the code")
                 }
             }
         } else if credentialKind == .keePassXC {
@@ -572,9 +592,13 @@ struct EditVPNView: View {
             }
             .disabled(sourceReference.trimmingCharacters(in: .whitespaces).isEmpty
                       || !opAvailable || loadingOPFields)
-            if loadingOPFields { ProgressView().controlSize(.small) }
+            if loadingOPFields {
+                ProgressView().controlSize(.small)
+                    .accessibilityLabel("Asking 1Password")
+            }
             if let err = opFieldError {
                 Label(err, systemImage: "xmark.circle.fill").foregroundStyle(.red).font(.callout).lineLimit(2)
+                    .accessibilityLabel("Error: \(err)")
             }
             Spacer()
         }
@@ -599,6 +623,7 @@ struct EditVPNView: View {
         }
         .buttonStyle(.bordered)
         .disabled(!opAvailable)
+        .accessibilityLabel("Browse 1Password items")
         .help(itemBrowseScope.isEmpty
               ? "Search the items in your 1Password vaults"
               : "Search the items in \u{201C}\(itemBrowseScope)\u{201D}")
@@ -643,6 +668,7 @@ struct EditVPNView: View {
         }
         .buttonStyle(.bordered)
         .disabled(!opAvailable)
+        .accessibilityLabel("Browse 1Password vaults")
         .help("Search the vaults in your 1Password account")
         .popover(isPresented: $showVaultBrowser) {
             OnePasswordBrowsePopover(
@@ -676,6 +702,7 @@ struct EditVPNView: View {
             Label(err, systemImage: "xmark.circle.fill")
                 .font(.callout).foregroundStyle(.red).lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel("Error: \(err)")
         }
     }
 
@@ -870,6 +897,9 @@ struct EditVPNView: View {
                 return true
             }
             .contentShape(Rectangle())
+            // The CertDropWell rule: a drop area names itself, states its value
+            // and names its keyboard alternative.
+            .accessibilityLabel("1Password item drop area, \(opItemTitle.isEmpty ? "empty" : "item: \(opItemTitle)"). Use the Browse buttons or type a reference as an alternative.")
             .popover(isPresented: $showDropChooser) {
                 dropChooser
             }
@@ -885,6 +915,7 @@ struct EditVPNView: View {
     @ViewBuilder private var dropChooser: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Which item is this VPN\u{2019}s sign-in?").font(.callout.weight(.semibold))
+                .accessibilityAddTraits(.isHeader)
             ForEach(Array(droppedChoices.enumerated()), id: \.element.id) { index, drop in
                 Button(drop.displayName(position: index + 1)) {
                     showDropChooser = false
@@ -1045,16 +1076,32 @@ struct EditVPNView: View {
         HStack {
             Button("Test") { Task { await testSource() } }
                 .disabled(sourceReference.trimmingCharacters(in: .whitespaces).isEmpty || sourceTest == .testing)
+                .accessibilityLabel("Test the credential source")
+                // The outcome is this button's answer — a focused Test button
+                // reports its own result.
+                .accessibilityValue(sourceTestAXValue)
             switch sourceTest {
             case .idle: EmptyView()
-            case .testing: ProgressView().controlSize(.small)
+            case .testing:
+                ProgressView().controlSize(.small)
+                    .accessibilityLabel("Testing")
             case .ok(let who):
                 Label(who, systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.callout)
             case .failed(let msg):
                 Label(msg, systemImage: "xmark.circle.fill").foregroundStyle(.red).font(.callout)
                     .lineLimit(3)
+                    .accessibilityLabel("Error: \(msg)")
             }
             Spacer()
+        }
+    }
+
+    private var sourceTestAXValue: String {
+        switch sourceTest {
+        case .idle: ""
+        case .testing: "testing"
+        case .ok(let who): who
+        case .failed(let msg): "failed: \(msg)"
         }
     }
 
@@ -1135,8 +1182,16 @@ struct EditVPNView: View {
         }
         .buttonStyle(.glassProminent)
         .disabled(saveDisabledReason != nil)
-        .help(saveDisabledReason ?? (embedded ? "Save changes to this VPN" : "Save and close"))
+        .help(saveDisabledReason ?? saveWarning ?? (embedded ? "Save changes to this VPN" : "Save and close"))
+        // The reason a dead Save is dead (or the saves-but-won't-connect
+        // warning) must reach VoiceOver, not just the hover tooltip.
+        .accessibilityValue(saveDisabledReason ?? saveWarning ?? "")
         .animation(.snappy(duration: 0.2), value: savedTick)
+        // The embedded editor doesn't close on save; the tick is its only
+        // confirmation — say it too.
+        .onChange(of: savedTick) { _, ticked in
+            if ticked { AccessibilityAnnouncer.sayNow("Saved") }
+        }
     }
 
     /// Touch ID protection toggle. The migration sources the secret from the
@@ -1300,9 +1355,15 @@ struct PendingSettingsNotice: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: "arrow.triangle.2.circlepath")
-                .foregroundStyle(.tint)
-            Text("Settings changes take effect on reconnect.")
+            // Icon + sentence combine; the button must stay individually
+            // activatable — a whole-row .combine swallowed it.
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .foregroundStyle(.tint)
+                    .accessibilityHidden(true)
+                Text("Settings changes take effect on reconnect.")
+            }
+            .accessibilityElement(children: .combine)
             Spacer(minLength: 8)
             Button("Reconnect") {
                 reconnecting = true
@@ -1314,7 +1375,6 @@ struct PendingSettingsNotice: View {
         .padding(10)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
         .padding([.horizontal, .bottom], 12)
-        .accessibilityElement(children: .combine)
     }
 }
 

@@ -22,6 +22,7 @@ struct WireGuardView: View {
     @State private var showImporter = false
     @State private var pasteText = ""
     @State private var showPaste = false
+    @FocusState private var pasteFocused: Bool
     @State private var customRouting = CustomRoutingProfile()
     @State private var crProxyAuthUsername = ""
     @State private var crProxyAuthPassword = ""
@@ -119,20 +120,30 @@ struct WireGuardView: View {
                       allowedContentTypes: [UTType(filenameExtension: "conf") ?? .data, .data, .plainText]) { result in
             if case let .success(url) = result { importConf(url) }
         }
-        .sheet(isPresented: $showPaste) {
-            VStack(spacing: 12) {
-                Text("Paste WireGuard configuration").font(.headline)
-                TextEditor(text: $pasteText).font(.callout.monospaced()).frame(width: 460, height: 260)
-                    .border(.quaternary)
-                HStack {
-                    Button("Cancel") { showPaste = false }
-                    Spacer()
-                    Button("Import") { applyParsed(pasteText); showPaste = false }
-                        .buttonStyle(.glassProminent).disabled(pasteText.isEmpty)
-                }
+        .sheet(isPresented: $showPaste) { pasteSheet }
+    }
+
+    /// The paste sheet: focus lands in the editor so a keyboard user can ⌘V at
+    /// once, ESC cancels, and Import is the default action (Return only fires
+    /// it once focus leaves the editor — inside it, Return types a newline).
+    private var pasteSheet: some View {
+        VStack(spacing: 12) {
+            Text("Paste WireGuard configuration").font(.headline)
+            TextEditor(text: $pasteText).font(.callout.monospaced()).frame(width: 460, height: 260)
+                .border(.quaternary)
+                .focused($pasteFocused)
+                .accessibilityLabel("WireGuard configuration text")
+            HStack {
+                Button("Cancel") { showPaste = false }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Import") { applyParsed(pasteText); showPaste = false }
+                    .buttonStyle(.glassProminent).disabled(pasteText.isEmpty)
+                    .keyboardShortcut(.defaultAction)
             }
-            .padding()
         }
+        .padding()
+        .onAppear { pasteFocused = true }
     }
 
     // MARK: Spec catalog + typed field helpers

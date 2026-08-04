@@ -12,6 +12,7 @@
 
 import SwiftUI
 import Charts
+import Accessibility
 
 // MARK: - Live latency
 
@@ -115,6 +116,7 @@ struct NetworkToolsView: View {
     @Environment(NativeVPNManager.self) private var nativeVPN: NativeVPNManager?
 
     @State private var target = ""
+    @FocusState private var targetFocused: Bool
     /// Which egress the diagnostics go out of. Automatic = a normal, route-table-obeying
     /// socket (today's behavior); the others pin the probe sockets to a chosen
     /// interface via `IP_BOUND_IF` so reachability/latency can be tested THROUGH a
@@ -205,7 +207,8 @@ struct NetworkToolsView: View {
                   running || hasResults else { return }
             run()
         }
-        .onAppear { topo?.startWatching() }      // need the routing table to classify the path
+        // Initial focus: the target field — the window exists to test an address.
+        .onAppear { topo?.startWatching(); targetFocused = true }      // need the routing table to classify the path
         .onDisappear {
             topo?.stopWatching()
             stop()                          // cancel latency/traceroute/DNS/resolve/MTU
@@ -270,16 +273,22 @@ struct NetworkToolsView: View {
         GroupBox("Routing") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
-                    Image(systemName: owner == nil ? "arrow.up.forward" : "lock.shield.fill")
-                        .foregroundStyle(owner == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.accentColor))
-                    Text("Default gateway:")
-                        .foregroundStyle(.secondary)
-                    Text(ownerName ?? "Direct").fontWeight(.medium)
+                    HStack(spacing: 6) {
+                        Image(systemName: owner == nil ? "arrow.up.forward" : "lock.shield.fill")
+                            .foregroundStyle(owner == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.accentColor))
+                            .accessibilityHidden(true)
+                        Text("Default gateway:")
+                            .foregroundStyle(.secondary)
+                        Text(ownerName ?? "Direct").fontWeight(.medium)
+                    }
+                    .accessibilityElement(children: .combine)
                     Spacer()
+                    // Three windows-worth of bare "Re-assert" buttons — name the subject.
                     Button("Re-assert") { vpn.routes.reassertNow() }
                         .controlSize(.small)
                         .help("Drive routing back to the intended default owner now.")
                         .disabled(participants.isEmpty)
+                        .accessibilityLabel("Re-assert routing")
                 }
                 .font(.callout)
 
@@ -290,27 +299,20 @@ struct NetworkToolsView: View {
                             Circle()
                                 .fill(vpn.routes.gatewayRole(for: p.id) == .full ? Color.accentColor : Color.secondary)
                                 .frame(width: 7, height: 7)
+                                .accessibilityHidden(true)   // the role sentence carries it
                             Text(p.name)
                             Spacer()
                             Text(vpn.routes.gatewayRole(for: p.id) == .full ? "full — carries the default" : "split — its subnets only")
                                 .foregroundStyle(.secondary)
                         }
                         .font(.caption)
+                        .accessibilityElement(children: .combine)
                     }
                 }
 
                 Divider()
                 if let drift = vpn.routes.lastDrift {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
-                            .foregroundStyle(.orange)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(drift.summary).foregroundStyle(.secondary)
-                            Text("\(drift.at.formatted(.relative(presentation: .named)))\(drift.reasserted ? " · re-asserted" : "")")
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                    .font(.caption)
+                    driftLine(drift)
                 } else {
                     Label("No external routing changes detected.", systemImage: "checkmark.seal")
                         .font(.caption)
@@ -334,15 +336,20 @@ struct NetworkToolsView: View {
         GroupBox("DNS") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
-                    Image(systemName: plan.catchAllOwner == nil ? "network" : "lock.shield.fill")
-                        .foregroundStyle(plan.catchAllOwner == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.accentColor))
-                    Text("Resolves through:").foregroundStyle(.secondary)
-                    Text(ownerName ?? "Direct (system resolvers)").fontWeight(.medium)
+                    HStack(spacing: 6) {
+                        Image(systemName: plan.catchAllOwner == nil ? "network" : "lock.shield.fill")
+                            .foregroundStyle(plan.catchAllOwner == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.accentColor))
+                            .accessibilityHidden(true)
+                        Text("Resolves through:").foregroundStyle(.secondary)
+                        Text(ownerName ?? "Direct (system resolvers)").fontWeight(.medium)
+                    }
+                    .accessibilityElement(children: .combine)
                     Spacer()
                     Button("Re-assert") { vpn.dns.reassertNow() }
                         .controlSize(.small)
                         .help("Re-establish the intended resolvers now.")
                         .disabled(plan.catchAllOwner == nil)
+                        .accessibilityLabel("Re-assert DNS")
                 }
                 .font(.callout)
 
@@ -361,6 +368,9 @@ struct NetworkToolsView: View {
                             Text("\(vpn.dns.name(for: a.engine) ?? a.engine) (\(a.resolvers.joined(separator: ", ")))")
                                 .font(.caption.monospaced()).foregroundStyle(.secondary)
                         }
+                        // One sentence; the "→" glyph becomes words.
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("\(a.domains.joined(separator: ", ")) resolve through \(vpn.dns.name(for: a.engine) ?? a.engine), \(a.resolvers.joined(separator: ", "))")
                     }
                 }
 
@@ -389,15 +399,20 @@ struct NetworkToolsView: View {
         GroupBox("Proxy") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
-                    Image(systemName: plan.providesProxy ? "server.rack" : "arrow.up.forward")
-                        .foregroundStyle(plan.providesProxy ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
-                    Text("System proxy:").foregroundStyle(.secondary)
-                    Text(vpn.proxies.effectiveProxyDescription).fontWeight(.medium)
+                    HStack(spacing: 6) {
+                        Image(systemName: plan.providesProxy ? "server.rack" : "arrow.up.forward")
+                            .foregroundStyle(plan.providesProxy ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+                            .accessibilityHidden(true)
+                        Text("System proxy:").foregroundStyle(.secondary)
+                        Text(vpn.proxies.effectiveProxyDescription).fontWeight(.medium)
+                    }
+                    .accessibilityElement(children: .combine)
                     Spacer()
                     Button("Re-assert") { vpn.proxies.reassertNow() }
                         .controlSize(.small)
                         .help("Re-apply the intended system proxy now.")
                         .disabled(!plan.providesProxy)
+                        .accessibilityLabel("Re-assert proxy")
                 }
                 .font(.callout)
 
@@ -440,6 +455,7 @@ struct NetworkToolsView: View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
                 .foregroundStyle(.orange)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 Text(drift.summary).foregroundStyle(.secondary)
                 Text("\(drift.at.formatted(.relative(presentation: .named)))\(drift.reasserted ? " · re-asserted" : "")")
@@ -447,6 +463,7 @@ struct NetworkToolsView: View {
             }
         }
         .font(.caption)
+        .accessibilityElement(children: .combine)
     }
 
     @ViewBuilder private var ladderSection: some View {
@@ -565,16 +582,19 @@ struct NetworkToolsView: View {
             TextField("Port", text: $probePortText, prompt: Text("\(defaultProbePort)"))
                 .textFieldStyle(.roundedBorder).frame(width: 70)
                 .onSubmit { restartVPNProbe() }
+                .accessibilityLabel("Probe port")
             Picker("Transport", selection: $probeTransport) {
                 ForEach(VPNProbe.Transport.allCases) { Text($0.label).tag($0) }
             }
             .pickerStyle(.segmented).labelsHidden().fixedSize()
+            .accessibilityLabel("Probe transport")
             Picker("Kind", selection: $probeKind) {
                 Text("Auto-detect").tag(VPNKind?.none)
                 ForEach(VPNKind.allCases, id: \.self) { Text($0.displayName).tag(VPNKind?.some($0)) }
             }
             .labelsHidden().fixedSize()
             .help("Narrows the probe to one protocol. Auto-detect tries a small battery.")
+            .accessibilityLabel("VPN kind to probe for")
             Spacer()
             Button("Probe") { restartVPNProbe() }
                 .disabled(target.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -588,6 +608,7 @@ struct NetworkToolsView: View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: f.best?.kind?.systemImage ?? (f.best != nil ? "checkmark.seal" : "questionmark.circle"))
                 .foregroundStyle(f.best != nil ? Color.green : .secondary)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(f.best.map { "VPN detected: \($0.label)" } ?? f.summary)
                     .font(.callout.weight(.semibold))
@@ -598,12 +619,14 @@ struct NetworkToolsView: View {
                 }
             }
         }
+        .accessibilityElement(children: .combine)
     }
 
     private func probeFindingRow(_ finding: VPNProbe.Finding) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: finding.detected ? "checkmark.circle.fill" : "minus.circle")
                 .foregroundStyle(finding.detected ? Color.green : .secondary)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 Text(finding.probe).font(.caption.weight(.medium))
                 Text(finding.label).font(.caption).foregroundStyle(.secondary)
@@ -618,6 +641,9 @@ struct NetworkToolsView: View {
                     .background(.green.opacity(0.15), in: Capsule())
             }
         }
+        // One sentence, detected-state first (the glyph carried it before).
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(finding.detected ? "Detected" : "Not detected"): \(finding.probe). \(finding.label). \(finding.detail)\(finding.detected ? ". Confidence \(finding.confidence.label.lowercased())" : "")")
     }
 
     @ViewBuilder
@@ -626,6 +652,7 @@ struct NetworkToolsView: View {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: portal.detected ? "wifi.exclamationmark" : "checkmark.shield")
                     .foregroundStyle(portal.detected ? Color.orange : .green)
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(portal.detected
                          ? "Something is intercepting traffic — a Wi-Fi sign-in page."
@@ -637,6 +664,7 @@ struct NetworkToolsView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                .accessibilityElement(children: .combine)
                 Spacer(minLength: 8)
                 if portal.detected, let url = portal.url {
                     Link("Open Sign-In Page", destination: url).font(.caption)
@@ -662,17 +690,20 @@ struct NetworkToolsView: View {
             TextField("Host or IP to test", text: $target, prompt: Text("example.com"))
                 .textFieldStyle(.roundedBorder).autocorrectionDisabled()
                 .onSubmit { run() }
+                .focused($targetFocused)
             egressPicker
             Picker("MTU via", selection: $mtuProto) {
                 ForEach(NetworkProbes.MTUProtocol.allCases) { Text($0.label).tag($0) }
             }
             .pickerStyle(.segmented).labelsHidden().fixedSize()
+            .accessibilityLabel("MTU test technique")
             .help("Which technique the MTU test uses. Only ICMP can size the path with the don't-fragment bit; the TCP-based tests report the negotiated MSS and look for a blackhole.")
             if mtuProto.isTCP {
                 TextField("Port", text: $mtuPortText,
                           prompt: Text("\(mtuProto.defaultPort ?? 443)"))
                     .textFieldStyle(.roundedBorder).frame(width: 64)
                     .onSubmit { restartMTU() }
+                    .accessibilityLabel("MTU test port")
             }
             Button(running ? "Stop" : "Run") { running ? stop() : run() }
                 .keyboardShortcut(.defaultAction)
@@ -717,7 +748,10 @@ struct NetworkToolsView: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("Send the diagnostics out a specific tunnel (via IP_BOUND_IF), regardless of the route table. Automatic uses the normal routing.")
+        // No socket-option jargon in anything a person hears or reads.
+        .help("Send the diagnostics out a specific tunnel, regardless of the route table. Automatic uses the normal routing.")
+        .accessibilityLabel("Diagnostics egress")
+        .accessibilityValue(egressLabel)
         // A chosen egress that isn't resolvable (interface not up) silently falls back
         // to Automatic at bind time — so the picker never sends a probe nowhere.
         .onChange(of: egress) { _, _ in if running { run() } }
@@ -770,6 +804,7 @@ struct NetworkToolsView: View {
                         NetNodeChip(node: node)
                         if i < flowNodes.count - 1 {
                             Image(systemName: "arrow.right").foregroundStyle(.secondary).padding(.horizontal, 6)
+                                .accessibilityHidden(true)   // reading order IS the path
                         }
                     }
                 }.padding(6)
@@ -870,12 +905,20 @@ struct NetworkToolsView: View {
                         LineMark(x: .value("t", s.id), y: .value("ms", rtt)).foregroundStyle(.blue)
                         AreaMark(x: .value("t", s.id), y: .value("ms", rtt)).foregroundStyle(.blue.opacity(0.15))
                     } else {
-                        PointMark(x: .value("t", s.id), y: .value("ms", 0)).foregroundStyle(.red)  // a drop
+                        // A drop: an ✕, not a colour-only dot — red alone can't
+                        // distinguish it from the line for everyone.
+                        PointMark(x: .value("t", s.id), y: .value("ms", 0))
+                            .foregroundStyle(.red)
+                            .symbol(.cross)
                     }
                 }
                 .chartYScale(domain: 0...latency.scaleMax)
                 .chartXAxis(.hidden)
                 .frame(height: 120)
+                // The audio-graph rule from the throughput charts.
+                .accessibilityChartDescriptor(LatencyChartDescriptor(
+                    samples: latency.samples, lossPercent: latency.lossPercent,
+                    scaleMax: latency.scaleMax))
             }.padding(6)
         }
     }
@@ -1041,15 +1084,32 @@ struct NetworkToolsView: View {
                         if let rtt = hop.rttMS { Text(String(format: "%.0f ms", rtt)).font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
                     }
                     .padding(.vertical, 1)
+                    // One sentence per hop; "* * *" is traceroute-speak nobody
+                    // should have to hear read out as asterisks.
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(hopSentence(hop))
                 }
             }.padding(6)
         }
     }
 
+    /// "Hop 3, 10.1.0.1, gateway.example.net, 12 milliseconds" — or "no reply".
+    private func hopSentence(_ hop: NetworkProbes.TraceHop) -> String {
+        var bits = ["Hop \(hop.ttl)"]
+        if let ip = hop.ip {
+            bits.append(ip)
+            if let name = hopNames[hop.ttl], name != ip { bits.append(name) }
+        } else {
+            bits.append("no reply")
+        }
+        if let rtt = hop.rttMS { bits.append(String(format: "%.0f milliseconds", rtt)) }
+        return bits.joined(separator: ", ")
+    }
+
     // MARK: DNS
 
     private var dnsCard: some View {
-        GroupBox("DNS") {
+        GroupBox("DNS Lookup") {
             VStack(alignment: .leading, spacing: 8) {
                 if dnsAnswers.isEmpty {
                     Text("Run a test to query DNS.").font(.callout).foregroundStyle(.secondary)
@@ -1090,6 +1150,22 @@ struct NetworkToolsView: View {
         }
         .padding(.vertical, 2).padding(.horizontal, 4)
         .background(a.matchesOS ? Color.green.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 6))
+        // One sentence; the ✓-and-green-wash "macOS used this one" rides in words.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(dnsSentence(a))
+    }
+
+    private func dnsSentence(_ a: DNSAnswer) -> String {
+        var bits = [a.server]
+        if let rev = a.reverse { bits.append(rev) }
+        if let recs = a.result?.records, !recs.isEmpty {
+            bits.append("answered \(recs.joined(separator: ", "))")
+        } else {
+            bits.append("no answer")
+        }
+        if let ms = a.result?.elapsedMS { bits.append(String(format: "%.0f milliseconds", ms)) }
+        if a.matchesOS { bits.append("the answer macOS used") }
+        return bits.joined(separator: ", ")
     }
 
     // MARK: Actions
@@ -1301,14 +1377,23 @@ struct NetworkToolsView: View {
             Text(title).font(.caption).foregroundStyle(.secondary)
             Text(value).font(.system(.body, design: .rounded)).monospacedDigit().bold()
         }
+        // Caption + number read as one ("Latency: 32 ms"), and the em-dash
+        // placeholder becomes words.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(title): \(value == "\u{2014}" ? "no data yet" : value)")
     }
 }
 
 private struct NetNodeChip: View {
     let node: NetNode
     var body: some View {
+        chipBody
+            .accessibilityElement(children: .combine)
+    }
+    private var chipBody: some View {
         VStack(spacing: 3) {
             Image(systemName: node.symbol).font(.title2).foregroundStyle(.tint)
+                .accessibilityHidden(true)
             Text(node.label).font(.caption.weight(.medium)).lineLimit(1)
             if let cc = node.countryCode { Text(CountryCentroids.flag(for: cc)).font(.caption2) }
             if let ip = node.ipv4 { Text(ip).font(.caption2.monospaced()).foregroundStyle(.secondary).lineLimit(1) }
@@ -1319,5 +1404,67 @@ private struct NetNodeChip: View {
         .padding(8)
         .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
         .help([node.label, node.ipv4, node.ipv6, node.reverse, node.subtitle].compactMap { $0 }.joined(separator: "\n"))
+    }
+}
+
+/// The latency graph as an audio graph — same rule as the throughput charts:
+/// a Swift Chart is navigable data, not a picture. Lost pings become their own
+/// discrete "Lost" series (the red ✕ marks), so sonification renders drops as
+/// absences rather than zero-latency lies.
+/// nonisolated because AXChartDescriptorRepresentable is a nonisolated protocol.
+nonisolated private struct LatencyChartDescriptor: AXChartDescriptorRepresentable {
+    let samples: [LatencyMonitor.Sample]
+    let lossPercent: Double
+    let scaleMax: Double
+
+    private func axes() -> (x: AXNumericDataAxisDescriptor, y: AXNumericDataAxisDescriptor) {
+        let newest = samples.last?.id ?? 0
+        let oldest = samples.first?.id ?? 0
+        let x = AXNumericDataAxisDescriptor(
+            title: "Ping number",
+            range: Double(oldest)...Double(max(oldest + 1, newest)),
+            gridlinePositions: []) { value in
+                let ago = Double(newest) - value
+                return ago < 1 ? "newest" : "\(Int(ago)) pings ago"
+            }
+        let y = AXNumericDataAxisDescriptor(
+            title: "Round trip",
+            range: 0...max(1, scaleMax),
+            gridlinePositions: []) { String(format: "%.0f milliseconds", $0) }
+        return (x, y)
+    }
+
+    private func series() -> [AXDataSeriesDescriptor] {
+        [AXDataSeriesDescriptor(
+            name: "Round trip", isContinuous: true,
+            dataPoints: samples.compactMap { s in
+                s.rttMS.map { AXDataPoint(x: Double(s.id), y: $0) }
+            }),
+         AXDataSeriesDescriptor(
+            name: "Lost pings", isContinuous: false,
+            dataPoints: samples.filter { $0.rttMS == nil }.map {
+                AXDataPoint(x: Double($0.id), y: 0, label: "lost")
+            })]
+    }
+
+    private var summary: String {
+        guard let last = samples.last else { return "No pings sent yet." }
+        let latest = last.rttMS.map { String(format: "%.0f milliseconds", $0) } ?? "lost"
+        return "Latest ping \(latest); \(String(format: "%.0f", lossPercent)) percent lost over \(samples.count) pings."
+    }
+
+    func makeChartDescriptor() -> AXChartDescriptor {
+        let (x, y) = axes()
+        return AXChartDescriptor(title: "Latency and packet loss", summary: summary,
+                                 xAxis: x, yAxis: y, additionalAxes: [], series: series())
+    }
+
+    // Rebuilt on every SwiftUI update so the audio graph tracks the live pings.
+    func updateChartDescriptor(_ descriptor: AXChartDescriptor) {
+        let (x, y) = axes()
+        descriptor.xAxis = x
+        descriptor.yAxis = y
+        descriptor.summary = summary
+        descriptor.series = series()
     }
 }

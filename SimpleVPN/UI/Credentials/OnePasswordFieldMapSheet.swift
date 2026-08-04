@@ -64,7 +64,10 @@ struct OnePasswordFieldMapSheet: View {
             .navigationTitle("Map 1Password Fields")
             .frame(minWidth: 460, minHeight: 420)
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+                // "Done" is dismissive — ESC must close the sheet too.
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
+                }
             }
         }
     }

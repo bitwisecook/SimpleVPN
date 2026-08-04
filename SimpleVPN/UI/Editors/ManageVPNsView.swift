@@ -19,6 +19,7 @@ struct ManageVPNsView: View {
     @Environment(NativeVPNManager.self) private var nativeVPN
     @Environment(\.dismiss) private var dismissWindow
     @State private var selection: String?
+    @FocusState private var sidebarFocused: Bool
 
     /// Every configured VPN across all backends — "only one VPN" for the
     /// save-closes-the-window behaviour.
@@ -62,6 +63,7 @@ struct ManageVPNsView: View {
                                 StatusDot(state: .from(subprocess: st))
                                 Image(systemName: t.kind.systemImage)
                                     .foregroundStyle(tunnelManager.isActive(t.id) ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                                    .accessibilityHidden(true)
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text(t.name)
                                     Text(st.isFailed ? (st.failureText ?? "Failed") : t.kind.displayName)
@@ -70,6 +72,9 @@ struct ManageVPNsView: View {
                                         .lineLimit(1)
                                 }
                             }
+                            // One sentence, dot state in words (the dot is hidden).
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel("\(t.name), \(t.kind.displayName), \(DotState.from(subprocess: st).accessibilityDescription)\(st.isFailed ? ", \(st.failureText ?? "failed")" : "")")
                             .tag(Self.tunnelTag + t.id)
                             .contextMenu {
                                 Button("Remove", role: .destructive) {
@@ -90,11 +95,16 @@ struct ManageVPNsView: View {
                                 StatusDot(status: isThis ? nativeVPN.status : .disconnected)
                                 Image(systemName: c.kind.systemImage)
                                     .foregroundStyle(isThis && nativeVPN.status == .connected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                                    .accessibilityHidden(true)
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text(c.name)
                                     Text(c.kind.displayName).font(.caption).foregroundStyle(.secondary)
                                 }
                             }
+                            // One sentence incl. the dot's state in words — the
+                            // hidden dot and icon tint said "connected" to nobody.
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel("\(c.name), \(c.kind.displayName), \(DotState.from(status: isThis ? nativeVPN.status : .disconnected).accessibilityDescription)")
                             .tag(Self.nativeTag + c.id)
                             .contextMenu {
                                 Button("Remove", role: .destructive) { nativeVPN.remove(c.id) }
@@ -111,13 +121,24 @@ struct ManageVPNsView: View {
                 }
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 240)
+            // One focus section per column (Tab: sidebar → editor), and the
+            // list takes initial focus so arrow keys pick a VPN immediately.
+            .focusSection()
+            .focused($sidebarFocused)
             .toolbar {
                 ToolbarItemGroup {
                     Menu { addMenu } label: { Image(systemName: "plus") }
                         .help("Add a connection, or import a config file (any supported type)")
-                    Button { if let id = selection { Task { try? await vpn.remove(id: id) } } } label: { Image(systemName: "minus") }
-                        .disabled(selection == nil || !vpn.profiles.contains { $0.id == selection })
-                        .help("Remove")
+                        .accessibilityLabel("Add VPN")
+                    Button { removeSelection() } label: { Image(systemName: "minus") }
+                        .disabled(!canRemoveSelection)
+                        .help("Remove the selected VPN")
+                        .accessibilityLabel("Remove the selected VPN")
+                    Button("Export .ovpn…") {
+                        if let p = vpn.profiles.first(where: { $0.id == selection }) { export(p) }
+                    }
+                    .disabled(!vpn.profiles.contains { $0.id == selection })
+                    .help("Save the selected VPN's configuration as a file")
                 }
             }
         } detail: {
@@ -133,7 +154,7 @@ struct ManageVPNsView: View {
         .fileExporter(isPresented: $showExporter, document: exportDoc, contentType: UI.ovpnType, defaultFilename: exportName + ".ovpn") { _ in }
         .alert("Config Imported", isPresented: Binding(
             get: { ciscoNote != nil }, set: { if !$0 { ciscoNote = nil } })) {
-            Button("OK") { ciscoNote = nil }
+            Button("OK", role: .cancel) { ciscoNote = nil }
         } message: { Text(ciscoNote ?? "") }
         .fileDropTarget { urls in importFiles(urls) }
         .importOutcomeAlert(vpn: vpn)
@@ -150,6 +171,7 @@ struct ManageVPNsView: View {
             if !seeded {
                 seeded = true
                 selection = vpn.selectedID ?? vpn.profiles.first?.id
+                sidebarFocused = true
             }
         }
     }
@@ -158,20 +180,35 @@ struct ManageVPNsView: View {
     @ViewBuilder private func compositionRow(_ comp: VPNComposition) -> some View {
         let active = vpn.isCompositionActive(comp)
         HStack(spacing: 8) {
-            Image(systemName: "square.stack.3d.up")
-                .foregroundStyle(active ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-            VStack(alignment: .leading, spacing: 1) {
-                Text(comp.name)
-                Text("\(comp.members.count) VPNs").font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Image(systemName: "square.stack.3d.up")
+                    .foregroundStyle(active ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(comp.name)
+                    Text("\(comp.members.count) VPNs").font(.caption).foregroundStyle(.secondary)
+                }
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(comp.name), composition of \(comp.members.count) VPNs, \(active ? "connected" : "disconnected")")
             Spacer(minLength: 6)
             if active {
                 Button { vpn.disconnectComposition(comp) } label: { Image(systemName: "stop.circle.fill") }
                     .buttonStyle(.borderless).help("Disconnect all")
+                    .accessibilityLabel("Disconnect all of \(comp.name)")
             } else {
                 Button { Task { await vpn.connectComposition(comp) } } label: { Image(systemName: "play.circle.fill") }
                     .buttonStyle(.borderless).help("Connect all")
+                    .accessibilityLabel("Connect all of \(comp.name)")
             }
+            // Edit/Remove used to live only in the context menu, which plain
+            // keyboard can't open — this menu is the Tab-reachable path.
+            Menu {
+                Button("Edit…") { editingComposition = comp }
+                Button("Remove", role: .destructive) { compositions.remove(comp.id) }
+            } label: { Image(systemName: "ellipsis.circle") }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                .accessibilityLabel("Actions for \(comp.name)")
         }
         .contextMenu {
             Button(active ? "Disconnect All" : "Connect All") {
@@ -179,6 +216,28 @@ struct ManageVPNsView: View {
             }
             Button("Edit…") { editingComposition = comp }
             Button("Remove", role: .destructive) { compositions.remove(comp.id) }
+        }
+    }
+
+    /// The − button removes whatever the sidebar has selected — VPN profiles,
+    /// tunnels and native configs alike. (Compositions aren't selectable; their
+    /// row menu carries Remove.)
+    private var canRemoveSelection: Bool {
+        guard let sel = selection else { return false }
+        if sel.hasPrefix(Self.tunnelTag) { return true }
+        if sel.hasPrefix(Self.nativeTag) { return true }
+        return vpn.profiles.contains { $0.id == sel }
+    }
+
+    private func removeSelection() {
+        guard let sel = selection else { return }
+        if sel.hasPrefix(Self.tunnelTag) {
+            let id = String(sel.dropFirst(Self.tunnelTag.count))
+            tunnelManager.disconnect(id); tunnels.remove(id)
+        } else if sel.hasPrefix(Self.nativeTag) {
+            nativeVPN.remove(String(sel.dropFirst(Self.nativeTag.count)))
+        } else {
+            Task { try? await vpn.remove(id: sel) }
         }
     }
 

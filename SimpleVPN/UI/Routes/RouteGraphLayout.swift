@@ -84,6 +84,19 @@ enum EdgeStatus: Equatable {   // was private — internal for the file split
         case .captivePortal: .indigo
         }
     }
+    /// Differentiate Without Color: within the dashed family the states differed
+    /// only by hue (and stalled by motion, which Reduce Motion removes) — under
+    /// the accommodation each gets its own dash rhythm. The default [6,7] stays
+    /// the shared look otherwise; the mid-edge symbol carries the exact state.
+    var accessibleDash: [CGFloat] {
+        switch self {
+        case .healthy, .passive: []
+        case .stalled: [6, 7]          // the baseline dash
+        case .paused: [12, 6]          // long, calm strokes — intentional
+        case .down: [2, 5]             // broken to dots — nothing flows
+        case .captivePortal: [10, 4, 2, 4]   // knock-knock, like its dot
+        }
+    }
     var help: String? {
         switch self {
         case .healthy, .passive: nil

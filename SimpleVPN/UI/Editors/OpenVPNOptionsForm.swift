@@ -70,6 +70,11 @@ struct OpenVPNOptionsForm: View {
                 Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(80))
                     withAnimation { proxy.scrollTo(id, anchor: .center) }
+                    // The reveal is a scroll + a colour wash — imperceptible to
+                    // VoiceOver. Say where we landed.
+                    if let d = OpenVPNSettings.byID[id] {
+                        AccessibilityAnnouncer.sayNow("Showing \(d.name), in \(d.group.title)")
+                    }
                 }
             }
         }
@@ -81,6 +86,7 @@ struct OpenVPNOptionsForm: View {
         Section {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
                 TextField("Search settings", text: $search.query)
                     .textFieldStyle(.plain)
                     .autocorrectionDisabled()
@@ -341,6 +347,9 @@ struct OpenVPNOptionsForm: View {
         if let base = certProfileBase.wrappedValue, base != .suiteb {
             Toggle("Only if the configuration file doesn't specify", isOn: certProfileOnlyDefault)
                 .padding(.leading, 16)
+                // The indentation ties this to Certificate Strictness for the
+                // eye; VoiceOver needs the subject in words.
+                .accessibilityLabel("Apply the certificate strictness only if the configuration file doesn't specify one")
         }
     }
 
@@ -420,6 +429,9 @@ struct OpenVPNOptionsForm: View {
                         .multilineTextAlignment(.trailing)
                         .frame(maxWidth: 260).frame(maxWidth: .infinity, alignment: .trailing)
                         .disabled(!context.proxyHasUsername)
+                        // A dead field must say why.
+                        .help(context.proxyHasUsername ? "" : "Enter a proxy username first")
+                        .accessibilityValue(context.proxyHasUsername ? "" : "unavailable — enter a proxy username first")
                 } label: {
                     Text("Proxy Password")
                 }
@@ -725,6 +737,8 @@ struct SettingLabel: View {
     var body: some View {
         let d = OpenVPNSettings.byID[id]!
         Text(d.name).bold(d.isSet(draft))
+            // Bold weight is invisible to VoiceOver — say the state too.
+            .accessibilityLabel(d.isSet(draft) ? "\(d.name), changed from default" : d.name)
     }
 }
 

@@ -20,24 +20,31 @@ struct DiscoverEndpointView: View {
     @State private var scanning = false
     @State private var scanned = false
     @State private var candidates: [DiscoveryCandidate] = []
+    @FocusState private var addressFocused: Bool
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
                     HStack {
-                        TextField("Host or host:port", text: $address,
+                        TextField("Server address (port optional)", text: $address,
                                   prompt: Text("vpn.example.com"))
                             .textFieldStyle(.roundedBorder)
                             .autocorrectionDisabled()
+                            .focused($addressFocused)
                             .onSubmit { Task { await scan() } }
                         Button {
                             Task { await scan() }
                         } label: {
+                            // The spinner replaces the TEXT, never the name — a
+                            // button whose AX label vanishes mid-scan reads as
+                            // an anonymous "button".
                             if scanning { ProgressView().controlSize(.small) } else { Text("Scan") }
                         }
                         .disabled(scanning || address.trimmingCharacters(in: .whitespaces).isEmpty)
                         .keyboardShortcut(.defaultAction)
+                        .accessibilityLabel("Scan")
+                        .accessibilityValue(scanning ? "scanning" : "")
                     }
                     Text("SimpleVPN sends probe traffic to this address to work out what kind of VPN it is and how it signs in. Only scan servers you're allowed to.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -66,42 +73,70 @@ struct DiscoverEndpointView: View {
             .formStyle(.grouped)
             .navigationTitle("Discover a VPN")
             .frame(minWidth: 520, minHeight: 460)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
+            // ESC closes (explicitly — the placement alone isn't a key binding).
+            .toolbar { ToolbarItem(placement: .cancellationAction) {
+                Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
+            } }
         }
+        // The address is the only thing to type — the cursor starts in it.
+        .onAppear { addressFocused = true }
     }
 
     @ViewBuilder private func candidateRow(_ c: DiscoveryCandidate) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: c.systemImage)
-                .font(.title3).foregroundStyle(.tint).frame(width: 24)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(c.title).font(.callout).bold()
-                    ConfidencePill(confidence: c.confidence)
-                    Text("\(c.transport)/\(c.port)").font(.caption).foregroundStyle(.secondary)
+            // The description is ONE element, ONE sentence; Create stays its own
+            // control but names its candidate (a column of bare "Create"s is
+            // unusable from the rotor).
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: c.systemImage)
+                    .font(.title3).foregroundStyle(.tint).frame(width: 24)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(c.title).font(.callout).bold()
+                        ConfidencePill(confidence: c.confidence)
+                        Text("\(c.transport)/\(c.port)").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Text(c.detail).font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if !c.facts.isEmpty { factsLine(c) }
                 }
-                Text(c.detail).font(.callout).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if !c.facts.isEmpty { factsLine(c) }
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(rowSentence(c))
             Spacer(minLength: 6)
             if c.kind != nil {
                 Button("Create") { onCreate(c); dismiss() }
                     .buttonStyle(.glassProminent).controlSize(.small)
+                    .accessibilityLabel("Create \(c.title)")
             }
         }
         .padding(.vertical, 2)
     }
 
+    /// The candidate in words: "SSH server on TCP port 22, confidence likely,
+    /// OpenSSH 9.6, auth: password, public key" — slashes and middots translated.
+    private func rowSentence(_ c: DiscoveryCandidate) -> String {
+        var bits = ["\(c.title) on \(c.transport) port \(c.port)",
+                    "confidence \(c.confidence.label.lowercased())",
+                    c.detail]
+        bits.append(contentsOf: factParts(c))
+        return bits.joined(separator: ", ")
+    }
+
     @ViewBuilder private func factsLine(_ c: DiscoveryCandidate) -> some View {
-        let order = ["software", "authMethods", "vendor", "encryption", "integrity",
-                     "dhGroup", "sslProtocol", "clientCert", "saml", "serverCert"]
-        let shown = order.compactMap { k in c.facts[k].map { "\(prettyKey(k)): \($0)" } }
+        let shown = factParts(c)
         if !shown.isEmpty {
             Text(shown.joined(separator: " · "))
                 .font(.caption).foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private func factParts(_ c: DiscoveryCandidate) -> [String] {
+        let order = ["software", "authMethods", "vendor", "encryption", "integrity",
+                     "dhGroup", "sslProtocol", "clientCert", "saml", "serverCert"]
+        return order.compactMap { k in c.facts[k].map { "\(prettyKey(k)): \($0)" } }
     }
 
     private func prettyKey(_ k: String) -> String {
@@ -120,6 +155,12 @@ struct DiscoverEndpointView: View {
         let results = await EndpointDiscovery.discover(host: host, hintPort: hint)
         candidates = results
         scanning = false; scanned = true
+        // The list changed under a reader who last heard "Probing…" — say how it
+        // ended (a scan takes long enough that silence reads as a hang).
+        let identified = results.count { $0.kind != nil }
+        AccessibilityAnnouncer.sayNow(identified > 0
+            ? "Scan finished: \(identified == 1 ? "one candidate" : "\(identified) candidates") found"
+            : "Scan finished: nothing identifiable")
     }
 }
 

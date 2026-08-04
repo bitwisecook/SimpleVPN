@@ -53,10 +53,14 @@ struct ProxyTunnelView: View {
                     TextField("proxy.example.com:\(preset.defaultPort)", text: $address)
                         .textFieldStyle(.roundedBorder)
                         .autocorrectionDisabled()
+                        // The title is an EXAMPLE address — the spec name is the name.
+                        .accessibilityLabel(Self.specs["px.address"].name)
+                        .accessibilityValue(upstreamProblem.map { "\(address). Problem: \($0)" } ?? address)
                 }
                 if let problem = upstreamProblem {
                     Label(problem, systemImage: "exclamationmark.triangle.fill")
                         .font(.callout).foregroundStyle(.orange)
+                        .accessibilityLabel("Problem: \(problem)")
                 }
             }
 
@@ -71,10 +75,13 @@ struct ProxyTunnelView: View {
                         TextField("Username", text: $username)
                             .textFieldStyle(.roundedBorder)
                             .autocorrectionDisabled()
+                            // Several editors show credential pairs — say whose.
+                            .accessibilityLabel("Proxy username")
                     }
                     EngineSettingRow(spec: Self.specs["px.password"], changed: !password.isEmpty) {
                         SecureField("Password", text: $password)
                             .textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("Proxy password")
                     }
                     Label("Saved in your Keychain, and only ever handed to the proxy in memory.",
                           systemImage: "lock")
@@ -93,20 +100,26 @@ struct ProxyTunnelView: View {
                         TextField("10.0.0.0/8, 192.168.1.0/24", text: $includedText)
                             .textFieldStyle(.roundedBorder)
                             .autocorrectionDisabled()
+                            .accessibilityLabel(Self.specs["px.included"].name)
+                            .accessibilityValue(includedProblem.map { "\(includedText). Problem: \($0)" } ?? includedText)
                     }
                     if let p = includedProblem {
                         Label(p, systemImage: "exclamationmark.triangle.fill")
                             .font(.callout).foregroundStyle(.orange)
+                            .accessibilityLabel("Problem: \(p)")
                     }
                 }
                 EngineSettingRow(spec: Self.specs["px.excluded"], changed: !excludedText.isEmpty) {
                     TextField("Networks to keep OUT of the proxy", text: $excludedText)
                         .textFieldStyle(.roundedBorder)
                         .autocorrectionDisabled()
+                        .accessibilityLabel(Self.specs["px.excluded"].name)
+                        .accessibilityValue(excludedProblem.map { "\(excludedText). Problem: \($0)" } ?? excludedText)
                 }
                 if let p = excludedProblem {
                     Label(p, systemImage: "exclamationmark.triangle.fill")
                         .font(.callout).foregroundStyle(.orange)
+                        .accessibilityLabel("Problem: \(p)")
                 }
             }
 
@@ -115,9 +128,12 @@ struct ProxyTunnelView: View {
                     TextField("1.1.1.1, 8.8.8.8", text: $dnsText)
                         .textFieldStyle(.roundedBorder)
                         .autocorrectionDisabled()
+                        .accessibilityLabel(Self.specs["px.dns"].name)
                 }
                 EngineSettingRow(spec: Self.specs["px.mtu"], changed: draft.mtu != ProxyTunnelStartConfig.defaultMTU) {
                     Stepper("MTU: \(draft.mtu)", value: $draft.mtu, in: 576...1500, step: 4)
+                        .accessibilityLabel("MTU")
+                        .accessibilityValue("\(draft.mtu)")
                 }
             }
 
@@ -142,6 +158,7 @@ struct ProxyTunnelView: View {
                 .buttonStyle(.glassProminent)
                 .disabled(saveDisabledReason != nil)
                 .help(saveDisabledReason ?? "Save changes to this VPN")
+                .accessibilityValue(saveDisabledReason ?? "")
             }
         }
         .safeAreaInset(edge: .bottom) {

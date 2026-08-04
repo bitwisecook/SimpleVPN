@@ -53,7 +53,11 @@ struct TrafficLogView: View {
             }
             .navigationTitle("Traffic · \(vpnName)")
             .searchable(text: $filter, prompt: "Filter by address, port or protocol")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            // "Done" is dismissive, so it takes ESC — a sheet with no escape
+            // path traps keyboard and VoiceOver users.
+            .toolbar { ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
+            } }
             .frame(minWidth: 620, minHeight: 460)
         }
         .task { await poll() }
@@ -65,16 +69,24 @@ struct TrafficLogView: View {
     private var divertedBar: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Routed around \(vpnName)").font(.caption).foregroundStyle(.secondary)
+                .accessibilityAddTraits(.isHeader)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     ForEach(rules) { rule in
                         HStack(spacing: 4) {
-                            Image(systemName: ruleSymbol(rule))
-                            Text(ruleLabel(rule)).font(.caption.monospaced())
+                            // Symbol + text read as one chip; the ✕ stays its own
+                            // (named) control — "button" with no label deletes a rule.
+                            HStack(spacing: 4) {
+                                Image(systemName: ruleSymbol(rule))
+                                Text(ruleLabel(rule)).font(.caption.monospaced())
+                            }
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel("Diverted: \(ruleLabel(rule))")
                             Button {
                                 Task { await vpn.removeRoutingRule(id: rule.id, for: profileID) }
                             } label: { Image(systemName: "xmark.circle.fill") }
                                 .buttonStyle(.plain).foregroundStyle(.secondary)
+                                .accessibilityLabel("Remove diversion for \(ruleLabel(rule))")
                         }
                         .padding(.horizontal, 8).padding(.vertical, 3)
                         .background(.orange.opacity(0.15), in: Capsule())
@@ -107,8 +119,11 @@ struct TrafficLogView: View {
                             Text("Open").frame(width: 56, alignment: .trailing)
                             Spacer().frame(width: 34)
                         }.font(.caption).foregroundStyle(.secondary)
+                        // Hand-built column captions never associate with the cells
+                        // below; each row reads as a full sentence instead.
+                        .accessibilityHidden(true)
                     } footer: {
-                        Text("A green dot is an active connection; grey is idle. Throughput is live download+upload; Total and Open are for the life of the connection.")
+                        Text("A filled green dot is an active connection; a hollow grey one is idle. Throughput is live download+upload; Total and Open are for the life of the connection.")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }
                 }
@@ -122,26 +137,37 @@ struct TrafficLogView: View {
         let rates = history[flow.id]?.rates ?? []
         let rateNow = rates.last ?? 0
         return HStack(spacing: 0) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(active ? Color.green : Color.secondary.opacity(0.5))
+            // Everything except the actions menu is ONE element, ONE sentence —
+            // the column captions are inlined here because the hand-built header
+            // can't associate with these cells the way a real table would.
+            HStack(spacing: 0) {
+                HStack(spacing: 6) {
+                    // Filled = active, hollow ring = idle: the state never rides
+                    // on green-vs-grey alone (the house status-dot rule).
+                    Group {
+                        if active { Circle().fill(Color.green) }
+                        else { Circle().strokeBorder(Color.secondary.opacity(0.6), lineWidth: 1) }
+                    }
                     .frame(width: 7, height: 7)
                     .help(active ? "Active" : "Idle")
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(flow.endpoint).font(.callout.monospaced()).lineLimit(1)
-                    Text("↓ \(Fmt.byteCount(Double(flow.bytesIn)))  ↑ \(Fmt.byteCount(Double(flow.bytesOut)))")
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(flow.endpoint).font(.callout.monospaced()).lineLimit(1)
+                        Text("↓ \(Fmt.byteCount(Double(flow.bytesIn)))  ↑ \(Fmt.byteCount(Double(flow.bytesOut)))")
+                            .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+                Text(flow.protoName).font(.caption).foregroundStyle(.secondary).frame(width: 48, alignment: .leading)
+                VStack(spacing: 1) {
+                    Sparkline(values: rates, active: active).frame(height: 22)
+                    Text(rateNow > 0 ? "\(Fmt.byteCount(rateNow))/s" : "—")
                         .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
-                }
-            }.frame(maxWidth: .infinity, alignment: .leading)
-            Text(flow.protoName).font(.caption).foregroundStyle(.secondary).frame(width: 48, alignment: .leading)
-            VStack(spacing: 1) {
-                Sparkline(values: rates, active: active).frame(height: 22)
-                Text(rateNow > 0 ? "\(Fmt.byteCount(rateNow))/s" : "—")
-                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
-            }.frame(width: 96)
-            Text(Fmt.byteCount(Double(flow.bytesTotal))).font(.caption.monospacedDigit()).frame(width: 74, alignment: .trailing)
-            Text(Self.durationText(flow.ageFirst)).font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary).frame(width: 56, alignment: .trailing)
+                }.frame(width: 96)
+                Text(Fmt.byteCount(Double(flow.bytesTotal))).font(.caption.monospacedDigit()).frame(width: 74, alignment: .trailing)
+                Text(Self.durationText(flow.ageFirst)).font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary).frame(width: 56, alignment: .trailing)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(rowSentence(flow, active: active, rateNow: rateNow))
             Menu {
                 if ManagedPolicy.allowDivertOutside {
                     Button {
@@ -167,8 +193,27 @@ struct TrafficLogView: View {
             }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
             .frame(width: 28)
+            .accessibilityLabel("Actions for \(flow.endpoint)")
         }
         .padding(.vertical, 1)
+    }
+
+    /// The row in words — column captions inlined, glyphs translated ("↓/↑"
+    /// become downloaded/uploaded, "—" becomes "no traffic").
+    private func rowSentence(_ flow: TrafficFlow, active: Bool, rateNow: Double) -> String {
+        let rate = rateNow > 0 ? "\(Fmt.byteCount(rateNow)) per second" : "no traffic right now"
+        return "\(flow.endpoint), \(flow.protoName), \(active ? "active" : "idle"), "
+             + "downloaded \(Fmt.byteCount(Double(flow.bytesIn))), uploaded \(Fmt.byteCount(Double(flow.bytesOut))), "
+             + "\(rate), \(Fmt.byteCount(Double(flow.bytesTotal))) in total, open \(Self.accessibleDuration(flow.ageFirst))"
+    }
+
+    /// "2h30m" reads as letter soup; say the units.
+    private static func accessibleDuration(_ seconds: TimeInterval) -> String {
+        let s = Int(seconds)
+        if s < 90 { return "\(s) seconds" }
+        let m = s / 60
+        if m < 60 { return "\(m) minutes" }
+        return "\(m / 60) hours \(m % 60) minutes"
     }
 
     private func divert(_ flow: TrafficFlow, to action: RoutingRule.Action) async {

@@ -118,6 +118,28 @@ struct MercatorMapView: View {
             .onTapGesture(count: 2) { location in
                 camera.zoom(by: 2, anchor: location, viewSize: size)
             }
+            // Keyboard path for the mouse-only pan/zoom (same keys as the route
+            // diagram): Tab focuses the map, arrows pan, +/− zoom.
+            .focusable()
+            .onMoveCommand { direction in
+                let step: CGFloat = 40
+                let delta: CGSize = switch direction {
+                case .left: CGSize(width: step, height: 0)
+                case .right: CGSize(width: -step, height: 0)
+                case .up: CGSize(width: 0, height: step)
+                case .down: CGSize(width: 0, height: -step)
+                @unknown default: .zero
+                }
+                camera.pan(by: delta, viewSize: size)
+            }
+            .onKeyPress(characters: CharacterSet(charactersIn: "+-=")) { press in
+                switch press.characters {
+                case "+", "=": camera.zoom(by: 1.5, anchor: nil, viewSize: nil)
+                case "-": camera.zoom(by: 1 / 1.5, anchor: nil, viewSize: nil)
+                default: return .ignored
+                }
+                return .handled
+            }
             .background(PanZoomEventCatcher(
                 onPan: { delta in camera.pan(by: delta, viewSize: size) },
                 onZoom: { factor, anchor in

@@ -190,6 +190,8 @@ struct EndpointRegionSheet: View {
             .padding(12)
         }
         .frame(width: 420, height: 520)
+        // Done already owns Return; ESC must also close a picker-only sheet.
+        .onExitCommand { dismiss() }
     }
 
     private func matches(in region: RegionBucket) -> [(code: String, name: String)] {

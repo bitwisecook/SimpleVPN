@@ -166,6 +166,7 @@ private struct IssueCaption: View {
                 .font(.caption2)
                 .foregroundStyle(issue.isError ? Color.red : Color.orange)
                 .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel("\(issue.isError ? "Error" : "Warning"): \(issue.message)")
         }
     }
 }
@@ -267,27 +268,35 @@ struct CustomRoutingTabView: View {
         let status = profile.routes.ruleStatus(r, against: pushed.routes)
         let overlaps = overlapTargets(for: r)
 
+        let sentence = Self.routeRuleSentence(r, status: status, overlapping: !overlaps.isEmpty)
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 8) {
-                Picker("", selection: rule.verb) {
+                // The verb is the row's grammatical subject — an unnamed popup
+                // ("pop up button, Replace") strands the reader mid-sentence.
+                Picker("Rule action", selection: rule.verb) {
                     Text("Accept").tag(FilterVerb.accept)
                     Text("Ignore").tag(FilterVerb.ignore)
                     Text("Replace").tag(FilterVerb.replace)
                     Text("Add").tag(FilterVerb.add)
                 }
                 .labelsHidden()
+                .accessibilityLabel("Rule action")
                 .frame(width: 96)
 
                 if r.verb != .add {
                     TextField("CIDR or default", text: routePrefixBinding(rule, \.match))
                         .textFieldStyle(.roundedBorder)
                         .frame(minWidth: 130)
+                        // Two identically-titled fields per row — name the slots.
+                        .accessibilityLabel("Network to match")
                 }
                 if r.verb == .replace || r.verb == .add {
                     Image(systemName: "arrow.right").foregroundStyle(.secondary).font(.caption)
+                        .accessibilityHidden(true)
                     TextField("CIDR or default", text: routePrefixBinding(rule, \.target))
                         .textFieldStyle(.roundedBorder)
                         .frame(minWidth: 130)
+                        .accessibilityLabel(r.verb == .replace ? "Replace with" : "Network to add")
                 }
 
                 Spacer(minLength: 4)
@@ -303,6 +312,10 @@ struct CustomRoutingTabView: View {
                     .buttonStyle(.plain)
                     .help(overlapHelp(overlaps))
                     .accessibilityLabel("Show what this overlaps")
+                    // WHAT it overlaps lived only in the hover help; the arrow
+                    // overlay itself is a Canvas VoiceOver can't see.
+                    .accessibilityValue(overlapHelp(overlaps))
+                    .accessibilityAddTraits(focusedRuleID == r.id ? .isSelected : [])
                 }
                 Button {
                     if focusedRuleID == r.id { focusedRuleID = nil }
@@ -312,12 +325,38 @@ struct CustomRoutingTabView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .accessibilityLabel("Delete rule")
+                .accessibilityLabel("Delete the \(sentence) rule")
             }
             IssueCaption(issues: issues)
         }
         .padding(.vertical, 2)
+        // The row reads as ONE sentence incl. status ("Add 10.0.0.0/8,
+        // overlaps a pushed route"), with the controls still reachable inside.
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(sentence)
         .routingAnchor("rule:\(r.id.uuidString)")
+    }
+
+    /// The rule in words — the container sentence VoiceOver announces when it
+    /// enters a row, and the delete button's subject.
+    private static func routeRuleSentence(_ r: RouteFilter.RouteRule,
+                                          status: RuleStatus, overlapping: Bool) -> String {
+        let match = r.match?.value ?? "anything"
+        let target = r.target?.value ?? "nothing"
+        var out: String = switch r.verb {
+        case .accept: "Accept \(match)"
+        case .ignore: "Ignore \(match)"
+        case .replace: "Replace \(match) with \(target)"
+        case .add: "Add \(target)"
+        }
+        switch status {
+        case .active: break
+        case .orphaned: out += ", matches nothing this VPN pushes"
+        case .redundant: out += ", already what's pushed"
+        case .overlapping: out += ", overlaps a pushed route"
+        }
+        if overlapping, status != .overlapping { out += ", overlaps another rule or route" }
+        return out
     }
 
     /// `RoutePrefix?` field ↔ plain text, blank = nil (the model treats a blank
@@ -332,6 +371,7 @@ struct CustomRoutingTabView: View {
 
     @ViewBuilder private var pushedRoutesReferenceList: some View {
         Text("Pushed by this VPN").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            .accessibilityAddTraits(.isHeader)
         if pushed.routes.advertisedPrefixes.isEmpty && !pushed.routes.wantsDefault {
             Text("Nothing pushed yet — connect once, or write rules against specific CIDRs / \"default\" offline.")
                 .font(.caption2).foregroundStyle(.tertiary)
@@ -521,15 +561,17 @@ struct CustomRoutingTabView: View {
         let r = rule.wrappedValue
         let issues = CustomRoutingValidator.validate(r)
         let status = profile.dns.ruleStatus(r, against: pushed.dns)
+        let sentence = Self.dnsRuleSentence(r, status: status)
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 8) {
-                Picker("", selection: rule.verb) {
+                Picker("Rule action", selection: rule.verb) {
                     Text("Accept").tag(FilterVerb.accept)
                     Text("Ignore").tag(FilterVerb.ignore)
                     Text("Replace").tag(FilterVerb.replace)
                     Text("Add").tag(FilterVerb.add)
                 }
                 .labelsHidden()
+                .accessibilityLabel("Rule action")
                 .frame(width: 96)
 
                 if r.verb != .add {
@@ -537,13 +579,16 @@ struct CustomRoutingTabView: View {
                         get: { rule.wrappedValue.match ?? "" },
                         set: { rule.wrappedValue.match = $0.isEmpty ? nil : $0 }))
                         .textFieldStyle(.roundedBorder).frame(minWidth: 120)
+                        .accessibilityLabel("Resolver to match")
                 }
                 if r.verb == .replace || r.verb == .add {
                     Image(systemName: "arrow.right").foregroundStyle(.secondary).font(.caption)
+                        .accessibilityHidden(true)
                     TextField("Resolver IP", text: Binding(
                         get: { rule.wrappedValue.target ?? "" },
                         set: { rule.wrappedValue.target = $0.isEmpty ? nil : $0 }))
                         .textFieldStyle(.roundedBorder).frame(minWidth: 120)
+                        .accessibilityLabel(r.verb == .replace ? "Replace with resolver" : "Resolver to add")
                 }
                 Spacer(minLength: 4)
                 if status != .active { RuleStatusBadge(status: status) }
@@ -553,11 +598,32 @@ struct CustomRoutingTabView: View {
                     Image(systemName: "trash")
                 }
                 .buttonStyle(.plain).foregroundStyle(.secondary)
-                .accessibilityLabel("Delete rule")
+                .accessibilityLabel("Delete the \(sentence) rule")
             }
             IssueCaption(issues: issues)
         }
         .padding(.vertical, 2)
+        // Same sentence discipline as the route rows.
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(sentence)
+    }
+
+    private static func dnsRuleSentence(_ r: DNSCustomization.ResolverRule, status: RuleStatus) -> String {
+        let match = r.match ?? "any resolver"
+        let target = r.target ?? "nothing"
+        var out: String = switch r.verb {
+        case .accept: "Accept resolver \(match)"
+        case .ignore: "Ignore resolver \(match)"
+        case .replace: "Replace resolver \(match) with \(target)"
+        case .add: "Add resolver \(target)"
+        }
+        switch status {
+        case .active: break
+        case .orphaned: out += ", matches nothing this VPN pushes"
+        case .redundant: out += ", already what's pushed"
+        case .overlapping: out += ", overlaps a pushed resolver"
+        }
+        return out
     }
 
     private func domainListField(_ title: String, _ binding: Binding<[String]>) -> some View {
@@ -569,6 +635,9 @@ struct CustomRoutingTabView: View {
                     set: { binding.wrappedValue = $0.split(separator: ",")
                         .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } }))
                     .textFieldStyle(.roundedBorder)
+                    .accessibilityValue(bad.isEmpty
+                        ? binding.wrappedValue.joined(separator: ", ")
+                        : "\(binding.wrappedValue.joined(separator: ", ")). Problem: not a valid domain: \(bad.joined(separator: ", "))")
             }
             if !bad.isEmpty {
                 Label("Not a valid domain: \(bad.joined(separator: ", "))", systemImage: "xmark.octagon.fill")
@@ -579,6 +648,7 @@ struct CustomRoutingTabView: View {
 
     @ViewBuilder private var pushedDNSReference: some View {
         Text("Pushed by this VPN").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            .accessibilityAddTraits(.isHeader)
         if !pushed.dns.resolvers.isEmpty {
             Text("Resolvers: \(pushed.dns.resolvers.joined(separator: ", "))")
                 .font(.caption.monospaced()).foregroundStyle(.secondary)
@@ -615,6 +685,7 @@ struct CustomRoutingTabView: View {
                 Text("Custom").tag(ProxyCustomization.Mode.custom)
             }
             .pickerStyle(.segmented)
+            .accessibilityLabel("Proxy mode")
 
             let status = profile.proxy.ruleStatus(against: pushed.proxy)
             if status != .active { RuleStatusBadge(status: status) }
@@ -674,8 +745,11 @@ struct CustomRoutingTabView: View {
     @ViewBuilder private func proxyAuthFields(caption: String) -> some View {
         TextField("Username (optional)", text: $proxyAuthUsername)
             .textFieldStyle(.roundedBorder).textContentType(.username)
+            // Host editors show several credential pairs — say whose this is.
+            .accessibilityLabel("Proxy username (optional)")
         SecureField("Password (optional)", text: $proxyAuthPassword)
             .textFieldStyle(.roundedBorder)
+            .accessibilityLabel("Proxy password (optional)")
         Label(caption, systemImage: "lock")
             .font(.caption2).foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)

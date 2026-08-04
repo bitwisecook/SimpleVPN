@@ -204,7 +204,9 @@ extension ConnectionDetailView {
             DrawnSpinner()
             // Never wrap: "Connecting…" broke onto two lines in the middle pane, which
             // made the pill twice as tall as the control beside it.
-            Text(text).foregroundStyle(.secondary)
+            // Increase Contrast: full-strength text on the tinted glass.
+            Text(text)
+                .foregroundStyle(contrast == .increased ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
         }
@@ -230,6 +232,8 @@ extension ConnectionDetailView {
                     Image(systemName: "xmark.circle.fill")
                 }
                 .buttonStyle(.glass).controlSize(.large).tint(UI.cancelRed)
+                // ESC abandons the wait, matching every sheet in the app.
+                .keyboardShortcut(.cancelAction)
                 .help("Stop asking for credentials")
                 .accessibilityLabel("Cancel credential lookup")
             })
@@ -268,6 +272,10 @@ extension ConnectionDetailView {
                 connectTask = Task { await connect() }
             }
                 .buttonStyle(.glassProminent).controlSize(.large)
+                // Return connects from anywhere in the window that isn't a text
+                // field (the fields' own onSubmit already routes to the same
+                // attempt) — the visibly prominent button IS the default action.
+                .keyboardShortcut(.defaultAction)
                 // Yellow whenever the official client is running — the caution
                 // colours the whole conflict state, not just the armed press
                 // (and not red: it's a warning being overridden, not destruction).

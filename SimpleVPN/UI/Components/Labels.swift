@@ -103,11 +103,30 @@ final class LabelStore {
 /// A pastel pill for a label.
 struct LabelPill: View {
     let label: LabelDef
+    @Environment(\.colorSchemeContrast) private var contrast
     var body: some View {
         Text(label.name)
+            // The label colour is USER-CHOSEN: the defaults are light pastels,
+            // but nothing stops a navy "Prod" — so the text picks black/white by
+            // the pill's own luminance instead of assuming a light background.
             .font(.caption2).fontWeight(.medium)
-            .foregroundStyle(.black.opacity(0.78))        // dark text reads on light pastels in both appearances
+            .foregroundStyle(textColor)
             .padding(.horizontal, 7).padding(.vertical, 2)
             .background(label.color, in: Capsule())
+            // Increase Contrast: an explicit rim, so a pastel pill doesn't melt
+            // into a light row background.
+            .overlay {
+                if contrast == .increased {
+                    Capsule().strokeBorder(textColor.opacity(0.6), lineWidth: 1)
+                }
+            }
+    }
+
+    private var textColor: Color {
+        // Relative luminance (sRGB, linearized) — the WCAG formula.
+        func lin(_ c: Double) -> Double { c <= 0.03928 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
+        let l = 0.2126 * lin(label.r) + 0.7152 * lin(label.g) + 0.0722 * lin(label.b)
+        return l > 0.4 ? .black.opacity(contrast == .increased ? 1 : 0.78)
+                       : .white.opacity(contrast == .increased ? 1 : 0.92)
     }
 }
