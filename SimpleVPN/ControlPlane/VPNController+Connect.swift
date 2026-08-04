@@ -729,7 +729,7 @@ extension VPNController {
 
     /// Whether `reconnect` can bring the profile back without user interaction —
     /// used to avoid dropping a live tunnel we couldn't restore.
-    private func canReconnectUnattended(id: String) -> Bool {
+    func canReconnectUnattended(id: String) -> Bool {   // was private — internal for the ExtensionDoctor
         // Once a Tailscale node is registered its key is on disk, so a
         // reconnect never needs the user. A WireGuard tunnel's keys live in
         // the keychain — same answer.

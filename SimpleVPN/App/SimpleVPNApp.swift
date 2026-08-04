@@ -32,7 +32,10 @@ struct SimpleVPNApp: App {
     /// The CLI's socket (ControlServer): hosts the SAME dispatcher out-of-process.
     private let controlServer = ControlServer()
     @State private var labels = LabelStore()
-    @State private var ext = ExtensionController()
+    @State private var ext: ExtensionController
+    /// Self-healing for the system extension (ping → resession → upgrade →
+    /// bounce → restart, consent-gated once anything is connected).
+    @State private var extDoctor: ExtensionDoctor
     @State private var evaluator = ProfileEvaluator()
     @State private var policy = PolicyStore()
     @State private var manualRouter = ManualRouter()
@@ -79,6 +82,15 @@ struct SimpleVPNApp: App {
         let dispatcher = ControlPlaneDispatcher(vpn: vpn)
         _control = State(initialValue: dispatcher)
         VPNIntentSupport.register(dispatcher)   // Shortcuts route through the same entry
+        // The extension doctor rides the same instances; it also installs the
+        // stats-timeout wake-up into vpn. The CLI may never heal disruptively,
+        // so while a consent-gated repair is pending, wire connects answer
+        // "not ready — open the app" through the dispatcher seam.
+        let ext = ExtensionController()
+        _ext = State(initialValue: ext)
+        let doctor = ExtensionDoctor(vpn: vpn, ext: ext)
+        _extDoctor = State(initialValue: doctor)
+        dispatcher.engineAttention = { [weak doctor] in doctor?.connectBlockedMessage }
     }
 
     var body: some Scene {
@@ -97,6 +109,7 @@ struct SimpleVPNApp: App {
                 .environment(reachability)
                 .environment(linkState)
                 .environment(ext)
+                .environment(extDoctor)
                 .onChange(of: appDelegate.openBuffer.generation) {
                     // Finder double-click / Dock drop → the shared import pipeline.
                     vpn.handleImport(of: appDelegate.openBuffer.take())
@@ -181,6 +194,10 @@ struct SimpleVPNApp: App {
                     // first to be idempotent across launches.
                     await vpn.loadAll()
                     await vpn.migrateLegacyWireGuardStore(wireguard)
+                    // Launch-time check-up, after loadAll so connected profiles
+                    // are known: non-disruptive rungs run silently; anything
+                    // that could drop a live tunnel stops for consent.
+                    await extDoctor.checkUp(trigger: .launch)
                 }
                 .task { GeoIP.warm() }                 // parse the ~10 MB DB off-main
         }

@@ -30,6 +30,7 @@ struct ConnectionView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(ReachabilityMonitor.self) private var reach: ReachabilityMonitor?
     @Environment(LinkStateMonitor.self) private var link: LinkStateMonitor?
+    @Environment(ExtensionDoctor.self) private var extDoctor: ExtensionDoctor?
     @Environment(SubprocessTunnelManager.self) private var tunnelManager: SubprocessTunnelManager?
     @Environment(SubprocessTunnelStore.self) private var tunnels: SubprocessTunnelStore?
     @Environment(NativeVPNManager.self) private var nativeVPN: NativeVPNManager?
@@ -123,8 +124,15 @@ struct ConnectionView: View {
                 // approval dialog, and a first launch should show the app, not a security
                 // prompt for something the user hasn't asked for yet. VPNController does
                 // it on the first connect (see ensureExtensionReady).
-                vpn.ensureExtensionReady = { [weak ext] in
+                let doctor = extDoctor
+                vpn.ensureExtensionReady = { [weak ext, weak doctor] in
                     guard let ext else { return true }
+                    // The connect gate doubles as a doctor trigger: a wedged
+                    // engine should be noticed the moment someone reaches for
+                    // it. Fire-and-forget — the doctor single-flights and
+                    // debounces, and its non-disruptive rungs never block or
+                    // interrupt the connect that's about to run.
+                    Task { [weak doctor] in await doctor?.checkUp(trigger: .connectGate) }
                     if ext.isActivated { return true }
                     // Ask ONCE. If approval is already outstanding, re-firing would put
                     // the same dialog up on every connect attempt, which trains people to

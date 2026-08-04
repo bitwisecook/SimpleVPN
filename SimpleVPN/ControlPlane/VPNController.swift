@@ -288,6 +288,12 @@ final class VPNController {
     /// intents and future Tcl handlers hear exactly what the UI observes.
     @ObservationIgnored var controlEventSink: ((ControlEvent) -> Void)?
 
+    /// Extension-doctor wake-up: a CONNECTED tunnel whose stats IPC stopped
+    /// answering — the classic dead/wedged-extension symptom. Installed by
+    /// ExtensionDoctor at launch; fired from fetchStats. The doctor debounces,
+    /// so the once-a-second stats poll can report freely.
+    @ObservationIgnored var statsTimeoutHook: ((String) -> Void)?
+
     /// The dispatcher's guard chain (MDM today, Tcl `CTL_*` later), installed at
     /// startup. The lifecycle entries below consult it BEFORE acting, so the
     /// guarantee is structural: every interface — UI buttons calling these

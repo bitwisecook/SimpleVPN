@@ -39,6 +39,12 @@ final class ControlPlaneDispatcher {
     /// directly; this stream is for the CLI's `watch`, intents, and scripts).
     @ObservationIgnored private var subscribers: [UUID: AsyncStream<ControlEvent>.Continuation] = [:]
 
+    /// Extension-doctor seam: non-nil while the engine needs a CONSENT-GATED
+    /// repair. Out-of-process callers (the CLI) can never grant that consent —
+    /// only the app's own warning can — so a wire connect answers `.notReady`
+    /// with this message instead of half-starting against a wedged engine.
+    @ObservationIgnored var engineAttention: (() -> String?)?
+
     init(vpn: VPNController) {
         self.vpn = vpn
         guards.append((name: "mdm", check: Self.managedPolicyGuard))
@@ -68,6 +74,7 @@ final class ControlPlaneDispatcher {
         switch command {
         case .connect(let id):
             guard hasProfile(id) else { return .failed("no such VPN: \(id)") }
+            if let why = engineAttention?() { return .notReady(why) }
             switch vpn.connectReadiness(for: id) {
             case .ready: break
             case .needsSignIn: return .notReady("this VPN needs a sign-in — open SimpleVPN to enter it")

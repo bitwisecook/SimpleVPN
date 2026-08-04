@@ -24,6 +24,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     @Environment(ReachabilityMonitor.self) var reach: ReachabilityMonitor?   // was private — internal for the file split
     @Environment(LinkStateMonitor.self) var link: LinkStateMonitor?   // was private — internal for the file split
     @Environment(ExtensionController.self) var ext: ExtensionController?   // was private — internal for the file split
+    @Environment(ExtensionDoctor.self) private var extDoctor: ExtensionDoctor?
     @Environment(\.accessibilityReduceMotion) var reduceMotion   // was private — internal for the file split
     @State var busy = false   // was private — internal for the file split
     /// The in-flight connect, so the busy pill's ✕ can cancel the credential lookup.
@@ -206,6 +207,12 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
         ScrollView {
             VStack(spacing: 20) {
                 header
+                // The engine's own doctor outranks per-VPN concerns: when the
+                // system extension needs a (consent-gated) repair, nothing
+                // below can work until it happens — say so first, quietly.
+                if let extDoctor, let surface = extDoctor.surface {
+                    ExtensionDoctorCard(doctor: extDoctor, surface: surface)
+                }
                 // Default-gateway picker (PolicyRouting.md Tier 2) moved OUT of this
                 // window — too prominent for non-technical users to find here. It
                 // now lives in VPN ▸ Routes, alongside the route graph and the

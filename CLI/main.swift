@@ -35,7 +35,16 @@ usage:
   simplevpn watch [--json]             stream live events until interrupted
   simplevpn version [--json]           the running app's version
 
+options:
+  --json        machine-readable output
+  --no-launch   don't start SimpleVPN when it isn't running (exit 4, as before)
+
 <vpn> is a VPN's name (case-insensitive; a unique prefix works) or its id.
+
+When SimpleVPN isn't running, the CLI launches it quietly and waits for its
+control socket before proceeding (--no-launch opts out). Anything that needs
+your consent — credentials, one-time codes, engine repairs that would drop a
+live VPN — happens in the app, never from here.
 """
 
 func fail(_ message: String, code: Int32) -> Never {
@@ -50,7 +59,9 @@ final class ControlClient {
     private let fd: Int32
     private var buffer = Data()
 
-    init() {
+    /// nil when the socket isn't there (app not running) — the caller decides
+    /// whether that means "launch it" or "exit 4" (see `connectedClient`).
+    init?() {
         let path = ControlSocket.path()
         fd = socket(AF_UNIX, SOCK_STREAM, 0)
         var addr = sockaddr_un()
@@ -67,12 +78,13 @@ final class ControlClient {
             }
         }) == 0
         if !connected {
-            fail("SimpleVPN isn't running (no control socket at \(path))", code: 4)
+            close(fd)
+            return nil
         }
         // A socket can exist while the app is still mid-launch (or wedged) — without
-        // timeouts a request then blocks FOREVER. 10s is generous for a local IPC;
-        // `watch` overrides receive back to infinite after subscribing.
-        setTimeout(seconds: 10)
+        // timeouts a request then blocks FOREVER. 3s is plenty for local IPC on an
+        // interactive command; `watch` lifts the receive timeout after subscribing.
+        setTimeout(seconds: 3)
     }
 
     /// 0 ⇒ block indefinitely (watch mode).
@@ -127,10 +139,44 @@ final class ControlClient {
     }
 }
 
+/// Dial the app's control socket; when the app isn't running, launch it
+/// quietly (no focus steal, hidden) and wait for the socket — `--no-launch`
+/// keeps the old exit-4 behaviour for scripts that must not side-effect.
+/// The MOST this ever does is start the app: healing anything disruptive
+/// needs the app's own consent flow and never happens from the CLI.
+func connectedClient() -> ControlClient {
+    if let client = ControlClient() { return client }
+    let path = ControlSocket.path()
+    if noLaunch {
+        fail("SimpleVPN isn't running (no control socket at \(path))", code: 4)
+    }
+    FileHandle.standardError.write(Data("SimpleVPN isn't running — starting it…\n".utf8))
+    let open = Process()
+    open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    // -g: don't steal focus; -j: launch hidden — the terminal keeps the stage.
+    open.arguments = ["-g", "-j", "-b", "com.bragi0.SimpleVPN"]
+    do {
+        try open.run()
+        open.waitUntilExit()
+    } catch {
+        fail("couldn't launch SimpleVPN: \(error.localizedDescription)", code: 4)
+    }
+    if open.terminationStatus != 0 {
+        fail("couldn't launch SimpleVPN (open exited \(open.terminationStatus)) — is it installed?", code: 4)
+    }
+    // Launch → socket is normally well under 5 s; poll rather than guess.
+    for _ in 0..<40 {   // ≤8 s
+        usleep(200_000)
+        if let client = ControlClient() { return client }
+    }
+    fail("SimpleVPN didn't come up (no control socket at \(path)). Open the app by hand, or use --no-launch to skip auto-launch.", code: 4)
+}
+
 // MARK: - Rendering
 
 let wantsJSON = CommandLine.arguments.contains("--json")
-var arguments = CommandLine.arguments.dropFirst().filter { $0 != "--json" }
+let noLaunch = CommandLine.arguments.contains("--no-launch")
+var arguments = CommandLine.arguments.dropFirst().filter { $0 != "--json" && $0 != "--no-launch" }
 
 func printJSON(_ reply: ControlReply) {
     let encoder = JSONEncoder()
@@ -213,20 +259,20 @@ func requireTarget(_ what: String) -> String {
 
 switch verb {
 case "list", "ls":
-    let client = ControlClient()
+    let client = connectedClient()
     finish(client.roundTrip(ControlRequestEnvelope(id: 2, query: .profiles))) { reply in
         if case .profiles(let list) = reply { renderList(list) }
     }
 
 case "status":
-    let client = ControlClient()
+    let client = connectedClient()
     let id = resolve(requireTarget("status"), client: client)
     finish(client.roundTrip(ControlRequestEnvelope(id: 2, query: .status(profile: id)))) { reply in
         if case .status(let p) = reply { renderStatus(p) }
     }
 
 case "connect", "disconnect", "pause", "resume":
-    let client = ControlClient()
+    let client = connectedClient()
     let id = resolve(requireTarget(verb), client: client)
     let command: ControlCommand = switch verb {
     case "connect": .connect(profile: id)
@@ -239,7 +285,7 @@ case "connect", "disconnect", "pause", "resume":
     }
 
 case "gateway", "gw":
-    let client = ControlClient()
+    let client = connectedClient()
     switch arguments.first {
     case nil:
         let reply = client.roundTrip(ControlRequestEnvelope(id: 2, query: .gateway))
@@ -269,7 +315,7 @@ case "gateway", "gw":
     }
 
 case "watch":
-    let client = ControlClient()
+    let client = connectedClient()
     let subscribed = client.roundTrip(ControlRequestEnvelope(id: 2, watch: true))
     guard case .ok = subscribed else { fail("couldn't subscribe", code: 1) }
     // Names read better than ids in the human stream.
@@ -302,7 +348,7 @@ case "watch":
     fail("SimpleVPN went away", code: 4)
 
 case "version":
-    let client = ControlClient()
+    let client = connectedClient()
     finish(client.roundTrip(ControlRequestEnvelope(id: 2, query: .version))) { reply in
         if case .version(let v) = reply { print("SimpleVPN \(v)") }
     }

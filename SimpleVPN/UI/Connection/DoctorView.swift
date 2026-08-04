@@ -220,6 +220,48 @@ private struct InfoRow: View {
     }
 }
 
+// MARK: - Extension doctor card (the engine itself needs healing)
+
+/// The ExtensionDoctor's quiet indicator: a consent-gated repair the user
+/// postponed ("Not Now"), or the ladder's last rung — restart the whole
+/// engine — waiting for them. Deliberately a card, not an alert: it holds the
+/// door open without knocking again; the warning re-appears only when the
+/// button is pressed. Rendered by ConnectionDetailView for whichever VPN is
+/// selected, because a dead engine is every VPN's problem.
+struct ExtensionDoctorCard: View {
+    let doctor: ExtensionDoctor
+    let surface: ExtensionDoctor.Surface
+    @State private var healing = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "stethoscope").foregroundStyle(.orange).font(.title3).frame(width: 22)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(surface.title).font(.callout).bold()
+                Text(surface.detail).font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    healing = true
+                    Task { await doctor.healFromCard(); healing = false }
+                } label: {
+                    if healing { ProgressView().controlSize(.small) }
+                    else { Text(surface.actionLabel) }
+                }
+                .buttonStyle(.glassProminent)
+                .tint(.orange)
+                .controlSize(.small)
+                .disabled(healing)
+                .padding(.top, 2)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.orange.opacity(0.25)))
+        .accessibilityElement(children: .combine)
+    }
+}
+
 // MARK: - Doctor finding card (genuine problems)
 
 private struct DoctorCard: View {

@@ -43,7 +43,15 @@ extension VPNController {
     /// Live telemetry poll — the only channel that crosses the root(system)
     /// extension ↔ user app boundary. nil when not connected.
     func fetchStats(id: String) async -> TunnelStats? {
-        guard let data = await sendMessageData("stats", to: id) else { return nil }
+        guard let data = await sendMessageData("stats", to: id) else {
+            // A connected tunnel that stops answering its own stats IPC is the
+            // extension doctor's wake-up call (dead or wedged extension). Only
+            // .connected counts — disconnected profiles legitimately answer nothing.
+            if profiles.first(where: { $0.id == id })?.status == .connected {
+                statsTimeoutHook?(id)
+            }
+            return nil
+        }
         let stats = try? JSONDecoder().decode(TunnelStats.self, from: data)
         // Fold the engine's ground-truth default-route ownership into the gateway
         // coordinator on every poll: keeps the applied-role cache honest and heals
