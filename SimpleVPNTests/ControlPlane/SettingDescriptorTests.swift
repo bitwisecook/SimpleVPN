@@ -51,12 +51,14 @@ struct SettingDescriptorTests {
 
     @Test func overriddenCountCountsPerGroup() {
         var o = OpenVPNOverrides()
-        o.tunPersist = true
-        o.retryOnAuthFailed = true
-        o.compression = .asym
-        #expect(OpenVPNSettings.overriddenCount(in: .reliability, for: o) == 2)
+        o.tunPersist = true            // Connection (lifecycle rides with reachability)
+        o.retryOnAuthFailed = true     // Sign-In
+        o.compression = .asym          // Security
+        #expect(OpenVPNSettings.overriddenCount(in: .connection, for: o) == 1)
+        #expect(OpenVPNSettings.overriddenCount(in: .signIn, for: o) == 1)
         #expect(OpenVPNSettings.overriddenCount(in: .security, for: o) == 1)
-        #expect(OpenVPNSettings.overriddenCount(in: .connection, for: o) == 0)
+        #expect(OpenVPNSettings.overriddenCount(in: .traffic, for: o) == 0)
+        #expect(OpenVPNSettings.overriddenCount(in: .advanced, for: o) == 0)
     }
 
     @Test func autologinSessionsHiddenForCredentialProfiles() {

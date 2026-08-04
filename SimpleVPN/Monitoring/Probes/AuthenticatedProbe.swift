@@ -492,7 +492,7 @@ actor ProbeStageRunner {
             switch $0 {
             case "publickey": "a key"
             case "password": "a password"
-            case "keyboard-interactive": "a password or a one-time code"
+            case "keyboard-interactive": "a password or a verification code"
             case "gssapi-with-mic": "a Kerberos sign-in"
             default: $0
             }

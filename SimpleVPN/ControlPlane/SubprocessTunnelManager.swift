@@ -76,7 +76,7 @@ final class SubprocessTunnelManager {
         if config.kind.isSSLVPN, !config.tokenMode.isEmpty,
            (KeychainCredentialStore.loadCredentials(profile: "tunnel.\(config.id).token")?.password ?? "").isEmpty {
             live[config.id] = Live(status: .failed(
-                "One-time-code token is set to \(config.tokenMode.uppercased()) but no token secret is stored — add it under Advanced ▸ Token secret and save."))
+                "Verification-code token is set to \(config.tokenMode.uppercased()) but no token secret is stored — add it under Sign-In ▸ Token secret and save."))
             return
         }
         if config.kind == .ssh, config.sshMode == .socks, Self.inProcessSSHSupports(config) {

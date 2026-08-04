@@ -860,7 +860,7 @@ struct NetworkToolsView: View {
         let name = vpn.profiles.first { $0.id == id }?.name ?? "VPN"
         return NetNode(label: name, symbol: "lock.shield", ipv4: s.serverIP,
                        countryCode: s.serverIP.flatMap { GeoIP.shared?.countryCode(for: $0) },
-                       subtitle: s.serverEndpoint.isEmpty ? nil : "Gateway")
+                       subtitle: s.serverEndpoint.isEmpty ? nil : "VPN server")
     }
     private func appendVPNsAndEgress(_ nodes: inout [NetNode]) {
         for (id, s) in (reach?.latestStats ?? [:]).sorted(by: { $0.key < $1.key }) {

@@ -55,7 +55,7 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
 
             Toggle(isOn: otpBinding) {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("I also enter a one-time code")
+                    Text("I also enter a verification code")
                     Text("A short code from an authenticator app, a key fob, or a text message.")
                         .font(.caption).foregroundStyle(.secondary)
                 }

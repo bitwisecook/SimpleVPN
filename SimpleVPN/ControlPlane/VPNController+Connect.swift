@@ -654,7 +654,7 @@ extension VPNController {
               Date().timeIntervalSince(lastUp) < 90 else { return }
         let name = profiles.first { $0.id == id }?.name ?? "The VPN"
         ToastCenter.shared.post(
-            "\(name) rejected the sign-in \u{2014} the one-time code was probably just used by the previous connection. Wait for your authenticator's next code, then connect again.",
+            "\(name) rejected the sign-in \u{2014} the verification code was probably just used by the previous connection. Wait for your authenticator's next code, then connect again.",
             symbol: "clock.badge.exclamationmark", seconds: 12)
     }
 

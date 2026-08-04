@@ -11,17 +11,20 @@
 
 import Foundation
 
+/// THE canonical config-surface taxonomy (AGENTS.md "Config surfaces"): every
+/// editor orders its groups Connection → Sign-In → Traffic → Security →
+/// Advanced, omitting groups it has nothing for. Custom Routing stays its own
+/// tab. Do not add per-engine groups — fit new settings into these five.
 enum SettingGroup: String, CaseIterable, Sendable {
-    case connection, reliability, networkPrivacy, security, proxy, troubleshooting
+    case connection, signIn, traffic, security, advanced
 
     var title: String {
         switch self {
         case .connection: return "Connection"
-        case .reliability: return "Reliability"
-        case .networkPrivacy: return "Network & Privacy"
+        case .signIn: return "Sign-In"
+        case .traffic: return "Traffic"
         case .security: return "Security"
-        case .proxy: return "Proxy"
-        case .troubleshooting: return "Troubleshooting"
+        case .advanced: return "Advanced"
         }
     }
 }
@@ -111,17 +114,41 @@ enum OpenVPNSettings {
             name: "Connection Timeout",
             summary: "How long to keep trying before giving up when the server doesn't answer."),
 
-        // MARK: Reliability
-
-        SettingDescriptor("openvpn.tun-persist", \.tunPersist, group: .reliability,
+        SettingDescriptor("openvpn.tun-persist", \.tunPersist, group: .connection,
             name: "Stay connected through interruptions",
             summary: "Keeps the VPN alive when your Mac changes Wi-Fi networks or wakes from sleep, instead of tearing it down and starting over."),
 
-        SettingDescriptor("openvpn.retry-on-auth-failed", \.retryOnAuthFailed, group: .reliability,
-            name: "Keep retrying after a failed sign-in",
-            summary: "Treat a rejected sign-in as temporary and try again. Useful with one-time passwords that expire."),
+        // MARK: Connection — reaching the server through an HTTP proxy
 
-        SettingDescriptor("openvpn.autologin-sessions", \.autologinSessions, group: .reliability,
+        SettingDescriptor("openvpn.proxy-host", \.proxyHost, group: .connection,
+            name: "Proxy Host",
+            summary: "Reach the VPN server through an HTTP proxy on your network. Proxies carry TCP only — while a proxy is configured, UDP can't be used."),
+
+        SettingDescriptor("openvpn.proxy-port", \.proxyPort, group: .connection,
+            name: "Proxy Port",
+            summary: "The port your proxy listens on.",
+            availability: { $0.proxyConfigured ? .available : .disabled(reason: "Enter a proxy host first") }),
+
+        SettingDescriptor("openvpn.proxy-username", \.proxyUsername, group: .connection,
+            name: "Proxy Username",
+            summary: "Only needed if your proxy asks you to sign in.",
+            availability: { $0.proxyConfigured ? .available : .disabled(reason: "Enter a proxy host first") }),
+
+        SettingDescriptor("openvpn.proxy-cleartext-auth", \.proxyAllowCleartextAuth, group: .connection,
+            name: "Allow unencrypted proxy sign-in",
+            summary: "Your proxy username and password may be visible to others on the local network.",
+            availability: { ctx in
+                guard ctx.proxyConfigured else { return .disabled(reason: "Enter a proxy host first") }
+                return ctx.proxyHasUsername ? .available : .disabled(reason: "Enter a proxy username first")
+            }),
+
+        // MARK: Sign-In
+
+        SettingDescriptor("openvpn.retry-on-auth-failed", \.retryOnAuthFailed, group: .signIn,
+            name: "Keep retrying after a failed sign-in",
+            summary: "Treat a rejected sign-in as temporary and try again. Useful with verification codes that expire."),
+
+        SettingDescriptor("openvpn.autologin-sessions", \.autologinSessions, group: .signIn,
             name: "Use server session tokens",
             summary: "Lets the server hand out a temporary session pass so quick reconnects don't need a full sign-in.",
             availability: { ctx in
@@ -129,17 +156,17 @@ enum OpenVPNSettings {
                 (ctx.evaluation?.autologin ?? false) ? .available : .hidden
             }),
 
-        // MARK: Network & Privacy
+        // MARK: Traffic
 
-        SettingDescriptor("openvpn.local-lan", \.allowLocalLanAccess, group: .networkPrivacy,
+        SettingDescriptor("openvpn.local-lan", \.allowLocalLanAccess, group: .traffic,
             name: "Allow local network access",
             summary: "Keep printers, file shares and other devices on your home or office network reachable while connected."),
 
-        SettingDescriptor("openvpn.unused-families", \.allowUnusedAddrFamilies, group: .networkPrivacy,
+        SettingDescriptor("openvpn.unused-families", \.allowUnusedAddrFamilies, group: .traffic,
             name: "Traffic the VPN doesn't carry",
             summary: "Some VPNs only carry IPv4 or only IPv6. Choose whether the other kind of traffic uses your normal connection (convenient) or is blocked (more private — nothing bypasses the VPN)."),
 
-        SettingDescriptor("openvpn.google-dns-fallback", \.googleDnsFallback, group: .networkPrivacy,
+        SettingDescriptor("openvpn.google-dns-fallback", \.googleDnsFallback, group: .traffic,
             name: "Fall back to Google DNS",
             summary: "If the VPN takes over all traffic but doesn't provide DNS servers, use Google's public DNS so browsing still works. Google can then see your DNS lookups."),
 
@@ -173,41 +200,17 @@ enum OpenVPNSettings {
             name: "TLS 1.3 ciphersuites",
             summary: "Leave empty unless a server administrator gave you an exact string to paste."),
 
-        // MARK: Proxy
+        // MARK: Advanced
 
-        SettingDescriptor("openvpn.proxy-host", \.proxyHost, group: .proxy,
-            name: "Proxy Host",
-            summary: "Reach the VPN server through an HTTP proxy on your network. Proxies carry TCP only — while a proxy is configured, UDP can't be used."),
-
-        SettingDescriptor("openvpn.proxy-port", \.proxyPort, group: .proxy,
-            name: "Proxy Port",
-            summary: "The port your proxy listens on.",
-            availability: { $0.proxyConfigured ? .available : .disabled(reason: "Enter a proxy host first") }),
-
-        SettingDescriptor("openvpn.proxy-username", \.proxyUsername, group: .proxy,
-            name: "Proxy Username",
-            summary: "Only needed if your proxy asks you to sign in.",
-            availability: { $0.proxyConfigured ? .available : .disabled(reason: "Enter a proxy host first") }),
-
-        SettingDescriptor("openvpn.proxy-cleartext-auth", \.proxyAllowCleartextAuth, group: .proxy,
-            name: "Allow unencrypted proxy sign-in",
-            summary: "Your proxy username and password may be visible to others on the local network.",
-            availability: { ctx in
-                guard ctx.proxyConfigured else { return .disabled(reason: "Enter a proxy host first") }
-                return ctx.proxyHasUsername ? .available : .disabled(reason: "Enter a proxy username first")
-            }),
-
-        // MARK: Troubleshooting
-
-        SettingDescriptor("openvpn.ssl-debug", \.sslDebugLevel, group: .troubleshooting,
+        SettingDescriptor("openvpn.ssl-debug", \.sslDebugLevel, group: .advanced,
             name: "TLS diagnostics",
             summary: "Adds TLS handshake detail to the log."),
 
-        SettingDescriptor("openvpn.synchronous-dns", \.synchronousDnsLookup, group: .troubleshooting,
+        SettingDescriptor("openvpn.synchronous-dns", \.synchronousDnsLookup, group: .advanced,
             name: "Use blocking DNS lookups",
             summary: "Changes how the server's name is looked up. Can help on unusual network setups."),
 
-        SettingDescriptor("openvpn.no-client-cert", \.disableClientCert, group: .troubleshooting,
+        SettingDescriptor("openvpn.no-client-cert", \.disableClientCert, group: .advanced,
             name: "Don't send a client certificate",
             summary: "Connect without identifying this Mac with its certificate. Most servers will refuse this.",
             availability: { ctx in
@@ -215,7 +218,7 @@ enum OpenVPNSettings {
                 (ctx.evaluation?.hasClientCert ?? true) ? .available : .hidden
             }),
 
-        SettingDescriptor("openvpn.key-direction", \.defaultKeyDirection, group: .troubleshooting,
+        SettingDescriptor("openvpn.key-direction", \.defaultKeyDirection, group: .advanced,
             name: "Key Direction",
             summary: "Matches the \u{201C}key direction\u{201D} of the server's extra HMAC key. Only change if your administrator says so.",
             availability: { ctx in

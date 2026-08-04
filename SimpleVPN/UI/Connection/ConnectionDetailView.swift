@@ -553,8 +553,8 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
             if managerNeedsTypedOTP {
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
                     GridRow {
-                        Text("OTP").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
-                        AutoFillField(kind: .oneTimeCode, placeholder: "One-time passcode",
+                        Text("Code").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
+                        AutoFillField(kind: .oneTimeCode, placeholder: "Verification code",
                                       text: otp, focus: $focusedField, focusValue: .otp,
                                       onSubmit: attemptConnect)
                             .requiredEmphasis(missing: otp.wrappedValue.isEmpty, attempted: submitAttempted, nudge: nudgeTick)
@@ -598,7 +598,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Sign-in protected by Touch ID").font(.callout.weight(.semibold))
                     Text(requiresOTP && biometricInfo.hasTOTP
-                         ? "Connecting asks for your fingerprint, which unlocks the username, password and one-time code in one go."
+                         ? "Connecting asks for your fingerprint, which unlocks the username, password and verification code in one go."
                          : "Connecting asks for your fingerprint to unlock the saved sign-in.")
                         .font(.callout).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -627,7 +627,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
                     GridRow {
                         Text("Code").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
-                        AutoFillField(kind: .oneTimeCode, placeholder: "One-time code",
+                        AutoFillField(kind: .oneTimeCode, placeholder: "Verification code",
                                       text: otp, focus: $focusedField, focusValue: .otp,
                                       onSubmit: attemptConnect)
                             .requiredEmphasis(missing: otp.wrappedValue.isEmpty, attempted: submitAttempted, nudge: nudgeTick)
@@ -669,8 +669,8 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                 }
                 if requiresOTP {
                     GridRow {
-                        Text("OTP").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
-                        AutoFillField(kind: .oneTimeCode, placeholder: "One-time passcode",
+                        Text("Code").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
+                        AutoFillField(kind: .oneTimeCode, placeholder: "Verification code",
                                       text: otp, focus: $focusedField, focusValue: .otp,
                                       onSubmit: attemptConnect)
                             .requiredEmphasis(missing: otp.wrappedValue.isEmpty, attempted: submitAttempted, nudge: nudgeTick)
@@ -691,7 +691,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                     .disabled(!canEnableProtection)
                     .help("Connecting will ask for your fingerprint (or Apple Watch, or your password) to unlock the sign-in.")
                 if requiresOTP, vpn.authConfig(for: profile.id).protectWithBiometrics {
-                    Text("Tip: add your authenticator's setup key in Manage VPNs so the fingerprint covers the one-time code too.")
+                    Text("Tip: add your authenticator's setup key in Manage VPNs so the fingerprint covers the verification code too.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             } else {
@@ -701,7 +701,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
             }
 
             Text(requiresOTP
-                 ? "Credentials are stored in your Keychain. The one-time passcode is used once and never stored."
+                 ? "Credentials are stored in your Keychain. The verification code is used once and never stored."
                  : "Credentials are stored in your Keychain. Manage this VPN in the Manage VPNs window.")
                 .font(.caption).foregroundStyle(.secondary)
         }

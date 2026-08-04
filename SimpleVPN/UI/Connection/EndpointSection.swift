@@ -51,7 +51,7 @@ struct EndpointSection: View {
                     MercatorMapView(pins: pins) { id in
                         if let e = endpoints.first(where: { $0.id == id }) { select(e) }
                     }
-                    Text("Endpoint locations are country-level. Pick a pin, or use the menu above.")
+                    Text("Server locations are country-level. Pick a pin, or use the menu above.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -74,7 +74,7 @@ struct EndpointSection: View {
     private func picker(_ groups: [RegionGroup]) -> some View {
         let items = groups.flatMap(\.endpoints)
         let selection = selectedEndpointID(items.map(\.endpoint))
-        return Picker("Endpoint", selection: Binding(
+        return Picker("Server", selection: Binding(
             get: { selection },
             set: { newID in select(items.first { $0.id == newID }?.endpoint) }
         )) {
@@ -98,7 +98,7 @@ struct EndpointSection: View {
                 Text("Custom (set in Options)").tag(String?.some(selection))
             }
         }
-        .accessibilityHint("Choosing an endpoint overrides the server, port and protocol for this VPN.")
+        .accessibilityHint("Choosing a server overrides the server address, port and protocol for this VPN.")
     }
 
     /// "Europe, 3 servers, quickest 24 milliseconds" — the region heading as

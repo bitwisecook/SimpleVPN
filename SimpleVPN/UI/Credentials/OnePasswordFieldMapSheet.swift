@@ -74,7 +74,7 @@ struct OnePasswordFieldMapSheet: View {
 
     /// Show the OTP field type so a user recognises which field carries the code.
     private func fieldLabel(_ f: OnePasswordProvider.OPField) -> String {
-        f.isOTP ? "\(f.label) (one-time code)" : f.label
+        f.isOTP ? "\(f.label) (verification code)" : f.label
     }
 
     private func binding(for role: String) -> Binding<String> {

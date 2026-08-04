@@ -28,7 +28,7 @@ enum CredentialRole: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .username: "Username"
         case .password: "Password"
-        case .otp: "One-time code"
+        case .otp: "Verification code"
         case .passkey: "Passkey"
         case .certificate: "Client certificate"
         case .privateKeyPassphrase: "Private-key passphrase"

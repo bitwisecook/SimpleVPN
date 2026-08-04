@@ -137,7 +137,7 @@ enum ConnectionDoctor {
             return DoctorFinding(
                 id: "otp-reneg", severity: .warning,
                 title: "Keeps asking for a new code after connecting",
-                detail: "OpenVPN renegotiates the session on a timer, which re-runs sign-in — and your one-time code is already spent, so it fails. Turning off client-side renegotiation stops that. (The server can also issue a session token via auth-gen-token so codes are never re-demanded.)",
+                detail: "OpenVPN renegotiates the session on a timer, which re-runs sign-in — and your verification code is already spent, so it fails. Turning off client-side renegotiation stops that. (The server can also issue a session token via auth-gen-token so codes are never re-demanded.)",
                 manualAnchor: "problem-otp-reneg", fixLabel: "Disable renegotiation (reneg-sec 0)",
                 fix: .editOVPN { OVPNInline.setDirective("reneg-sec", "0", in: $0) })
         },

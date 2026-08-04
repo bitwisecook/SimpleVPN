@@ -417,5 +417,5 @@ nonisolated enum ProbeLadderEngine {
     static let defaultAccountSkipReason =
         "Not tested \u{2014} this would count against your sign-in attempts."
     static let otpAccountSkipReason =
-        "Not tested \u{2014} this would use your one-time code."
+        "Not tested \u{2014} this would use your verification code."
 }

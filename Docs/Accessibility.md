@@ -75,6 +75,25 @@ actually on.
    list (SimpleVPNUITests.swift documents each exclusion and why it is a framework
    artifact). New audit failures are build-breaking, same as warnings.
 
+## Vocabulary
+
+What VoiceOver says IS the UI, so the naming glossary (AGENTS.md "Config surfaces — group
+taxonomy & naming glossary") binds AX labels, values, hints, and announcements too. The
+load-bearing terms:
+
+- **verification code** — never "OTP"/"one-time passcode" in spoken strings (a
+  parenthetical "(OTP)" gloss in visible copy is fine); Apple's own word, and what the
+  connect form's nudges and announcements already use.
+- **sign in / sign-in** — never "log in"/"login"/"authenticate" (System Settings pane
+  names like "Login Items & Extensions" and the "login keychain" keep Apple's naming).
+- **server / server address** — never "endpoint"/"gateway"/"host" for the machine a VPN
+  connects to.
+- **keepalive** (one word), **Send All Traffic** / **full tunnel**, **Allow local network
+  access** — one phrasing per concept across every editor and the manual.
+- Config-surface group names are exactly **Connection · Sign-In · Traffic · Security ·
+  Advanced** — search-reveal announcements ("Showing Compression, in Security") speak the
+  group title from `SettingGroup`, so renaming a group is a spoken-UI change.
+
 ## Keyboard driving
 
 The contract, per surface kind:

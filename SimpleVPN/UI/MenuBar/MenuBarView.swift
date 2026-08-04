@@ -780,7 +780,7 @@ private struct MenuCredentialEntry: View {
                     .onSubmit(connectIfReady)
             }
             if requiresOTP {
-                TextField("One-time passcode", text: creds.otp)
+                TextField("Verification code", text: creds.otp)
                     .textContentType(.oneTimeCode)
                     .focused($focused, equals: .otp)
                     .onSubmit(connectIfReady)

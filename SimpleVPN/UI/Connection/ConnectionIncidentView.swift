@@ -299,7 +299,7 @@ struct ConnectionIncidentCard: View {
                 o.server = e.host
                 o.port = e.port
                 o.proto = e.proto.flatMap { OpenVPNOverrides.TransportProto(rawValue: $0) }
-            }, to: profile.id, undoLabel: "endpoint: \(e.host)")
+            }, to: profile.id, undoLabel: "server: \(e.host)")
             vpn.dismissIncident(id: profile.id)
             try? await vpn.connectUsingConfiguredSource(
                 id: profile.id, typedOTP: vpn.transientCredentials(for: profile.id).otp)
@@ -312,7 +312,7 @@ struct ConnectionIncidentCard: View {
                 o.server = nil
                 o.port = nil
                 o.proto = nil
-            }, to: profile.id, undoLabel: "endpoint: Automatic")
+            }, to: profile.id, undoLabel: "server: Automatic")
             vpn.dismissIncident(id: profile.id)
             try? await vpn.connectUsingConfiguredSource(
                 id: profile.id, typedOTP: vpn.transientCredentials(for: profile.id).otp)
@@ -339,7 +339,7 @@ struct ConnectionIncidentCard: View {
             Presentation(symbol: "person.badge.key.fill", color: .orange,
                 title: "Sign-in Problem",
                 explanation: "The server rejected the credentials.",
-                advice: "Check your username and password. If you use a one-time code, it may have expired while connecting — try again with a fresh one.")
+                advice: "Check your username and password. If you use a verification code, it may have expired while connecting — try again with a fresh one.")
         case .dns:
             Presentation(symbol: "questionmark.circle.fill", color: .red,
                 title: "Can't Find the Server",
@@ -354,7 +354,7 @@ struct ConnectionIncidentCard: View {
             Presentation(symbol: "clock.badge.exclamationmark.fill", color: .orange,
                 title: "Server Not Answering",
                 explanation: "The server never replied.",
-                advice: "The server may be down, or this network may silently drop VPN traffic. Try another endpoint if this VPN has one, or TCP on port 443.")
+                advice: "The server may be down, or this network may silently drop VPN traffic. Try another server if this VPN has one, or TCP on port 443.")
         case .tlsIdentity:
             Presentation(symbol: "checkmark.seal.trianglebadge.exclamationmark.fill", color: .red,
                 title: "Server Identity Problem",
@@ -379,7 +379,7 @@ struct ConnectionIncidentCard: View {
             Presentation(symbol: "arrow.triangle.branch", color: .orange,
                 title: "Proxy Problem",
                 explanation: "The HTTP proxy refused or dropped the connection.",
-                advice: "Check the proxy address, port and sign-in in Options ▸ Proxy — or turn the proxy off if this network doesn't need one.")
+                advice: "Check the proxy address, port and sign-in in Options ▸ Connection — or turn the proxy off if this network doesn't need one.")
         case .serverHalt:
             Presentation(symbol: "hand.raised.fill", color: .orange,
                 title: "Server Ended the Session",
@@ -525,7 +525,7 @@ struct FailurePathDiagram: View {
         case .auth:
             if report == nil { network.state = .ok; internet.state = .ok; server.state = .ok }
             signIn.state = .failed
-            signIn.verdict = "The VPN answered but rejected the sign-in — wrong password or a stale one-time code."
+            signIn.verdict = "The VPN answered but rejected the sign-in — wrong password or a stale verification code."
         case .dns:
             internet.state = .failed
             internet.verdict = "The VPN's address can't be looked up on this network."

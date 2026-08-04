@@ -34,33 +34,25 @@ struct WireGuardView: View {
 
     var body: some View {
         Form {
-            Section {
+            // Canonical group order (AGENTS.md "Config surfaces"):
+            // Connection → Sign-In → Traffic → Advanced (keys ARE WireGuard's
+            // sign-in, so they group there; the wg-quick Interface/Peer split
+            // survives only in the .conf round-trip, not in the form).
+            Section("Connection") {
                 TextField("Name", text: $draft.name)
                 HStack {
                     Button("Import .conf…") { showImporter = true }
                     Button("Paste Configuration…") { pasteText = ""; showPaste = true }
                 }
-            }
-
-            Section("Interface") {
-                EngineSettingRow(spec: Self.specs["wg.address"], changed: !draft.addresses.isEmpty) {
-                    listField(Self.specs["wg.address"], $draft.addresses, prompt: "10.0.0.2/32")
-                }
-                EngineSettingRow(spec: Self.specs["wg.dns"], changed: !draft.dns.isEmpty) {
-                    listField(Self.specs["wg.dns"], $draft.dns, prompt: "1.1.1.1")
-                }
-                EngineSettingRow(spec: Self.specs["wg.mtu"], changed: draft.mtu != nil) {
-                    intField(Self.specs["wg.mtu"], $draft.mtu, prompt: "1420")
+                EngineSettingRow(spec: Self.specs["wg.endpoint"], changed: !draft.endpoint.isEmpty) {
+                    textField(Self.specs["wg.endpoint"], $draft.endpoint, prompt: "host:51820")
                 }
                 EngineSettingRow(spec: Self.specs["wg.listen-port"], changed: draft.listenPort != nil) {
                     intField(Self.specs["wg.listen-port"], $draft.listenPort, prompt: "auto")
                 }
-                EngineSettingRow(spec: Self.specs["wg.table"], changed: !draft.table.isEmpty) {
-                    textField(Self.specs["wg.table"], $draft.table, prompt: "auto")
-                }
-                EngineSettingRow(spec: Self.specs["wg.fwmark"], changed: !draft.fwMark.isEmpty) {
-                    textField(Self.specs["wg.fwmark"], $draft.fwMark, prompt: "off")
-                }
+            }
+
+            Section("Sign-In") {
                 LabeledContent("Private key") {
                     Text(draft.privateKey.isEmpty && newPrivateKey.isEmpty
                          ? "not set" : "•••••• (in Keychain)")
@@ -72,27 +64,42 @@ struct WireGuardView: View {
                         .multilineTextAlignment(.trailing)
                         .autocorrectionDisabled()
                 }
-            }
-
-            Section("Peer") {
                 EngineSettingRow(spec: Self.specs["wg.public-key"], changed: !draft.peerPublicKey.isEmpty) {
                     monoField(Self.specs["wg.public-key"], $draft.peerPublicKey, prompt: "base64 public key")
-                }
-                EngineSettingRow(spec: Self.specs["wg.endpoint"], changed: !draft.endpoint.isEmpty) {
-                    textField(Self.specs["wg.endpoint"], $draft.endpoint, prompt: "host:51820")
-                }
-                EngineSettingRow(spec: Self.specs["wg.allowed-ips"], changed: !draft.allowedIPs.isEmpty) {
-                    listField(Self.specs["wg.allowed-ips"], $draft.allowedIPs, prompt: "0.0.0.0/0")
                 }
                 EngineSettingRow(spec: Self.specs["wg.preshared-key"], changed: !draft.presharedKey.isEmpty) {
                     monoField(Self.specs["wg.preshared-key"], $draft.presharedKey, prompt: "optional base64")
                 }
-                EngineSettingRow(spec: Self.specs["wg.keepalive"], changed: draft.persistentKeepalive != nil) {
-                    intField(Self.specs["wg.keepalive"], $draft.persistentKeepalive, prompt: "off")
+            }
+
+            Section("Traffic") {
+                EngineSettingRow(spec: Self.specs["wg.address"], changed: !draft.addresses.isEmpty) {
+                    listField(Self.specs["wg.address"], $draft.addresses, prompt: "10.0.0.2/32")
+                }
+                EngineSettingRow(spec: Self.specs["wg.allowed-ips"], changed: !draft.allowedIPs.isEmpty) {
+                    listField(Self.specs["wg.allowed-ips"], $draft.allowedIPs, prompt: "0.0.0.0/0")
                 }
                 if draft.isFullTunnel {
                     Label("Full tunnel — all traffic routes through this peer.", systemImage: "globe")
                         .font(.callout).foregroundStyle(.secondary)
+                }
+                EngineSettingRow(spec: Self.specs["wg.dns"], changed: !draft.dns.isEmpty) {
+                    listField(Self.specs["wg.dns"], $draft.dns, prompt: "1.1.1.1")
+                }
+                EngineSettingRow(spec: Self.specs["wg.mtu"], changed: draft.mtu != nil) {
+                    intField(Self.specs["wg.mtu"], $draft.mtu, prompt: "1420")
+                }
+                EngineSettingRow(spec: Self.specs["wg.table"], changed: !draft.table.isEmpty) {
+                    textField(Self.specs["wg.table"], $draft.table, prompt: "auto")
+                }
+            }
+
+            Section("Advanced") {
+                EngineSettingRow(spec: Self.specs["wg.keepalive"], changed: draft.persistentKeepalive != nil) {
+                    intField(Self.specs["wg.keepalive"], $draft.persistentKeepalive, prompt: "off")
+                }
+                EngineSettingRow(spec: Self.specs["wg.fwmark"], changed: !draft.fwMark.isEmpty) {
+                    textField(Self.specs["wg.fwmark"], $draft.fwMark, prompt: "off")
                 }
             }
 
@@ -163,8 +170,8 @@ struct WireGuardView: View {
               summary: "A firewall mark placed on the tunnel's own packets, for advanced policy routing. Rarely needed."),
         .init(id: "wg.public-key", name: "Peer Public Key",
               summary: "The server peer's public key (base64). Identifies and encrypts to the server. From your provider."),
-        .init(id: "wg.endpoint", name: "Endpoint",
-              summary: "The server's public address and port, host:port (e.g. vpn.example.com:51820)."),
+        .init(id: "wg.endpoint", name: "Server Address",
+              summary: "The server's public address and port, host:port (e.g. vpn.example.com:51820) — the Endpoint line of a wg-quick file."),
         .init(id: "wg.allowed-ips", name: "Allowed IPs",
               summary: "Which destinations go through this peer. 0.0.0.0/0, ::/0 sends everything (full tunnel); specific subnets make it split."),
         .init(id: "wg.preshared-key", name: "Pre-shared Key",

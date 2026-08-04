@@ -262,7 +262,7 @@ struct VPNSidebarRow: View {
         .fixedSize()
         // The visible label is an icon + the current pick — name the control
         // itself and keep the pick as its live value.
-        .accessibilityLabel("Endpoint")
+        .accessibilityLabel("Server")
         .accessibilityValue(currentEndpointLabel)
     }
 
@@ -303,7 +303,7 @@ struct VPNSidebarRow: View {
                 o.server = endpoint?.host
                 o.port = endpoint?.port
                 o.proto = endpoint?.proto.flatMap { OpenVPNOverrides.TransportProto(rawValue: $0) }
-            }, to: profile.id, undoLabel: "endpoint: \(label)")
+            }, to: profile.id, undoLabel: "server: \(label)")
         }
     }
 

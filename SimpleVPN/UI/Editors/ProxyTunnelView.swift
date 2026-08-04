@@ -38,7 +38,10 @@ struct ProxyTunnelView: View {
 
     var body: some View {
         Form {
-            Section {
+            // Canonical group order (AGENTS.md "Config surfaces"):
+            // Connection → Sign-In → Traffic (no Security/Advanced content —
+            // DNS and MTU are user-facing traffic knobs here).
+            Section("Connection") {
                 TextField("Name", text: $name)
                 Picker("Kind", selection: $preset) {
                     ForEach(ProxyTunnelConfig.Preset.allCases, id: \.self) {
@@ -89,7 +92,7 @@ struct ProxyTunnelView: View {
                 }
             }
 
-            Section("What Goes Through the Proxy") {
+            Section("Traffic") {
                 EngineSettingRow(spec: Self.specs["px.default-route"], changed: !draft.includeDefaultRoute) {
                     Toggle(isOn: $draft.includeDefaultRoute) {
                         Text("Send all traffic through the proxy").bold(!draft.includeDefaultRoute)
@@ -121,9 +124,6 @@ struct ProxyTunnelView: View {
                         .font(.callout).foregroundStyle(.orange)
                         .accessibilityLabel("Problem: \(p)")
                 }
-            }
-
-            Section("Advanced") {
                 EngineSettingRow(spec: Self.specs["px.dns"], changed: !dnsText.isEmpty) {
                     TextField("1.1.1.1, 8.8.8.8", text: $dnsText)
                         .textFieldStyle(.roundedBorder)
@@ -300,7 +300,7 @@ struct ProxyTunnelView: View {
         .init(id: "px.password", name: "Password",
               summary: "The password your proxy expects. Stored in your Keychain, handed to the proxy only in memory."),
         .init(id: "px.default-route", name: "Send All Traffic",
-              summary: "Route everything on this Mac through the proxy. Turn off to send only specific networks through it and leave the rest direct."),
+              summary: "Route everything on this Mac through the proxy (full tunnel). Turn off to send only specific networks through it and leave the rest direct (split tunnel)."),
         .init(id: "px.included", name: "Networks Through the Proxy",
               summary: "When not sending all traffic, these networks (as CIDRs) go through the proxy and nothing else does."),
         .init(id: "px.excluded", name: "Networks Kept Direct",

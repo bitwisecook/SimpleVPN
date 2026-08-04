@@ -78,9 +78,9 @@ struct WorldMapView: View {
     private func caption(_ m: WorldMapModel.Result) -> String {
         var parts = ["Home → VPN → internet, at country level."]
         if m.hasUnlocatableTunnel {
-            parts.append("A gateway with no public location is pinned beside you.")
+            parts.append("A VPN server with no public location is pinned beside you.")
         } else if m.hasApproximateTunnel {
-            parts.append("A gateway with no public address is shown near the country it's set to.")
+            parts.append("A VPN server with no public address is shown near the country it's set to.")
             // The line above already explains a pin sitting beside you, so the
             // tether note would only repeat it.
         }

@@ -70,20 +70,23 @@ private struct ExtensionsSettings: View {
 
     var body: some View {
         Form {
-            Section("Updates") {
-                Toggle("Check for updates automatically", isOn: $autoCheckUpdates)
-                    .onChange(of: autoCheckUpdates) { updater?.automaticallyChecksForUpdates = autoCheckUpdates }
-                    .onAppear { autoCheckUpdates = updater?.automaticallyChecksForUpdates ?? false }
-                    .disabled(updater == nil)
-                Text("Asks GitHub about once a day whether a newer SimpleVPN exists. Off means SimpleVPN never checks on its own — you can always check from the SimpleVPN menu.")
-                    .font(.callout).foregroundStyle(.secondary)
-            }
-            Section("Main Window") {
+            // Sections group by user goal (AGENTS.md "Config surfaces"):
+            // General → Menu Bar & Icons → Updates → Privacy → Advanced.
+            Section("General") {
                 Toggle("Open the live-details pane by default", isOn: $inspectorOpenByDefault)
                 Text("The right-hand pane with the traffic graph, map and connection details. It can always be opened from the toolbar; this only sets how the window starts.")
                     .font(.callout).foregroundStyle(.secondary)
+                BrowserPicker(selection: $appBrowser)
+                    .onChange(of: appBrowser) { BrowserDefaults.appDefault = appBrowser }
+                Text("The browser (and profile) SimpleVPN uses for SAML/SSO sign-in when a VPN needs one. Each VPN can override this; the default is your system default browser.")
+                    .font(.callout).foregroundStyle(.secondary)
+                Toggle("Check how quick each server is", isOn: $endpointProbing)
+                    .onChange(of: endpointProbing) { if !endpointProbing { probes?.clear() } }
+                Text("When a VPN offers several servers, SimpleVPN measures them as you open its server list and puts the quickest first. Off means no checks are made at all — the list is ordered by which servers are nearest to you instead.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Section("App Icons") {
+            Section("Menu Bar & Icons") {
                 Toggle("Show the Dock icon", isOn: $dockIcon)
                     .onChange(of: dockIcon) {
                         NSApp.setActivationPolicy(dockIcon ? .regular : .accessory)
@@ -96,23 +99,16 @@ private struct ExtensionsSettings: View {
                     .onChange(of: menuBarIcon) { warnIfBothIconsOff() }
                 Text("Takes effect the next time SimpleVPN opens. With no menu-bar icon, closing the SimpleVPN window quits the app — and quitting always disconnects.")
                     .font(.callout).foregroundStyle(.secondary)
-            }
-            Section("Servers") {
-                Toggle("Check how quick each server is", isOn: $endpointProbing)
-                    .onChange(of: endpointProbing) { if !endpointProbing { probes?.clear() } }
-                Text("When a VPN offers several servers, SimpleVPN measures them as you open its server list and puts the quickest first. Off means no checks are made at all — the list is ordered by which servers are nearest to you instead.")
-                    .font(.callout).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Section("Menu Bar") {
                 Toggle("Show traffic graph next to the icon", isOn: $menuBarGraph)
                 Text("Widens the menu-bar icon with a small live up/down graph while a VPN is connected.")
                     .font(.callout).foregroundStyle(.secondary)
             }
-            Section("Sign-in Browser") {
-                BrowserPicker(selection: $appBrowser)
-                    .onChange(of: appBrowser) { BrowserDefaults.appDefault = appBrowser }
-                Text("The browser (and profile) SimpleVPN uses for SAML/SSO sign-in when a VPN needs one. Each VPN can override this; the default is your system default browser.")
+            Section("Updates") {
+                Toggle("Check for updates automatically", isOn: $autoCheckUpdates)
+                    .onChange(of: autoCheckUpdates) { updater?.automaticallyChecksForUpdates = autoCheckUpdates }
+                    .onAppear { autoCheckUpdates = updater?.automaticallyChecksForUpdates ?? false }
+                    .disabled(updater == nil)
+                Text("Asks GitHub about once a day whether a newer SimpleVPN exists. Off means SimpleVPN never checks on its own — you can always check from the SimpleVPN menu.")
                     .font(.callout).foregroundStyle(.secondary)
             }
             Section("Privacy") {
@@ -204,9 +200,9 @@ private struct ExtensionsSettings: View {
                         .font(.callout).foregroundStyle(.secondary)
                 }
             }
-            Section("System Extension") {
-                LabeledContent("Status", value: ext.status)
-                LabeledContent("Bundled version", value: ext.bundledVersion)
+            Section("Advanced") {
+                LabeledContent("Extension status", value: ext.status)
+                LabeledContent("Bundled extension version", value: ext.bundledVersion)
                 Button("Re-activate Extension") { Task { await ext.activate() } }
             }
             Section("About") {

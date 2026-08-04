@@ -78,7 +78,7 @@ final class ControlPlaneDispatcher {
             switch vpn.connectReadiness(for: id) {
             case .ready: break
             case .needsSignIn: return .notReady("this VPN needs a sign-in — open SimpleVPN to enter it")
-            case .needsCode: return .notReady("this VPN needs a one-time code — open SimpleVPN to enter it")
+            case .needsCode: return .notReady("this VPN needs a verification code — open SimpleVPN to enter it")
             case .blocked: return .notReady("this VPN has a configuration problem — open SimpleVPN")
             }
             do {

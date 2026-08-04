@@ -44,7 +44,9 @@ struct SubprocessTunnelView: View {
 
     var body: some View {
         Form {
-            Section {
+            // Canonical group order (AGENTS.md "Config surfaces"):
+            // Connection → Sign-In → Traffic → Security → Advanced.
+            Section("Connection") {
                 TextField("Name", text: $draft.name)
                 Picker("Kind", selection: $draft.kind) {
                     ForEach([VPNKind.ssh, .fortinet, .f5apm, .ciscoAnyConnect,
@@ -61,20 +63,31 @@ struct SubprocessTunnelView: View {
                     }
                 }
                 cliStatusRow
+                if draft.kind == .ssh {
+                    TextField("Server address", text: $draft.server, prompt: Text("ssh.example.com")).autocorrectionDisabled()
+                    portField
+                    jumpHostRows
+                } else if draft.kind.isSSLVPN {
+                    TextField("Server address", text: $draft.server, prompt: Text("vpn.example.com")).autocorrectionDisabled()
+                    portField
+                    connectionProxyRows
+                    Text(gatewayFooter).font(.callout).foregroundStyle(.secondary)
+                }
             }
 
             if draft.kind == .ssh {
-                sshCommon
-                sshModeSection
+                sshImportSection
+                sshSignInSection
+                sshTrafficSection
+                sshSecuritySection
                 sshAdvanced
             } else if draft.kind.isSSLVPN {
-                sslVPNSection
-                sslSocksSection
-                proxySection
+                sslSignInSection
+                sslTrafficSection
+                sslSecuritySection
                 sslAdvanced
             }
 
-            credentialsSection
             controlSection
             if let log = live?.log, !log.isEmpty { logSection(log) }
 
@@ -130,8 +143,8 @@ struct SubprocessTunnelView: View {
     }
 
     /// SSH carries traffic three ways; the mode picks which fields matter.
-    @ViewBuilder private var sshModeSection: some View {
-        Section("Mode") {
+    @ViewBuilder private var sshTrafficSection: some View {
+        Section("Traffic") {
             Picker("Mode", selection: $draft.sshMode) {
                 ForEach(SSHMode.allCases, id: \.self) { Text($0.label).tag($0) }
             }
@@ -147,30 +160,39 @@ struct SubprocessTunnelView: View {
         }
     }
 
-    @ViewBuilder private var sshCommon: some View {
-        sshImportSection
-        Section("Target") {
-            TextField("Host", text: $draft.server, prompt: Text("ssh.example.com")).autocorrectionDisabled()
-            portField
+    @ViewBuilder private var sshSignInSection: some View {
+        Section("Sign-In") {
             TextField("Username", text: $draft.username).textContentType(.username)
             row("ssh.identity-file", text: $draft.identityFile, prompt: "~/.ssh/id_ed25519")
+            passwordRows
         }
-        Section {
-            Toggle("Connect via a jump host (bastion)", isOn: $draft.useJumpHost)
-            if draft.useJumpHost {
-                TextField("Jump host", text: $draft.jumpHost, prompt: Text("bastion.example.com")).autocorrectionDisabled()
-                TextField("Jump port", value: $draft.jumpPort, format: .number.grouping(.never)).frame(maxWidth: 120)
-                TextField("Jump username", text: $draft.jumpUsername).textContentType(.username)
-                TextField("Jump identity file", text: $draft.jumpIdentityFile, prompt: Text("~/.ssh/id_bastion"))
-                    .autocorrectionDisabled()
-                SecureField("Jump password (optional)", text: $jumpPassword)
+    }
+
+    @ViewBuilder private var sshSecuritySection: some View {
+        Section("Security") {
+            EngineSettingRow(spec: Self.specs["ssh.strict-host-key"], changed: draft.strictHostKey != "accept-new") {
+                Picker(selection: $draft.strictHostKey) {
+                    Text("Trust on first use").tag("accept-new")
+                    Text("Only known hosts").tag("yes")
+                    Text("Never check (unsafe)").tag("no")
+                } label: { EngineSettingLabel(spec: Self.specs["ssh.strict-host-key"], changed: draft.strictHostKey != "accept-new") }
             }
-        } header: {
-            Text("Jump Host")
-        } footer: {
-            if draft.useJumpHost {
-                Text("SSH first connects to the jump host, then hops to the target. The jump host uses its own key and password above — independent of the target's.")
-            }
+        }
+    }
+
+    /// The jump-host rows live inside Connection — a jump host is part of how
+    /// the tunnel reaches its server, like the SSL kinds' connection proxy.
+    @ViewBuilder private var jumpHostRows: some View {
+        Toggle("Connect via a jump host (bastion)", isOn: $draft.useJumpHost)
+        if draft.useJumpHost {
+            TextField("Jump host", text: $draft.jumpHost, prompt: Text("bastion.example.com")).autocorrectionDisabled()
+            TextField("Jump port", value: $draft.jumpPort, format: .number.grouping(.never)).frame(maxWidth: 120)
+            TextField("Jump username", text: $draft.jumpUsername).textContentType(.username)
+            TextField("Jump identity file", text: $draft.jumpIdentityFile, prompt: Text("~/.ssh/id_bastion"))
+                .autocorrectionDisabled()
+            SecureField("Jump password (optional)", text: $jumpPassword)
+            Text("SSH first connects to the jump host, then hops to the target. The jump host uses its own key and password above — independent of the target's.")
+                .font(.callout).foregroundStyle(.secondary)
         }
     }
 
@@ -192,7 +214,7 @@ struct SubprocessTunnelView: View {
                                   isActive: !reduceMotion && !importTargeted)
                 Text("Drag your SSH config, a key, or a certificate here")
                     .font(.callout).foregroundStyle(.secondary)
-                Text("Forwards, jump hosts and keys defined for this endpoint are picked up automatically.")
+                Text("Forwards, jump hosts and keys defined for this server are picked up automatically.")
                     .font(.caption).foregroundStyle(.tertiary)
                     .multilineTextAlignment(.center)
             }
@@ -422,38 +444,35 @@ struct SubprocessTunnelView: View {
         manager.applyForwards(draft)
     }
 
-    /// Web-proxy path to the SSL-VPN gateway: system default / direct / manual.
-    @ViewBuilder private var proxySection: some View {
-        Section("Connection Proxy") {
-            Picker("Proxy", selection: $draft.proxyMode) {
-                ForEach(ProxyMode.allCases, id: \.self) { Text($0.label).tag($0) }
-            }
-            if draft.proxyMode == .manual {
-                TextField("Proxy URL", text: $draft.proxyURL, prompt: Text("http://proxy.example.com:8080"))
-                    .autocorrectionDisabled()
-                TextField("Proxy username (optional)", text: $draft.proxyUsername)
-                    .autocorrectionDisabled()
-                SecureField("Proxy password (optional)", text: $proxyPassword)
-                Toggle("Include proxy password in process arguments (visible to other local processes)",
-                       isOn: Binding(get: { draft.proxyPasswordInArgv ?? false },
-                                     set: { draft.proxyPasswordInArgv = $0 ? true : nil }))
-            }
-            Text(proxyModeHelp).font(.callout).foregroundStyle(.secondary)
+    /// Web-proxy path to the SSL-VPN server, inside Connection (canonical:
+    /// upstream/jump lives there): system default / direct / manual.
+    @ViewBuilder private var connectionProxyRows: some View {
+        Picker("Connection proxy", selection: $draft.proxyMode) {
+            ForEach(ProxyMode.allCases, id: \.self) { Text($0.label).tag($0) }
         }
+        if draft.proxyMode == .manual {
+            TextField("Proxy URL", text: $draft.proxyURL, prompt: Text("http://proxy.example.com:8080"))
+                .autocorrectionDisabled()
+            TextField("Proxy username (optional)", text: $draft.proxyUsername)
+                .autocorrectionDisabled()
+            SecureField("Proxy password (optional)", text: $proxyPassword)
+            Toggle("Include proxy password in process arguments (visible to other local processes)",
+                   isOn: Binding(get: { draft.proxyPasswordInArgv ?? false },
+                                 set: { draft.proxyPasswordInArgv = $0 ? true : nil }))
+        }
+        Text(proxyModeHelp).font(.callout).foregroundStyle(.secondary)
     }
 
     private var proxyModeHelp: String {
         switch draft.proxyMode {
-        case .systemDefault: "Reach the gateway through whatever web proxy your Mac is configured to use (System Settings ▸ Network ▸ Proxies)."
-        case .none: "Ignore any system proxy and connect straight to the gateway."
+        case .systemDefault: "Reach the VPN server through whatever web proxy your Mac is configured to use (System Settings ▸ Network ▸ Proxies)."
+        case .none: "Ignore any system proxy and connect straight to the server."
         case .manual: "Send the connection through this specific HTTP/SOCKS proxy. Supports http://, https:// and socks5://. openconnect can only take a proxy password on its command line — where any local process can read it with `ps` — so it's only passed when the toggle above is on; off, an authenticating proxy will refuse the connection (use an unauthenticated proxy, or the in-process engine under Advanced)."
         }
     }
 
-    @ViewBuilder private var sslVPNSection: some View {
-        Section("Gateway") {
-            TextField("Server URL or host", text: $draft.server, prompt: Text("vpn.example.com")).autocorrectionDisabled()
-            portField
+    @ViewBuilder private var sslSignInSection: some View {
+        Section("Sign-In") {
             // SSO is only offered where openconnect's --external-browser flow
             // exists (AnyConnect / GlobalProtect / Pulse); elsewhere it would
             // just drop the password and fail under --non-inter.
@@ -469,7 +488,7 @@ struct SubprocessTunnelView: View {
                     .font(.callout).foregroundStyle(.orange)
             }
             if draft.authMode == "sso" {
-                Text("Signs in through your browser, so identity-provider passkeys/WebAuthn and MFA work. Set a specific browser under Advanced if needed.")
+                Text("Signs in through your browser, so identity-provider passkeys/WebAuthn and MFA work. Pick a specific browser below to override the app default.")
                     .font(.callout).foregroundStyle(.secondary)
             } else if !draft.kind.supportsExternalBrowserSSO {
                 Text("Single sign-on isn't available for \(draft.kind.displayName): openconnect has no browser sign-in flow for this protocol.")
@@ -477,9 +496,39 @@ struct SubprocessTunnelView: View {
             }
             TextField("Username", text: $draft.username).textContentType(.username)
             TextField("Realm / group (optional)", text: $draft.realm)
-            TextField("Pinned cert SHA-256 (optional)", text: $draft.trustedCertSHA256)
-                .font(.callout.monospaced())
-            Text(gatewayFooter).font(.callout).foregroundStyle(.secondary)
+            passwordRows
+
+            // SAML / SSO sign-in browser + profile (F5 APM, GlobalProtect, AnyConnect).
+            BrowserPicker(selection: $draft.browser,
+                          systemDefaultLabel: "App default (\(appBrowserSummary))")
+            Text("If this VPN signs in with SAML/SSO, the browser (and profile) used for the sign-in page. “App default” follows Settings; pick a specific browser here to override it for this VPN.")
+                .font(.caption).foregroundStyle(.secondary)
+
+            // Software verification-code token (secret stored in the keychain).
+            Picker("Verification-code token", selection: $draft.tokenMode) {
+                Text("None").tag("")
+                Text("TOTP").tag("totp")
+                Text("HOTP").tag("hotp")
+                Text("OIDC").tag("oidc")
+            }
+            if !draft.tokenMode.isEmpty {
+                SecureField("Token secret (TOTP/HOTP seed)", text: $tokenSecret)
+                Text("Stored in your login keychain and handed to openconnect via a private temporary file at connect — never on the command line. Required: without it the connection fails before starting.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            // Client-certificate sign-in.
+            LabeledContent("Client certificate") {
+                TextField("~/client.pem or .p12", text: $draft.clientCertFile).autocorrectionDisabled()
+            }
+            LabeledContent("Client private key") {
+                TextField("~/client.key (optional)", text: $draft.clientKeyFile).autocorrectionDisabled()
+            }
+            if !draft.clientCertFile.isEmpty || !draft.clientKeyFile.isEmpty {
+                SecureField("Key / PKCS#12 passphrase (if encrypted)", text: $keyPassphrase)
+                Text("Stored in your login keychain and passed to openconnect as --key-password when the key or .p12 is encrypted.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -488,7 +537,7 @@ struct SubprocessTunnelView: View {
     private var gatewayFooter: String {
         switch draft.kind {
         case .fortinet: "FortiGate SSL VPN via OpenConnect (or openfortivpn). With ocproxy it needs no admin rights."
-        case .f5apm: "F5 BIG-IP APM: OpenConnect performs the HTTPS logon then runs the PPP-over-TLS tunnel."
+        case .f5apm: "F5 BIG-IP APM: OpenConnect performs the HTTPS sign-in then runs the PPP-over-TLS tunnel."
         case .ciscoAnyConnect: "Cisco AnyConnect / Secure Client (or an ocserv gateway) via OpenConnect. With ocproxy it needs no admin rights."
         case .globalProtect: "Palo Alto GlobalProtect via OpenConnect. “User group / path” under Advanced selects portal vs gateway sign-in."
         case .juniper: "Juniper Network Connect (oNCP) via OpenConnect. With ocproxy it needs no admin rights."
@@ -501,8 +550,8 @@ struct SubprocessTunnelView: View {
     /// Every OpenConnect kind runs through `ocproxy -D <port>` here (the no-root
     /// path), so the port is editable for all of them — two tunnels on the same
     /// port would collide on bind.
-    @ViewBuilder private var sslSocksSection: some View {
-        Section("Local SOCKS Proxy") {
+    @ViewBuilder private var sslTrafficSection: some View {
+        Section("Traffic") {
             intField("Local SOCKS port", value: $draft.socksPort, default: 1080)
             Toggle("Route Mac traffic through this proxy", isOn: $draft.setSystemProxy)
                 // The toggle applies live to a connected tunnel — no reconnect.
@@ -524,22 +573,23 @@ struct SubprocessTunnelView: View {
                 toggleRow("ssh.compression", isOn: $draft.compression)
                 intRow("ssh.keepalive", value: Binding(get: { draft.serverAliveInterval }, set: { draft.serverAliveInterval = $0 ?? 0 }), prompt: "30")
                 intRow("ssh.connect-timeout", value: $draft.connectTimeout, prompt: "off")
-                EngineSettingRow(spec: Self.specs["ssh.strict-host-key"], changed: draft.strictHostKey != "accept-new") {
-                    Picker(selection: $draft.strictHostKey) {
-                        Text("Trust on first use").tag("accept-new")
-                        Text("Only known hosts").tag("yes")
-                        Text("Never check (unsafe)").tag("no")
-                    } label: { EngineSettingLabel(spec: Self.specs["ssh.strict-host-key"], changed: draft.strictHostKey != "accept-new") }
-                }
                 linesRow("ssh.extra-options", $draft.sshExtraOptions, prompt: "Ciphers aes256-gcm@openssh.com")
             }
+        }
+    }
+
+    @ViewBuilder private var sslSecuritySection: some View {
+        Section("Security") {
+            TextField("Pinned cert SHA-256 (optional)", text: $draft.trustedCertSHA256)
+                .font(.callout.monospaced())
+            row("oc.cafile", text: $draft.caFile, prompt: "~/vpn-ca.pem")
+            Toggle("Require perfect forward secrecy", isOn: $draft.enablePFS)
         }
     }
 
     @ViewBuilder private var sslAdvanced: some View {
         Section {
             DisclosureGroup("Advanced") {
-                row("oc.cafile", text: $draft.caFile, prompt: "~/vpn-ca.pem")
                 row("oc.os", text: $draft.spoofOS, prompt: "mac-intel")
                 toggleRow("oc.no-dtls", isOn: $draft.disableDTLS)
                 toggleRow("oc.disable-csd", isOn: $draft.disableCSD)
@@ -549,49 +599,19 @@ struct SubprocessTunnelView: View {
                 }
 
                 Toggle("Run in-process (no OpenConnect subprocess)", isOn: $draft.preferInProcess)
-                Text("Runs this VPN through SimpleVPN's built-in OpenConnect engine as a full system tunnel, instead of the openconnect command-line tool. Falls back to the tool automatically if it can't start. New — validate against your gateway before relying on it.")
-                    .font(.caption).foregroundStyle(.secondary)
-
-                // SAML / SSO sign-in browser + profile (F5 APM, GlobalProtect, AnyConnect).
-                BrowserPicker(selection: $draft.browser,
-                              systemDefaultLabel: "App default (\(appBrowserSummary))")
-                Text("If this gateway signs in with SAML/SSO, the browser (and profile) used for the sign-in page. “App default” follows Settings; pick a specific browser here to override it for this VPN.")
+                Text("Runs this VPN through SimpleVPN's built-in OpenConnect engine as a full system tunnel, instead of the openconnect command-line tool. Falls back to the tool automatically if it can't start. New — validate against your VPN server before relying on it.")
                     .font(.caption).foregroundStyle(.secondary)
 
                 // F5 APM / Cisco endpoint posture (host checker / EPA).
                 LabeledContent("Host-checker wrapper") {
                     TextField("/path/to/csd-wrapper.sh", text: $draft.csdWrapper).autocorrectionDisabled()
                 }
-                Text("F5 APM and Cisco run an endpoint (posture) check at sign-in. Provide a wrapper script to satisfy it, or turn on “skip host-checker” above to bypass it where the gateway allows.")
+                Text("F5 APM and Cisco run an endpoint (posture) check at sign-in. Provide a wrapper script to satisfy it, or turn on “skip host-checker” above to bypass it where the server allows.")
                     .font(.caption).foregroundStyle(.secondary)
 
                 // Auth group / URL path (GlobalProtect portal-vs-gateway, Juniper/Pulse realm).
                 LabeledContent("User group / path") {
                     TextField("optional", text: $draft.usergroup).autocorrectionDisabled()
-                }
-                // Software one-time-code token (secret stored in the keychain).
-                Picker("One-time-code token", selection: $draft.tokenMode) {
-                    Text("None").tag("")
-                    Text("TOTP").tag("totp")
-                    Text("HOTP").tag("hotp")
-                    Text("OIDC").tag("oidc")
-                }
-                if !draft.tokenMode.isEmpty {
-                    SecureField("Token secret (TOTP/HOTP seed)", text: $tokenSecret)
-                    Text("Stored in your login keychain and handed to openconnect via a private temporary file at connect — never on the command line. Required: without it the connection fails before starting.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                // Client-certificate auth.
-                LabeledContent("Client certificate") {
-                    TextField("~/client.pem or .p12", text: $draft.clientCertFile).autocorrectionDisabled()
-                }
-                LabeledContent("Client private key") {
-                    TextField("~/client.key (optional)", text: $draft.clientKeyFile).autocorrectionDisabled()
-                }
-                if !draft.clientCertFile.isEmpty || !draft.clientKeyFile.isEmpty {
-                    SecureField("Key / PKCS#12 passphrase (if encrypted)", text: $keyPassphrase)
-                    Text("Stored in your login keychain and passed to openconnect as --key-password when the key or .p12 is encrypted.")
-                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Picker("Compression", selection: $draft.ocCompression) {
                     Text("Default").tag("")
@@ -599,9 +619,8 @@ struct SubprocessTunnelView: View {
                     Text("None").tag("none")
                     Text("All").tag("all")
                 }
-                Toggle("Require perfect forward secrecy", isOn: $draft.enablePFS)
                 Toggle("Disable IPv6 in the tunnel", isOn: $draft.disableIPv6)
-                Toggle("Disable HTTP keep-alive", isOn: $draft.noHTTPKeepalive)
+                Toggle("Disable HTTP keepalive", isOn: $draft.noHTTPKeepalive)
                 LabeledContent("Reported hostname") {
                     TextField("optional", text: $draft.localHostname).autocorrectionDisabled()
                 }
@@ -620,11 +639,10 @@ struct SubprocessTunnelView: View {
         }
     }
 
-    @ViewBuilder private var credentialsSection: some View {
-        Section("Password") {
-            SecureField("Password", text: $password).textContentType(.password)
-            Toggle("Remember password", isOn: $remember)
-        }
+    /// Password + remember rows, shared by both kinds' Sign-In sections.
+    @ViewBuilder private var passwordRows: some View {
+        SecureField("Password", text: $password).textContentType(.password)
+        Toggle("Remember password", isOn: $remember)
     }
 
     @ViewBuilder private var controlSection: some View {
@@ -659,11 +677,11 @@ struct SubprocessTunnelView: View {
             return "\(requiredCLI.rawValue) isn't installed. \(requiredCLI.installHint)"
         }
         if draft.server.isEmpty {
-            return draft.kind == .ssh ? "Enter a host to connect to." : "Enter the gateway address."
+            return "Enter the server address."
         }
         // --token-mode without its seed would just die under --non-inter.
         if draft.kind.isSSLVPN, !draft.tokenMode.isEmpty, tokenSecret.isEmpty {
-            return "One-time-code token (\(draft.tokenMode.uppercased())) needs its secret — add it under Advanced."
+            return "Verification-code token (\(draft.tokenMode.uppercased())) needs its secret — add it under Sign-In."
         }
         return nil
     }
@@ -707,13 +725,13 @@ struct SubprocessTunnelView: View {
         .init(id: "ssh.extra-options", name: "Extra Options",
               summary: "Raw ssh_config lines (one per row, “Key Value”) for anything not covered here, e.g. Ciphers or MACs."),
         .init(id: "oc.cafile", name: "CA Certificate File",
-              summary: "A PEM file of extra certificate authorities to trust for the gateway, if it uses a private CA."),
+              summary: "A PEM file of extra certificate authorities to trust for the VPN server, if it uses a private CA."),
         .init(id: "oc.os", name: "Reported OS",
-              summary: "The operating system OpenConnect claims to be, which some gateways policy-check. e.g. mac-intel, win, linux-64."),
+              summary: "The operating system OpenConnect claims to be, which some servers policy-check. e.g. mac-intel, win, linux-64."),
         .init(id: "oc.no-dtls", name: "Disable DTLS",
               summary: "Force the slower-but-more-compatible TLS transport instead of UDP DTLS. Turn on only if DTLS is blocked or flaky."),
         .init(id: "oc.disable-csd", name: "Skip Host Checker",
-              summary: "Bypass the gateway's endpoint-posture/host-checker script. May be required to connect from an unmanaged Mac; some gateways refuse without it."),
+              summary: "Bypass the server's endpoint-posture/host-checker script. May be required to connect from an unmanaged Mac; some servers refuse without it."),
         .init(id: "oc.reconnect-timeout", name: "Reconnect Timeout",
               summary: "How long (seconds) to keep retrying a dropped tunnel before giving up."),
         .init(id: "oc.mtu", name: "MTU",
@@ -721,7 +739,7 @@ struct SubprocessTunnelView: View {
         .init(id: "oc.base-mtu", name: "Base MTU",
               summary: "The MTU of the underlying network path, used to size the tunnel. Leave empty to auto-detect."),
         .init(id: "oc.force-dpd", name: "Dead-Peer Detection (seconds)",
-              summary: "Send a liveness probe this often and reconnect fast if the gateway stops answering. Empty leaves the protocol default."),
+              summary: "Send a liveness probe this often and reconnect fast if the server stops answering. Empty leaves the protocol default."),
         .init(id: "oc.extra-args", name: "Extra Arguments",
               summary: "Raw OpenConnect flags (one per row) for site-specific needs not covered above."),
     ])

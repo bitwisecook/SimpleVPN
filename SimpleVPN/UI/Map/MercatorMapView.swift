@@ -149,7 +149,7 @@ struct MercatorMapView: View {
         }
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("World map of VPN endpoints. Use the endpoint menu for the full list.")
+        .accessibilityLabel("World map of VPN servers. Use the server menu for the full list.")
         // The picture in one sentence — where you appear from, each gateway,
         // the egress — built from the same pins the map draws, so it changes
         // when they do. The pins stay individually reachable children (each is
@@ -174,7 +174,7 @@ struct MercatorMapView: View {
             for pin in pins {
                 switch pin.kind {
                 case .endpoint:
-                    parts.append("\(pin.title) gateway"
+                    parts.append("\(pin.title) VPN server"
                         + (pin.subtitle.isEmpty ? "" : ", \(pin.subtitle)"))
                 case .egress:
                     parts.append("Internet egress"

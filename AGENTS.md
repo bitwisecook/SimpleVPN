@@ -191,6 +191,69 @@ as `{password}{otp}` (no `static-challenge`). No client cert → `ENABLE_EXTERNA
   failure-time diagnostics (DNS/reach/TLS/captive-portal, baseline comparison) — active probes ONLY on
   failure; live link health is judged passively from byte counters.
 
+## Config surfaces — group taxonomy & naming glossary (binding)
+
+ONE canonical group taxonomy across every config surface, so a user who learns one editor
+knows them all. Groups, in this order, in every editor (a kind that has nothing for a group
+OMITS it — never an empty section):
+
+1. **Connection** — name, kind/preset, server address, port, protocol, how you reach the
+   server (jump host, upstream/connection proxy), connection lifecycle (timeouts,
+   stay-connected, on-demand).
+2. **Sign-In** — credentials, keys/certificates used to identify YOU, credential managers,
+   verification-code (OTP) config, sign-in browser, remember-password.
+3. **Traffic** — full vs split tunnel ("Send All Traffic"), routes/allowed IPs, exit node,
+   forwards, SOCKS, DNS, local-network access, user-facing MTU.
+4. **Security** — verifying the SERVER and the channel: host-key/certificate checking,
+   pinned certs, CA files, TLS versions, ciphers, key exchange, PFS, strictness.
+5. **Advanced** — keep-alives, engine internals, spoofing, escape hatches, rarely-touched.
+
+**Custom Routing stays its own tab everywhere it exists.** The mechanism per surface:
+the OpenVPN Options form derives its sections from `SettingGroup` in
+`OpenVPNSettingDescriptors.swift` (regroup by editing a descriptor's `group` — the form,
+SettingsSearch and manual all follow); the other editors use `Section("<Group>")` headers
+in canonical order. EditVPNView's tabs follow the same order (General · Servers=Connection
+· Sign-In · Options · Certificates · Configuration · Custom Routing). The app-wide
+Settings window groups by user goal: General · Menu Bar & Icons · Updates · Privacy ·
+Advanced. The manual's nav group headings (`Resources/Manual/manual.html`) mirror the five
+group names — keep them in sync when regrouping.
+
+### Naming glossary (one term per concept — includes AX labels and the manual)
+
+| Concept | House term | Never |
+|---|---|---|
+| The remote machine a VPN connects to | **server** / "Server address" | endpoint, gateway, host, target (except quoting a protocol's own key, e.g. wg-quick `Endpoint`, in a summary) |
+| A proxy on the way to the server | **connection proxy** / "Proxy Host" | egress proxy, upstream |
+| SSH bastion | **jump host** | bastion alone (parenthetical "(bastion)" once is fine) |
+| Authenticating | **sign in** (verb), **sign-in** (noun/adj) | log in, login, logon, authenticate (UI copy) |
+| OTP / one-time code | **verification code** (Apple's word) | one-time passcode/password, OTP alone (a parenthetical "(OTP)"/"(TOTP)" gloss is fine) |
+| Session keep-alive | **keepalive** (one word) | keep-alive, heartbeat |
+| Routing everything through the VPN | **"Send All Traffic"** (control), **full tunnel** (gloss) | default route, send everything |
+| Selective routing | **split tunnel** | policy tunnel |
+| Keeping LAN reachable | **"Allow local network access"** | local LAN, exclude local networks |
+| Credentials | **username / password** | user, login, account name |
+| Other products' own labels | keep their vocabulary (1Password "one-time password" field, GlobalProtect "portal/gateway", System Settings pane names) | translating another product's proper terms |
+
+Stable descriptor/spec **ids never change** when a display name changes — ids are the
+CLI/MDM/manual-anchor contract (`openvpn.server`, `wg.endpoint`, …). Manual anchors key on
+ids, so renames only touch heading/link text.
+
+### Adding a new engine's options (e.g. the libssh SSH engine)
+
+1. Declare an `EngineSettingCatalog` (`EngineSettings.swift`) — one spec per option with a
+   stable id (`ssh2.keepalive`-style namespace), a display name from the glossary above,
+   and a one-sentence plain-English summary. Render every row through
+   `EngineSettingRow`/`EngineSettingLabel` (bold-when-changed, summary, manual link, a11y
+   built in; wrap bare TextFields in `LabeledContent` so the example prompt never becomes
+   the VoiceOver name).
+2. Lay the form out as `Section`s in the canonical order above; omit empty groups; Custom
+   Routing stays a tab.
+3. Add one manual section per spec id in `Resources/Manual/manual.html` (anchor = id with
+   dots→dashes) under a nav heading named for the engine, and a `Default:` line per
+   setting.
+4. Disabled Save/Connect buttons must say why (`.help` + `.accessibilityValue`);
+   validation errors ride the field's `accessibilityValue` (see Docs/Accessibility.md).
+
 ## Accessibility — a first-class requirement, not a pass
 
 The bar is WORLD CLASS: someone using VoiceOver (or switch control, or keyboard

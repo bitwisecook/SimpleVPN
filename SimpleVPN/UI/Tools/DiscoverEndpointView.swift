@@ -48,11 +48,11 @@ struct DiscoverEndpointView: View {
                     }
                     Text("SimpleVPN sends probe traffic to this address to work out what kind of VPN it is and how it signs in. Only scan servers you're allowed to.")
                         .font(.caption).foregroundStyle(.secondary)
-                } header: { Text("Endpoint") }
+                } header: { Text("Server") }
 
                 if scanning {
                     Section {
-                        Label("Probing SSH, TLS VPN gateways, IKEv2 and OpenVPN…", systemImage: "dot.radiowaves.left.and.right")
+                        Label("Probing SSH, TLS VPN servers, IKEv2 and OpenVPN…", systemImage: "dot.radiowaves.left.and.right")
                             .foregroundStyle(.secondary)
                     }
                 } else if scanned {

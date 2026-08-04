@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 //  EditVPNView.swift
-//  Edit sheet for a single VPN entry, tabbed:
+//  Edit sheet for a single VPN entry, tabbed (tab order follows the canonical
+//  group order, AGENTS.md "Config surfaces": Connection → Sign-In → …):
 //   • General        — name, logo, labels
-//   • Credentials    — username/password (adapts to the profile: hidden for
-//                      autologin, username locked when the profile pins it)
+//   • Servers        — endpoints (the Connection story)
+//   • Sign-In        — credentials + credential sources (adapts to the profile:
+//                      hidden for autologin, username locked when pinned)
 //   • Options        — per-VPN OpenVPN engine overrides (OpenVPNOptionsForm)
 //   • Certificates   — certificate/key wells with rich parsed cards
 //   • Configuration  — the raw .ovpn text (source of truth)
@@ -149,12 +151,12 @@ struct EditVPNView: View {
             TabView {
                 generalTab
                     .tabItem { Label("General", systemImage: "info.circle") }
-                credentialsTab
-                    .tabItem { Label("Credentials", systemImage: "person.badge.key") }
                 // Saves as it goes (see EndpointsEditor) — no draft to reconcile
                 // with this sheet's Save button.
                 EndpointsEditor(vpn: vpn, profileID: profileID)
                     .tabItem { Label("Servers", systemImage: "mappin.and.ellipse") }
+                credentialsTab
+                    .tabItem { Label("Sign-In", systemImage: "person.badge.key") }
                 OpenVPNOptionsForm(draft: $draft,
                                    proxyPassword: $proxyPassword,
                                    privateKeyPassword: $privateKeyPassword,
@@ -352,7 +354,7 @@ struct EditVPNView: View {
                                     .accessibilityValue(totpSecretInput.isEmpty ? "not set"
                                         : (TOTPConfiguration.canonicalStorageString(from: totpSecretInput) == nil
                                            ? "set, but it doesn't look like a valid setup key" : "set"))
-                                Text("Paste the setup key your authenticator was enrolled with and the fingerprint covers the one-time code too — no more typing codes. Saved only inside the Touch ID-locked item.")
+                                Text("Paste the setup key your authenticator was enrolled with and the fingerprint covers the verification code too — no more typing codes. Saved only inside the Touch ID-locked item.")
                                     .font(.callout).foregroundStyle(.secondary)
                                 if !totpSecretInput.isEmpty && TOTPConfiguration.canonicalStorageString(from: totpSecretInput) == nil {
                                     Label("That doesn't look like a valid setup key (otpauth:// link or base32 secret).",
@@ -365,8 +367,8 @@ struct EditVPNView: View {
                     }
                 }
 
-                Section("One-Time Passcode") {
-                    Toggle("Requires a one-time passcode (OTP)", isOn: $requiresOTP)
+                Section("Verification Code") {
+                    Toggle("Requires a verification code (OTP)", isOn: $requiresOTP)
                         .onChange(of: requiresOTP) { _, on in
                             if on { promptForOTPFieldIfNeeded() }
                         }
@@ -383,7 +385,7 @@ struct EditVPNView: View {
                                 .padding(.top, 4)
                                 .accessibilityValue(templateValid ? passwordTemplate
                                     : "\(passwordTemplate). Problem: the template must contain {otp}")
-                            Text("How the sign-in password is assembled from your password and the code. \u{201C}{password}{otp}\u{201D} sends them joined together — what most OTP-enabled servers (LinOTP, privacyIDEA) expect.")
+                            Text("How the sign-in password is assembled from your password and the verification code. \u{201C}{password}{otp}\u{201D} sends them joined together — what most OTP-enabled servers (LinOTP, privacyIDEA) expect.")
                                 .font(.callout).foregroundStyle(.secondary)
                             if !templateValid {
                                 Label("The template must contain {otp} — the default will be used instead.",
@@ -431,7 +433,7 @@ struct EditVPNView: View {
                     .accessibilityHidden(true)   // the text states the same thing
                 VStack(alignment: .leading, spacing: 2) {
                     if let mapped {
-                        Text("Code comes from the \u{201C}\(mapped)\u{201D} field in 1Password")
+                        Text("Verification code comes from the \u{201C}\(mapped)\u{201D} field in 1Password")
                             .font(.callout)
                     } else if noItemYet {
                         Text("Choose a 1Password item below, then pick the field holding the code.")
@@ -439,7 +441,7 @@ struct EditVPNView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     } else {
                         Text("Which 1Password field holds the code?").font(.callout)
-                        Text("Until you pick one, SimpleVPN tries the item's standard one-time-code field.")
+                        Text("Until you pick one, SimpleVPN tries the field 1Password marks as a one-time password.")
                             .font(.callout).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -460,7 +462,7 @@ struct EditVPNView: View {
             // No mapping to configure: KeePassXC computes the code from the
             // matched entry's own TOTP settings — worth saying, so nobody goes
             // hunting for a field picker that doesn't exist.
-            Label("KeePassXC supplies the code from the matched entry's TOTP, when it has one.",
+            Label("KeePassXC supplies the verification code from the matched entry's TOTP, when it has one.",
                   systemImage: "arrow.right.circle")
                 .font(.callout).foregroundStyle(.secondary)
         }
@@ -511,7 +513,7 @@ struct EditVPNView: View {
                     .autocorrectionDisabled()
                 TextField("Account (optional)", text: $sourceAccount)
                     .autocorrectionDisabled()
-                Text("SimpleVPN reads the saved username and password for this server from Apple Passwords. macOS asks your permission the first time. One-time codes aren't read — enter those below if required.")
+                Text("SimpleVPN reads the saved username and password for this server from Apple Passwords. macOS asks your permission the first time. Verification codes aren't read — enter those below if required.")
                     .font(.callout).foregroundStyle(.secondary)
                 sourceTestRow
             case .keePassXC:
@@ -527,7 +529,7 @@ struct EditVPNView: View {
                         .font(.callout).foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Text("SimpleVPN asks the KeePassXC app for the entry whose URL matches this address — including its one-time code, when the entry has one. The first request asks you to pair (name it \u{201C}SimpleVPN\u{201D}), and a locked database raises KeePassXC's own unlock.")
+                Text("SimpleVPN asks the KeePassXC app for the entry whose URL matches this address — including its verification code, when the entry has one. The first request asks you to pair (name it \u{201C}SimpleVPN\u{201D}), and a locked database raises KeePassXC's own unlock.")
                     .font(.callout).foregroundStyle(.secondary)
                 sourceTestRow
             }
@@ -603,7 +605,7 @@ struct EditVPNView: View {
             Spacer()
         }
 
-        Text("SimpleVPN reads the mapped fields through 1Password. If you don't map them, it uses the item's standard username, password and one-time-code fields. 1Password handles unlock (Touch ID); the vault password never reaches SimpleVPN.")
+        Text("SimpleVPN reads the mapped fields through 1Password. If you don't map them, it uses the item's standard username, password and one-time password fields. 1Password handles unlock (Touch ID); the vault password never reaches SimpleVPN.")
             .font(.callout).foregroundStyle(.secondary)
         sourceTestRow
     }
@@ -1113,7 +1115,7 @@ struct EditVPNView: View {
         do {
             let raw = try await provider.resolve(profile: profileID, fields: [.username, .password, .otp])
             let user = raw.username.map { "as \($0)" } ?? "found"
-            let hasOTP = (raw.otp?.isEmpty == false) ? " · one-time code available" : ""
+            let hasOTP = (raw.otp?.isEmpty == false) ? " · verification code available" : ""
             sourceTest = raw.password?.isEmpty == false
                 ? .ok("Found \(user)\(hasOTP)")
                 : .failed("Item found but has no password.")

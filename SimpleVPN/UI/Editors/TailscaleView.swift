@@ -33,7 +33,9 @@ struct TailscaleView: View {
 
     var body: some View {
         Form {
-            Section {
+            // Canonical group order (AGENTS.md "Config surfaces"):
+            // Connection → Sign-In → Traffic → Advanced (no Security content).
+            Section("Connection") {
                 TextField("Name", text: $name)
                 Picker("Service", selection: $draft.preset) {
                     ForEach(TailscaleConfig.Preset.allCases, id: \.self) {
@@ -105,7 +107,7 @@ struct TailscaleView: View {
                 }
                 if draft.useExitNode {
                     exitNodePicker
-                    Toggle("Keep using my local network (printers, files)", isOn: $draft.exitNodeAllowLANAccess)
+                    Toggle("Allow local network access (printers, files)", isOn: $draft.exitNodeAllowLANAccess)
                 }
             }
 

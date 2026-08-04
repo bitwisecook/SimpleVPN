@@ -52,7 +52,9 @@ struct NativeVPNView: View {
 
     var body: some View {
         Form {
-            Section {
+            // Canonical group order (AGENTS.md "Config surfaces"):
+            // Connection → Sign-In → Traffic → Security → Advanced.
+            Section("Connection") {
                 TextField("Name", text: $draft.name)
                 Picker("Protocol", selection: $draft.kind) {
                     Text("IKEv2").tag(VPNKind.ikev2)
@@ -66,15 +68,26 @@ struct NativeVPNView: View {
                     // this flag for IPsec either.
                     if draft.kind == .ipsec { draft.usesSharedSecret = true }
                 }
+                TextField("Server address", text: $draft.server, prompt: Text("vpn.example.com")).autocorrectionDisabled()
+                if draft.kind == .ikev2 {
+                    TextField("Remote identifier (optional)", text: $draft.remoteID,
+                              prompt: Text("defaults to the server address"))
+                }
+                if draft.kind == .ipsec {
+                    TextField("Group / local identifier (optional)", text: $draft.groupOrRealm)
+                }
+                if draft.kind != .l2tp {
+                    Toggle("Connect on demand", isOn: $draft.onDemand)
+                }
             }
 
             if draft.kind == .l2tp {
                 l2tpSection
             } else {
-                serverSection
                 authSection
-                if draft.kind == .ikev2 { ikev2AdvancedSection }
-                routingSection
+                trafficSection
+                if draft.kind == .ikev2 { securitySection }
+                advancedSection
                 controlSection
                 CustomRoutingTabView(vpn: vpn, profileID: draft.id, profile: $customRouting,
                                     proxyAuthUsername: $crProxyAuthUsername,
@@ -100,19 +113,6 @@ struct NativeVPNView: View {
         }
     }
 
-    @ViewBuilder private var serverSection: some View {
-        Section("Server") {
-            TextField("Server address", text: $draft.server, prompt: Text("vpn.example.com")).autocorrectionDisabled()
-            if draft.kind == .ikev2 {
-                TextField("Remote identifier (optional)", text: $draft.remoteID,
-                          prompt: Text("defaults to the server address"))
-            }
-            if draft.kind == .ipsec {
-                TextField("Group / local identifier (optional)", text: $draft.groupOrRealm)
-            }
-        }
-    }
-
     @ViewBuilder private var authSection: some View {
         Section {
             if draft.kind == .ipsec {
@@ -130,7 +130,8 @@ struct NativeVPNView: View {
                 }
                 SecureField(draft.usesSharedSecret ? "Shared secret" : "Password", text: $secret)
             }
-            Toggle("Connect on demand", isOn: $draft.onDemand)
+        } header: {
+            Text("Sign-In")
         } footer: {
             if draft.kind == .ipsec {
                 Text("Certificate authentication isn't supported in this build — IPsec always uses a shared secret.")
@@ -138,8 +139,8 @@ struct NativeVPNView: View {
         }
     }
 
-    @ViewBuilder private var routingSection: some View {
-        Section("Routing") {
+    @ViewBuilder private var trafficSection: some View {
+        Section("Traffic") {
             EngineSettingRow(spec: Self.specs["native.include-all"], changed: draft.includeAllNetworks) {
                 Toggle(isOn: $draft.includeAllNetworks) { EngineSettingLabel(spec: Self.specs["native.include-all"], changed: draft.includeAllNetworks) }
             }
@@ -148,32 +149,38 @@ struct NativeVPNView: View {
                     Toggle(isOn: $draft.excludeLocalNetworks) { EngineSettingLabel(spec: Self.specs["native.exclude-local"], changed: !draft.excludeLocalNetworks) }
                 }
             }
-            EngineSettingRow(spec: Self.specs["native.disconnect-sleep"], changed: draft.disconnectOnSleep) {
-                Toggle(isOn: $draft.disconnectOnSleep) { EngineSettingLabel(spec: Self.specs["native.disconnect-sleep"], changed: draft.disconnectOnSleep) }
+        }
+    }
+
+    /// IKEv2 only — the crypto knobs macOS exposes.
+    @ViewBuilder private var securitySection: some View {
+        Section("Security") {
+            enumRow("native.encryption", $draft.ikeEncryption, [
+                ("", "Automatic"), ("aes256gcm", "AES-256-GCM"), ("aes128gcm", "AES-128-GCM"),
+                ("aes256", "AES-256-CBC"), ("aes128", "AES-128-CBC"), ("chacha20poly1305", "ChaCha20-Poly1305")])
+            enumRow("native.integrity", $draft.ikeIntegrity, [
+                ("", "Automatic"), ("sha256", "SHA2-256"), ("sha384", "SHA2-384"), ("sha512", "SHA2-512")])
+            enumRow("native.dh-group", $draft.ikeDHGroup, [
+                ("", "Automatic"), ("14", "Group 14 (2048-bit)"), ("15", "Group 15 (3072-bit)"),
+                ("16", "Group 16 (4096-bit)"), ("19", "Group 19 (P-256)"), ("20", "Group 20 (P-384)"),
+                ("21", "Group 21 (P-521)"), ("31", "Group 31 (Curve25519)")])
+            EngineSettingRow(spec: Self.specs["native.pfs"], changed: draft.enablePFS) {
+                Toggle(isOn: $draft.enablePFS) { EngineSettingLabel(spec: Self.specs["native.pfs"], changed: draft.enablePFS) }
             }
         }
     }
 
-    @ViewBuilder private var ikev2AdvancedSection: some View {
-        Section {
-            DisclosureGroup("Advanced (IKEv2)") {
-                enumRow("native.encryption", $draft.ikeEncryption, [
-                    ("", "Automatic"), ("aes256gcm", "AES-256-GCM"), ("aes128gcm", "AES-128-GCM"),
-                    ("aes256", "AES-256-CBC"), ("aes128", "AES-128-CBC"), ("chacha20poly1305", "ChaCha20-Poly1305")])
-                enumRow("native.integrity", $draft.ikeIntegrity, [
-                    ("", "Automatic"), ("sha256", "SHA2-256"), ("sha384", "SHA2-384"), ("sha512", "SHA2-512")])
-                enumRow("native.dh-group", $draft.ikeDHGroup, [
-                    ("", "Automatic"), ("14", "Group 14 (2048-bit)"), ("15", "Group 15 (3072-bit)"),
-                    ("16", "Group 16 (4096-bit)"), ("19", "Group 19 (P-256)"), ("20", "Group 20 (P-384)"),
-                    ("21", "Group 21 (P-521)"), ("31", "Group 31 (Curve25519)")])
+    @ViewBuilder private var advancedSection: some View {
+        Section("Advanced") {
+            if draft.kind == .ikev2 {
                 enumRow("native.dpd", $draft.deadPeerDetection, [
                     ("", "Default"), ("none", "Off"), ("low", "Low"), ("medium", "Medium"), ("high", "High")])
-                EngineSettingRow(spec: Self.specs["native.pfs"], changed: draft.enablePFS) {
-                    Toggle(isOn: $draft.enablePFS) { EngineSettingLabel(spec: Self.specs["native.pfs"], changed: draft.enablePFS) }
-                }
                 EngineSettingRow(spec: Self.specs["native.mobike"], changed: draft.disableMOBIKE) {
                     Toggle(isOn: $draft.disableMOBIKE) { EngineSettingLabel(spec: Self.specs["native.mobike"], changed: draft.disableMOBIKE) }
                 }
+            }
+            EngineSettingRow(spec: Self.specs["native.disconnect-sleep"], changed: draft.disconnectOnSleep) {
+                Toggle(isOn: $draft.disconnectOnSleep) { EngineSettingLabel(spec: Self.specs["native.disconnect-sleep"], changed: draft.disconnectOnSleep) }
             }
         }
     }
@@ -193,7 +200,7 @@ struct NativeVPNView: View {
               summary: "MOBIKE lets the tunnel survive network changes (Wi-Fi ↔ Ethernet). Only disable it if a picky server misbehaves with it on."),
         .init(id: "native.include-all", name: "Send All Traffic",
               summary: "Route everything through the VPN (full tunnel). Off means only the server's routes go through it."),
-        .init(id: "native.exclude-local", name: "Allow Local Network",
+        .init(id: "native.exclude-local", name: "Allow Local Network Access",
               summary: "While sending all traffic through the VPN, still let your local network (printers, file shares) stay reachable."),
         .init(id: "native.disconnect-sleep", name: "Disconnect on Sleep",
               summary: "Drop the VPN when the Mac sleeps instead of resuming it on wake. Off keeps it up across sleep."),
@@ -254,8 +261,7 @@ struct NativeVPNView: View {
     }
 
     @ViewBuilder private var l2tpSection: some View {
-        Section("Server") {
-            TextField("Server address", text: $draft.server).autocorrectionDisabled()
+        Section("Sign-In") {
             TextField("Username", text: $draft.username).textContentType(.username)
             SecureField("Shared secret", text: $secret)
         }

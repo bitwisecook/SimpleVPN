@@ -445,7 +445,7 @@ private struct PrivateKeyCard: View {
                 .font(.callout).foregroundStyle(.orange)
         case .none:
             if summary.encrypted {
-                Text("Enter its password in Options ▸ Security to use it.")
+                Text("Enter its password in Options ▸ Sign-In to use it.")
                     .font(.callout).foregroundStyle(.secondary)
             }
         }

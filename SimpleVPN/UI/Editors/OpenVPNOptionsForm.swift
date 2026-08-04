@@ -14,11 +14,13 @@
 //     context menu; section headers count their overrides.
 //   • Rows the profile makes meaningless are hidden; rows another choice makes
 //     unavailable are disabled with the reason shown.
-//   • Prominence follows a survey of ~460 published real-world .ovpn files:
-//     protocol/port/endpoint are what users actually flip (every provider
-//     documents "switch to TCP 443 if blocked"), so Connection leads; Security,
-//     Proxy (absent from every surveyed file) and Troubleshooting are collapsed
-//     until they contain overrides.
+//   • Groups follow the canonical taxonomy (AGENTS.md "Config surfaces"):
+//     Connection → Sign-In → Traffic → Security → Advanced. Prominence follows
+//     a survey of ~460 published real-world .ovpn files: protocol/port/server
+//     are what users actually flip (every provider documents "switch to TCP
+//     443 if blocked"), so Connection leads; Security and Advanced are
+//     collapsed until they contain overrides, and the proxy fields (absent
+//     from every surveyed file) hide behind their enabling toggle.
 //
 
 import SwiftUI
@@ -44,11 +46,10 @@ struct OpenVPNOptionsForm: View {
             Form {
                 searchSection
                 connectionSection
-                reliabilitySection
-                networkPrivacySection
+                signInSection
+                trafficSection
                 securitySection
-                proxySection
-                troubleshootingSection
+                advancedSection
                 resetSection
             }
             .formStyle(.grouped)
@@ -63,7 +64,7 @@ struct OpenVPNOptionsForm: View {
             .onChange(of: search.revealGeneration) {
                 guard let id = search.revealTargetID else { return }
                 // Open any container hiding the target, let it expand, then scroll.
-                if search.revealGroup == .proxy { proxyOn = true }
+                if id.hasPrefix("openvpn.proxy-") { proxyOn = true }
                 if id == "openvpn.tls-cipher-list" || id == "openvpn.tls-ciphersuites" {
                     cipherStringsExpanded = true
                 }
@@ -175,6 +176,13 @@ struct OpenVPNOptionsForm: View {
             SettingRow(id: "openvpn.connect-timeout", draft: $draft, context: context) {
                 connTimeoutPicker
             }
+
+            SettingRow(id: "openvpn.tun-persist", draft: $draft, context: context) {
+                settingToggle("openvpn.tun-persist", \.tunPersist,
+                              default: OpenVPNOverrides.EngineDefaults.tunPersist)
+            }
+
+            proxyRows
         }
     }
 
@@ -209,14 +217,10 @@ struct OpenVPNOptionsForm: View {
         } label: { SettingLabel(id: "openvpn.connect-timeout", draft: draft) }
     }
 
-    // MARK: Reliability
+    // MARK: Sign-In
 
-    @ViewBuilder private var reliabilitySection: some View {
-        SettingsSection(group: .reliability, draft: draft) {
-            SettingRow(id: "openvpn.tun-persist", draft: $draft, context: context) {
-                settingToggle("openvpn.tun-persist", \.tunPersist,
-                              default: OpenVPNOverrides.EngineDefaults.tunPersist)
-            }
+    @ViewBuilder private var signInSection: some View {
+        SettingsSection(group: .signIn, draft: draft) {
             SettingRow(id: "openvpn.retry-on-auth-failed", draft: $draft, context: context) {
                 settingToggle("openvpn.retry-on-auth-failed", \.retryOnAuthFailed,
                               default: OpenVPNOverrides.EngineDefaults.retryOnAuthFailed)
@@ -225,13 +229,24 @@ struct OpenVPNOptionsForm: View {
                 settingToggle("openvpn.autologin-sessions", \.autologinSessions,
                               default: OpenVPNOverrides.EngineDefaults.autologinSessions)
             }
+            if evaluation?.privateKeyPasswordRequired == true {
+                LabeledContent {
+                    SecureField("required", text: $privateKeyPassword)
+                        .multilineTextAlignment(.trailing)
+                        .frame(maxWidth: 260).frame(maxWidth: .infinity, alignment: .trailing)
+                } label: {
+                    Text("Private Key Password")
+                }
+                Text("This configuration's private key is protected by a password. It is stored in your Keychain.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
         }
     }
 
-    // MARK: Network & Privacy
+    // MARK: Traffic
 
-    @ViewBuilder private var networkPrivacySection: some View {
-        SettingsSection(group: .networkPrivacy, draft: draft) {
+    @ViewBuilder private var trafficSection: some View {
+        SettingsSection(group: .traffic, draft: draft) {
             SettingRow(id: "openvpn.local-lan", draft: $draft, context: context) {
                 settingToggle("openvpn.local-lan", \.allowLocalLanAccess,
                               default: OpenVPNOverrides.EngineDefaults.allowLocalLanAccess)
@@ -297,18 +312,6 @@ struct OpenVPNOptionsForm: View {
             SettingRow(id: "openvpn.non-preferred-ciphers", draft: $draft, context: context) {
                 settingToggle("openvpn.non-preferred-ciphers", \.enableNonPreferredDCAlgorithms,
                               default: OpenVPNOverrides.EngineDefaults.enableNonPreferredDCAlgorithms)
-            }
-
-            if evaluation?.privateKeyPasswordRequired == true {
-                LabeledContent {
-                    SecureField("required", text: $privateKeyPassword)
-                        .multilineTextAlignment(.trailing)
-                        .frame(maxWidth: 260).frame(maxWidth: .infinity, alignment: .trailing)
-                } label: {
-                    Text("Private Key Password")
-                }
-                Text("This configuration's private key is protected by a password. It is stored in your Keychain.")
-                    .font(.callout).foregroundStyle(.secondary)
             }
 
             DisclosureGroup(isExpanded: $cipherStringsExpanded) {
@@ -388,15 +391,15 @@ struct OpenVPNOptionsForm: View {
             })
     }
 
-    // MARK: Proxy (collapsed — no surveyed real-world profile shipped one, but
-    // corporate egress networks are exactly where a Mac user gets stuck)
+    // MARK: Connection — proxy rows (no surveyed real-world profile shipped a
+    // proxy, but corporate egress networks are exactly where a Mac user gets
+    // stuck, so the fields live one toggle away inside Connection)
 
-    @ViewBuilder private var proxySection: some View {
-        CollapsibleSettingsSection(group: .proxy, draft: draft) {
-            if ManagedPolicy.lockProxySettings {
-                SettingCaveat("Proxy settings are managed by your organization and can't be changed.")
-            }
-            Group {
+    @ViewBuilder private var proxyRows: some View {
+        if ManagedPolicy.lockProxySettings {
+            SettingCaveat("Proxy settings are managed by your organization and can't be changed.")
+        }
+        Group {
             Toggle("Connect through an HTTP proxy", isOn: proxyEnabled)
 
             if proxyOn {
@@ -439,12 +442,11 @@ struct OpenVPNOptionsForm: View {
                     settingToggle("openvpn.proxy-cleartext-auth", \.proxyAllowCleartextAuth,
                                   default: OpenVPNOverrides.EngineDefaults.proxyAllowCleartextAuth)
                 }
+                Text("Proxies carry TCP only. While a proxy is configured, UDP can't be used.")
+                    .font(.callout).foregroundStyle(.secondary)
             }
-            }
-            .disabled(ManagedPolicy.lockProxySettings)
-        } footer: {
-            Text("Proxies carry TCP only. While a proxy is configured, UDP can't be used.")
         }
+        .disabled(ManagedPolicy.lockProxySettings)
     }
 
     /// Sub-form visibility is deliberately NOT derived from the host value:
@@ -467,10 +469,10 @@ struct OpenVPNOptionsForm: View {
             })
     }
 
-    // MARK: Troubleshooting
+    // MARK: Advanced
 
-    @ViewBuilder private var troubleshootingSection: some View {
-        CollapsibleSettingsSection(group: .troubleshooting, draft: draft) {
+    @ViewBuilder private var advancedSection: some View {
+        CollapsibleSettingsSection(group: .advanced, draft: draft) {
                 SettingRow(id: "openvpn.ssl-debug", draft: $draft, context: context) {
                     Picker(selection: $draft.sslDebugLevel) {
                         Text("Off (default)").tag(Int?.none)
@@ -606,9 +608,9 @@ extension SettingsSection where Footer == EmptyView {
     }
 }
 
-/// A collapsed-by-default group (Security, Proxy, Troubleshooting — the areas
-/// the real-world survey shows are rarely touched). Opens automatically when it
-/// already contains overrides, so nothing the user changed is ever hidden.
+/// A collapsed-by-default group (Security, Advanced — the areas the real-world
+/// survey shows are rarely touched). Opens automatically when it already
+/// contains overrides, so nothing the user changed is ever hidden.
 private struct CollapsibleSettingsSection<Content: View, Footer: View>: View {
     let group: SettingGroup
     let draft: OpenVPNOverrides
