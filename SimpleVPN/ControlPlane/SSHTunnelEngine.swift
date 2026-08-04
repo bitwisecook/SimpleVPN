@@ -171,49 +171,105 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
         publish(.connected)
     }
 
-    /// An explicit method is used alone — a config that says "password" must
-    /// never quietly succeed with a key (or vice versa); the chosen method's
-    /// real failure surfaces instead. Automatic keeps the historical chain.
-    private static func authenticate(_ s: SSHSession, _ c: Config) throws {
+    /// One sign-in attempt, in the order it will be made.
+    nonisolated enum AuthStep: Equatable, Sendable {
+        case password
+        /// A private key from a file; `certificate` means an OpenSSH …-cert.pub is
+        /// grafted onto it so the userauth request presents the certificate.
+        case key(certificate: Bool)
+        case agent
+        case kerberos
+    }
+
+    /// The ordered sign-in attempts a config asks for — PURE, so which method a
+    /// config actually routes to is testable without a server. That matters most
+    /// for a HARDWARE SECURITY KEY: an `sk-` identity must be tried as a KEY (the
+    /// token signs), never fall through to a password prompt the user never set.
+    ///
+    /// An explicit method yields exactly ONE step: a config that says "password"
+    /// must never quietly succeed with a key (or vice versa), so the chosen
+    /// method's real failure is what surfaces. Automatic keeps the historical
+    /// chain — key file, then agent, then password.
+    nonisolated static func authPlan(_ c: Config) throws -> [AuthStep] {
+        let key = c.identityFile?.trimmingCharacters(in: .whitespaces) ?? ""
+        let cert = c.certificateFile?.trimmingCharacters(in: .whitespaces) ?? ""
         switch c.authMethod ?? "" {
         case "password":
             guard let pw = c.password, !pw.isEmpty else {
                 throw AuthError("Password sign-in is selected but no password was provided.")
             }
-            try s.authPassword(forUser: c.username, password: pw)
+            return [.password]
         case "key":
-            guard let key = c.identityFile, !key.isEmpty else {
+            guard !key.isEmpty else {
                 throw AuthError("Key sign-in is selected but no identity file is set.")
             }
-            try s.authKey(forUser: c.username, privateKeyPath: key,
-                          certificatePath: nil, passphrase: c.password)
+            return [.key(certificate: false)]
         case "certificate":
-            guard let key = c.identityFile, !key.isEmpty,
-                  let cert = c.certificateFile, !cert.isEmpty else {
+            guard !key.isEmpty, !cert.isEmpty else {
                 throw AuthError("Certificate sign-in is selected but the identity file or certificate file is missing.")
             }
-            try s.authKey(forUser: c.username, privateKeyPath: key,
-                          certificatePath: cert, passphrase: c.password)
+            return [.key(certificate: true)]
         case "agent":
-            try s.authAgent(forUser: c.username)
+            return [.agent]
         case "kerberos":
-            try s.authGSSAPI(forUser: c.username)
+            return [.kerberos]
         default:
-            // Automatic: key file, then agent, then password.
-            if let key = c.identityFile, !key.isEmpty {
-                if (try? s.authKey(forUser: c.username, privateKeyPath: key,
-                                   certificatePath: nil,
-                                   passphrase: c.password)) != nil { return }
-            }
-            if (try? s.authAgent(forUser: c.username)) != nil { return }
-            if let pw = c.password, !pw.isEmpty {
-                try s.authPassword(forUser: c.username, password: pw)
-                return
-            }
-            // authKey/authAgent throw on failure; reaching here with no
-            // password means nothing worked.
-            try s.authAgent(forUser: c.username)
+            var plan: [AuthStep] = []
+            if !key.isEmpty { plan.append(.key(certificate: !cert.isEmpty)) }
+            plan.append(.agent)
+            if let pw = c.password, !pw.isEmpty { plan.append(.password) }
+            return plan
         }
+    }
+
+    /// A security-key identity signs ON THE DEVICE, so a rejection there almost
+    /// never means "bad key" — it means no token was plugged in, or nobody touched
+    /// it. libssh reports both as a plain "key authentication was rejected", which
+    /// sends the user looking at the wrong thing; this replaces that with the
+    /// sentence that names what to DO. nil for an ordinary key (detected from the
+    /// public half, the same check the editor's note uses).
+    nonisolated static func securityKeyAdvice(identityFile: String?) -> String? {
+        guard let path = identityFile, SubprocessTunnelConfig.securityKeyNote(path) != nil else {
+            return nil
+        }
+        return "The security key didn't sign in. Plug it in, then touch it when it lights up "
+            + "(some keys also ask for their PIN)."
+    }
+
+    /// Walk the plan, first success wins; if every attempt fails the LAST error is
+    /// the one the user sees — for a one-step plan that is the chosen method's own
+    /// failure, which is the point of pinning a method.
+    private static func authenticate(_ s: SSHSession, _ c: Config) throws {
+        let plan = try authPlan(c)
+        var lastError: Error?
+        for step in plan {
+            do {
+                switch step {
+                case .password:
+                    // authPlan only puts .password in a plan when there IS one.
+                    try s.authPassword(forUser: c.username, password: c.password ?? "")
+                case .key(let certificate):
+                    do {
+                        try s.authKey(forUser: c.username, privateKeyPath: c.identityFile ?? "",
+                                      certificatePath: certificate ? c.certificateFile : nil,
+                                      passphrase: c.password)
+                    } catch {
+                        if let advice = securityKeyAdvice(identityFile: c.identityFile) {
+                            throw AuthError(advice)
+                        }
+                        throw error
+                    }
+                case .agent:
+                    try s.authAgent(forUser: c.username)
+                case .kerberos:
+                    try s.authGSSAPI(forUser: c.username)
+                }
+                return
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError ?? AuthError("No SSH sign-in method is configured.")
     }
 
     /// Start the main SOCKS listener and return only once it is actually

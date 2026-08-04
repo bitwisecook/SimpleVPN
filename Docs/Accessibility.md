@@ -70,10 +70,14 @@ actually on.
      black/white text by the user-chosen color's WCAG luminance and gains a rim. macOS has
      no Button Shapes setting (that env is iOS-only) — Increase Contrast is the
      accommodation we honor.
-9. **The regression gate is real.** SimpleVPNUITests runs `performAccessibilityAudit()`
-   over the **main, Routes, Settings, and Manage VPNs** windows with one shared exclusion
-   list (SimpleVPNUITests.swift documents each exclusion and why it is a framework
-   artifact). New audit failures are build-breaking, same as warnings.
+9. **The regression gate is real, and it is two gates.** SimpleVPNUITests runs
+   `performAccessibilityAudit()` over the **main, Routes, Settings, and Manage VPNs**
+   windows with one shared exclusion list (SimpleVPNUITests.swift documents each
+   exclusion and why it is a framework artifact) — the audit answers "is anything
+   unnamed or unreachable?". `VoiceOverWalkthroughTests` answers the different question
+   "does what VoiceOver would SAY match what this document promises?", step by step
+   (see "The walkthrough, automated" below). New failures in either are build-breaking,
+   same as warnings.
 
 ## Vocabulary
 
@@ -153,49 +157,64 @@ The contract, per surface kind:
 | About | Identity block combined; component rows one sentence each (link preserved). |
 | Diagnostics sheets (crash, issue, error) | ESC + default action; remedy steps read without markup. |
 
+## The walkthrough, automated: `VoiceOverWalkthroughTests`
+
+The fifteen-step walkthrough below used to be entirely manual. Most of each step was
+never a judgement at all — it was a FACT about the accessibility tree ("this element
+exists, it is reachable, and what VoiceOver would read is what this doc promises"), and
+what VoiceOver reads IS that tree. `SimpleVPNUITests/VoiceOverWalkthroughTests.swift`
+asserts those facts, one test per step, in this section's order, so the human checklist
+below is only the part a person must do.
+
+**VoiceOver is never switched on by the tests** — that would make the machine start
+speaking. They read the same `label` / `value` / structure VoiceOver reads. They are
+also **read-only about the tester's own VPNs** on purpose: a gate that edits your
+profiles to check a label is worse than no gate.
+
+Four things are structurally out of reach for any UI test, and every step below that
+depends on one says so:
+
+- **Speech and announcement timing.** `AccessibilityNotification.Announcement` leaves no
+  trace in the tree, so no test can hear "Tig Lab connected" or judge the 3 s debounce.
+- **Audio graphs.** `AXChartDescriptor` isn't exposed to XCUITest.
+- **The rotor.** VO-U is a VoiceOver affordance, not an AX attribute. The tests assert
+  the *structure* a rotor is built from (named children carrying values).
+- **Anything needing a live connection** (a real connect, the throughput chart, the
+  traffic log) or a system accessibility preference.
+
+The tests SKIP with a reason, never flake, when the environment can't present UI, when
+the machine has no VPNs configured, or when the selected VPN has no credential fields
+(its credentials come from a manager). A skipped step is a step the human still owns for
+that run.
+
 ## Human VoiceOver walkthrough (release QA)
 
-Run with a real build (notarized install per AGENTS.md), VoiceOver on (⌘F5). Every step
-must pass by ear — no peeking. ~15 minutes.
+Run with a real build (notarized install per AGENTS.md), VoiceOver on (⌘F5). **~5
+minutes now**, not 15: each step lists what the gate already proved and what is left for
+your ears. Any failure — yours or the gate's — is release-blocking, same as a failed audit.
 
-1. **Launch** SimpleVPN. VO announces the window; interact with the sidebar (VO-⇧-↓) and
-   arrow through the VPN list. Each row must read as one sentence: name, kind, state
-   ("disconnected"), labels. No "image", no unlabeled buttons.
-2. **Pick a VPN** that needs credentials. Focus should already be in the first empty
-   field (VO says its name — "Username"). Press Return with the password still empty and
-   hear the field VO lands on (the nudge) plus "Required" in its value.
-3. **Fill in credentials** (Tab moves Username → Password → OTP in order) and press
-   Return in the last field. Without touching anything, you must hear
-   "<name> connected" within a few seconds.
-4. **Hear the state**: VO-focus the Connect area — the Disconnect/stop control reports
-   the live status in its value. The sidebar row now says "connected".
-5. **Open Routes** (⇧⌘R or VPN ▸ Routes…). Focus lands in the search field — type an
-   address you route (e.g. 10.0.0.1) and hear the answer panel. Clear it, then Tab to
-   the diagram and pan with arrows, zoom with `+`/`-`, `0` to fit.
-6. **Use the rotor**: VO-U, choose "VPNs", jump to your VPN's card; then rotor
-   "Problems" — with a healthy connection it should be empty (say so out loud: "no
-   problems listed").
-7. **Read the throughput chart** (main window inspector): VO onto the chart and play the
-   audio graph. Confirm the summary sentence gives current rates.
-8. **Pause or disconnect** and hear the announcement ("<name> disconnected") without
-   moving focus.
-9. **Open Manage VPNs** (⇧⌘M). Focus is in the sidebar list; arrow to a tunnel/native
-   row and confirm the row sentence includes its status. Tab into the editor; find a
-   Save button and hear why it's disabled (or that it saves).
-10. **Break a setting**: in a Tailscale/Headscale editor type an invalid control URL —
-    the field's value must speak the problem, and Save must explain itself.
-11. **Custom Routing**: add a rule that overlaps a pushed route; the row must read as a
-    sentence ending "…overlaps a pushed route", and the overlap button must say what it
-    overlaps.
-12. **Settings** (⌘,): toggle a checkbox in General, then in Labels rename a label — every
-    control names WHICH label it edits.
-13. **Network Tools** (⇧⌘T): focus is in the host field; type an address, Return. Hear
-    the scan finish. Walk the DNS rows — the one macOS used must say so.
-14. **Traffic log** (from a connected VPN's inspector): rows read as sentences; ESC
-    closes the sheet and focus returns to the opener.
-15. **Accommodations spot-check** (System Settings ▸ Accessibility ▸ Display): turn on
-    Differentiate Without Color — dots become shapes, route edges change dash rhythm per
-    state, log errors gain underlines. Turn on Increase Contrast — pill text darkens,
-    label pills gain rims. Turn on Reduce Motion — nothing pulses.
+| # | Step | Proven automatically | You still judge |
+|---|---|---|---|
+| 1 | **Launch** and arrow the VPN list (VO-⇧-↓) | Each VPN row is ONE static text, naming the VPN, its kind and its state in words; ≥3 comma-separated parts; the row exposes no image at all (dots and logos are hidden, so the dot's state can only reach you as words) | That arrowing the list *reads* like a list, and the sentence is pleasant rather than merely complete |
+| 2 | **Pick a VPN that needs credentials** — focus should be in the first empty field, named ("Username") | Every credential field on screen is named, and named from the glossary (Username / Password / verification code) — never by its example prompt | That INITIAL focus lands in the first empty field |
+| 3 | **Return with the password empty**, then fill in and submit | — | The nudge: which field focus moves to, "Required" in its value, Tab order Username → Password → verification code, and hearing "<name> connected" without touching anything |
+| 4 | **Hear the state** — VO-focus the Connect area | Every Connect/Disconnect control carries a non-empty value drawn from the ONE connection vocabulary | That the value is spoken the moment focus lands, and the "Connecting…" pill reads as one element while it churns |
+| 5 | **Open Routes** (⇧⌘R), search, zoom | ⇧⌘R really opens the window; the search field is named for what it takes, not by its prompt; ⌘= and ⌘0 really change the zoom | That focus LANDS in the search field, that the answer panel is spoken, and that arrow-key panning feels like panning |
+| 6 | **Use the rotor** (VO-U → "VPNs", then "Problems") | The diagram is a named container ("Route diagram") with children; every button inside is named; at least one card carries both a name and a value | The rotors themselves: that "VPNs" and "Problems" are offered, and that a healthy connection lists no problems |
+| 7 | **Read the throughput chart** (inspector) | The live-details toggle is named and reports whether the pane is showing | The audio graph — needs a live connection, and tones are heard, not read. Confirm the summary sentence names the current rates |
+| 8 | **Pause or disconnect** | Every status phrase on screen comes from one vocabulary; VPN ▸ Disconnect is enabled exactly when the Connect controls report something active | The announcement: its wording, that it arrives without moving focus, and that reconnect churn doesn't spam |
+| 9 | **Open Manage VPNs** (⇧⌘M) | ⇧⌘M opens it; every sidebar row reads as one sentence including a `DotState` status word; every "Help for X" button names a setting that is on screen under that name; a disabled Save carries its reason in its value | That focus starts in the sidebar list, and that Tab reaches the editor |
+| 10 | **Break a setting** (invalid control URL in a Tailscale/Headscale editor) | — | All of it: type the bad value and hear the field's own value speak the problem, and Save explain itself. Automating this would mean editing one of your real VPNs |
+| 11 | **Custom Routing** | It is its own named tab beside "Settings", and both tabs are reachable; any rule row already present reads as a sentence | Adding a rule that overlaps a pushed route, and hearing the overlap explained ("…overlaps a pushed route") |
+| 12 | **Settings** (⌘,) | The window opens from the menu or ⌘,; all five group headings (General · Menu Bar & Icons · Updates · Privacy · Advanced) are on screen under those names; the Labels tab is reachable and its per-label controls name which label they edit | Actually toggling a checkbox and renaming a label, and hearing the change confirmed |
+| 13 | **Network Tools** (⇧⌘T) | ⇧⌘T opens it; the host field is named "Host or IP to test" (it used to be nameless — VoiceOver read its example, "example.com", as its name); the three Re-assert buttons name their subject; EVERY disabled control in the window carries its reason in its value; the DNS card names the resolvers macOS is actually using | Hearing the scan FINISH (the completion announcement) and the latency audio graph |
+| 14 | **Traffic log** (connected VPN's inspector) | The ESC contract, on the one sheet reachable while disconnected: ⌘⇧F presents "Find a Setting…" and ESC closes it | The traffic log itself — rows as sentences with columns inlined and glyphs translated, and focus returning to the row that opened it |
+| 15 | **Accommodations** (System Settings ▸ Accessibility ▸ Display) | The half that holds whatever the settings are: no VPN row exposes an image, and the route diagram's links state their condition in words | The visual pass — Differentiate Without Color (dots become shapes, edge dash rhythms, log underlines), Increase Contrast (pill text darkens, label pills gain rims), Reduce Motion (nothing pulses) |
 
-Any step that fails is release-blocking, same as a failed audit.
+Two notes on the gate's own limits, both measured rather than assumed:
+
+- XCUITest cannot make the Routes search field the first responder in a test session
+  ("Neither element nor any descendant has keyboard focus"), which is why step 5's
+  focus/typing half is human.
+- SwiftUI's Settings scene does not reliably answer the bare ⌘, in a test session, so
+  step 12 opens the window by menu and falls back to the shortcut.

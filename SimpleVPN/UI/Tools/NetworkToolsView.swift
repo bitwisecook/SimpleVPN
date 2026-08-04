@@ -284,11 +284,14 @@ struct NetworkToolsView: View {
                     .accessibilityElement(children: .combine)
                     Spacer()
                     // Three windows-worth of bare "Re-assert" buttons — name the subject.
+                    let reason: String? = participants.isEmpty
+                        ? "No VPN is routing anything, so there is nothing to re-assert." : nil
                     Button("Re-assert") { vpn.routes.reassertNow() }
                         .controlSize(.small)
-                        .help("Drive routing back to the intended default owner now.")
-                        .disabled(participants.isEmpty)
+                        .help(reason ?? "Drive routing back to the intended default owner now.")
+                        .disabled(reason != nil)
                         .accessibilityLabel("Re-assert routing")
+                        .accessibilityValue(reason ?? "Ready to re-assert")
                 }
                 .font(.callout)
 
@@ -345,11 +348,14 @@ struct NetworkToolsView: View {
                     }
                     .accessibilityElement(children: .combine)
                     Spacer()
+                    let reason: String? = plan.catchAllOwner == nil
+                        ? "No VPN is providing DNS, so there is nothing to re-assert." : nil
                     Button("Re-assert") { vpn.dns.reassertNow() }
                         .controlSize(.small)
-                        .help("Re-establish the intended resolvers now.")
-                        .disabled(plan.catchAllOwner == nil)
+                        .help(reason ?? "Re-establish the intended resolvers now.")
+                        .disabled(reason != nil)
                         .accessibilityLabel("Re-assert DNS")
+                        .accessibilityValue(reason ?? "Ready to re-assert")
                 }
                 .font(.callout)
 
@@ -408,11 +414,14 @@ struct NetworkToolsView: View {
                     }
                     .accessibilityElement(children: .combine)
                     Spacer()
+                    let reason: String? = plan.providesProxy
+                        ? nil : "No VPN is providing a proxy, so there is nothing to re-assert."
                     Button("Re-assert") { vpn.proxies.reassertNow() }
                         .controlSize(.small)
-                        .help("Re-apply the intended system proxy now.")
-                        .disabled(!plan.providesProxy)
+                        .help(reason ?? "Re-apply the intended system proxy now.")
+                        .disabled(reason != nil)
                         .accessibilityLabel("Re-assert proxy")
+                        .accessibilityValue(reason ?? "Ready to re-assert")
                 }
                 .font(.callout)
 
@@ -535,8 +544,15 @@ struct NetworkToolsView: View {
                 }
                 .labelsHidden().fixedSize()
                 .help("Runs each step of this VPN's own handshake in order \u{2014} its address, this network, its shared key and certificates \u{2014} and shows exactly where it stops.")
+                let ladderReason: String? = ladderRunner.isRunning
+                    ? "Already checking \u{2014} wait for this run to finish."
+                    : (ladderKey.isEmpty
+                       ? "Choose a VPN from the menu beside this button first." : nil)
                 Button("Check Step by Step") { runLadder() }
-                    .disabled(ladderKey.isEmpty || ladderRunner.isRunning)
+                    .disabled(ladderReason != nil)
+                    .help(ladderReason
+                          ?? "Run each step of this VPN's own handshake in order.")
+                    .accessibilityValue(ladderReason ?? "Ready to check")
                 Spacer()
             }
         }
@@ -597,7 +613,9 @@ struct NetworkToolsView: View {
             .accessibilityLabel("VPN kind to probe for")
             Spacer()
             Button("Probe") { restartVPNProbe() }
-                .disabled(target.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(noTargetReason != nil)
+                .help(noTargetReason ?? "Send one harmless hello in each protocol's own language.")
+                .accessibilityValue(noTargetReason ?? "Ready to probe")
         }
     }
 
@@ -685,12 +703,26 @@ struct NetworkToolsView: View {
         }
     }
 
+    /// Why the diagnostics can't run yet, or nil when they can. ONE sentence,
+    /// spent twice: `.help` (hover) and `.accessibilityValue` (VoiceOver) — a
+    /// disabled control that says nothing is a dead end for anyone who can't see
+    /// that the field above is empty (Docs/Accessibility.md, rule 5).
+    private var noTargetReason: String? {
+        target.trimmingCharacters(in: .whitespaces).isEmpty
+            ? "Type a host name or IP address above first." : nil
+    }
+
     private var targetBar: some View {
         HStack {
             TextField("Host or IP to test", text: $target, prompt: Text("example.com"))
                 .textFieldStyle(.roundedBorder).autocorrectionDisabled()
                 .onSubmit { run() }
                 .focused($targetFocused)
+                // A bare TextField whose title has nowhere to render leaves the
+                // PROMPT as its VoiceOver name — "example.com" is an example, not
+                // a name. Say what the field is (AGENTS.md's LabeledContent rule,
+                // applied where the toolbar row has no room for a visible label).
+                .accessibilityLabel("Host or IP to test")
             egressPicker
             Picker("MTU via", selection: $mtuProto) {
                 ForEach(NetworkProbes.MTUProtocol.allCases) { Text($0.label).tag($0) }
@@ -707,7 +739,10 @@ struct NetworkToolsView: View {
             }
             Button(running ? "Stop" : "Run") { running ? stop() : run() }
                 .keyboardShortcut(.defaultAction)
-                .disabled(target.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(!running && noTargetReason != nil)
+                .help(noTargetReason ?? "Run the diagnostics against that address.")
+                .accessibilityValue(running ? "Running"
+                                    : (noTargetReason ?? "Ready to run"))
         }
         .onChange(of: mtuProto) { restartMTU() }
     }

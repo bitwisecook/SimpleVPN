@@ -255,23 +255,34 @@ if ! libtool -static -o "$BUILD/libSSHEngine.a" \
 fi
 grep -v 'has no symbols' "$BUILD/libtool.err" >&2 || true
 
-echo "==> smoke-test: required symbols present in the merged archive"
+echo "==> smoke-test: required symbols DEFINED in the merged archive"
 # NOTE: grep -c, not grep -q. Under `set -o pipefail`, grep -q exits on the first match
 # and closes the pipe, nm dies of SIGPIPE, and the whole pipeline reports failure — so a
 # PASSING smoke test reads as FATAL. grep -c consumes all input, so nm exits cleanly.
 NM="$BUILD/nm.symbols"
 nm "$BUILD/libSSHEngine.a" 2>/dev/null > "$NM"
+# DEFINED, not merely mentioned. A bare `grep _fido_dev_open` also matches the
+# UNDEFINED reference (`U _fido_dev_open`) that libssh's own object files carry, and
+# matches the archive-member header line `sk_usbhid.c.o:` for anything named after
+# its file — so the check would pass on an archive with libfido2 MISSING, which is
+# exactly the failure it exists to catch. Anchor on nm's address + `T` (external) or
+# `t` (static — libssh's sk_usbhid entry points are file-static) instead.
+#
 # _pki_sk_enroll_key proves WITH_FIDO2 compiled the sk key paths;
 # _ssh_sk_usbhid_load_resident_keys proves libfido2 itself was found (sk_usbhid.c is
 # gated on HAVE_LIBFIDO2); _fido_dev_open proves the merged archive carries libfido2.
 # Without them an sk- key FILE fails to authenticate and only agent-held security
 # keys work — silently, which is the whole reason these are asserted.
+# SimpleVPNTests/ControlPlane/SecurityKeySSHTests.swift re-checks the same symbols
+# against the SHIPPED archive, so this can't be the only place that knows.
 for sym in _ssh_new _ssh_connect _ssh_session_is_known_server _ssh_userauth_gssapi \
            _ssh_gssapi_set_creds _libsshx_channel_open_tun _libsshx_send_keepalive \
            _pki_sk_enroll_key _ssh_sk_usbhid_load_resident_keys _fido_dev_open \
            _cbor_load; do
-  if ! grep -c "$sym" "$NM" >/dev/null; then
-    echo "FATAL: $sym missing from the merged archive."; exit 1
+  if ! grep -cE "^[0-9a-f]+ [Tt] ${sym}\$" "$NM" >/dev/null; then
+    echo "FATAL: $sym is not DEFINED in the merged archive."
+    echo "       (found: $(grep -E "[ ]${sym}\$" "$NM" | head -3 | tr '\n' ';' || echo 'nothing'))"
+    exit 1
   fi
 done
 # Straight-cutover sanity: no libssh2 can sneak back in through a stale build dir.

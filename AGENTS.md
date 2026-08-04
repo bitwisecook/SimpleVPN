@@ -370,5 +370,11 @@ ITS STATE — as quickly as a sighted mouse user. Rules, all binding:
   Differentiate Without Color — the status-dot language ALWAYS pairs color
   with a shape/symbol difference; respect Increase Contrast; no fixed tiny
   fonts on informational text.
-- **Regression gate**: SimpleVPNUITests runs `performAccessibilityAudit()`
-  per window — new audit failures are build-breaking, same as warnings.
+- **Regression gate, in two halves**: SimpleVPNUITests runs
+  `performAccessibilityAudit()` per window ("is anything unnamed or
+  unreachable?"), and `VoiceOverWalkthroughTests` asserts, step by step, that
+  what VoiceOver would SAY matches what `Docs/Accessibility.md` promises — it
+  never turns VoiceOver on, it reads the same accessibility tree. New failures
+  in either are build-breaking, same as warnings. What is left for a human is
+  the short checklist at the end of that doc: speech and announcement timing,
+  audio graphs, the rotor, and anything needing a live connection.

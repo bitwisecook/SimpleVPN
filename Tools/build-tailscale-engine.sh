@@ -16,7 +16,11 @@
 # Same shape as Tools/build-onepassword-sdk.sh (the other Go c-archive), with
 # one addition: the Go contract tests run before the archive is produced, so a
 # rename on either side of the JSON boundary fails HERE rather than as a tunnel
-# that connects and carries nothing.
+# that connects and carries nothing. Those tests include a REAL WireGuard
+# handshake — wireguard_handshake_test.go stands up two wireguard-go devices over
+# loopback UDP and drives one of them with renderWGUAPI's own output — so a key
+# encoding, allowed_ip or endpoint regression fails here too, with no live peer
+# and no hardware.
 set -euo pipefail
 
 # Pin exactly, never float — bump deliberately (must match go.mod). Even minor

@@ -289,8 +289,11 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     /// The SSH key types that live on a hardware security key (FIDO2/U2F): the
     /// private "key file" is only a handle — the signature is made by the device,
     /// which is why connecting needs a physical touch.
-    static let securityKeyTypes = ["sk-ssh-ed25519@openssh.com",
-                                   "sk-ecdsa-sha2-nistp256@openssh.com"]
+    /// `nonisolated`: also consulted off the main actor — SSHTunnelEngine's
+    /// sign-in runs on its own serial queue and needs to know a security key when
+    /// it sees one (see `securityKeyAdvice`).
+    nonisolated static let securityKeyTypes = ["sk-ssh-ed25519@openssh.com",
+                                              "sk-ecdsa-sha2-nistp256@openssh.com"]
 
     /// A note for an identity file that is a SECURITY KEY, or nil for an ordinary
     /// key (and for anything unreadable — this is informational, never blocking).
@@ -300,7 +303,7 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     /// dead waiting for a touch nobody was told about. Detected from the public
     /// half (`<path>.pub`), whose first field is the key type in clear text; the
     /// private file is an encrypted blob and is never read for this.
-    static func securityKeyNote(_ path: String) -> String? {
+    nonisolated static func securityKeyNote(_ path: String) -> String? {
         let p = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !p.isEmpty else { return nil }
         var expanded = (p as NSString).expandingTildeInPath
