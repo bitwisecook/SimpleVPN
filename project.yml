@@ -112,10 +112,28 @@ targets:
           - "$(BUILT_PRODUCTS_DIR)/opnative-helper"
         outputFiles:
           - "$(TARGET_BUILD_DIR)/$(EXECUTABLE_FOLDER_PATH)/opnative-helper"
+      # The CLI ships inside the bundle so it is signed/notarized/updated with
+      # the app (no separate distribution). It lives in Contents/Helpers, NOT
+      # Contents/MacOS: "simplevpn" and the app binary "SimpleVPN" differ only
+      # by case, and on a case-insensitive filesystem a MacOS/ copy silently
+      # OVERWRITES THE APP BINARY. Users link it onto their PATH:
+      #   ln -s /Applications/SimpleVPN.app/Contents/Helpers/simplevpn /usr/local/bin/simplevpn
+      - name: Embed simplevpn CLI
+        script: |
+          mkdir -p "${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers"
+          cp -f "${BUILT_PRODUCTS_DIR}/simplevpn" "${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers/simplevpn"
+        inputFiles:
+          - "$(BUILT_PRODUCTS_DIR)/simplevpn"
+        outputFiles:
+          - "$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/simplevpn"
     dependencies:
       - target: PacketTunnel
         embed: true
       - target: OPNativeHelper
+        embed: false
+      # Built before the app so the embed script above finds it; copied by the
+      # script (not embed:) because tools land in Contents/MacOS, not Frameworks.
+      - target: SimpleVPNCLI
         embed: false
       - package: Sparkle
       - sdk: Security.framework

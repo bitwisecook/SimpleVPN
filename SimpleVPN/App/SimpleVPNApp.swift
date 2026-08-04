@@ -186,6 +186,12 @@ struct SimpleVPNApp: App {
         }
         .commands {
             CommandGroup(replacing: .newItem) {}   // no document "New"
+            // SimpleVPN ▸ Install CLI… — links the bundled `simplevpn` tool onto
+            // the PATH (admin prompt). Lives in the app menu, like VS Code's
+            // "install 'code' command".
+            CommandGroup(after: .appInfo) {
+                Button("Install CLI…") { CLIInstaller.install() }
+            }
             VPNCommands(vpn: vpn, updater: updaterController)
             DiagnosticsCommands(vpn: vpn, tunnels: tunnels)
         }
