@@ -440,9 +440,14 @@ struct LabelChip: View {
         Button(action: toggle) {
             Text(label.name).font(.caption)
                 .padding(.horizontal, 9).padding(.vertical, 3)
+                // A caption in 3pt of padding is ~17pt tall; the app-wide minimum
+                // hit target is 22 (the hitbox rule), and the capsule itself is
+                // the shape being clicked.
+                .frame(minHeight: 22)
                 .background(on ? AnyShapeStyle(label.color) : AnyShapeStyle(.clear), in: Capsule())
                 .overlay(Capsule().strokeBorder(label.color, lineWidth: on ? 0 : 1))
                 .foregroundStyle(on ? AnyShapeStyle(.black.opacity(0.78)) : AnyShapeStyle(.primary))
+                .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         // It toggles — say so, and say which way it currently is (the filled

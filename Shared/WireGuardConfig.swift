@@ -215,7 +215,35 @@ nonisolated extension WireGuardConfig {
         if let v = n.mtu, !Self.mtuRange.contains(v) { n.mtu = nil }
         if let v = n.listenPort, !Self.listenPortRange.contains(v) { n.listenPort = nil }
         if let v = n.persistentKeepalive, !Self.keepaliveRange.contains(v) { n.persistentKeepalive = nil }
+        // Both are CLOSED value sets in wg-quick's own grammar, not free text: a
+        // typo used to round-trip straight into an exported .conf that wg-quick
+        // then refuses ("Table"/"FwMark": bad value). Anything illegal collapses
+        // back to "not set", the same way an out-of-range number does above.
+        if !n.table.isEmpty, !Self.isValidTable(n.table) { n.table = "" }
+        if !n.fwMark.isEmpty, !Self.isValidFwMark(n.fwMark) { n.fwMark = "" }
         return n
+    }
+
+    /// wg-quick's `Table` grammar: `auto`, `off`, or a routing-table number.
+    /// (SimpleVPN's own engine never reads it — it only reaches an exported file.)
+    static let tableNumberRange = 0...0xFFFF_FFFF
+    static func isValidTable(_ raw: String) -> Bool {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if s == "auto" || s == "off" { return true }
+        guard let n = Int(s) else { return false }
+        return tableNumberRange.contains(n)
+    }
+
+    /// wg-quick's `FwMark` grammar: `off`, or an unsigned 32-bit number written in
+    /// decimal or as `0x…` hex.
+    static func isValidFwMark(_ raw: String) -> Bool {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if s == "off" { return true }
+        if s.hasPrefix("0x") {
+            guard let n = UInt32(s.dropFirst(2), radix: 16) else { return false }
+            return n == n     // any UInt32 is legal
+        }
+        return UInt32(s) != nil
     }
 
     /// The endpoint's host half (for serverAddress / probes / the map pin).

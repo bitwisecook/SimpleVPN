@@ -24,6 +24,46 @@ struct EngineSettingSpec: Identifiable, Sendable {
     /// (SSHSettings) can be section-checked by tests and future searches.
     var group: SettingGroup? = nil
     var manualAnchor: String { id.replacingOccurrences(of: ".", with: "-") }
+
+    /// The engine/OS default, type-erased behind its own comparison. "Changed"
+    /// used to be hand-wired at every call site (`changed: !draft.acceptRoutes`,
+    /// `changed: draft.useExitNode`, …) — thirty-odd derivations, several of them
+    /// INVERTED, for one question the spec can answer once. Declare the default
+    /// here and `isChanged(_:)` computes it.
+    private let changedCheck: (@Sendable (Any) -> Bool)?
+
+    /// Whether this spec declares a default at all (the contract tests check that
+    /// every spec whose form asks for "changed" has one).
+    var declaresDefault: Bool { changedCheck != nil }
+
+    /// Whether `value` differs from the declared default. False when no default
+    /// is declared — never a guess. Generic (not `Any`) so an Optional value
+    /// isn't silently coerced at the call site.
+    func isChanged(_ value: some Equatable & Sendable) -> Bool { changedCheck?(value) ?? false }
+
+    init(id: String, name: String, summary: String, group: SettingGroup? = nil) {
+        self.id = id
+        self.name = name
+        self.summary = summary
+        self.group = group
+        self.changedCheck = nil
+    }
+
+    /// The preferred form: declare the value this setting rests at, and every row
+    /// gets its bold-when-changed state from one place.
+    init<V: Equatable & Sendable>(id: String, name: String, summary: String,
+                                  group: SettingGroup? = nil, default defaultValue: V) {
+        self.id = id
+        self.name = name
+        self.summary = summary
+        self.group = group
+        self.changedCheck = { value in
+            // A mismatched type is a programming error at the call site, but a
+            // wrong BOLD is not worth a crash — answer "unchanged".
+            guard let typed = value as? V else { return false }
+            return typed != defaultValue
+        }
+    }
 }
 
 /// A spec table keyed by id, with a terse literal builder.
@@ -87,10 +127,35 @@ struct EngineSettingRow<Control: View>: View {
     func label() -> some View { Text(spec.name).bold(changed) }
 }
 
+extension EngineSettingRow {
+    /// The preferred form: hand the row the CURRENT value and let the spec's
+    /// declared default decide whether it counts as changed. One derivation, in
+    /// the catalog, instead of a hand-written (and sometimes inverted) predicate
+    /// at each of thirty-odd call sites.
+    init(spec: EngineSettingSpec, value: some Equatable & Sendable,
+         disabledReason: String? = nil,
+         @ViewBuilder control: () -> Control) {
+        self.init(spec: spec, changed: spec.isChanged(value),
+                  disabledReason: disabledReason, control: control)
+    }
+}
+
 /// Convenience: a plain label for a spec (bold when changed), matching SettingLabel.
 struct EngineSettingLabel: View {
     let spec: EngineSettingSpec
     var changed = false
+
+    init(spec: EngineSettingSpec, changed: Bool = false) {
+        self.spec = spec
+        self.changed = changed
+    }
+
+    /// Value-driven form: the spec's declared default decides "changed".
+    init(spec: EngineSettingSpec, value: some Equatable & Sendable) {
+        self.spec = spec
+        self.changed = spec.isChanged(value)
+    }
+
     var body: some View {
         Text(spec.name).bold(changed)
             // Bold weight is invisible to VoiceOver — say the state too.

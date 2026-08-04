@@ -36,29 +36,29 @@ struct ProxyTunnelView: View {
     @State private var crProxyAuthUsername = ""
     @State private var crProxyAuthPassword = ""
 
-    var body: some View {
+    /// The config surface: the canonical groups, in order (AGENTS.md "Config
+    /// surfaces"). Security and Advanced have no content for this engine.
+    private var configForm: some View {
         Form {
-            // Canonical group order (AGENTS.md "Config surfaces"):
-            // Connection → Sign-In → Traffic (no Security/Advanced content —
-            // DNS and MTU are user-facing traffic knobs here).
             Section("Connection") {
                 TextField("Name", text: $name)
-                Picker("Kind", selection: $preset) {
-                    ForEach(ProxyTunnelConfig.Preset.allCases, id: \.self) {
-                        Text($0.displayName).tag($0)
+                EngineSettingRow(spec: Self.specs["px.kind"], value: preset) {
+                    Picker(selection: $preset) {
+                        ForEach(ProxyTunnelConfig.Preset.allCases, id: \.self) {
+                            Text($0.displayName).tag($0)
+                        }
+                    } label: {
+                        EngineSettingLabel(spec: Self.specs["px.kind"], value: preset)
                     }
                 }
                 Text(preset.summary)
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                EngineSettingRow(spec: Self.specs["px.address"], changed: !address.isEmpty) {
-                    TextField("proxy.example.com:\(preset.defaultPort)", text: $address)
-                        .textFieldStyle(.roundedBorder)
-                        .autocorrectionDisabled()
-                        // The title is an EXAMPLE address — the spec name is the name.
-                        .accessibilityLabel(Self.specs["px.address"].name)
-                        .accessibilityValue(upstreamProblem.map { "\(address). Problem: \($0)" } ?? address)
+                EngineSettingRow(spec: Self.specs["px.address"], value: address) {
+                    labeledField(Self.specs["px.address"], $address,
+                                 prompt: "proxy.example.com:\(preset.defaultPort)",
+                                 problem: upstreamProblem)
                         // A pasted full URL wins over the Kind picker in
                         // `composedUpstream`, so it must DRIVE the picker too —
                         // otherwise the picker sits there naming a scheme the
@@ -77,23 +77,28 @@ struct ProxyTunnelView: View {
             }
 
             Section("Sign-In") {
-                EngineSettingRow(spec: Self.specs["px.requires-auth"], changed: draft.requiresAuth) {
+                // The Toggle's label is the SPEC's name. It used to carry its own
+                // string while the row rendered the spec name, so one setting had
+                // two names — search found one, the screen showed the other.
+                EngineSettingRow(spec: Self.specs["px.requires-auth"], value: draft.requiresAuth) {
                     Toggle(isOn: $draft.requiresAuth) {
-                        Text("This proxy needs a username and password").bold(draft.requiresAuth)
+                        EngineSettingLabel(spec: Self.specs["px.requires-auth"], value: draft.requiresAuth)
                     }
                 }
                 if draft.requiresAuth {
-                    EngineSettingRow(spec: Self.specs["px.username"], changed: !username.isEmpty) {
-                        TextField("Username", text: $username)
-                            .textFieldStyle(.roundedBorder)
-                            .autocorrectionDisabled()
-                            // Several editors show credential pairs — say whose.
-                            .accessibilityLabel("Proxy username")
+                    EngineSettingRow(spec: Self.specs["px.username"], value: username) {
+                        // Several editors show credential pairs — say whose.
+                        labeledField(Self.specs["px.username"], $username, prompt: "username",
+                                     accessibilityLabel: "Proxy username")
                     }
-                    EngineSettingRow(spec: Self.specs["px.password"], changed: !password.isEmpty) {
-                        SecureField("Password", text: $password)
-                            .textFieldStyle(.roundedBorder)
-                            .accessibilityLabel("Proxy password")
+                    EngineSettingRow(spec: Self.specs["px.password"], value: password) {
+                        LabeledContent {
+                            SecureField("password", text: $password)
+                                .multilineTextAlignment(.trailing)
+                                .accessibilityLabel("Proxy password")
+                        } label: {
+                            EngineSettingLabel(spec: Self.specs["px.password"], value: password)
+                        }
                     }
                     Label("Saved in your Keychain, and only ever handed to the proxy in memory.",
                           systemImage: "lock")
@@ -102,18 +107,17 @@ struct ProxyTunnelView: View {
             }
 
             Section("Traffic") {
-                EngineSettingRow(spec: Self.specs["px.default-route"], changed: !draft.includeDefaultRoute) {
+                EngineSettingRow(spec: Self.specs["px.default-route"], value: draft.includeDefaultRoute) {
                     Toggle(isOn: $draft.includeDefaultRoute) {
-                        Text("Send all traffic through the proxy").bold(!draft.includeDefaultRoute)
+                        EngineSettingLabel(spec: Self.specs["px.default-route"],
+                                           value: draft.includeDefaultRoute)
                     }
                 }
                 if !draft.includeDefaultRoute {
-                    EngineSettingRow(spec: Self.specs["px.included"], changed: !includedText.isEmpty) {
-                        TextField("10.0.0.0/8, 192.168.1.0/24", text: $includedText)
-                            .textFieldStyle(.roundedBorder)
-                            .autocorrectionDisabled()
-                            .accessibilityLabel(Self.specs["px.included"].name)
-                            .accessibilityValue(includedProblem.map { "\(includedText). Problem: \($0)" } ?? includedText)
+                    EngineSettingRow(spec: Self.specs["px.included"], value: includedText) {
+                        labeledField(Self.specs["px.included"], $includedText,
+                                     prompt: "10.0.0.0/8, 192.168.1.0/24",
+                                     problem: includedProblem)
                     }
                     if let p = includedProblem {
                         Label(p, systemImage: "exclamationmark.triangle.fill")
@@ -121,12 +125,9 @@ struct ProxyTunnelView: View {
                             .accessibilityLabel("Problem: \(p)")
                     }
                 }
-                EngineSettingRow(spec: Self.specs["px.excluded"], changed: !excludedText.isEmpty) {
-                    TextField("Networks to keep OUT of the proxy", text: $excludedText)
-                        .textFieldStyle(.roundedBorder)
-                        .autocorrectionDisabled()
-                        .accessibilityLabel(Self.specs["px.excluded"].name)
-                        .accessibilityValue(excludedProblem.map { "\(excludedText). Problem: \($0)" } ?? excludedText)
+                EngineSettingRow(spec: Self.specs["px.excluded"], value: excludedText) {
+                    labeledField(Self.specs["px.excluded"], $excludedText,
+                                 prompt: "10.0.0.0/8", problem: excludedProblem)
                 }
                 if let p = excludedProblem {
                     Label(p, systemImage: "exclamationmark.triangle.fill")
@@ -143,14 +144,11 @@ struct ProxyTunnelView: View {
                 if let w = excludedRedundantWarning {
                     SettingCaveat(w)
                 }
-                EngineSettingRow(spec: Self.specs["px.dns"], changed: !dnsText.isEmpty) {
-                    TextField("1.1.1.1, 8.8.8.8", text: $dnsText)
-                        .textFieldStyle(.roundedBorder)
-                        .autocorrectionDisabled()
-                        .accessibilityLabel(Self.specs["px.dns"].name)
-                        // A bad resolver is the FIELD's problem — NE just drops
-                        // it, and DNS stops with nothing said anywhere.
-                        .accessibilityValue(dnsProblem.map { "\(dnsText). Problem: \($0)" } ?? dnsText)
+                EngineSettingRow(spec: Self.specs["px.dns"], value: dnsText) {
+                    // A bad resolver is the FIELD's problem — NE just drops it,
+                    // and DNS stops with nothing said anywhere.
+                    labeledField(Self.specs["px.dns"], $dnsText, prompt: "1.1.1.1, 8.8.8.8",
+                                 problem: dnsProblem)
                 }
                 if let p = dnsProblem {
                     Label(p, systemImage: "exclamationmark.triangle.fill")
@@ -164,24 +162,47 @@ struct ProxyTunnelView: View {
                 if let w = dnsExcludedWarning {
                     SettingCaveat(w)
                 }
-                EngineSettingRow(spec: Self.specs["px.mtu"], changed: draft.mtu != ProxyTunnelStartConfig.defaultMTU) {
-                    Stepper("MTU: \(draft.mtu)", value: $draft.mtu,
-                            in: ProxyTunnelConfig.mtuRange, step: 4)
-                        .accessibilityLabel("MTU")
-                        .accessibilityValue("\(draft.mtu)")
+                // ONE MTU control across every engine that has one (see
+                // UI/Components/MTUField.swift). This was a `Stepper(step: 4)`
+                // over a 925-wide range — thirty clicks from 1500 to 1380, with
+                // no way to type the number at all.
+                EngineSettingRow(spec: Self.specs["px.mtu"], value: draft.mtu) {
+                    RequiredMTUField(
+                        label: { EngineSettingLabel(spec: Self.specs["px.mtu"], value: draft.mtu) },
+                        value: $draft.mtu,
+                        range: ProxyTunnelConfig.mtuRange,
+                        engineDefault: ProxyTunnelStartConfig.defaultMTU,
+                        invalidMessage: "Enter an MTU between \(ProxyTunnelConfig.mtuRange.lowerBound) and \(ProxyTunnelConfig.mtuRange.upperBound). Leave empty for the standard \(ProxyTunnelStartConfig.defaultMTU).")
                 }
             }
 
+            // Live status, AFTER the canonical config groups — it is not one of
+            // them, so it must not interrupt their run.
             if let status, status.isRunning {
                 liveSection(status)
             }
-
-            CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
-                                proxyAuthUsername: $crProxyAuthUsername,
-                                proxyAuthPassword: $crProxyAuthPassword)
         }
         .formStyle(.grouped)
         .disabled(ManagedPolicy.lockConfiguration)
+    }
+
+    var body: some View {
+        // Custom Routing is its own TAB in every editor (AGENTS.md "Config
+        // surfaces") — appending it as sections put a second, differently-shaped
+        // config surface inside the run of canonical groups.
+        TabView {
+            configForm
+                .tabItem { Label("Settings", systemImage: "slider.horizontal.3") }
+            Form {
+                CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
+                                    proxyAuthUsername: $crProxyAuthUsername,
+                                    proxyAuthPassword: $crProxyAuthPassword)
+            }
+            .formStyle(.grouped)
+            .disabled(ManagedPolicy.lockConfiguration)
+            .tabItem { Label("Custom Routing", systemImage: "arrow.triangle.branch") }
+        }
+        .padding(.top, 10)
         .navigationTitle(name.isEmpty ? "Proxy Tunnel" : name)
         .task { loadOnce() }
         .task(id: profileID) { await pollStatus() }
@@ -355,24 +376,67 @@ struct ProxyTunnelView: View {
 
     // MARK: Manual-linked specs (anchors: px.x → #px-x in manual.html)
 
+    /// In canonical group order (AGENTS.md "Config surfaces"): Connection →
+    /// Sign-In → Traffic. No Security or Advanced content — DNS and MTU are
+    /// user-facing traffic knobs here — so both groups are omitted.
     static let specs = EngineSettingCatalog([
+
+        // MARK: Connection
+
+        .init(id: "px.kind", name: "Kind",
+              summary: "Which kind of proxy this is: SOCKS5, HTTP CONNECT or HTTPS CONNECT. Match what your proxy's own documentation calls it.",
+              group: .connection, default: ProxyTunnelConfig.Preset.socks5),
         .init(id: "px.address", name: "Proxy Address",
-              summary: "The proxy that carries your traffic, as host or host:port. Pick the kind above to match your proxy (SOCKS5 or HTTP CONNECT)."),
+              summary: "The proxy that carries your traffic, as host or host:port. Pick the kind above to match your proxy (SOCKS5 or HTTP CONNECT).",
+              group: .connection, default: ""),
+
+        // MARK: Sign-In
+
         .init(id: "px.requires-auth", name: "Requires Sign-In",
-              summary: "Turn on if your proxy asks for a username and password. Leave off for an open proxy."),
+              summary: "Turn on if your proxy asks for a username and password. Leave off for an open proxy.",
+              group: .signIn, default: false),
         .init(id: "px.username", name: "Username",
-              summary: "The username your proxy expects."),
+              summary: "The username your proxy expects.",
+              group: .signIn, default: ""),
         .init(id: "px.password", name: "Password",
-              summary: "The password your proxy expects. Stored in your Keychain, handed to the proxy only in memory."),
+              summary: "The password your proxy expects. Stored in your Keychain, handed to the proxy only in memory.",
+              group: .signIn, default: ""),
+
+        // MARK: Traffic
+
         .init(id: "px.default-route", name: "Send All Traffic",
-              summary: "Route everything on this Mac through the proxy (full tunnel). Turn off to send only specific networks through it and leave the rest direct (split tunnel)."),
+              summary: "Route everything on this Mac through the proxy (full tunnel). Turn off to send only specific networks through it and leave the rest direct (split tunnel).",
+              group: .traffic, default: true),
         .init(id: "px.included", name: "Networks Through the Proxy",
-              summary: "When not sending all traffic, these networks (as CIDRs) go through the proxy and nothing else does."),
+              summary: "When not sending all traffic, these networks (as CIDRs) go through the proxy and nothing else does.",
+              group: .traffic, default: ""),
         .init(id: "px.excluded", name: "Networks Kept Direct",
-              summary: "Networks to send straight out, never through the proxy — even when \u{201C}Send all traffic\u{201D} is on."),
+              summary: "Networks to send straight out, never through the proxy — even when \u{201C}Send all traffic\u{201D} is on.",
+              group: .traffic, default: ""),
         .init(id: "px.dns", name: "DNS Servers",
-              summary: "Name servers to use while connected. Lookups to them go through the proxy too, so they don't leak. Leave empty to keep your Mac's own DNS."),
+              summary: "Name servers to use while connected. Lookups to them go through the proxy too, so they don't leak. Leave empty to keep your Mac's own DNS.",
+              group: .traffic, default: ""),
         .init(id: "px.mtu", name: "MTU",
-              summary: "The tunnel's maximum packet size. 1500 suits almost everything; lower it only if a network in the path needs smaller packets."),
+              summary: "The tunnel's maximum packet size. 1500 suits almost everything; lower it only if a network in the path needs smaller packets.",
+              group: .traffic, default: ProxyTunnelStartConfig.defaultMTU),
     ])
+
+    /// The house text-field idiom (`LabeledContent` + trailing plain field), so a
+    /// text row looks the same here as in the OpenVPN, WireGuard, SSH and
+    /// OpenConnect editors — this form used full-width `.roundedBorder` fields.
+    private func labeledField(_ spec: EngineSettingSpec, _ binding: Binding<String>,
+                              prompt: String, problem: String? = nil,
+                              accessibilityLabel: String? = nil) -> some View {
+        LabeledContent {
+            TextField(prompt, text: binding)
+                .multilineTextAlignment(.trailing)
+                .autocorrectionDisabled()
+                // The title is an EXAMPLE value — the spec name is the name.
+                .accessibilityLabel(accessibilityLabel ?? spec.name)
+                .accessibilityValue(problem.map { "\(binding.wrappedValue). Problem: \($0)" }
+                                    ?? binding.wrappedValue)
+        } label: {
+            EngineSettingLabel(spec: spec, value: binding.wrappedValue)
+        }
+    }
 }

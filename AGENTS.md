@@ -208,15 +208,49 @@ OMITS it — never an empty section):
    pinned certs, CA files, TLS versions, ciphers, key exchange, PFS, strictness.
 5. **Advanced** — keep-alives, engine internals, spoofing, escape hatches, rarely-touched.
 
-**Custom Routing stays its own tab everywhere it exists.** The mechanism per surface:
-the OpenVPN Options form derives its sections from `SettingGroup` in
-`OpenVPNSettingDescriptors.swift` (regroup by editing a descriptor's `group` — the form,
-SettingsSearch and manual all follow); the other editors use `Section("<Group>")` headers
-in canonical order. EditVPNView's tabs follow the same order (General · Servers=Connection
-· Sign-In · Options · Certificates · Configuration · Custom Routing). The app-wide
-Settings window groups by user goal: General · Menu Bar & Icons · Updates · Privacy ·
-Advanced. The manual's nav group headings (`Resources/Manual/manual.html`) mirror the five
-group names — keep them in sync when regrouping.
+**Custom Routing stays its own tab everywhere it exists** — enforced, not aspirational.
+It was a tab in EditVPNView and appended `Section`s in the other five, which is the same
+surface wearing two shapes. All six now put the canonical groups in one `TabView` tab
+("Settings") and `CustomRoutingTabView` in a second ("Custom Routing"); the host still
+owns the draft and commits from Save (see `CustomRoutingTabView.swift`'s header — tab
+switches fire its `onDisappear` commit, which is idempotent). Live STATUS blocks
+("This Network", "Right Now") are not config groups: they go AFTER the canonical groups,
+never between them.
+
+The mechanism per surface: the OpenVPN Options form derives its sections from
+`SettingGroup` in `OpenVPNSettingDescriptors.swift` (regroup by editing a descriptor's
+`group` — the form, SettingsSearch and manual all follow); the other editors use
+`Section("<Group>")` headers in canonical order. EditVPNView's tabs follow the same order
+(General · Servers=Connection · Sign-In · Options · Certificates · Configuration · Custom
+Routing). The app-wide Settings window groups by user goal: General · Menu Bar & Icons ·
+Updates · Privacy · Advanced. The manual's nav group headings
+(`Resources/Manual/manual.html`) mirror the five group names — keep them in sync when
+regrouping.
+
+**One "Advanced" idiom:** `UI/Components/CollapsibleSettingsSection.swift`, group-generic
+and shared. Every editor gets the whole-row hit target, the "n changed" badge and the
+search-reveal hook from it. Never hand-roll a `Section { DisclosureGroup }` again.
+
+**The MTU split (decided; do not re-litigate).** A user-facing MTU is **Traffic** — it is
+the number someone is told to lower when transfers stall (`wg.mtu`, `px.mtu`, `oc.mtu`).
+An MTU that describes the network path *underneath* the tunnel is **Advanced**
+(`oc.base-mtu`): different subject, different range (jumbo frames allowed), and nobody
+reaches for it to fix a stalling download. All of them render through the ONE shared
+control, `UI/Components/MTUField.swift` (type it *and* nudge it).
+
+**"Changed" is computed, never re-derived.** `EngineSettingSpec` carries the value the
+setting rests at (`default:`), and `isChanged(_:)` / `EngineSettingRow(spec:value:)` /
+`EngineSettingLabel(spec:value:)` answer from it. Hand-writing `changed: !draft.x` at the
+call site is how one setting ends up bold when it is at its default and plain when it
+isn't — several rows had it inverted. New specs declare a default;
+`ManualAnchorParityTests` holds every catalog to it.
+
+**One text-row idiom:** `LabeledContent { TextField … } label: { EngineSettingLabel … }`.
+Not a full-width `.roundedBorder` field whose placeholder doubles as its name.
+
+**A Toggle's label is its spec's name** — `EngineSettingLabel(spec:)`, never a second
+hand-written string. A row that renders the spec name while its Toggle says something else
+gives one setting two names: search finds one, the screen shows the other.
 
 ### Naming glossary (one term per concept — includes AX labels and the manual)
 
@@ -250,9 +284,22 @@ ids, so renames only touch heading/link text.
    Routing stays a tab.
 3. Add one manual section per spec id in `Resources/Manual/manual.html` (anchor = id with
    dots→dashes) under a nav heading named for the engine, and a `Default:` line per
-   setting.
+   setting. **`SimpleVPNTests/ControlPlane/ManualAnchorParityTests.swift` enforces this in
+   BOTH directions**: a spec with no anchor is a broken help button, an anchor with no spec
+   is dead documentation. Register the new catalog in that test's `catalogs` table (and any
+   prose-only chapter in `proseAnchors`) — that registration is what makes the reverse
+   check total.
 4. Disabled Save/Connect buttons must say why (`.help` + `.accessibilityValue`);
    validation errors ride the field's `accessibilityValue` (see Docs/Accessibility.md).
+5. **Every user-facing control gets a spec** — including the ones that look like plumbing:
+   secrets (`wg.private-key`, `native.password`), master toggles that gate other rows
+   (`openvpn.proxy-enabled`), and the value the whole VPN depends on. An unspec'd control
+   is invisible to SettingsSearch, unaddressable by the CLI and MDM, and has no manual
+   anchor behind its help button. Keychain-backed and UI-state controls use
+   `SettingDescriptor`'s closure initializer rather than a keypath.
+6. **Primary action, one idiom:** `.buttonStyle(.glassProminent)` plus the `savedTick`
+   Save→Saved affordance. A Save that changes nothing on screen reads as one that
+   didn't happen.
 
 ## Accessibility — a first-class requirement, not a pass
 

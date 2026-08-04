@@ -203,21 +203,64 @@ struct OpenVPNOptionsForm: View {
         } label: { SettingLabel(id: "openvpn.protocol", draft: draft) }
     }
 
-    private var connTimeoutPicker: some View {
-        let choices: [(Int?, String)] = [
-            (nil, "Keep trying forever"),
-            (15, "15 seconds"), (30, "30 seconds"),
-            (60, "1 minute"), (120, "2 minutes"), (300, "5 minutes"),
-        ]
-        let known = choices.compactMap(\.0)
-        return Picker(selection: $draft.connTimeout) {
-            ForEach(choices, id: \.0) { value, title in
-                Text(value == nil ? "\(title) (default)" : title).tag(value)
+    /// The fixed choices, plus a real "Custom…" case. A read-only
+    /// "Custom (n seconds)" row could DISPLAY an in-range value that arrived from
+    /// MDM, the CLI or an older blob but gave no way to edit it — the picker was a
+    /// dead end for every value it didn't list.
+    private static let connTimeoutChoices: [(Int?, String)] = [
+        (nil, "Keep trying forever"),
+        (15, "15 seconds"), (30, "30 seconds"),
+        (60, "1 minute"), (120, "2 minutes"), (300, "5 minutes"),
+    ]
+
+    @ViewBuilder private var connTimeoutPicker: some View {
+        let known = Self.connTimeoutChoices.compactMap(\.0)
+        let isCustom = connTimeoutCustom || draft.connTimeout.map { !known.contains($0) } ?? false
+        VStack(alignment: .leading, spacing: 6) {
+            Picker(selection: connTimeoutSelection(known: known)) {
+                ForEach(Self.connTimeoutChoices, id: \.0) { value, title in
+                    Text(value == nil ? "\(title) (default)" : title).tag(CustomChoice.preset(value))
+                }
+                Text("Custom…").tag(CustomChoice.custom)
+            } label: { SettingLabel(id: "openvpn.connect-timeout", draft: draft) }
+            if isCustom {
+                ValidatedNumberField(
+                    label: { Text("Seconds").foregroundStyle(.secondary) },
+                    prompt: "seconds",
+                    value: $draft.connTimeout,
+                    range: OpenVPNOverrides.connTimeoutRange,
+                    invalidMessage: "Enter a number of seconds between 0 and 86400 — 0 keeps trying forever.")
+                    .padding(.leading, 16)
             }
-            if let current = draft.connTimeout, !known.contains(current) {
-                Text("Custom (\(current) seconds)").tag(Int?.some(current))
-            }
-        } label: { SettingLabel(id: "openvpn.connect-timeout", draft: draft) }
+        }
+    }
+
+    /// A picker selection that can say "one of the listed values" or "let me type
+    /// one" without either state being able to erase the other's value.
+    private enum CustomChoice: Hashable {
+        case preset(Int?)
+        case custom
+    }
+
+    @State private var connTimeoutCustom = false
+    @State private var sslDebugCustom = false
+
+    private func connTimeoutSelection(known: [Int]) -> Binding<CustomChoice> {
+        Binding(
+            get: {
+                if connTimeoutCustom { return .custom }
+                if let v = draft.connTimeout, !known.contains(v) { return .custom }
+                return .preset(draft.connTimeout)
+            },
+            set: { choice in
+                switch choice {
+                case .custom:
+                    connTimeoutCustom = true
+                case .preset(let value):
+                    connTimeoutCustom = false
+                    draft.connTimeout = value
+                }
+            })
     }
 
     // MARK: Sign-In
@@ -232,16 +275,14 @@ struct OpenVPNOptionsForm: View {
                 settingToggle("openvpn.autologin-sessions", \.autologinSessions,
                               default: OpenVPNOverrides.EngineDefaults.autologinSessions)
             }
-            if evaluation?.privateKeyPasswordRequired == true {
+            SettingRow(id: "openvpn.private-key-password", draft: $draft, context: context) {
                 LabeledContent {
                     SecureField("required", text: $privateKeyPassword)
                         .multilineTextAlignment(.trailing)
                         .frame(maxWidth: 260).frame(maxWidth: .infinity, alignment: .trailing)
                 } label: {
-                    Text("Private Key Password")
+                    SettingLabel(id: "openvpn.private-key-password", draft: draft)
                 }
-                Text("This configuration's private key is protected by a password. It is stored in your Keychain.")
-                    .font(.callout).foregroundStyle(.secondary)
             }
         }
     }
@@ -442,7 +483,11 @@ struct OpenVPNOptionsForm: View {
             SettingCaveat("Proxy settings are managed by your organization and can't be changed.")
         }
         Group {
-            Toggle("Connect through an HTTP proxy", isOn: proxyEnabled)
+            SettingRow(id: "openvpn.proxy-enabled", draft: $draft, context: context) {
+                Toggle(isOn: proxyEnabled) {
+                    SettingLabel(id: "openvpn.proxy-enabled", draft: draft)
+                }
+            }
 
             if proxyOn {
                 SettingRow(id: "openvpn.proxy-host", draft: $draft, context: context) {
@@ -477,16 +522,17 @@ struct OpenVPNOptionsForm: View {
                             .frame(maxWidth: 260).frame(maxWidth: .infinity, alignment: .trailing)
                     } label: { SettingLabel(id: "openvpn.proxy-username", draft: draft) }
                 }
-                LabeledContent {
-                    SecureField("optional", text: $proxyPassword)
-                        .multilineTextAlignment(.trailing)
-                        .frame(maxWidth: 260).frame(maxWidth: .infinity, alignment: .trailing)
-                        .disabled(!context.proxyHasUsername)
-                        // A dead field must say why.
-                        .help(context.proxyHasUsername ? "" : "Enter a proxy username first")
-                        .accessibilityValue(context.proxyHasUsername ? "" : "unavailable — enter a proxy username first")
-                } label: {
-                    Text("Proxy Password")
+                // The descriptor carries the "enter a username first" rule now, so
+                // the dead-field reason comes from the same place as every other
+                // row's (SettingRow applies it to all three channels).
+                SettingRow(id: "openvpn.proxy-password", draft: $draft, context: context) {
+                    LabeledContent {
+                        SecureField("optional", text: $proxyPassword)
+                            .multilineTextAlignment(.trailing)
+                            .frame(maxWidth: 260).frame(maxWidth: .infinity, alignment: .trailing)
+                    } label: {
+                        SettingLabel(id: "openvpn.proxy-password", draft: draft)
+                    }
                 }
                 SettingRow(id: "openvpn.proxy-cleartext-auth", draft: $draft, context: context) {
                     settingToggle("openvpn.proxy-cleartext-auth", \.proxyAllowCleartextAuth,
@@ -524,15 +570,7 @@ struct OpenVPNOptionsForm: View {
     @ViewBuilder private var advancedSection: some View {
         CollapsibleSettingsSection(group: .advanced, draft: draft) {
                 SettingRow(id: "openvpn.ssl-debug", draft: $draft, context: context) {
-                    Picker(selection: $draft.sslDebugLevel) {
-                        Text("Off (default)").tag(Int?.none)
-                        Text("Basic").tag(Int?.some(1))
-                        Text("Detailed").tag(Int?.some(3))
-                        Text("Everything").tag(Int?.some(9))
-                        if let v = draft.sslDebugLevel, ![1, 3, 9].contains(v) {
-                            Text("Custom (\(v))").tag(Int?.some(v))
-                        }
-                    } label: { SettingLabel(id: "openvpn.ssl-debug", draft: draft) }
+                    sslDebugPicker
                 }
                 SettingRow(id: "openvpn.synchronous-dns", draft: $draft, context: context) {
                     settingToggle("openvpn.synchronous-dns", \.synchronousDnsLookup,
@@ -551,6 +589,42 @@ struct OpenVPNOptionsForm: View {
                 }
         } footer: {
             Text("Only change these if support asks you to.")
+        }
+    }
+
+    /// Same shape as the connection timeout: named levels plus a typed value, so
+    /// any level in the engine's 0–9 range can be both shown AND set.
+    @ViewBuilder private var sslDebugPicker: some View {
+        let known = [1, 3, 9]
+        let isCustom = sslDebugCustom || draft.sslDebugLevel.map { !known.contains($0) } ?? false
+        VStack(alignment: .leading, spacing: 6) {
+            Picker(selection: Binding<CustomChoice>(
+                get: {
+                    if sslDebugCustom { return .custom }
+                    if let v = draft.sslDebugLevel, !known.contains(v) { return .custom }
+                    return .preset(draft.sslDebugLevel)
+                },
+                set: { choice in
+                    switch choice {
+                    case .custom: sslDebugCustom = true
+                    case .preset(let value): sslDebugCustom = false; draft.sslDebugLevel = value
+                    }
+                })) {
+                Text("Off (default)").tag(CustomChoice.preset(Int?.none))
+                Text("Basic").tag(CustomChoice.preset(Int?.some(1)))
+                Text("Detailed").tag(CustomChoice.preset(Int?.some(3)))
+                Text("Everything").tag(CustomChoice.preset(Int?.some(9)))
+                Text("Custom…").tag(CustomChoice.custom)
+            } label: { SettingLabel(id: "openvpn.ssl-debug", draft: draft) }
+            if isCustom {
+                ValidatedNumberField(
+                    label: { Text("Level").foregroundStyle(.secondary) },
+                    prompt: "0–9",
+                    value: $draft.sslDebugLevel,
+                    range: OpenVPNOverrides.sslDebugLevelRange,
+                    invalidMessage: "Enter a level between 0 and 9 — 0 is off, 9 is everything.")
+                    .padding(.leading, 16)
+            }
         }
     }
 
@@ -658,55 +732,26 @@ extension SettingsSection where Footer == EmptyView {
     }
 }
 
-/// A collapsed-by-default group (Security, Advanced — the areas the real-world
-/// survey shows are rarely touched). Opens automatically when it already
-/// contains overrides, so nothing the user changed is ever hidden.
-private struct CollapsibleSettingsSection<Content: View, Footer: View>: View {
-    let group: SettingGroup
-    let draft: OpenVPNOverrides
-    @ViewBuilder let content: Content
-    @ViewBuilder let footer: Footer
-    @State private var expanded: Bool
-    @Environment(SettingsSearch.self) private var search: SettingsSearch?
-
-    init(group: SettingGroup, draft: OpenVPNOverrides,
-         @ViewBuilder content: () -> Content,
-         @ViewBuilder footer: () -> Footer) {
-        self.group = group
-        self.draft = draft
-        self.content = content()
-        self.footer = footer()
-        _expanded = State(initialValue: OpenVPNSettings.overriddenCount(in: group, for: draft) > 0)
-    }
-
-    var body: some View {
-        Section {
-            DisclosureGroup(isExpanded: $expanded) {
-                content
-                    .padding(.top, 4)
-            } label: {
-                HStack {
-                    Text(group.title)
-                    ChangeCountBadge(count: OpenVPNSettings.overriddenCount(in: group, for: draft))
-                    Spacer(minLength: 0)
-                }
-                .padding(.vertical, 4)
-                .contentShape(Rectangle())
-                .onTapGesture { withAnimation(.snappy) { expanded.toggle() } }
-            }
-        } footer: {
-            footer.font(.callout).foregroundStyle(.secondary)
-        }
-        .onChange(of: search?.revealGeneration ?? 0) {
-            // A search hit inside this group must never land on a closed disclosure.
-            if search?.revealGroup == group { expanded = true }
-        }
+// CollapsibleSettingsSection — the collapsed-by-default group with the whole-row
+// hit target, the "n changed" badge and the search-reveal hook — grew up here and
+// now lives in UI/Components/CollapsibleSettingsSection.swift so every editor
+// uses the same one. This overlay keeps the OpenVPN form's call sites reading in
+// terms of its draft rather than a hand-computed count.
+extension CollapsibleSettingsSection where Footer == EmptyView {
+    init(group: SettingGroup, draft: OpenVPNOverrides, @ViewBuilder content: () -> Content) {
+        self.init(group: group,
+                  changedCount: OpenVPNSettings.overriddenCount(in: group, for: draft),
+                  content: content)
     }
 }
 
-extension CollapsibleSettingsSection where Footer == EmptyView {
-    init(group: SettingGroup, draft: OpenVPNOverrides, @ViewBuilder content: () -> Content) {
-        self.init(group: group, draft: draft, content: content, footer: { EmptyView() })
+extension CollapsibleSettingsSection {
+    init(group: SettingGroup, draft: OpenVPNOverrides,
+         @ViewBuilder content: () -> Content,
+         @ViewBuilder footer: () -> Footer) {
+        self.init(group: group,
+                  changedCount: OpenVPNSettings.overriddenCount(in: group, for: draft),
+                  content: content, footer: footer)
     }
 }
 
@@ -842,7 +887,12 @@ struct ManualLink: View {
             router?.navigate(to: anchor)
             openWindow(id: "manual")
         } label: {
+            // The glyph is ~13pt; the app-wide minimum hit target is 22×22 (the
+            // hitbox sweep's rule). This one button repeats ~55 times across five
+            // editors, so it is the single biggest target-size win in the app.
             Image(systemName: "questionmark.circle")
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.borderless)
         .help("Learn more about \u{201C}\(settingName)\u{201D} in the manual")

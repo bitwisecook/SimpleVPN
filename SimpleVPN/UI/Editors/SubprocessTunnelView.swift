@@ -37,19 +37,21 @@ struct SubprocessTunnelView: View {
     @State private var hostPicker: HostPickerPayload?
     // Debounce for live forward edits while connected.
     @State private var applyForwardsTask: Task<Void, Never>?
-    // Advanced disclosures: bound state so the whole header row is a hit
-    // target and a future search-reveal can open the container.
-    @State private var sshAdvancedExpanded = false
-    @State private var sslAdvancedExpanded = false
+    /// The saved-confirmation affordance every editor's primary action now has.
+    @State private var savedTick = false
+    // The Advanced disclosures' expansion state now lives in the shared
+    // CollapsibleSettingsSection, which opens itself when the group already holds
+    // changes — the two hand-kept `…Expanded` flags (and the long boolean chains
+    // in loadOnce that seeded them) are gone.
 
     private var live: SubprocessTunnelManager.Live? { manager.live[draft.id] }
     private var active: Bool { manager.isActive(draft.id) }
     private var appBrowserSummary: String { BrowserCatalog.label(BrowserDefaults.appDefault) }
 
-    var body: some View {
+    /// The config surface: the canonical groups, in order (AGENTS.md "Config
+    /// surfaces") — Connection → Sign-In → Traffic → Security → Advanced.
+    private var configForm: some View {
         Form {
-            // Canonical group order (AGENTS.md "Config surfaces"):
-            // Connection → Sign-In → Traffic → Security → Advanced.
             Section("Connection") {
                 TextField("Name", text: $draft.name)
                 Picker("Kind", selection: $draft.kind) {
@@ -80,6 +82,12 @@ struct SubprocessTunnelView: View {
                     TextField("Server address", text: $draft.server, prompt: Text("vpn.example.com")).autocorrectionDisabled()
                     portField
                     connectionProxyRows
+                    // Connection LIFECYCLE, so it belongs here with the other
+                    // timeouts rather than buried in Advanced (the taxonomy's own
+                    // wording: "connection lifecycle (timeouts, stay-connected…)").
+                    intRow("oc.reconnect-timeout", value: $draft.reconnectTimeout, prompt: "300",
+                           range: SubprocessTunnelConfig.reconnectTimeoutRange,
+                           invalidMessage: "Enter a number of seconds between 0 and 86400 — 0 gives up as soon as the tunnel drops.")
                     Text(gatewayFooter).font(.callout).foregroundStyle(.secondary)
                 }
             }
@@ -99,18 +107,37 @@ struct SubprocessTunnelView: View {
 
             controlSection
             if let log = live?.log, !log.isEmpty { logSection(log) }
-
-            CustomRoutingTabView(vpn: vpn, profileID: draft.id, profile: $customRouting,
-                                proxyAuthUsername: $crProxyAuthUsername,
-                                proxyAuthPassword: $crProxyAuthPassword)
         }
         .formStyle(.grouped)
         .disabled(ManagedPolicy.lockConfiguration)
+    }
+
+    var body: some View {
+        // Custom Routing is its own TAB in every editor (AGENTS.md "Config
+        // surfaces") — appending it as sections put a second, differently-shaped
+        // config surface inside the run of canonical groups.
+        TabView {
+            configForm
+                .tabItem { Label("Settings", systemImage: "slider.horizontal.3") }
+            Form {
+                CustomRoutingTabView(vpn: vpn, profileID: draft.id, profile: $customRouting,
+                                    proxyAuthUsername: $crProxyAuthUsername,
+                                    proxyAuthPassword: $crProxyAuthPassword)
+            }
+            .formStyle(.grouped)
+            .disabled(ManagedPolicy.lockConfiguration)
+            .tabItem { Label("Custom Routing", systemImage: "arrow.triangle.branch") }
+        }
+        .padding(.top, 10)
         .navigationTitle(draft.name)
         .task { loadOnce() }
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button("Save") { save() }
+                Button { save() } label: {
+                    savedTick ? Label("Saved", systemImage: "checkmark")
+                              : Label("Save", systemImage: "checkmark")
+                }
+                    .buttonStyle(.glassProminent)   // primary action — one idiom in every editor
                     .disabled(draft.name.trimmingCharacters(in: .whitespaces).isEmpty || draft.server.isEmpty)
                     // A dead button must say why (the rule ConnectionView follows).
                     .help(draft.name.trimmingCharacters(in: .whitespaces).isEmpty ? "Give this tunnel a name first."
@@ -154,10 +181,10 @@ struct SubprocessTunnelView: View {
     /// SSH carries traffic three ways; the mode picks which fields matter.
     @ViewBuilder private var sshTrafficSection: some View {
         Section("Traffic") {
-            EngineSettingRow(spec: spec("ssh.mode"), changed: draft.sshMode != .socks) {
+            EngineSettingRow(spec: spec("ssh.mode"), value: draft.sshMode) {
                 Picker(selection: $draft.sshMode) {
                     ForEach(SSHMode.allCases, id: \.self) { Text($0.label).tag($0) }
-                } label: { EngineSettingLabel(spec: spec("ssh.mode"), changed: draft.sshMode != .socks) }
+                } label: { EngineSettingLabel(spec: spec("ssh.mode"), value: draft.sshMode) }
                 .pickerStyle(.segmented)
                 // Segmented pickers draw no label — give VoiceOver the name back.
                 .accessibilityLabel(spec("ssh.mode").name)
@@ -178,7 +205,7 @@ struct SubprocessTunnelView: View {
 
     @ViewBuilder private var sshSignInSection: some View {
         Section("Sign-In") {
-            EngineSettingRow(spec: spec("ssh.auth-method"), changed: !sshMethod.isEmpty) {
+            EngineSettingRow(spec: spec("ssh.auth-method"), value: sshMethod) {
                 Picker(selection: Binding(
                     get: { sshMethod },
                     set: { draft.sshAuthMethod = $0.isEmpty ? nil : $0 })) {
@@ -188,7 +215,7 @@ struct SubprocessTunnelView: View {
                     Text("Certificate").tag("certificate")
                     Text("SSH agent").tag("agent")
                     Text("Kerberos").tag("kerberos")
-                } label: { EngineSettingLabel(spec: spec("ssh.auth-method"), changed: !sshMethod.isEmpty) }
+                } label: { EngineSettingLabel(spec: spec("ssh.auth-method"), value: sshMethod) }
             }
             row("ssh.username", text: $draft.username, prompt: "alex")
             // Each credential row is live only under the methods that use it —
@@ -222,14 +249,14 @@ struct SubprocessTunnelView: View {
     @ViewBuilder private var sshPasswordRow: some View {
         let passwordUnused: String? = ["agent", "kerberos"].contains(sshMethod)
             ? "Not used when signing in with \(sshMethodLabel)." : nil
-        EngineSettingRow(spec: spec("ssh.password"), changed: !password.isEmpty,
+        EngineSettingRow(spec: spec("ssh.password"), value: password,
                          disabledReason: passwordUnused) {
             VStack(alignment: .leading, spacing: 6) {
                 LabeledContent {
                     SecureField("optional", text: $password)
                         .textContentType(.password)
                         .multilineTextAlignment(.trailing)
-                } label: { EngineSettingLabel(spec: spec("ssh.password"), changed: !password.isEmpty) }
+                } label: { EngineSettingLabel(spec: spec("ssh.password"), value: password) }
                 Toggle("Remember password", isOn: $remember)
             }
         }
@@ -240,12 +267,12 @@ struct SubprocessTunnelView: View {
 
     @ViewBuilder private var sshSecuritySection: some View {
         Section("Security") {
-            EngineSettingRow(spec: spec("ssh.strict-host-key"), changed: draft.strictHostKey != "accept-new") {
+            EngineSettingRow(spec: spec("ssh.strict-host-key"), value: draft.strictHostKey) {
                 Picker(selection: $draft.strictHostKey) {
                     Text("Trust on first use").tag("accept-new")
                     Text("Only known hosts").tag("yes")
                     Text("Never check (unsafe)").tag("no")
-                } label: { EngineSettingLabel(spec: spec("ssh.strict-host-key"), changed: draft.strictHostKey != "accept-new") }
+                } label: { EngineSettingLabel(spec: spec("ssh.strict-host-key"), value: draft.strictHostKey) }
             }
             pinnedHostKeyRow
             row("ssh.key-exchange", text: optionalText(\.sshKexAlgorithms),
@@ -259,7 +286,7 @@ struct SubprocessTunnelView: View {
     @ViewBuilder private var pinnedHostKeyRow: some View {
         let s = spec("ssh.pinned-host-key")
         let pinned = SubprocessTunnelManager.sshPinnedKey(draft) != nil
-        EngineSettingRow(spec: s, changed: pinned) {
+        EngineSettingRow(spec: s, value: pinned) {
             VStack(alignment: .leading, spacing: 4) {
                 LabeledContent {
                     TextField("SHA256:… or 64 hex characters", text: optionalText(\.sshPinnedHostKey))
@@ -267,7 +294,7 @@ struct SubprocessTunnelView: View {
                         .autocorrectionDisabled()
                         .multilineTextAlignment(.trailing)
                         .accessibilityValue(pinnedKeyError.map { "Problem: \($0)" } ?? "")
-                } label: { EngineSettingLabel(spec: s, changed: pinned) }
+                } label: { EngineSettingLabel(spec: s, value: pinned) }
                 if let error = pinnedKeyError {
                     Text(error)
                         .font(.callout).foregroundStyle(.red)
@@ -483,14 +510,14 @@ struct SubprocessTunnelView: View {
     }
 
     @ViewBuilder private var socksSectionBody: some View {
-        EngineSettingRow(spec: spec("ssh.socks-port"), changed: draft.socksPort != 1080) {
+        EngineSettingRow(spec: spec("ssh.socks-port"), value: draft.socksPort) {
             VStack(alignment: .leading, spacing: 4) {
                 LabeledContent {
                     TextField("1080", value: $draft.socksPort, format: .number.grouping(.never))
                         .multilineTextAlignment(.trailing).frame(maxWidth: 120)
                         // Validation rides the field's value (Docs/Accessibility.md).
                         .accessibilityValue(socksPortError.map { "Problem: \($0)" } ?? "")
-                } label: { EngineSettingLabel(spec: spec("ssh.socks-port"), changed: draft.socksPort != 1080) }
+                } label: { EngineSettingLabel(spec: spec("ssh.socks-port"), value: draft.socksPort) }
                 if let error = socksPortError {
                     Text(error)
                         .font(.callout).foregroundStyle(.red)
@@ -498,9 +525,9 @@ struct SubprocessTunnelView: View {
                 }
             }
         }
-        EngineSettingRow(spec: spec("ssh.system-proxy"), changed: draft.setSystemProxy) {
+        EngineSettingRow(spec: spec("ssh.system-proxy"), value: draft.setSystemProxy) {
             Toggle(isOn: $draft.setSystemProxy) {
-                EngineSettingLabel(spec: spec("ssh.system-proxy"), changed: draft.setSystemProxy)
+                EngineSettingLabel(spec: spec("ssh.system-proxy"), value: draft.setSystemProxy)
             }
             // The toggle applies live to a connected tunnel — no reconnect.
             .onChange(of: draft.setSystemProxy) {
@@ -519,9 +546,9 @@ struct SubprocessTunnelView: View {
     /// link); every existing behaviour — live badges, debounced apply, the
     /// per-row delete buttons with real hitboxes — is unchanged.
     @ViewBuilder private var forwardsSectionBody: some View {
-        EngineSettingRow(spec: spec("ssh.forwards"), changed: !draft.forwards.isEmpty) {
+        EngineSettingRow(spec: spec("ssh.forwards"), value: draft.forwards) {
             VStack(alignment: .leading, spacing: 4) {
-                EngineSettingLabel(spec: spec("ssh.forwards"), changed: !draft.forwards.isEmpty)
+                EngineSettingLabel(spec: spec("ssh.forwards"), value: draft.forwards)
                 forwardEditorRows
             }
         }
@@ -687,7 +714,7 @@ struct SubprocessTunnelView: View {
             }
 
             // Software verification-code token (secret stored in the keychain).
-            EngineSettingRow(spec: Self.specs["oc.token-mode"], changed: !draft.tokenMode.isEmpty,
+            EngineSettingRow(spec: Self.specs["oc.token-mode"], value: draft.tokenMode,
                              disabledReason: tokenUnused) {
                 Picker(selection: $draft.tokenMode) {
                     Text("None").tag("")
@@ -699,20 +726,20 @@ struct SubprocessTunnelView: View {
                     Text("RSA SecurID").tag("rsa")
                     Text("YubiKey (OATH)").tag("yubioath")
                 } label: {
-                    EngineSettingLabel(spec: Self.specs["oc.token-mode"], changed: !draft.tokenMode.isEmpty)
+                    EngineSettingLabel(spec: Self.specs["oc.token-mode"], value: draft.tokenMode)
                 }
             }
             // YubiKey codes come off the key itself, so no seed is stored (or
             // required) for that mode.
             if SubprocessTunnelConfig.tokenModeRequiresSecret(draft.tokenMode) {
-                EngineSettingRow(spec: Self.specs["oc.token-secret"], changed: !tokenSecret.isEmpty,
+                EngineSettingRow(spec: Self.specs["oc.token-secret"], value: tokenSecret,
                                  disabledReason: tokenUnused) {
                     VStack(alignment: .leading, spacing: 4) {
                         LabeledContent {
                             SecureField("TOTP/HOTP seed", text: $tokenSecret)
                                 .multilineTextAlignment(.trailing)
                         } label: {
-                            EngineSettingLabel(spec: Self.specs["oc.token-secret"], changed: !tokenSecret.isEmpty)
+                            EngineSettingLabel(spec: Self.specs["oc.token-secret"], value: tokenSecret)
                         }
                         Text("Required: without it the connection fails before starting.")
                             .font(.caption).foregroundStyle(.secondary)
@@ -729,13 +756,13 @@ struct SubprocessTunnelView: View {
                 disabled: certificateUnused,
                 warning: SubprocessTunnelConfig.missingFileWarning(draft.clientKeyFile))
             if !draft.clientCertFile.isEmpty || !draft.clientKeyFile.isEmpty {
-                EngineSettingRow(spec: Self.specs["oc.key-password"], changed: !keyPassphrase.isEmpty,
+                EngineSettingRow(spec: Self.specs["oc.key-password"], value: keyPassphrase,
                                  disabledReason: certificateUnused) {
                     LabeledContent {
                         SecureField("if the key or .p12 is encrypted", text: $keyPassphrase)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        EngineSettingLabel(spec: Self.specs["oc.key-password"], changed: !keyPassphrase.isEmpty)
+                        EngineSettingLabel(spec: Self.specs["oc.key-password"], value: keyPassphrase)
                     }
                 }
             }
@@ -850,38 +877,53 @@ struct SubprocessTunnelView: View {
                 }
             Text("OpenConnect exposes this tunnel as a SOCKS proxy on 127.0.0.1:\(draft.socksPort) via ocproxy — give each tunnel its own port to run two at once. “Route Mac traffic” points the active network service's SOCKS proxy at it while connected (asks for your admin password) and restores it on disconnect.")
                 .font(.callout).foregroundStyle(.secondary)
+            // The user-facing MTU, on ONE shared control (UI/Components/MTUField)
+            // — it sat in Advanced beside the BASE MTU, which describes the path
+            // underneath and stays there (see AGENTS.md on the split).
+            EngineSettingRow(spec: Self.specs["oc.mtu"], value: draft.ocMTU) {
+                MTUField(spec: Self.specs["oc.mtu"], value: $draft.ocMTU,
+                         range: SubprocessTunnelConfig.ocMTURange, prompt: "auto",
+                         invalidMessage: "Enter an MTU between 576 and 1500. Leave empty to let OpenConnect work it out.")
+            }
         }
     }
 
     // MARK: Advanced (comprehensive knobs, collapsed)
 
+    /// Through the SHARED collapsible section every editor now uses, so this
+    /// surface also gets the "n changed" badge and the search-reveal hook (it was
+    /// a hand-rolled `Section { DisclosureGroup }` — one of three different
+    /// "Advanced" idioms that existed across five editors).
     @ViewBuilder private var sshAdvanced: some View {
-        Section {
-            DisclosureGroup(isExpanded: $sshAdvancedExpanded) {
-                // Clearing the field means "the default (30)", never 0 —
-                // 0 would silently turn keepalives off.
-                intRow("ssh.keepalive", value: Binding(get: { draft.serverAliveInterval }, set: { draft.serverAliveInterval = $0 ?? 30 }), prompt: "30",
-                       range: SubprocessTunnelConfig.keepaliveRange,
-                       invalidMessage: "Enter an interval between 0 and 86400 seconds — 0 turns keepalives off. Leave empty for the default 30.",
-                       changed: draft.serverAliveInterval != 30)
-                toggleRow("ssh.compression", isOn: $draft.compression)
-                linesRow("ssh.extra-options", $draft.sshExtraOptions, prompt: "Ciphers aes256-gcm@openssh.com")
-            } label: {
-                advancedDisclosureLabel($sshAdvancedExpanded)
-            }
+        CollapsibleSettingsSection(group: .advanced, changedCount: sshAdvancedChangedCount) {
+            // Clearing the field means "the default (30)", never 0 —
+            // 0 would silently turn keepalives off.
+            intRow("ssh.keepalive", value: Binding(get: { draft.serverAliveInterval }, set: { draft.serverAliveInterval = $0 ?? 30 }), prompt: "30",
+                   range: SubprocessTunnelConfig.keepaliveRange,
+                   invalidMessage: "Enter an interval between 0 and 86400 seconds — 0 turns keepalives off. Leave empty for the default 30.",
+                   changed: draft.serverAliveInterval != 30)
+            toggleRow("ssh.compression", isOn: $draft.compression)
+            linesRow("ssh.extra-options", $draft.sshExtraOptions, prompt: "Ciphers aes256-gcm@openssh.com")
         }
     }
 
-    /// A whole-row hit target for a disclosure header — a bare string label
-    /// leaves only the chevron and the word clickable (the hitbox rule).
-    private func advancedDisclosureLabel(_ expanded: Binding<Bool>) -> some View {
-        HStack {
-            Text("Advanced")
-            Spacer(minLength: 0)
-        }
-        .padding(.vertical, 4)
-        .contentShape(Rectangle())
-        .onTapGesture { withAnimation(.snappy) { expanded.wrappedValue.toggle() } }
+    private var sshAdvancedChangedCount: Int {
+        [draft.serverAliveInterval != 30,
+         draft.compression,
+         draft.sshExtraOptions.contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty }].count { $0 }
+    }
+
+    private var sslAdvancedChangedCount: Int {
+        [Self.specs["oc.os"].isChanged(draft.spoofOS),
+         Self.specs["oc.no-dtls"].isChanged(draft.disableDTLS),
+         Self.specs["oc.disable-csd"].isChanged(draft.disableCSD),
+         Self.specs["oc.base-mtu"].isChanged(draft.baseMTU),
+         Self.specs["oc.force-dpd"].isChanged(draft.forceDPD),
+         Self.specs["oc.extra-args"].isChanged(draft.extraArgs),
+         draft.preferInProcess,
+         !draft.csdWrapper.isEmpty, !draft.usergroup.isEmpty, !draft.ocCompression.isEmpty,
+         draft.disableIPv6, draft.noHTTPKeepalive,
+         !draft.localHostname.isEmpty, !draft.userAgent.isEmpty, !draft.versionString.isEmpty].count { $0 }
     }
 
     @ViewBuilder private var sslSecuritySection: some View {
@@ -895,18 +937,18 @@ struct SubprocessTunnelView: View {
     }
 
     @ViewBuilder private var sslAdvanced: some View {
-        Section {
-            DisclosureGroup(isExpanded: $sslAdvancedExpanded) {
+        CollapsibleSettingsSection(group: .advanced, changedCount: sslAdvancedChangedCount) {
+            Group {
                 // openconnect accepts a CLOSED set here — free text let a typo
                 // through to be refused at startup with an opaque error.
-                EngineSettingRow(spec: Self.specs["oc.os"], changed: !draft.spoofOS.isEmpty) {
+                EngineSettingRow(spec: Self.specs["oc.os"], value: draft.spoofOS) {
                     Picker(selection: $draft.spoofOS) {
                         Text("Don't say (this Mac)").tag("")
                         ForEach(SubprocessTunnelConfig.spoofOSValues, id: \.self) {
                             Text(Self.spoofOSLabel($0)).tag($0)
                         }
                     } label: {
-                        EngineSettingLabel(spec: Self.specs["oc.os"], changed: !draft.spoofOS.isEmpty)
+                        EngineSettingLabel(spec: Self.specs["oc.os"], value: draft.spoofOS)
                     }
                 }
                 toggleRow("oc.no-dtls", isOn: $draft.disableDTLS)
@@ -956,21 +998,19 @@ struct SubprocessTunnelView: View {
                 LabeledContent("Client version string") {
                     TextField("spoof e.g. 4.10.05085", text: $draft.versionString).autocorrectionDisabled()
                 }
-                intRow("oc.reconnect-timeout", value: $draft.reconnectTimeout, prompt: "300",
-                       range: SubprocessTunnelConfig.reconnectTimeoutRange,
-                       invalidMessage: "Enter a number of seconds between 0 and 86400 — 0 gives up as soon as the tunnel drops.")
-                intRow("oc.mtu", value: $draft.ocMTU, prompt: "auto",
-                       range: SubprocessTunnelConfig.ocMTURange,
-                       invalidMessage: "Enter an MTU between 576 and 1500. Leave empty to let OpenConnect work it out.")
-                intRow("oc.base-mtu", value: $draft.baseMTU, prompt: "auto",
-                       range: SubprocessTunnelConfig.baseMTURange,
-                       invalidMessage: "Enter the path's MTU, between 576 and 9000 (jumbo frames). Leave empty to let OpenConnect work it out.")
+                // The BASE MTU describes the path underneath the tunnel — an
+                // engine internal, and a different range (jumbo frames allowed),
+                // which is why it stays here while the user-facing MTU is up in
+                // Traffic. Same shared control, though.
+                MTUField(spec: Self.specs["oc.base-mtu"], value: $draft.baseMTU,
+                         range: SubprocessTunnelConfig.baseMTURange, prompt: "auto",
+                         invalidMessage: "Enter the path's MTU, between 576 and 9000 (jumbo frames). Leave empty to let OpenConnect work it out.",
+                         step: 100)
+                    .padding(.vertical, 2)
                 intRow("oc.force-dpd", value: $draft.forceDPD, prompt: "off",
                        range: SubprocessTunnelConfig.forceDPDRange,
                        invalidMessage: "Enter an interval between 0 and 3600 seconds — 0 leaves the protocol's own rate.")
                 linesRow("oc.extra-args", $draft.extraArgs, prompt: "--no-http-keepalive")
-            } label: {
-                advancedDisclosureLabel($sslAdvancedExpanded)
             }
         }
     }
@@ -980,7 +1020,7 @@ struct SubprocessTunnelView: View {
     /// the same treatment `sshPasswordRow` gives the SSH surface. Disabling
     /// alone would be theatre; the argv builder is what stopped transmitting it.
     @ViewBuilder private var passwordRows: some View {
-        EngineSettingRow(spec: Self.specs["oc.password"], changed: !password.isEmpty,
+        EngineSettingRow(spec: Self.specs["oc.password"], value: password,
                          disabledReason: passwordUnused) {
             VStack(alignment: .leading, spacing: 6) {
                 LabeledContent {
@@ -988,7 +1028,7 @@ struct SubprocessTunnelView: View {
                         .textContentType(.password)
                         .multilineTextAlignment(.trailing)
                 } label: {
-                    EngineSettingLabel(spec: Self.specs["oc.password"], changed: !password.isEmpty)
+                    EngineSettingLabel(spec: Self.specs["oc.password"], value: password)
                 }
                 Toggle("Remember password", isOn: $remember)
             }
@@ -1103,39 +1143,75 @@ struct SubprocessTunnelView: View {
                 set: { draft[keyPath: keyPath] = $0.isEmpty ? nil : $0 })
     }
 
+    /// In canonical group order (AGENTS.md "Config surfaces"). Note the MTU split
+    /// documented there: `oc.mtu` is the user-facing tunnel MTU and lives in
+    /// Traffic (it is the one someone is told to lower when transfers stall);
+    /// `oc.base-mtu` describes the network path UNDERNEATH the tunnel and stays in
+    /// Advanced.
     static let specs = EngineSettingCatalog([
-        .init(id: "oc.password", name: "Password",
-              summary: "The password for this VPN. Used by password sign-in only — a client certificate or single sign-on doesn't send it."),
-        .init(id: "oc.client-cert", name: "Client Certificate",
-              summary: "A certificate file (PEM or .p12) that identifies YOU to the gateway, instead of a password. Used by certificate sign-in only."),
-        .init(id: "oc.client-key", name: "Client Private Key",
-              summary: "The private key for the client certificate, when it isn't inside the certificate file itself."),
-        .init(id: "oc.key-password", name: "Key / PKCS#12 Passphrase",
-              summary: "The passphrase protecting your client key or .p12 file. Stored in your login keychain."),
-        .init(id: "oc.sso-browser", name: "Sign-In Browser",
-              summary: "Which browser (and profile) opens the single sign-on page, so passkeys and saved passwords are where you keep them."),
-        .init(id: "oc.token-mode", name: "Verification-Code Token",
-              summary: "Have OpenConnect produce the verification code (TOTP, HOTP, OIDC, RSA SecurID or a YubiKey) instead of you typing it. Used alongside password or certificate sign-in."),
-        .init(id: "oc.token-secret", name: "Token Secret",
-              summary: "The seed your verification codes are generated from. Stored in your login keychain and handed over in a private file — never on the command line. Not needed for a YubiKey, which holds its own."),
-        .init(id: "oc.cafile", name: "CA Certificate File",
-              summary: "A PEM file of extra certificate authorities to trust for the VPN server, if it uses a private CA."),
-        .init(id: "oc.os", name: "Reported OS",
-              summary: "The operating system OpenConnect claims to be, which some servers policy-check. Pick one only if your gateway refuses a Mac; anything else isn't a value OpenConnect accepts."),
-        .init(id: "oc.no-dtls", name: "Disable DTLS",
-              summary: "Force the slower-but-more-compatible TLS transport instead of UDP DTLS. Turn on only if DTLS is blocked or flaky."),
-        .init(id: "oc.disable-csd", name: "Skip Host Checker",
-              summary: "Bypass the server's endpoint-posture/host-checker script. May be required to connect from an unmanaged Mac; some servers refuse without it."),
+
+        // MARK: Connection
+
         .init(id: "oc.reconnect-timeout", name: "Reconnect Timeout",
-              summary: "How long (0–86400 seconds) to keep retrying a dropped tunnel before giving up."),
+              summary: "How long (0–86400 seconds) to keep retrying a dropped tunnel before giving up.",
+              group: .connection, default: Int?.none),
+
+        // MARK: Sign-In
+
+        .init(id: "oc.password", name: "Password",
+              summary: "The password for this VPN. Used by password sign-in only — a client certificate or single sign-on doesn't send it.",
+              group: .signIn, default: ""),
+        .init(id: "oc.client-cert", name: "Client Certificate",
+              summary: "A certificate file (PEM or .p12) that identifies YOU to the gateway, instead of a password. Used by certificate sign-in only.",
+              group: .signIn, default: ""),
+        .init(id: "oc.client-key", name: "Client Private Key",
+              summary: "The private key for the client certificate, when it isn't inside the certificate file itself.",
+              group: .signIn, default: ""),
+        .init(id: "oc.key-password", name: "Key / PKCS#12 Passphrase",
+              summary: "The passphrase protecting your client key or .p12 file. Stored in your login keychain.",
+              group: .signIn, default: ""),
+        .init(id: "oc.sso-browser", name: "Sign-In Browser",
+              summary: "Which browser (and profile) opens the single sign-on page, so passkeys and saved passwords are where you keep them.",
+              group: .signIn),
+        .init(id: "oc.token-mode", name: "Verification-Code Token",
+              summary: "Have OpenConnect produce the verification code (TOTP, HOTP, OIDC, RSA SecurID or a YubiKey) instead of you typing it. Used alongside password or certificate sign-in.",
+              group: .signIn, default: ""),
+        .init(id: "oc.token-secret", name: "Token Secret",
+              summary: "The seed your verification codes are generated from. Stored in your login keychain and handed over in a private file — never on the command line. Not needed for a YubiKey, which holds its own.",
+              group: .signIn, default: ""),
+
+        // MARK: Traffic
+
         .init(id: "oc.mtu", name: "MTU",
-              summary: "Largest tunnel packet size, 576–1500. Leave empty to auto-detect; lower it if transfers stall."),
+              summary: "Largest tunnel packet size, 576–1500. Leave empty to auto-detect; lower it if transfers stall.",
+              group: .traffic, default: Int?.none),
+
+        // MARK: Security
+
+        .init(id: "oc.cafile", name: "CA Certificate File",
+              summary: "A PEM file of extra certificate authorities to trust for the VPN server, if it uses a private CA.",
+              group: .security, default: ""),
+
+        // MARK: Advanced
+
+        .init(id: "oc.os", name: "Reported OS",
+              summary: "The operating system OpenConnect claims to be, which some servers policy-check. Pick one only if your gateway refuses a Mac; anything else isn't a value OpenConnect accepts.",
+              group: .advanced, default: ""),
+        .init(id: "oc.no-dtls", name: "Disable DTLS",
+              summary: "Force the slower-but-more-compatible TLS transport instead of UDP DTLS. Turn on only if DTLS is blocked or flaky.",
+              group: .advanced, default: false),
+        .init(id: "oc.disable-csd", name: "Skip Host Checker",
+              summary: "Bypass the server's endpoint-posture/host-checker script. May be required to connect from an unmanaged Mac; some servers refuse without it.",
+              group: .advanced, default: false),
         .init(id: "oc.base-mtu", name: "Base MTU",
-              summary: "The MTU of the underlying network path (576–9000, allowing jumbo frames), used to size the tunnel. Leave empty to auto-detect."),
+              summary: "The MTU of the underlying network path (576–9000, allowing jumbo frames), used to size the tunnel. Leave empty to auto-detect.",
+              group: .advanced, default: Int?.none),
         .init(id: "oc.force-dpd", name: "Dead-Peer Detection (seconds)",
-              summary: "Send a liveness probe this often (0–3600 seconds) and reconnect fast if the server stops answering. Empty leaves the protocol default."),
+              summary: "Send a liveness probe this often (0–3600 seconds) and reconnect fast if the server stops answering. Empty leaves the protocol default.",
+              group: .advanced, default: Int?.none),
         .init(id: "oc.extra-args", name: "Extra Arguments",
-              summary: "Raw OpenConnect flags (one per row) for site-specific needs not covered above."),
+              summary: "Raw OpenConnect flags (one per row) for site-specific needs not covered above.",
+              group: .advanced, default: [String]()),
     ])
 
     /// `warning` is a NON-blocking caption under the field — used for "No file at
@@ -1143,14 +1219,14 @@ struct SubprocessTunnelView: View {
     /// next connect) but is otherwise an opaque tool-startup error.
     private func row(_ id: String, text: Binding<String>, prompt: String,
                      disabled: String? = nil, warning: String? = nil) -> some View {
-        EngineSettingRow(spec: spec(id), changed: !text.wrappedValue.isEmpty,
+        EngineSettingRow(spec: spec(id), value: text.wrappedValue,
                          disabledReason: disabled) {
             VStack(alignment: .leading, spacing: 4) {
                 LabeledContent {
                     TextField(prompt, text: text).multilineTextAlignment(.trailing).autocorrectionDisabled()
                         // Validation rides the field's value (Docs/Accessibility.md).
                         .accessibilityValue(warning.map { "\(text.wrappedValue). \($0)" } ?? text.wrappedValue)
-                } label: { EngineSettingLabel(spec: spec(id), changed: !text.wrappedValue.isEmpty) }
+                } label: { EngineSettingLabel(spec: spec(id), value: text.wrappedValue) }
                 if let warning, disabled == nil {
                     Label(warning, systemImage: "exclamationmark.triangle.fill")
                         .font(.callout).foregroundStyle(.orange)
@@ -1159,9 +1235,12 @@ struct SubprocessTunnelView: View {
             }
         }
     }
+    /// "Changed" comes from the spec's declared default — one derivation, in the
+    /// catalog, rather than a hand-written predicate at each call site.
     private func toggleRow(_ id: String, isOn: Binding<Bool>, disabled: String? = nil) -> some View {
-        EngineSettingRow(spec: spec(id), changed: isOn.wrappedValue, disabledReason: disabled) {
-            Toggle(isOn: isOn) { EngineSettingLabel(spec: spec(id), changed: isOn.wrappedValue) }
+        let s = spec(id)
+        return EngineSettingRow(spec: s, value: isOn.wrappedValue, disabledReason: disabled) {
+            Toggle(isOn: isOn) { EngineSettingLabel(spec: s, value: isOn.wrappedValue) }
         }
     }
     /// Every numeric row goes through the shared `ValidatedNumberField`, so an
@@ -1169,12 +1248,13 @@ struct SubprocessTunnelView: View {
     /// than being handed to ssh/openconnect to reject at startup with an opaque
     /// message. The range always comes from `SubprocessTunnelConfig`'s own
     /// `…Range` block, so the UI bound and the stored bound can't drift.
-    /// `changed` defaults to "a value is set"; pass it explicitly for fields
-    /// whose binding always has a value (e.g. keepalive's non-optional default).
+    /// `changed` comes from the spec's declared default; pass it explicitly only
+    /// for a binding whose optionality doesn't match the spec's own type (e.g.
+    /// keepalive, whose model field is a non-optional Int behind an Int? binding).
     private func intRow(_ id: String, value: Binding<Int?>, prompt: String,
                         range: ClosedRange<Int>, invalidMessage: String,
                         changed: Bool? = nil) -> some View {
-        let isChanged = changed ?? (value.wrappedValue != nil)
+        let isChanged = changed ?? spec(id).isChanged(value.wrappedValue)
         return EngineSettingRow(spec: spec(id), changed: isChanged) {
             ValidatedNumberField(
                 label: { EngineSettingLabel(spec: spec(id), changed: isChanged) },
@@ -1182,9 +1262,9 @@ struct SubprocessTunnelView: View {
         }
     }
     private func linesRow(_ id: String, _ binding: Binding<[String]>, prompt: String) -> some View {
-        EngineSettingRow(spec: spec(id), changed: !binding.wrappedValue.isEmpty) {
+        EngineSettingRow(spec: spec(id), value: binding.wrappedValue) {
             VStack(alignment: .leading, spacing: 4) {
-                EngineSettingLabel(spec: spec(id), changed: !binding.wrappedValue.isEmpty)
+                EngineSettingLabel(spec: spec(id), value: binding.wrappedValue)
                 ForEach(Array(binding.wrappedValue.enumerated()), id: \.offset) { i, _ in
                     HStack(spacing: 6) {
                         TextField(prompt, text: Binding(get: { binding.wrappedValue[i] }, set: { binding.wrappedValue[i] = $0 }))
@@ -1238,17 +1318,9 @@ struct SubprocessTunnelView: View {
         }
         customRouting = vpn.customRouting(for: draft.id)
         (crProxyAuthUsername, crProxyAuthPassword) = loadCustomRoutingProxyAuthFields(profileID: draft.id)
-        // Open Advanced when it already holds changes — nothing the user set
-        // may hide behind a closed disclosure (the OpenVPN form's rule).
-        sshAdvancedExpanded = draft.serverAliveInterval != 30 || draft.compression
-            || draft.sshExtraOptions.contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-        sslAdvancedExpanded = !draft.spoofOS.isEmpty || draft.disableDTLS || draft.disableCSD
-            || draft.preferInProcess || !draft.csdWrapper.isEmpty || !draft.usergroup.isEmpty
-            || !draft.ocCompression.isEmpty || draft.disableIPv6 || draft.noHTTPKeepalive
-            || !draft.localHostname.isEmpty || !draft.userAgent.isEmpty || !draft.versionString.isEmpty
-            || draft.reconnectTimeout != nil || draft.ocMTU != nil || draft.baseMTU != nil
-            || draft.forceDPD != nil
-            || draft.extraArgs.contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        // Advanced opens itself when it already holds changes — the shared
+        // CollapsibleSettingsSection derives that from its own changed count, so
+        // there is nothing to seed here (and no chain to keep in sync).
     }
 
     private func save() {
@@ -1296,6 +1368,12 @@ struct SubprocessTunnelView: View {
         Task { @MainActor in
             customRouting = await commitCustomRouting(vpn, profileID: id, profile: toCommit,
                                                       proxyAuthUsername: user, proxyAuthPassword: pass)
+        }
+        // Acknowledge the save on the button, like every other editor.
+        savedTick = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            savedTick = false
         }
     }
 

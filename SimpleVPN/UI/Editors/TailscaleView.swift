@@ -31,15 +31,22 @@ struct TailscaleView: View {
     @State private var crProxyAuthUsername = ""
     @State private var crProxyAuthPassword = ""
 
-    var body: some View {
+    /// The config surface: the canonical groups, in order (AGENTS.md "Config
+    /// surfaces"). Security and Advanced have no content for this engine and are
+    /// omitted; the live "This Network" status is NOT a config group and lives
+    /// outside this form (it used to sit between Advanced and Custom Routing,
+    /// i.e. inside the run of config groups).
+    private var configForm: some View {
         Form {
-            // Canonical group order (AGENTS.md "Config surfaces"):
-            // Connection → Sign-In → Traffic → Advanced (no Security content).
             Section("Connection") {
                 TextField("Name", text: $name)
-                Picker("Service", selection: $draft.preset) {
-                    ForEach(TailscaleConfig.Preset.allCases, id: \.self) {
-                        Text($0.displayName).tag($0)
+                EngineSettingRow(spec: Self.specs["ts.preset"], value: draft.preset) {
+                    Picker(selection: $draft.preset) {
+                        ForEach(TailscaleConfig.Preset.allCases, id: \.self) {
+                            Text($0.displayName).tag($0)
+                        }
+                    } label: {
+                        EngineSettingLabel(spec: Self.specs["ts.preset"], value: draft.preset)
                     }
                 }
                 Text(draft.preset.summary)
@@ -49,16 +56,11 @@ struct TailscaleView: View {
                 // Headscale only: Tailscale's own service has one address and
                 // asking for it would just be a way to get it wrong.
                 if draft.preset == .headscale {
-                    EngineSettingRow(spec: Self.specs["ts.control-url"],
-                                     changed: !draft.controlURL.isEmpty) {
-                        TextField("https://vpn.example.com", text: $draft.controlURL)
-                            .textFieldStyle(.roundedBorder)
-                            .autocorrectionDisabled()
-                            // The title is an EXAMPLE — the spec name is the name.
-                            .accessibilityLabel(Self.specs["ts.control-url"].name)
-                            // A malformed address is the FIELD's problem.
-                            .accessibilityValue(draft.controlURL.isEmpty ? ""
-                                : (draft.controlURLProblem.map { "\(draft.controlURL). Problem: \($0)" } ?? draft.controlURL))
+                    EngineSettingRow(spec: Self.specs["ts.control-url"], value: draft.controlURL) {
+                        labeledField(Self.specs["ts.control-url"], $draft.controlURL,
+                                     prompt: "https://vpn.example.com",
+                                     // A malformed address is the FIELD's problem.
+                                     problem: draft.controlURL.isEmpty ? nil : draft.controlURLProblem)
                     }
                     if let problem = draft.controlURLProblem, !draft.controlURL.isEmpty {
                         Label(problem, systemImage: "exclamationmark.triangle.fill")
@@ -67,24 +69,26 @@ struct TailscaleView: View {
                     }
                 }
 
-                EngineSettingRow(spec: Self.specs["ts.hostname"], changed: !draft.hostname.isEmpty) {
-                    TextField(VPNController.defaultTailscaleHostname(), text: $draft.hostname)
-                        .textFieldStyle(.roundedBorder)
-                        .autocorrectionDisabled()
-                        .accessibilityLabel(Self.specs["ts.hostname"].name)
-                        .accessibilityValue(hostnameWarning.map { "\(draft.hostname). \($0)" } ?? draft.hostname)
+                EngineSettingRow(spec: Self.specs["ts.hostname"], value: draft.hostname) {
+                    labeledField(Self.specs["ts.hostname"], $draft.hostname,
+                                 prompt: VPNController.defaultTailscaleHostname(),
+                                 problem: hostnameWarning)
                 }
                 // Non-blocking: the name is legal, it just won't survive intact.
                 if let w = hostnameWarning { SettingCaveat(w) }
             }
 
             Section("Sign-In") {
-                EngineSettingRow(spec: Self.specs["ts.auth-key"], changed: !authKey.isEmpty) {
-                    SecureField("Leave empty to sign in with a browser", text: $authKey)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityLabel(Self.specs["ts.auth-key"].name)
-                        .accessibilityValue(authKey.isEmpty ? "not set — sign in with a browser"
-                                            : (authKeyWarning.map { "set. \($0)" } ?? "set"))
+                EngineSettingRow(spec: Self.specs["ts.auth-key"], value: authKey) {
+                    LabeledContent {
+                        SecureField("empty = sign in with a browser", text: $authKey)
+                            .multilineTextAlignment(.trailing)
+                            .accessibilityLabel(Self.specs["ts.auth-key"].name)
+                            .accessibilityValue(authKey.isEmpty ? "not set — sign in with a browser"
+                                                : (authKeyWarning.map { "set. \($0)" } ?? "set"))
+                    } label: {
+                        EngineSettingLabel(spec: Self.specs["ts.auth-key"], value: authKey)
+                    }
                 }
                 // Non-blocking: Headscale's keys legitimately look different.
                 if let w = authKeyWarning { SettingCaveat(w) }
@@ -112,22 +116,32 @@ struct TailscaleView: View {
             }
 
             Section("Traffic") {
-                EngineSettingRow(spec: Self.specs["ts.accept-routes"], changed: !draft.acceptRoutes) {
-                    Toggle(isOn: $draft.acceptRoutes) { Text("Use networks other machines share").bold(!draft.acceptRoutes) }
+                // The Toggle's label is the SPEC's name. It used to carry its own
+                // string ("Use networks other machines share") while the row above
+                // rendered the spec name ("Use Shared Networks"), so one setting
+                // had two names: search found one, the screen showed the other.
+                EngineSettingRow(spec: Self.specs["ts.accept-routes"], value: draft.acceptRoutes) {
+                    Toggle(isOn: $draft.acceptRoutes) {
+                        EngineSettingLabel(spec: Self.specs["ts.accept-routes"], value: draft.acceptRoutes)
+                    }
                 }
                 // Both toggles reach the engine and do exactly what they say — but
                 // paired with an exit machine each leaves a hole worth naming.
                 if !draft.acceptRoutes && draft.useExitNode {
                     SettingCaveat("With shared networks off, only your internet traffic goes through the other machine. The office or home networks other machines share stay unreachable.")
                 }
-                EngineSettingRow(spec: Self.specs["ts.accept-dns"], changed: !draft.acceptDNS) {
-                    Toggle(isOn: $draft.acceptDNS) { Text("Use this network's DNS").bold(!draft.acceptDNS) }
+                EngineSettingRow(spec: Self.specs["ts.accept-dns"], value: draft.acceptDNS) {
+                    Toggle(isOn: $draft.acceptDNS) {
+                        EngineSettingLabel(spec: Self.specs["ts.accept-dns"], value: draft.acceptDNS)
+                    }
                 }
                 if !draft.acceptDNS && draft.useExitNode {
                     SettingCaveat("Your traffic goes through the other machine but your name lookups don't — they keep using this Mac's own DNS servers, which reveals every site you visit to whoever runs them. Turn this network's DNS on to send lookups through the machine carrying your traffic.")
                 }
-                EngineSettingRow(spec: Self.specs["ts.exit-node"], changed: draft.useExitNode) {
-                    Toggle(isOn: $draft.useExitNode) { Text("Send all internet traffic through another machine").bold(draft.useExitNode) }
+                EngineSettingRow(spec: Self.specs["ts.exit-node"], value: draft.useExitNode) {
+                    Toggle(isOn: $draft.useExitNode) {
+                        EngineSettingLabel(spec: Self.specs["ts.exit-node"], value: draft.useExitNode)
+                    }
                 }
                 if draft.useExitNode {
                     exitNodePicker
@@ -138,17 +152,18 @@ struct TailscaleView: View {
                             .font(.callout).foregroundStyle(.orange)
                             .accessibilityLabel("Problem: \(p)")
                     }
-                    Toggle("Allow local network access (printers, files)", isOn: $draft.exitNodeAllowLANAccess)
+                    EngineSettingRow(spec: Self.specs["ts.exit-node-lan"],
+                                     value: draft.exitNodeAllowLANAccess) {
+                        Toggle(isOn: $draft.exitNodeAllowLANAccess) {
+                            EngineSettingLabel(spec: Self.specs["ts.exit-node-lan"],
+                                               value: draft.exitNodeAllowLANAccess)
+                        }
+                    }
                 }
-            }
-
-            Section("Advanced") {
-                EngineSettingRow(spec: Self.specs["ts.advertise-routes"], changed: !advertiseText.isEmpty) {
-                    TextField("192.168.1.0/24, 10.0.0.0/8", text: $advertiseText)
-                        .textFieldStyle(.roundedBorder)
-                        .autocorrectionDisabled()
-                        .accessibilityLabel(Self.specs["ts.advertise-routes"].name)
-                        .accessibilityValue(advertiseProblem.map { "\(advertiseText). Problem: \($0)" } ?? advertiseText)
+                EngineSettingRow(spec: Self.specs["ts.advertise-routes"], value: advertiseText) {
+                    labeledField(Self.specs["ts.advertise-routes"], $advertiseText,
+                                 prompt: "192.168.1.0/24, 10.0.0.0/8",
+                                 problem: advertiseProblem)
                 }
                 if let problem = advertiseProblem {
                     Label(problem, systemImage: "exclamationmark.triangle.fill")
@@ -157,16 +172,34 @@ struct TailscaleView: View {
                 }
             }
 
+            // Live status, AFTER the canonical config groups. It used to sit
+            // between Advanced and Custom Routing — inside the config run — where
+            // a read-only status block reads as another group of settings.
             if let status, status.backendState == .running {
                 networkSection(status)
             }
-
-            CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
-                                proxyAuthUsername: $crProxyAuthUsername,
-                                proxyAuthPassword: $crProxyAuthPassword)
         }
         .formStyle(.grouped)
         .disabled(ManagedPolicy.lockConfiguration)
+    }
+
+    var body: some View {
+        // Custom Routing is its own TAB in every editor (AGENTS.md "Config
+        // surfaces") — appending it as sections put a second, differently-shaped
+        // config surface inside the run of canonical groups.
+        TabView {
+            configForm
+                .tabItem { Label("Settings", systemImage: "slider.horizontal.3") }
+            Form {
+                CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
+                                    proxyAuthUsername: $crProxyAuthUsername,
+                                    proxyAuthPassword: $crProxyAuthPassword)
+            }
+            .formStyle(.grouped)
+            .disabled(ManagedPolicy.lockConfiguration)
+            .tabItem { Label("Custom Routing", systemImage: "arrow.triangle.branch") }
+        }
+        .padding(.top, 10)
         .navigationTitle(name.isEmpty ? "Tailscale" : name)
         .task { loadOnce() }
         .task(id: profileID) { await pollStatus() }
@@ -230,6 +263,7 @@ struct TailscaleView: View {
 
     @ViewBuilder private var exitNodePicker: some View {
         let nodes = status?.exitNodes ?? []
+        let spec = Self.specs["ts.exit-node-machine"]
         if nodes.isEmpty {
             // Honest empty state: the list can only be known from a live
             // session, so say so instead of showing an empty menu.
@@ -238,20 +272,41 @@ struct TailscaleView: View {
                   : "No machine on this network is offering to carry internet traffic yet.",
                   systemImage: "info.circle")
                 .font(.callout).foregroundStyle(.secondary)
-            TextField("Machine address (100.x.y.z)", text: $draft.exitNode)
-                .textFieldStyle(.roundedBorder)
-                .autocorrectionDisabled()
-                .accessibilityLabel("Exit machine address")
-                // Validation rides the field's value (Docs/Accessibility.md).
-                .accessibilityValue(TailscaleConfig.exitNodeProblem(draft.exitNode)
-                                    .map { "\(draft.exitNode). Problem: \($0)" } ?? draft.exitNode)
+            EngineSettingRow(spec: spec, value: draft.exitNode) {
+                labeledField(spec, $draft.exitNode, prompt: "100.x.y.z",
+                             // Validation rides the field's value (Docs/Accessibility.md).
+                             problem: TailscaleConfig.exitNodeProblem(draft.exitNode))
+            }
         } else {
-            Picker("Machine", selection: $draft.exitNode) {
-                Text("Choose…").tag("")
-                ForEach(nodes) { node in
-                    Text(node.pickerLabel + (node.online ? "" : " (offline)")).tag(node.id)
+            EngineSettingRow(spec: spec, value: draft.exitNode) {
+                Picker(selection: $draft.exitNode) {
+                    Text("Choose…").tag("")
+                    ForEach(nodes) { node in
+                        Text(node.pickerLabel + (node.online ? "" : " (offline)")).tag(node.id)
+                    }
+                } label: {
+                    EngineSettingLabel(spec: spec, value: draft.exitNode)
                 }
             }
+        }
+    }
+
+    /// The house text-field idiom: `LabeledContent` with a trailing plain field,
+    /// as used by the OpenVPN, WireGuard, SSH and OpenConnect editors. This form
+    /// used `.roundedBorder` full-width fields, so the same control looked
+    /// different depending on which editor you happened to open.
+    private func labeledField(_ spec: EngineSettingSpec, _ binding: Binding<String>,
+                              prompt: String, problem: String? = nil) -> some View {
+        LabeledContent {
+            TextField(prompt, text: binding)
+                .multilineTextAlignment(.trailing)
+                .autocorrectionDisabled()
+                // The title is an EXAMPLE value — the spec name is the name.
+                .accessibilityLabel(spec.name)
+                .accessibilityValue(problem.map { "\(binding.wrappedValue). Problem: \($0)" }
+                                    ?? binding.wrappedValue)
+        } label: {
+            EngineSettingLabel(spec: spec, value: binding.wrappedValue)
         }
     }
 
@@ -357,20 +412,52 @@ struct TailscaleView: View {
 
     // MARK: Manual-linked specs (anchors: ts.x → #ts-x in manual.html)
 
+    /// In canonical group order (AGENTS.md "Config surfaces"). There is no
+    /// Security content and — with Share Networks moved to Traffic, where a
+    /// decision about which networks this Mac carries belongs — no Advanced
+    /// content either, so both groups are OMITTED rather than shown empty.
     static let specs = EngineSettingCatalog([
+
+        // MARK: Connection
+
+        .init(id: "ts.preset", name: "Service",
+              summary: "Tailscale's own coordination service, or a Headscale server you run yourself. It is the same engine either way — this only decides whether you're asked for a server address.",
+              group: .connection, default: TailscaleConfig.Preset.tailscale),
         .init(id: "ts.control-url", name: "Server Address",
-              summary: "The web address of your own Tailscale-compatible server (Headscale). Must start with https://."),
+              summary: "The web address of your own Tailscale-compatible server (Headscale). Must start with https://.",
+              group: .connection, default: ""),
         .init(id: "ts.hostname", name: "Name on the Network",
-              summary: "What this Mac is called to the other machines on your network. Defaults to your Mac's name."),
+              summary: "What this Mac is called to the other machines on your network. Defaults to your Mac's name.",
+              group: .connection, default: ""),
+
+        // MARK: Sign-In
+
         .init(id: "ts.auth-key", name: "Setup Key",
-              summary: "An optional key from your network's admin page that signs this Mac in without a browser. Leave empty and you'll sign in the usual way, once."),
+              summary: "An optional key from your network's admin page that signs this Mac in without a browser. Leave empty and you'll sign in the usual way, once.",
+              group: .signIn, default: ""),
+
+        // MARK: Traffic
+
         .init(id: "ts.accept-routes", name: "Use Shared Networks",
-              summary: "Some machines share the office or home network they sit on. With this on, those networks are reachable through this VPN too."),
+              summary: "Some machines share the office or home network they sit on. With this on, those networks are reachable through this VPN too.",
+              group: .traffic, default: true),
         .init(id: "ts.accept-dns", name: "Use This Network's DNS",
-              summary: "Lets you reach the other machines by name instead of by address, and uses the DNS servers your network specifies."),
+              summary: "Lets you reach the other machines by name instead of by address, and uses the DNS servers your network specifies.",
+              group: .traffic, default: true),
         .init(id: "ts.exit-node", name: "Send Internet Traffic Elsewhere",
-              summary: "Route everything — not just traffic to your own machines — through another machine on the network, the way a traditional VPN would."),
+              summary: "Route everything — not just traffic to your own machines — through another machine on the network, the way a traditional VPN would.",
+              group: .traffic, default: false),
+        .init(id: "ts.exit-node-machine", name: "Machine",
+              summary: "Which machine on your network carries your internet traffic. It has to be offering to, and be approved on the admin page — SimpleVPN can only list the ones that are while connected.",
+              group: .traffic, default: ""),
+        .init(id: "ts.exit-node-lan", name: "Allow Local Network Access",
+              summary: "While your internet traffic goes through another machine, keep the network you are physically on — printers, file shares — directly reachable.",
+              group: .traffic, default: true),
+        // Sharing the networks this Mac can reach is a decision about which
+        // traffic this tunnel carries, so it sits with the other traffic
+        // decisions rather than alone under an "Advanced" heading.
         .init(id: "ts.advertise-routes", name: "Share Networks From This Mac",
-              summary: "Offer the networks this Mac can reach (like your home LAN) to the other machines. They still have to be approved on the admin page."),
+              summary: "Offer the networks this Mac can reach (like your home LAN) to the other machines. They still have to be approved on the admin page.",
+              group: .traffic, default: ""),
     ])
 }

@@ -136,17 +136,27 @@ private extension View {
 /// vocabulary RouteGraphView's icons use, so the two surfaces read as one system.
 private struct RuleStatusBadge: View {
     let status: RuleStatus
+
+    /// The glyph is the tooltip's target, so it obeys the app-wide 22×22 minimum
+    /// like every other hit/hover target — at intrinsic ~13pt the explanation was
+    /// behind a pixel-hunt.
+    private func glyph(_ name: String) -> some View {
+        Image(systemName: name)
+            .frame(width: 22, height: 22)
+            .contentShape(Rectangle())
+    }
+
     var body: some View {
         switch status {
         case .active:
             EmptyView()
         case .orphaned:
-            Image(systemName: "questionmark.circle")
+            glyph("questionmark.circle")
                 .foregroundStyle(.secondary)
                 .help("This rule doesn't match anything this VPN currently pushes.")
                 .accessibilityLabel("Orphaned rule")
         case .redundant:
-            Image(systemName: "arrow.triangle.merge")
+            glyph("arrow.triangle.merge")
                 .foregroundStyle(.secondary)
                 // Covers both redundancies the model reports: a Replace/Add whose
                 // target already matches a pushed item, and an Ignore in a section
@@ -154,7 +164,7 @@ private struct RuleStatusBadge: View {
                 .help("This rule can't change anything — the outcome is the same without it.")
                 .accessibilityLabel("Redundant rule")
         case .overlapping:
-            Image(systemName: "exclamationmark.triangle.fill")
+            glyph("exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
                 .help("This overlaps a route already carried by this VPN.")
                 .accessibilityLabel("Overlapping rule")
@@ -233,14 +243,48 @@ struct CustomRoutingTabView: View {
 
     // MARK: Routes
 
+    /// The spec catalog for this whole surface, in one place
+    /// (CustomRoutingSettingDescriptors). Every control below is descriptor-backed:
+    /// a name, a plain-English summary, a manual anchor behind a help button, and
+    /// an id the CLI and MDM can address.
+    private static let specs = CustomRoutingSettings.catalog
+
+    /// The header for a control that is a LIST rather than a single value (the
+    /// rule editors, the domain pairs): the same name / summary / help-button
+    /// arrangement `EngineSettingRow` gives a one-line control, without wrapping a
+    /// 300pt scroll view and its Canvas overlay inside a row's HStack.
+    @ViewBuilder private func crHeader(_ spec: EngineSettingSpec, changed: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .center, spacing: 8) {
+                EngineSettingLabel(spec: spec, changed: changed)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                ManualLink(anchor: spec.manualAnchor, settingName: spec.name)
+            }
+            Text(spec.summary)
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.top, 4)
+        .help(spec.summary)
+        .accessibilityElement(children: .contain)
+    }
+
     @ViewBuilder private var routesSection: some View {
         Section("Custom Routing — Routes") {
-            Picker("Unmatched routes", selection: $profile.routes.defaultDisposition) {
-                Text("Accept").tag(UnmatchedDisposition.accept)
-                Text("Ignore (allow-list)").tag(UnmatchedDisposition.ignore)
+            EngineSettingRow(spec: Self.specs["cr.routes-default"],
+                             value: profile.routes.defaultDisposition) {
+                Picker(selection: $profile.routes.defaultDisposition) {
+                    Text("Accept").tag(UnmatchedDisposition.accept)
+                    Text("Ignore (allow-list)").tag(UnmatchedDisposition.ignore)
+                } label: {
+                    EngineSettingLabel(spec: Self.specs["cr.routes-default"],
+                                       value: profile.routes.defaultDisposition)
+                }
+                .pickerStyle(.segmented)
             }
-            .pickerStyle(.segmented)
-            .help("Accept keeps everything this VPN pushes except what a rule below changes. Ignore drops everything unless a rule explicitly Accepts/Replaces it.")
+
+            crHeader(Self.specs["cr.route-rule"], changed: !profile.routes.rules.isEmpty)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
@@ -563,12 +607,19 @@ struct CustomRoutingTabView: View {
 
     @ViewBuilder private var dnsSection: some View {
         Section("Custom Routing — DNS") {
-            Picker("Unmatched resolvers", selection: $profile.dns.defaultDisposition) {
-                Text("Accept").tag(UnmatchedDisposition.accept)
-                Text("Ignore (allow-list)").tag(UnmatchedDisposition.ignore)
+            EngineSettingRow(spec: Self.specs["cr.dns-default"],
+                             value: profile.dns.defaultDisposition) {
+                Picker(selection: $profile.dns.defaultDisposition) {
+                    Text("Accept").tag(UnmatchedDisposition.accept)
+                    Text("Ignore (allow-list)").tag(UnmatchedDisposition.ignore)
+                } label: {
+                    EngineSettingLabel(spec: Self.specs["cr.dns-default"],
+                                       value: profile.dns.defaultDisposition)
+                }
+                .pickerStyle(.segmented)
             }
-            .pickerStyle(.segmented)
 
+            crHeader(Self.specs["cr.dns-rule"], changed: !profile.dns.resolverRules.isEmpty)
             ForEach($profile.dns.resolverRules) { $rule in dnsRuleRow($rule) }
             Button {
                 profile.dns.resolverRules.append(.init(verb: .accept))
@@ -577,8 +628,16 @@ struct CustomRoutingTabView: View {
             }
 
             Divider()
-            Toggle("Ignore all pushed search domains", isOn: $profile.dns.ignorePushedSearchDomains)
-            Toggle("Ignore all pushed match domains", isOn: $profile.dns.ignorePushedMatchDomains)
+            EngineSettingRow(spec: Self.specs["cr.ignore-pushed-search"],
+                             value: profile.dns.ignorePushedSearchDomains) {
+                Toggle(isOn: $profile.dns.ignorePushedSearchDomains) {
+                    EngineSettingLabel(spec: Self.specs["cr.ignore-pushed-search"],
+                                       value: profile.dns.ignorePushedSearchDomains)
+                }
+            }
+            crHeader(Self.specs["cr.add-search-domains"],
+                     changed: !profile.dns.addSearchDomains.isEmpty
+                              || !profile.dns.ignoreSearchDomains.isEmpty)
             domainListField("Add search domains", $profile.dns.addSearchDomains)
             // Ignoring ALL of them subsumes any list: `editDomains` starts from an
             // empty set under ignore-all and never consults the subtraction list,
@@ -587,6 +646,18 @@ struct CustomRoutingTabView: View {
                             disabledReason: profile.dns.ignorePushedSearchDomains
                                 ? "\u{201C}Ignore all pushed search domains\u{201D} is on, which already drops every one."
                                 : nil)
+
+            Divider()
+            EngineSettingRow(spec: Self.specs["cr.ignore-pushed-match"],
+                             value: profile.dns.ignorePushedMatchDomains) {
+                Toggle(isOn: $profile.dns.ignorePushedMatchDomains) {
+                    EngineSettingLabel(spec: Self.specs["cr.ignore-pushed-match"],
+                                       value: profile.dns.ignorePushedMatchDomains)
+                }
+            }
+            crHeader(Self.specs["cr.match-domains"],
+                     changed: !profile.dns.addMatchDomains.isEmpty
+                              || !profile.dns.ignoreMatchDomains.isEmpty)
             domainListField("Add match domains", $profile.dns.addMatchDomains)
             domainListField("Ignore match domains", $profile.dns.ignoreMatchDomains,
                             disabledReason: profile.dns.ignorePushedMatchDomains
@@ -739,13 +810,17 @@ struct CustomRoutingTabView: View {
 
     @ViewBuilder private var proxySection: some View {
         Section("Custom Routing — Proxy") {
-            Picker("Mode", selection: $profile.proxy.mode) {
-                Text("Use pushed proxy").tag(ProxyCustomization.Mode.accept)
-                Text("Ignore (direct)").tag(ProxyCustomization.Mode.ignore)
-                Text("Custom").tag(ProxyCustomization.Mode.custom)
+            EngineSettingRow(spec: Self.specs["cr.proxy-mode"], value: profile.proxy.mode) {
+                Picker(selection: $profile.proxy.mode) {
+                    Text("Use pushed proxy").tag(ProxyCustomization.Mode.accept)
+                    Text("Ignore (direct)").tag(ProxyCustomization.Mode.ignore)
+                    Text("Custom").tag(ProxyCustomization.Mode.custom)
+                } label: {
+                    EngineSettingLabel(spec: Self.specs["cr.proxy-mode"], value: profile.proxy.mode)
+                }
+                .pickerStyle(.segmented)
+                .accessibilityLabel(Self.specs["cr.proxy-mode"].name)
             }
-            .pickerStyle(.segmented)
-            .accessibilityLabel("Proxy mode")
 
             let status = profile.proxy.ruleStatus(against: pushed.proxy)
             if status != .active { RuleStatusBadge(status: status) }
@@ -759,19 +834,23 @@ struct CustomRoutingTabView: View {
                 let manualDead: String? = pacURLSet
                     ? "The PAC URL below is set, and it wins — this address isn't used. Clear the PAC URL to use a manual proxy."
                     : nil
-                TextField("Manual proxy: http(s)://host:port or socks5://host:port", text: Binding(
-                    get: { profile.proxy.manualURL ?? "" },
-                    set: { profile.proxy.manualURL = $0.isEmpty ? nil : $0 }))
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(manualDead != nil)
-                    .accessibilityLabel("Manual proxy address")
-                    .help(manualDead ?? "The proxy this VPN should use, as http(s)://host:port or socks5://host:port.")
-                    .accessibilityValue(manualDead.map { "unavailable — \($0)" }
-                                        ?? (profile.proxy.manualURL ?? ""))
-                if let manualDead {
-                    Text(manualDead)
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                // The house idiom: LabeledContent + a trailing plain field, like
+                // every other editor's text rows (this was a full-width
+                // `.roundedBorder` field whose placeholder carried its name).
+                EngineSettingRow(spec: Self.specs["cr.proxy-manual-url"],
+                                 value: profile.proxy.manualURL ?? "",
+                                 disabledReason: manualDead) {
+                    LabeledContent {
+                        TextField("http(s)://host:port or socks5://host:port", text: Binding(
+                            get: { profile.proxy.manualURL ?? "" },
+                            set: { profile.proxy.manualURL = $0.isEmpty ? nil : $0 }))
+                            .multilineTextAlignment(.trailing)
+                            .autocorrectionDisabled()
+                            .accessibilityLabel(Self.specs["cr.proxy-manual-url"].name)
+                    } label: {
+                        EngineSettingLabel(spec: Self.specs["cr.proxy-manual-url"],
+                                           value: profile.proxy.manualURL ?? "")
+                    }
                 }
                 if manualDead == nil {
                     IssueCaption(issues: issues.filter { $0.field == "manualURL" })
@@ -782,10 +861,20 @@ struct CustomRoutingTabView: View {
                         .font(.caption2).foregroundStyle(.orange)
                 }
 
-                TextField("PAC URL (wins over the manual proxy above)", text: Binding(
-                    get: { profile.proxy.pacURL ?? "" },
-                    set: { profile.proxy.pacURL = $0.isEmpty ? nil : $0 }))
-                    .textFieldStyle(.roundedBorder)
+                EngineSettingRow(spec: Self.specs["cr.proxy-pac-url"],
+                                 value: profile.proxy.pacURL ?? "") {
+                    LabeledContent {
+                        TextField("https://example.com/proxy.pac", text: Binding(
+                            get: { profile.proxy.pacURL ?? "" },
+                            set: { profile.proxy.pacURL = $0.isEmpty ? nil : $0 }))
+                            .multilineTextAlignment(.trailing)
+                            .autocorrectionDisabled()
+                            .accessibilityLabel(Self.specs["cr.proxy-pac-url"].name)
+                    } label: {
+                        EngineSettingLabel(spec: Self.specs["cr.proxy-pac-url"],
+                                           value: profile.proxy.pacURL ?? "")
+                    }
+                }
                 IssueCaption(issues: issues.filter { $0.field == "pacURL" })
 
                 Divider()
@@ -822,13 +911,21 @@ struct CustomRoutingTabView: View {
     /// Accept (pushed-proxy sign-in) and Custom (own-proxy sign-in) modes so the two
     /// read as one system. The caption names where the secret lives.
     @ViewBuilder private func proxyAuthFields(caption: String) -> some View {
-        TextField("Username (optional)", text: $proxyAuthUsername)
-            .textFieldStyle(.roundedBorder).textContentType(.username)
-            // Host editors show several credential pairs — say whose this is.
-            .accessibilityLabel("Proxy username (optional)")
-        SecureField("Password (optional)", text: $proxyAuthPassword)
-            .textFieldStyle(.roundedBorder)
-            .accessibilityLabel("Proxy password (optional)")
+        let set = !proxyAuthUsername.isEmpty || !proxyAuthPassword.isEmpty
+        crHeader(Self.specs["cr.proxy-auth"], changed: set)
+        LabeledContent("Username") {
+            TextField("optional", text: $proxyAuthUsername)
+                .multilineTextAlignment(.trailing)
+                .textContentType(.username)
+                .autocorrectionDisabled()
+                // Host editors show several credential pairs — say whose this is.
+                .accessibilityLabel("Proxy username (optional)")
+        }
+        LabeledContent("Password") {
+            SecureField("optional", text: $proxyAuthPassword)
+                .multilineTextAlignment(.trailing)
+                .accessibilityLabel("Proxy password (optional)")
+        }
         Label(caption, systemImage: "lock")
             .font(.caption2).foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)

@@ -131,12 +131,15 @@
   <a href="#openvpn-ip-version">Internet Protocol</a>
   <a href="#openvpn-connect-timeout">Connection Timeout</a>
   <a href="#openvpn-tun-persist">Stay Connected</a>
+  <a href="#openvpn-proxy-enabled">Connect Through a Proxy</a>
   <a href="#openvpn-proxy-host">Proxy Host</a>
   <a href="#openvpn-proxy-port">Proxy Port</a>
   <a href="#openvpn-proxy-username">Proxy Username</a>
+  <a href="#openvpn-proxy-password">Proxy Password</a>
   <a href="#openvpn-proxy-cleartext-auth">Unencrypted Proxy Sign-in</a>
 
   <h2>Sign-In</h2>
+  <a href="#openvpn-private-key-password">Private Key Password</a>
   <a href="#openvpn-retry-on-auth-failed">Retry After Failed Sign-in</a>
   <a href="#openvpn-autologin-sessions">Session Tokens</a>
 
@@ -161,17 +164,18 @@
   <a href="#openvpn-key-direction">Key Direction</a>
 
   <h2>WireGuard</h2>
+  <a href="#wg-endpoint">Server Address</a>
+  <a href="#wg-listen-port">Listen Port</a>
+  <a href="#wg-private-key">Private Key</a>
+  <a href="#wg-public-key">Peer Public Key</a>
+  <a href="#wg-preshared-key">Pre-shared Key</a>
   <a href="#wg-address">Addresses</a>
+  <a href="#wg-allowed-ips">Allowed IPs</a>
   <a href="#wg-dns">DNS Servers</a>
   <a href="#wg-mtu">MTU</a>
-  <a href="#wg-listen-port">Listen Port</a>
+  <a href="#wg-keepalive">Persistent Keepalive</a>
   <a href="#wg-table">Routing Table</a>
   <a href="#wg-fwmark">Firewall Mark</a>
-  <a href="#wg-public-key">Peer Public Key</a>
-  <a href="#wg-endpoint">Server Address</a>
-  <a href="#wg-allowed-ips">Allowed IPs</a>
-  <a href="#wg-preshared-key">Pre-shared Key</a>
-  <a href="#wg-keepalive">Persistent Keepalive</a>
 
   <h2>SSH Tunnels</h2>
   <a href="#ssh-server">Server Address</a>
@@ -216,26 +220,67 @@
   <a href="#oc-extra-args">Extra Arguments</a>
 
   <h2>Native (IKEv2 / IPsec)</h2>
+  <a href="#native-protocol">Protocol</a>
+  <a href="#native-server">Server Address</a>
+  <a href="#native-group">Group / Local Identifier</a>
+  <a href="#native-on-demand">Connect on Demand</a>
+  <a href="#native-disconnect-sleep">Disconnect on Sleep</a>
+  <a href="#native-auth-method">Use a Shared Secret</a>
+  <a href="#native-xauth">XAuth Sign-In</a>
+  <a href="#native-username">Username</a>
+  <a href="#native-password">Password</a>
+  <a href="#native-shared-secret">Shared Secret</a>
+  <a href="#native-xauth-password">Password (XAuth)</a>
+  <a href="#native-include-all">Send All Traffic</a>
+  <a href="#native-exclude-local">Allow Local Network Access</a>
+  <a href="#native-remote-id">Remote Identifier</a>
   <a href="#native-encryption">Encryption</a>
   <a href="#native-integrity">Integrity / PRF</a>
   <a href="#native-dh-group">Diffie-Hellman Group</a>
-  <a href="#native-dpd">Dead Peer Detection</a>
   <a href="#native-pfs">Perfect Forward Secrecy</a>
   <a href="#native-ike-lifetime">Key Lifetime</a>
+  <a href="#native-dpd">Dead Peer Detection</a>
   <a href="#native-mobike">MOBIKE</a>
-  <a href="#native-include-all">Send All Traffic</a>
-  <a href="#native-exclude-local">Allow Local Network Access</a>
-  <a href="#native-disconnect-sleep">Disconnect on Sleep</a>
 
   <h2>Tailscale &amp; Headscale</h2>
   <a href="#ts-what-is-it">What This Is</a>
+  <a href="#ts-preset">Service</a>
   <a href="#ts-control-url">Server Address</a>
   <a href="#ts-hostname">Name on the Network</a>
   <a href="#ts-auth-key">Setup Key</a>
   <a href="#ts-accept-routes">Use Shared Networks</a>
   <a href="#ts-accept-dns">Use This Network&rsquo;s DNS</a>
   <a href="#ts-exit-node">Send Internet Traffic Elsewhere</a>
+  <a href="#ts-exit-node-machine">Which Machine</a>
+  <a href="#ts-exit-node-lan">Allow Local Network Access</a>
   <a href="#ts-advertise-routes">Share Networks From This Mac</a>
+
+  <h2>Proxy Tunnel</h2>
+  <a href="#px-kind">Kind</a>
+  <a href="#px-address">Proxy Address</a>
+  <a href="#px-requires-auth">Requires Sign-In</a>
+  <a href="#px-username">Username</a>
+  <a href="#px-password">Password</a>
+  <a href="#px-default-route">Send All Traffic</a>
+  <a href="#px-included">Networks Through the Proxy</a>
+  <a href="#px-excluded">Networks Kept Direct</a>
+  <a href="#px-dns">DNS Servers</a>
+  <a href="#px-mtu">MTU</a>
+
+  <h2>Custom Routing</h2>
+  <a href="#cr-what-is-it">What This Is</a>
+  <a href="#cr-routes-default">Unmatched Routes</a>
+  <a href="#cr-route-rule">Route Rules</a>
+  <a href="#cr-dns-default">Unmatched Resolvers</a>
+  <a href="#cr-dns-rule">Resolver Rules</a>
+  <a href="#cr-ignore-pushed-search">Ignore Pushed Search Domains</a>
+  <a href="#cr-add-search-domains">Search Domains</a>
+  <a href="#cr-ignore-pushed-match">Ignore Pushed Match Domains</a>
+  <a href="#cr-match-domains">Match Domains</a>
+  <a href="#cr-proxy-mode">Proxy</a>
+  <a href="#cr-proxy-manual-url">Manual Proxy Address</a>
+  <a href="#cr-proxy-pac-url">PAC URL</a>
+  <a href="#cr-proxy-auth">Proxy Sign-In</a>
 </nav>
 
 <main>
@@ -379,6 +424,11 @@
 
 <!-- ══════ Connection — via an HTTP proxy ══════ -->
 
+<h2 id="openvpn-proxy-enabled">Connect Through an HTTP Proxy</h2>
+<p class="default">Default: off — SimpleVPN reaches the server directly.</p>
+<p>The master switch for the proxy fields below. Turn it on when this network makes you reach the internet through a proxy, and the proxy's address, port and sign-in appear underneath. Turning it off again clears all of them, so a proxy you have stopped using can't be left half-configured.</p>
+<p>Proxies carry TCP only: while a proxy is configured, the <a href="#openvpn-protocol">Protocol</a> effectively becomes TCP, and a VPN left on UDP never uses the proxy at all.</p>
+
 <h2 id="openvpn-proxy-host">Proxy Host</h2>
 <p class="default">Default: no proxy.</p>
 <p>Reaches the VPN server <em>through</em> an HTTP proxy — common on corporate networks where direct outbound connections are blocked and everything must pass through a proxy. Enter the proxy's name or address here and its port next to it; your network's IT documentation will have both.</p>
@@ -392,6 +442,10 @@
 <p class="default">Default: none.</p>
 <p>Only needed if your proxy requires sign-in. The proxy password is stored in your Keychain, never in the configuration.</p>
 
+<h2 id="openvpn-proxy-password">Proxy Password</h2>
+<p class="default">Default: none. Needs a proxy username first.</p>
+<p>The password the proxy asks for. It is kept in your login keychain and handed to the engine in memory when the VPN connects — never written into this VPN's settings file, and never on a command line. Clear the field to remove the stored password.</p>
+
 <h2 id="openvpn-proxy-cleartext-auth">Allow Unencrypted Proxy Sign-in</h2>
 <p class="default">Default: off — only digest-style sign-in is offered.</p>
 <p>Some proxies only support HTTP "Basic" authentication, which sends the proxy username and password essentially unencrypted <em>on your local network segment</em> (your VPN traffic itself stays encrypted). Turn on only if the proxy refuses to authenticate otherwise.</p>
@@ -399,6 +453,10 @@
 
 <!-- ══════════════════ Sign-In ══════════════════ -->
 
+
+<h2 id="openvpn-private-key-password">Private Key Password</h2>
+<p class="default">Only shown when this configuration's private key is encrypted.</p>
+<p>Configuration files that carry a client certificate often protect its private key with a passphrase. Enter it once here and it is kept in your login keychain, so connecting doesn't ask again; it is never written into the VPN's settings file. Clear the field to remove the stored passphrase — the next connection will then fail to unlock the key, which is the honest outcome rather than a silent fallback.</p>
 
 <h2 id="openvpn-retry-on-auth-failed">Keep Retrying After a Failed Sign-in</h2>
 <p class="default">Default: off — a rejected sign-in disconnects.</p>
@@ -516,6 +574,12 @@
 <h2 id="wg-fwmark">Firewall Mark</h2>
 <p class="default">Default: off.</p>
 <p>A firewall mark (fwmark) stamped on the tunnel's own outgoing packets, for advanced policy-based routing setups. Almost nobody needs this — leave it empty unless you're deliberately building custom routing rules.</p>
+
+<h2 id="wg-private-key">Private Key</h2>
+<p class="default">Required. Kept in your Keychain; never shown again once saved.</p>
+<p>This device's own secret key, as base64 (44 characters). It is the other half of the public key you gave — or registered with — your provider: WireGuard has no username or password, so these keys <em>are</em> the sign-in.</p>
+<p>The field is write-only. It shows whether a key is stored, and typing or pasting a new one replaces it when you save; the stored value is never rendered back, so it can't end up in a screenshot or a screen share. Importing or pasting a <code>.conf</code> file sets it too.</p>
+<div class="warn">Anyone holding this key can be this device on your provider's network. If it leaks, generate a new pair and register the new public key.</div>
 
 <h2 id="wg-public-key">Peer Public Key</h2>
 <p class="default">Required. From your provider.</p>
@@ -725,6 +789,54 @@
 
 <!-- ══════════════════ Native (IKEv2 / IPsec) ══════════════════ -->
 
+<h2 id="native-protocol">Protocol</h2>
+<p class="default">Default: IKEv2.</p>
+<p>Which VPN protocol macOS runs for this connection. <strong>IKEv2</strong> is the modern one and what almost every current server offers — pick it unless told otherwise. <strong>IPsec (IKEv1)</strong> suits older Cisco-style concentrators that expect a group secret. <strong>L2TP / IPsec</strong> has no programmatic interface for apps at all, so SimpleVPN writes a configuration profile you install instead of connecting it directly.</p>
+<p>Switching to L2TP hides the options an L2TP profile cannot carry. Anything you set for IKEv2 or IPsec is kept, just not used there — the export says so explicitly.</p>
+
+<h2 id="native-server">Server Address</h2>
+<p class="default">Required.</p>
+<p>The address of the VPN server, either a name like <code>vpn.example.com</code> or an IP address. Just the address — no scheme, no port, no username. A typo here used to surface only as an opaque IKE timeout a minute later, so the field checks the shape of what you type and says what is wrong before you can save it.</p>
+
+<h2 id="native-group">Group / Local Identifier</h2>
+<p class="default">Optional. IPsec (IKEv1) only.</p>
+<p>The group name — some products call it the &ldquo;tunnel group&rdquo; — that tells the concentrator which of its configurations should answer you. Only fill this in if your administrator gave you one; a Cisco <code>.pcf</code> file that SimpleVPN imported will have filled it in for you.</p>
+
+<h2 id="native-on-demand">Connect on Demand</h2>
+<p class="default">Default: off.</p>
+<p>Reconnects this VPN whenever any app opens a network connection. There are <em>no</em> per-network conditions — no Wi-Fi names, no domains, no interfaces — so it applies on every network you join, which is what makes it useful and also what makes it a poor fit for a VPN you only want sometimes.</p>
+
+<h2 id="native-auth-method">Use a Shared Secret (PSK)</h2>
+<p class="default">Default: off — sign in with a username and password.</p>
+<p>How you prove who you are to an IKEv2 server: a <strong>shared secret</strong> that everyone using the VPN has, or your own <strong>username and password</strong>. Turning this on replaces the username and password fields with a single shared-secret field.</p>
+<p>Certificate sign-in isn't offered in this build — there is no identity picker or import for it, so it isn't listed as a choice that then wouldn't work.</p>
+
+<h2 id="native-xauth">Also Sign In With a Username and Password (XAuth)</h2>
+<p class="default">Default: on when a username exists, otherwise off. IPsec (IKEv1) only.</p>
+<p>Some concentrators are satisfied by the group shared secret alone; others want a personal username and password as well (&ldquo;extended authentication&rdquo;). Turn this off and neither is sent — which is the only way to say &ldquo;no XAuth&rdquo; when an import has left a username behind that would otherwise keep it switched on with nothing to send.</p>
+
+<h2 id="native-username">Username</h2>
+<p class="default">Required by password sign-in.</p>
+<p>The account name to sign in to this VPN with. For IPsec it is the personal username the concentrator expects <em>alongside</em> the group secret, and it is only used when XAuth is on.</p>
+
+<h2 id="native-password">Password</h2>
+<p class="default">Required by password sign-in.</p>
+<p>Your personal password for this VPN. It is kept in your login keychain and handed to macOS when the tunnel starts. Clearing the field <em>removes</em> the stored password rather than leaving the previous one in place — so deleting it really does mean the next connection won't use it.</p>
+
+<h2 id="native-shared-secret">Shared Secret</h2>
+<p class="default">Required by shared-secret sign-in, and by every IPsec connection.</p>
+<p>The pre-shared key — also called the group secret or machine secret — which is the same for everyone using this VPN. For IPsec it is always needed; for IKEv2 only when &ldquo;Use a shared secret&rdquo; is on. Kept in your login keychain, and cleared from it when you clear the field.</p>
+<div class="warn">A shared secret is shared: it identifies the VPN, not you. On its own it proves nothing about who is connecting, which is why most servers pair it with a personal sign-in.</div>
+
+<h2 id="native-xauth-password">Password (XAuth)</h2>
+<p class="default">Optional. IPsec (IKEv1) only, when XAuth is on.</p>
+<p>The personal password the concentrator asks for on top of the group shared secret. Kept in your login keychain. Unavailable — and not sent — while &ldquo;Also sign in with a username and password&rdquo; is off.</p>
+
+<h2 id="native-remote-id">Remote Identifier</h2>
+<p class="default">Default: empty — the server address itself must match.</p>
+<p>The identity the server has to prove it has, checked against the name in its certificate. Leave it empty and macOS requires the server address you typed; set it when the server's certificate legitimately names something else (a load-balanced cluster name, for instance) and your administrator tells you what to expect.</p>
+<p>This is a check on the <em>server</em>, which is why it sits under Security rather than beside the address it verifies.</p>
+
 <h2 id="native-encryption">Encryption</h2>
 <p class="default">Default: automatic (macOS negotiates).</p>
 <p>The cipher protecting the IKE and data channels. Leave on Automatic and macOS picks a strong one; set a specific value only if your administrator requires it. AES-256-GCM is a solid modern choice.</p>
@@ -773,6 +885,11 @@
 <p><strong>Headscale</strong> is the same thing with a server you run yourself: an open-source, Tailscale-compatible coordination server. SimpleVPN uses one engine for both. Choosing &ldquo;Headscale (self-hosted)&rdquo; only tells SimpleVPN to ask you for that server&rsquo;s address instead of using Tailscale&rsquo;s.</p>
 <p>The first time you connect, this Mac has to be added to the network. After that its membership is remembered and connecting is instant.</p>
 
+<h2 id="ts-preset">Service</h2>
+<p class="default">Default: Tailscale.</p>
+<p>Which coordination service this VPN joins: <strong>Tailscale</strong>&rsquo;s own, or a <strong>Headscale</strong> server you run yourself. It is the same engine either way — this choice only decides whether SimpleVPN asks you for a <a href="#ts-control-url">server address</a>.</p>
+<p>Changing it after this Mac has joined a network means joining a different network: the membership isn&rsquo;t transferable, so you sign in again.</p>
+
 <h2 id="ts-control-url">Server Address</h2>
 <p class="default">Headscale only. Tailscale uses its own.</p>
 <p>The web address of your self-hosted server, for example <code>https://vpn.example.com</code>. It must start with <code>https://</code> — the request that adds this Mac to the network carries its identity, and plain <code>http</code> would expose it.</p>
@@ -803,11 +920,135 @@
 <p>Normally only traffic to your own machines goes through this VPN; everything else takes its usual route. Turn this on to send <em>all</em> internet traffic through another machine on the network — the way a traditional VPN works. Useful for appearing to be somewhere else, or for using a trusted connection from an untrusted network.</p>
 <p>The machine has to be offering to do this and be approved on the admin page; SimpleVPN lists the ones that are, and it can only list them while the VPN is connected. <strong>Allow local network access</strong> leaves printers and file shares on the network you are physically on reachable; turn it off for the strictest isolation.</p>
 
+<h2 id="ts-exit-node-machine">Which Machine</h2>
+<p class="default">Required once &ldquo;Send internet traffic elsewhere&rdquo; is on.</p>
+<p>The machine on your network that carries your internet traffic. It has to be offering to do that <em>and</em> be approved on the admin page; SimpleVPN lists the ones that qualify, and it can only know the list from a live session — so before this Mac has ever connected you type the machine&rsquo;s address (<code>100.x.y.z</code>) instead.</p>
+<p>Leaving it empty with the option on would build a tunnel that carries your traffic nowhere, so SimpleVPN refuses to save or connect until a machine is chosen.</p>
+
+<h2 id="ts-exit-node-lan">Allow Local Network Access</h2>
+<p class="default">Default: on.</p>
+<p>While your internet traffic goes through another machine, keep the network you are physically on — printers, file shares, a NAS — directly reachable. Turn it off for the strictest isolation, where nothing at all bypasses the machine carrying your traffic.</p>
+
 <h2 id="ts-advertise-routes">Share Networks From This Mac</h2>
 <p class="default">Optional.</p>
 <p>The reverse of &ldquo;Use shared networks&rdquo;: offer a network <em>this</em> Mac can reach — typically the LAN it is on — to the other machines, so they can reach it too. Enter networks in address/length form, separated by commas: <code>192.168.1.0/24, 10.0.0.0/8</code>.</p>
 <p>An offer isn&rsquo;t enough on its own: someone has to approve it on the network&rsquo;s admin page before the others will use it.</p>
 <div class="warn">Sharing a network exposes everything on it to everyone on your private network. Share the narrowest range that does the job.</div>
+
+<!-- ══════════════════ Proxy Tunnel ══════════════════ -->
+
+<h2 id="px-kind">Kind</h2>
+<p class="default">Default: SOCKS5.</p>
+<p>Which kind of proxy this is: <strong>SOCKS5</strong>, <strong>HTTP CONNECT</strong> or <strong>HTTPS CONNECT</strong>. Use whatever your proxy&rsquo;s own documentation calls it — this only decides the scheme of the address SimpleVPN dials.</p>
+<p>Paste a full URL into the address field (<code>socks5://…</code>) and the picker follows it, because the pasted scheme is the one actually used.</p>
+
+<h2 id="px-address">Proxy Address</h2>
+<p class="default">Required.</p>
+<p>The proxy that carries your traffic, as <code>host</code> or <code>host:port</code>. Leave the port off and the standard one for the kind above is used.</p>
+<p>This tunnel presents itself to macOS as a normal VPN — apps need no proxy settings of their own — and dials every connection through the proxy for you. The address is stored in the VPN&rsquo;s settings, so it must not carry a username or password; those go in the sign-in fields, which keep them in your Keychain.</p>
+
+<h2 id="px-requires-auth">Requires Sign-In</h2>
+<p class="default">Default: off.</p>
+<p>Turn on if your proxy asks for a username and password; leave off for an open proxy. Turning it off again clears the stored credentials, so a proxy you stopped signing in to isn&rsquo;t left holding your password.</p>
+
+<h2 id="px-username">Username</h2>
+<p class="default">Required when the proxy asks for a sign-in.</p>
+<p>The username your proxy expects.</p>
+
+<h2 id="px-password">Password</h2>
+<p class="default">Required when the proxy asks for a sign-in.</p>
+<p>The password your proxy expects. Kept in your login keychain and handed to the proxy only in memory, never written into the VPN&rsquo;s settings file.</p>
+
+<h2 id="px-default-route">Send All Traffic</h2>
+<p class="default">Default: on.</p>
+<p>Routes everything on this Mac through the proxy (full tunnel). Turn it off to send only specific networks through it and leave the rest going out directly (split tunnel) — you then have to say which networks in <a href="#px-included">Networks Through the Proxy</a>.</p>
+
+<h2 id="px-included">Networks Through the Proxy</h2>
+<p class="default">Required when not sending all traffic.</p>
+<p>The networks that go through the proxy, in address/length form and separated by commas: <code>10.0.0.0/8, 192.168.1.0/24</code>. Nothing else does. Leaving this empty with &ldquo;Send all traffic&rdquo; off would build a tunnel that carries nothing, so SimpleVPN refuses to save it.</p>
+
+<h2 id="px-excluded">Networks Kept Direct</h2>
+<p class="default">Optional.</p>
+<p>Networks to send straight out, never through the proxy — even when &ldquo;Send all traffic&rdquo; is on. Useful for a local subnet or a service the proxy can&rsquo;t reach.</p>
+<p>An exclusion that swallows part of an inclusion is legal and does something, just rarely what was meant, so SimpleVPN points it out without blocking it. The same goes for an exclusion that carves out one of your <a href="#px-dns">DNS servers</a>: the resolver still gets used, just directly, outside the proxy.</p>
+
+<h2 id="px-dns">DNS Servers</h2>
+<p class="default">Default: empty — keep this Mac&rsquo;s own DNS.</p>
+<p>Name servers to use while connected, separated by commas. Lookups to them go through the proxy too, so they don&rsquo;t leak past it. Each one must be an <em>address</em>, not a network — a prefix here is silently dropped by macOS and DNS then stops working with nothing said anywhere, which is why the field refuses it up front.</p>
+
+<h2 id="px-mtu">MTU</h2>
+<p class="default">Default: 1500.</p>
+<p>The largest packet the tunnel carries. 1500 suits almost everything; lower it only if a network in the path needs smaller packets, which shows up as large transfers or particular websites stalling. Type the number or nudge it with the stepper.</p>
+
+<!-- ══════════════════ Custom Routing ══════════════════ -->
+
+<h2 id="cr-what-is-it">What This Is</h2>
+<p class="default">Every VPN kind has this tab. It changes nothing until you add a rule.</p>
+<p>When a VPN connects it <em>pushes</em> settings at your Mac: which networks it carries, which DNS servers to use, sometimes a proxy. Custom Routing is where you edit that push — accept it, ignore parts of it, replace a value, or add one the VPN never offered — per VPN.</p>
+<p>Every rule is written against what this VPN last pushed, which SimpleVPN remembers, so the tab works the same whether or not the VPN is connected right now. Each section shows a &ldquo;Pushed by this VPN&rdquo; reference list for exactly that reason. Rules that can&rsquo;t match anything, or can&rsquo;t change anything, are marked as such rather than left looking effective.</p>
+<div class="warn">Custom Routing overrides what your VPN administrator configured. Ignoring a pushed route or resolver can take away access you need — or send traffic outside the tunnel that was meant to stay inside it.</div>
+
+<h2 id="cr-routes-default">Unmatched Routes</h2>
+<p class="default">Default: Accept.</p>
+<p>What happens to the networks this VPN offers that no rule below mentions. <strong>Accept</strong> keeps them all, and your rules are exceptions. <strong>Ignore</strong> drops them all, and only what a rule explicitly accepts or replaces is used — an allow-list.</p>
+
+<h2 id="cr-route-rule">Route Rules</h2>
+<p class="default">Default: no rules — routes pass through unchanged.</p>
+<p>An ordered list that edits the networks this VPN offers. Each rule has an action and one or two networks (in address/length form, or the word <code>default</code> for the &ldquo;send everything&rdquo; route):</p>
+<table>
+  <tr><th>Action</th><th>What it does</th></tr>
+  <tr><td>Accept</td><td>Keep this network, whatever the default above says.</td></tr>
+  <tr><td>Ignore</td><td>Drop this network — the VPN won't carry it.</td></tr>
+  <tr><td>Replace</td><td>Carry a different network in place of this one.</td></tr>
+  <tr><td>Add</td><td>Carry a network the VPN never offered.</td></tr>
+</table>
+<p>Changing a rule&rsquo;s action clears the field the new action doesn&rsquo;t use, so nothing invisible survives the change. A rule whose networks overlap a pushed route, or another rule, offers a button that draws the overlap for you. Rules with an error in them stay in your draft but are never applied.</p>
+
+<h2 id="cr-dns-default">Unmatched Resolvers</h2>
+<p class="default">Default: Accept.</p>
+<p>The same choice as for routes, for the DNS servers this VPN offers: keep the ones no rule mentions, or drop them so only what a rule accepts is used.</p>
+
+<h2 id="cr-dns-rule">Resolver Rules</h2>
+<p class="default">Default: no rules — resolvers pass through unchanged.</p>
+<p>An ordered list that edits the DNS servers this VPN offers, with the same four actions as route rules: accept one, ignore one, replace one with another, or add a server of your own. Values are plain addresses.</p>
+<div class="warn">Replacing a VPN&rsquo;s DNS server with a public one means the names inside your organisation stop resolving — and it sends every lookup you make to whoever runs the server you chose.</div>
+
+<h2 id="cr-ignore-pushed-search">Ignore All Pushed Search Domains</h2>
+<p class="default">Default: off.</p>
+<p>Drops every search domain this VPN offers. Search domains are what let you type a short name (<code>wiki</code>) and have your Mac complete it to a full one (<code>wiki.example.com</code>).</p>
+<p>With this on, the &ldquo;ignore search domains&rdquo; list below has nothing left to remove, so it is shown as unavailable rather than pretending to apply.</p>
+
+<h2 id="cr-add-search-domains">Search Domains</h2>
+<p class="default">Optional.</p>
+<p>Two comma-separated lists: search domains to <strong>add</strong> to whatever this VPN offers, and individual ones to <strong>leave out</strong>. Adding is useful when a VPN forgets a suffix you need; leaving one out is useful when a pushed suffix shadows a name you use locally.</p>
+
+<h2 id="cr-ignore-pushed-match">Ignore All Pushed Match Domains</h2>
+<p class="default">Default: off.</p>
+<p>Drops every match domain this VPN offers. Match domains are the name suffixes whose lookups go to <em>this VPN&rsquo;s</em> DNS servers; everything else keeps using your Mac&rsquo;s normal ones.</p>
+<p>Dropping them all usually means the VPN&rsquo;s DNS servers stop being consulted for anything — which is a large change disguised as a small switch.</p>
+
+<h2 id="cr-match-domains">Match Domains</h2>
+<p class="default">Optional.</p>
+<p>Two comma-separated lists: name suffixes to <strong>send</strong> to this VPN&rsquo;s DNS servers on top of whatever it offers, and individual ones to <strong>leave out</strong>. Adding a suffix is how you make one more part of the internal namespace resolve through the VPN; leaving one out keeps a suffix on your Mac&rsquo;s own DNS.</p>
+
+<h2 id="cr-proxy-mode">Proxy</h2>
+<p class="default">Default: use the proxy this VPN pushes.</p>
+<p>Whether to use the proxy this VPN offers, go <strong>direct</strong> and ignore it, or use a proxy of your <strong>own</strong>. Choosing Custom reveals the address fields below.</p>
+<p>For the OS-native VPN kinds (IKEv2, IPsec) macOS applies the proxy itself and SimpleVPN only observes it — so a pushed proxy&rsquo;s sign-in can&rsquo;t be attached there. The tab says so where it matters instead of offering a field that does nothing.</p>
+
+<h2 id="cr-proxy-manual-url">Manual Proxy Address</h2>
+<p class="default">Optional. Custom mode only.</p>
+<p>The proxy to use while connected, as <code>http://host:port</code>, <code>https://host:port</code> or <code>socks5://host:port</code>. Ignored while a <a href="#cr-proxy-pac-url">PAC URL</a> is set — that wins, so the field is shown as unavailable rather than left editable and inert.</p>
+<p>The native VPN configuration has no SOCKS slot, so on those kinds a <code>socks5://</code> address can&rsquo;t be applied; the tab says so instead of failing quietly.</p>
+
+<h2 id="cr-proxy-pac-url">PAC URL</h2>
+<p class="default">Optional. Custom mode only.</p>
+<p>The address of a proxy auto-configuration script — a small file, published by whoever runs your network, that decides per-site which proxy to use. It takes precedence over the manual address above.</p>
+
+<h2 id="cr-proxy-auth">Proxy Sign-In</h2>
+<p class="default">Optional.</p>
+<p>The username and password the proxy asks for, if it does. Used both for a proxy you configured here and for one this VPN pushed — a push never carries credentials, so if the pushed proxy wants a sign-in this is where it comes from.</p>
+<p>The pair is kept in your login keychain; the VPN&rsquo;s settings only ever carry a reference to it. Clearing both fields deletes the stored secret. Choosing &ldquo;Ignore (direct)&rdquo; keeps what you typed but drops the reference, so an unreferenced secret can never reach a connection.</p>
 
 <hr style="border: none; border-top: 1px solid var(--border); margin-top: 48px">
 <p class="muted" style="font-size: 13px">SimpleVPN uses the OpenVPN 3, OpenConnect, libssh and Tailscale engines. <a href="https://db-ip.com">IP Geolocation by DB-IP</a>, licensed CC BY 4.0.</p>

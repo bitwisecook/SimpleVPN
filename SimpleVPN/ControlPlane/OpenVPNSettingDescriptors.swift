@@ -94,6 +94,32 @@ struct SettingDescriptor: Identifiable {
         self.reset = { $0[keyPath: keyPath] = nil }
         self.availabilityRule = availability
     }
+
+    /// For the exposed controls that are NOT one Optional field of the overrides
+    /// blob: the two engine secrets (which live in the keychain — see the M7
+    /// settings architecture) and the proxy master toggle (whose state is "is a
+    /// proxy host set", and whose reset clears the whole sub-form). They still
+    /// need a descriptor: an unspec'd control is invisible to SettingsSearch, has
+    /// no manual anchor behind its help button, and cannot be addressed by the
+    /// CLI or forced by MDM — which is exactly how the toggle that unhides five
+    /// spec'd proxy rows ended up unfindable by searching "proxy".
+    init(
+        _ id: String,
+        group: SettingGroup,
+        name: String,
+        summary: String,
+        isSet: @escaping (OpenVPNOverrides) -> Bool = { _ in false },
+        reset: @escaping (inout OpenVPNOverrides) -> Void = { _ in },
+        availability: @escaping (SettingsContext) -> SettingAvailability = { _ in .available }
+    ) {
+        self.id = id
+        self.group = group
+        self.name = name
+        self.summary = summary
+        self.isSet = isSet
+        self.reset = reset
+        self.availabilityRule = availability
+    }
 }
 
 @MainActor
@@ -129,6 +155,20 @@ enum OpenVPNSettings {
 
         // MARK: Connection — reaching the server through an HTTP proxy
 
+        // The master toggle for the five rows below. It gates them, so it must be
+        // findable BY ITSELF: searching "proxy" used to list the fields the toggle
+        // hides and never the toggle that unhides them.
+        SettingDescriptor("openvpn.proxy-enabled", group: .connection,
+            name: "Connect through an HTTP proxy",
+            summary: "Turn on when this network makes you reach the internet through a proxy. The proxy's address and sign-in appear below.",
+            isSet: { $0.proxyHost != nil },
+            reset: {
+                $0.proxyHost = nil
+                $0.proxyPort = nil
+                $0.proxyUsername = nil
+                $0.proxyAllowCleartextAuth = nil
+            }),
+
         SettingDescriptor("openvpn.proxy-host", \.proxyHost, group: .connection,
             name: "Proxy Host",
             summary: "Reach the VPN server through an HTTP proxy on your network. Proxies carry TCP only — while a proxy is configured, UDP can't be used."),
@@ -143,6 +183,17 @@ enum OpenVPNSettings {
             summary: "Only needed if your proxy asks you to sign in.",
             availability: { $0.proxyConfigured ? .available : .disabled(reason: "Enter a proxy host first") }),
 
+        // Keychain-backed (never in the overrides blob), so it has no
+        // overridden-state to track — but it is a control the user can find,
+        // read about, and have MDM manage.
+        SettingDescriptor("openvpn.proxy-password", group: .connection,
+            name: "Proxy Password",
+            summary: "The password your proxy asks for. Stored in your Keychain, never in this VPN's settings file.",
+            availability: { ctx in
+                guard ctx.proxyConfigured else { return .disabled(reason: "Enter a proxy host first") }
+                return ctx.proxyHasUsername ? .available : .disabled(reason: "Enter a proxy username first")
+            }),
+
         SettingDescriptor("openvpn.proxy-cleartext-auth", \.proxyAllowCleartextAuth, group: .connection,
             name: "Allow unencrypted proxy sign-in",
             summary: "Your proxy username and password may be visible to others on the local network.",
@@ -156,6 +207,15 @@ enum OpenVPNSettings {
         SettingDescriptor("openvpn.retry-on-auth-failed", \.retryOnAuthFailed, group: .signIn,
             name: "Keep retrying after a failed sign-in",
             summary: "Treat a rejected sign-in as temporary and try again. Useful with verification codes that expire."),
+
+        // Also keychain-backed. Shown only for profiles whose private key is
+        // actually protected — for anything else there is no passphrase to type.
+        SettingDescriptor("openvpn.private-key-password", group: .signIn,
+            name: "Private Key Password",
+            summary: "The password that unlocks this configuration's private key. Stored in your Keychain, never in this VPN's settings file.",
+            availability: { ctx in
+                (ctx.evaluation?.privateKeyPasswordRequired ?? false) ? .available : .hidden
+            }),
 
         SettingDescriptor("openvpn.autologin-sessions", \.autologinSessions, group: .signIn,
             name: "Use server session tokens",

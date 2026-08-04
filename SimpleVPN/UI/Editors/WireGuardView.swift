@@ -41,27 +41,29 @@ struct WireGuardView: View {
     /// this a user could never take it off again (and clearing must really
     /// clear, not leave the old key in the keychain and in use).
     @State private var removePresharedKey = false
+    /// The saved-confirmation affordance every editor's primary action now has —
+    /// three of six used to save with no visible acknowledgement at all.
+    @State private var savedTick = false
 
-    var body: some View {
+    /// The config surface: the canonical groups, in order (AGENTS.md "Config
+    /// surfaces"). No Security group — WireGuard's cryptography is fixed by
+    /// design, so there is nothing to choose and the group is omitted.
+    private var configForm: some View {
         Form {
-            // Canonical group order (AGENTS.md "Config surfaces"):
-            // Connection → Sign-In → Traffic → Advanced (keys ARE WireGuard's
-            // sign-in, so they group there; the wg-quick Interface/Peer split
-            // survives only in the .conf round-trip, not in the form).
             Section("Connection") {
                 TextField("Name", text: $draft.name)
                 HStack {
                     Button("Import .conf…") { showImporter = true }
                     Button("Paste Configuration…") { pasteText = ""; showPaste = true }
                 }
-                EngineSettingRow(spec: Self.specs["wg.endpoint"], changed: !draft.endpoint.isEmpty) {
+                EngineSettingRow(spec: Self.specs["wg.endpoint"], value: draft.endpoint) {
                     textField(Self.specs["wg.endpoint"], $draft.endpoint, prompt: "host:51820",
                               problem: endpointProblem)
                 }
                 problemLabel(endpointProblem)
-                EngineSettingRow(spec: Self.specs["wg.listen-port"], changed: draft.listenPort != nil) {
+                EngineSettingRow(spec: Self.specs["wg.listen-port"], value: draft.listenPort) {
                     ValidatedNumberField(
-                        label: { EngineSettingLabel(spec: Self.specs["wg.listen-port"], changed: draft.listenPort != nil) },
+                        label: { EngineSettingLabel(spec: Self.specs["wg.listen-port"], value: draft.listenPort) },
                         prompt: "auto",
                         value: $draft.listenPort,
                         range: WireGuardConfig.listenPortRange,
@@ -73,39 +75,31 @@ struct WireGuardView: View {
             }
 
             Section("Sign-In") {
-                LabeledContent("Private key") {
-                    Text(draft.privateKey.isEmpty && newPrivateKey.isEmpty
-                         ? "not set" : "•••••• (in Keychain)")
-                        .foregroundStyle(.secondary)
-                }
-                LabeledContent("Set / Replace Key") {
-                    SecureField("paste base64 private key", text: $newPrivateKey)
-                        .font(.callout.monospaced())
-                        .multilineTextAlignment(.trailing)
-                        .autocorrectionDisabled()
-                        .accessibilityLabel("Set or replace the private key")
-                        // Validation rides the field's value (Docs/Accessibility.md).
-                        .accessibilityValue(privateKeyProblem.map { "Problem: \($0)" } ?? "")
+                // Descriptor-backed like every other row: the summary, the manual
+                // link and the a11y contract come from the spec, so the field the
+                // whole VPN depends on is finally findable and documented.
+                EngineSettingRow(spec: Self.specs["wg.private-key"], value: hasPrivateKey) {
+                    privateKeyRows
                 }
                 problemLabel(privateKeyProblem)
-                EngineSettingRow(spec: Self.specs["wg.public-key"], changed: !draft.peerPublicKey.isEmpty) {
+                EngineSettingRow(spec: Self.specs["wg.public-key"], value: draft.peerPublicKey) {
                     monoField(Self.specs["wg.public-key"], $draft.peerPublicKey, prompt: "base64 public key",
                               problem: publicKeyProblem)
                 }
                 problemLabel(publicKeyProblem)
-                EngineSettingRow(spec: Self.specs["wg.preshared-key"], changed: hasPresharedKey) {
+                EngineSettingRow(spec: Self.specs["wg.preshared-key"], value: hasPresharedKey) {
                     presharedKeyRows
                 }
                 problemLabel(presharedKeyProblem)
             }
 
             Section("Traffic") {
-                EngineSettingRow(spec: Self.specs["wg.address"], changed: !draft.addresses.isEmpty) {
+                EngineSettingRow(spec: Self.specs["wg.address"], value: draft.addresses) {
                     listField(Self.specs["wg.address"], $draft.addresses, prompt: "10.0.0.2/32",
                               problem: addressProblem)
                 }
                 problemLabel(addressProblem)
-                EngineSettingRow(spec: Self.specs["wg.allowed-ips"], changed: !draft.allowedIPs.isEmpty) {
+                EngineSettingRow(spec: Self.specs["wg.allowed-ips"], value: draft.allowedIPs) {
                     listField(Self.specs["wg.allowed-ips"], $draft.allowedIPs, prompt: "0.0.0.0/0",
                               problem: allowedIPsProblem)
                 }
@@ -118,7 +112,7 @@ struct WireGuardView: View {
                         .font(.callout).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                EngineSettingRow(spec: Self.specs["wg.dns"], changed: !draft.dns.isEmpty) {
+                EngineSettingRow(spec: Self.specs["wg.dns"], value: draft.dns) {
                     listField(Self.specs["wg.dns"], $draft.dns, prompt: "1.1.1.1")
                 }
                 // One caveat per resolver the peer won't carry — the split-tunnel
@@ -126,17 +120,29 @@ struct WireGuardView: View {
                 ForEach(uncoveredDNS, id: \.self) { server in
                     SettingCaveat(WireGuardConfig.dnsCoverageWarning(server))
                 }
-                EngineSettingRow(spec: Self.specs["wg.mtu"], changed: draft.mtu != nil) {
-                    ValidatedNumberField(
-                        label: { EngineSettingLabel(spec: Self.specs["wg.mtu"], changed: draft.mtu != nil) },
-                        prompt: "1420",
-                        value: $draft.mtu,
-                        range: WireGuardConfig.mtuRange,
-                        invalidMessage: "Enter an MTU between 1280 and 1500. Below 1280 the tunnel can't carry IPv6 at all, and the engine would silently drop packets.")
+                // ONE MTU control across every engine that has one (MTUField).
+                EngineSettingRow(spec: Self.specs["wg.mtu"], value: draft.mtu) {
+                    MTUField(spec: Self.specs["wg.mtu"], value: $draft.mtu,
+                             range: WireGuardConfig.mtuRange, prompt: "1420",
+                             invalidMessage: "Enter an MTU between 1280 and 1500. Below 1280 the tunnel can't carry IPv6 at all, and the engine would silently drop packets.")
                 }
-                EngineSettingRow(spec: Self.specs["wg.table"], changed: !draft.table.isEmpty) {
-                    textField(Self.specs["wg.table"], $draft.table, prompt: "auto",
-                              help: Self.exportOnlyHelp)
+            }
+
+            CollapsibleSettingsSection(group: .advanced, changedCount: advancedChangedCount) {
+                EngineSettingRow(spec: Self.specs["wg.keepalive"], value: draft.persistentKeepalive) {
+                    ValidatedNumberField(
+                        label: { EngineSettingLabel(spec: Self.specs["wg.keepalive"], value: draft.persistentKeepalive) },
+                        prompt: "off",
+                        value: $draft.persistentKeepalive,
+                        range: WireGuardConfig.keepaliveRange,
+                        invalidMessage: "Enter a number of seconds between 0 and 65535 — 0 turns keepalives off, 25 is typical behind NAT.")
+                }
+                // Both are closed value sets, not free text: `Table` is
+                // auto|off|<number> and `FwMark` is off|<uint32>. As TextFields
+                // any typo round-tripped straight into an exported .conf that
+                // wg-quick then refuses.
+                EngineSettingRow(spec: Self.specs["wg.table"], value: draft.table) {
+                    tableRow
                 }
                 // Not disabled: the value is honoured — in the EXPORTED file. What
                 // it does there is turn the Allowed IPs above into documentation,
@@ -144,21 +150,11 @@ struct WireGuardView: View {
                 if draft.table.trimmingCharacters(in: .whitespaces).lowercased() == "off" {
                     SettingCaveat("In a configuration you export, \u{201C}off\u{201D} tells wg-quick to install no routes at all, so the Allowed IPs above route nothing there. SimpleVPN's own engine ignores this setting and still routes them.")
                 }
-            }
-
-            Section("Advanced") {
-                EngineSettingRow(spec: Self.specs["wg.keepalive"], changed: draft.persistentKeepalive != nil) {
-                    ValidatedNumberField(
-                        label: { EngineSettingLabel(spec: Self.specs["wg.keepalive"], changed: draft.persistentKeepalive != nil) },
-                        prompt: "off",
-                        value: $draft.persistentKeepalive,
-                        range: WireGuardConfig.keepaliveRange,
-                        invalidMessage: "Enter a number of seconds between 0 and 65535 — 0 turns keepalives off, 25 is typical behind NAT.")
+                EngineSettingRow(spec: Self.specs["wg.fwmark"], value: draft.fwMark) {
+                    fwMarkRow
                 }
-                EngineSettingRow(spec: Self.specs["wg.fwmark"], changed: !draft.fwMark.isEmpty) {
-                    textField(Self.specs["wg.fwmark"], $draft.fwMark, prompt: "off",
-                              help: Self.exportOnlyHelp)
-                }
+            } footer: {
+                Text(Self.exportOnlyHelp)
             }
 
             Section {
@@ -174,18 +170,37 @@ struct WireGuardView: View {
                 Text(exportDisabledReason
                      ?? "Export produces a standard wg-quick file for use with other WireGuard clients.")
             }
-
-            CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
-                                proxyAuthUsername: $crProxyAuthUsername,
-                                proxyAuthPassword: $crProxyAuthPassword)
         }
         .formStyle(.grouped)
         .disabled(ManagedPolicy.lockConfiguration)
+    }
+
+    var body: some View {
+        // Custom Routing is its own TAB in every editor (AGENTS.md "Config
+        // surfaces") — appending it as sections put a second, differently-shaped
+        // config surface inside the run of canonical groups.
+        TabView {
+            configForm
+                .tabItem { Label("Settings", systemImage: "slider.horizontal.3") }
+            Form {
+                CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
+                                    proxyAuthUsername: $crProxyAuthUsername,
+                                    proxyAuthPassword: $crProxyAuthPassword)
+            }
+            .formStyle(.grouped)
+            .disabled(ManagedPolicy.lockConfiguration)
+            .tabItem { Label("Custom Routing", systemImage: "arrow.triangle.branch") }
+        }
+        .padding(.top, 10)
         .navigationTitle(draft.name)
         .task { loadOnce() }
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button("Save") { save() }
+                Button { save() } label: {
+                    savedTick ? Label("Saved", systemImage: "checkmark")
+                              : Label("Save", systemImage: "checkmark")
+                }
+                    .buttonStyle(.glassProminent)   // primary action — one idiom in every editor
                     .disabled(saveDisabledReason != nil)
                     // A dead Save must say why — hover AND VoiceOver (house rule).
                     .help(saveDisabledReason ?? "Save changes to this VPN")
@@ -197,6 +212,103 @@ struct WireGuardView: View {
             if case let .success(url) = result { importConf(url) }
         }
         .sheet(isPresented: $showPaste) { pasteSheet }
+    }
+
+    // MARK: Routing-table / firewall-mark rows (closed value sets, not free text)
+
+    /// `Table` is `auto | off | <number>`. A Picker over the two words plus a
+    /// "Custom…" numeric case, so the only reachable values are the ones wg-quick
+    /// accepts — it was an unconstrained TextField.
+    @ViewBuilder private var tableRow: some View {
+        let spec = Self.specs["wg.table"]
+        let word = draft.table.trimmingCharacters(in: .whitespaces).lowercased()
+        let isCustom = !draft.table.isEmpty && word != "auto" && word != "off"
+        VStack(alignment: .leading, spacing: 6) {
+            Picker(selection: Binding<String>(
+                get: { isCustom ? "custom" : word },
+                set: { choice in
+                    switch choice {
+                    case "custom": draft.table = tableNumberText.isEmpty ? "0" : tableNumberText
+                    case "": draft.table = ""
+                    default: draft.table = choice
+                    }
+                })) {
+                Text("Not set — wg-quick's own default (auto)").tag("")
+                Text("auto — install routes for the allowed IPs").tag("auto")
+                Text("off — install no routes").tag("off")
+                Text("Custom table number…").tag("custom")
+            } label: {
+                EngineSettingLabel(spec: spec, value: draft.table)
+            }
+            .help(Self.exportOnlyHelp)
+            if isCustom {
+                ValidatedNumberField(
+                    label: { Text("Table number").foregroundStyle(.secondary) },
+                    prompt: "0",
+                    value: Binding(
+                        get: { Int(draft.table.trimmingCharacters(in: .whitespaces)) },
+                        set: { draft.table = $0.map(String.init) ?? "" }),
+                    range: WireGuardConfig.tableNumberRange,
+                    invalidMessage: "Enter a routing-table number between 0 and 4294967295, or choose auto/off above.")
+                    .padding(.leading, 16)
+            }
+        }
+    }
+
+    /// The last value typed into the custom table field, so flipping to "Custom…"
+    /// and back doesn't lose it.
+    @State private var tableNumberText = ""
+
+    /// `FwMark` is `off | <uint32>`, decimal or `0x…` hex — so it can't be a plain
+    /// numeric field. A Picker for "off" plus a validated text case.
+    @ViewBuilder private var fwMarkRow: some View {
+        let spec = Self.specs["wg.fwmark"]
+        let word = draft.fwMark.trimmingCharacters(in: .whitespaces).lowercased()
+        let isCustom = !draft.fwMark.isEmpty && word != "off"
+        VStack(alignment: .leading, spacing: 6) {
+            Picker(selection: Binding<String>(
+                get: { isCustom ? "custom" : word },
+                set: { choice in
+                    switch choice {
+                    case "custom": draft.fwMark = "0x0"
+                    case "": draft.fwMark = ""
+                    default: draft.fwMark = choice
+                    }
+                })) {
+                Text("Not set — wg-quick's own default (off)").tag("")
+                Text("off — don't mark packets").tag("off")
+                Text("Custom mark…").tag("custom")
+            } label: {
+                EngineSettingLabel(spec: spec, value: draft.fwMark)
+            }
+            .help(Self.exportOnlyHelp)
+            if isCustom {
+                LabeledContent("Mark") {
+                    TextField("0x1234 or 4660", text: $draft.fwMark)
+                        .font(.callout.monospaced())
+                        .multilineTextAlignment(.trailing)
+                        .autocorrectionDisabled()
+                        .accessibilityLabel("Firewall mark value")
+                        .accessibilityValue(fwMarkProblem.map { "\(draft.fwMark). Problem: \($0)" } ?? draft.fwMark)
+                }
+                .padding(.leading, 16)
+                problemLabel(fwMarkProblem)
+            }
+        }
+    }
+
+    /// Why this firewall mark isn't one wg-quick would take, or nil.
+    private var fwMarkProblem: String? {
+        let s = draft.fwMark.trimmingCharacters(in: .whitespaces)
+        if s.isEmpty || WireGuardConfig.isValidFwMark(s) { return nil }
+        return "Enter a whole number up to 4294967295, in decimal or as 0x-prefixed hex — or choose \u{201C}off\u{201D} above."
+    }
+
+    /// The Advanced badge count, from the specs' own declared defaults.
+    private var advancedChangedCount: Int {
+        [Self.specs["wg.keepalive"].isChanged(draft.persistentKeepalive),
+         Self.specs["wg.table"].isChanged(draft.table),
+         Self.specs["wg.fwmark"].isChanged(draft.fwMark)].count { $0 }
     }
 
     /// The paste sheet: focus lands in the editor so a keyboard user can ⌘V at
@@ -222,6 +334,29 @@ struct WireGuardView: View {
         .onAppear { pasteFocused = true }
     }
 
+    /// Status + write-only entry for the private key: the row says whether one is
+    /// stored, and the value is never rendered (the "set it, never reveal it"
+    /// convention every secret in this app follows).
+    @ViewBuilder private var privateKeyRows: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            LabeledContent {
+                Text(hasPrivateKey ? "•••••• (in Keychain)" : "not set")
+                    .foregroundStyle(.secondary)
+            } label: {
+                EngineSettingLabel(spec: Self.specs["wg.private-key"], value: hasPrivateKey)
+            }
+            LabeledContent("Set / Replace Key") {
+                SecureField("paste base64 private key", text: $newPrivateKey)
+                    .font(.callout.monospaced())
+                    .multilineTextAlignment(.trailing)
+                    .autocorrectionDisabled()
+                    .accessibilityLabel("Set or replace the private key")
+                    // Validation rides the field's value (Docs/Accessibility.md).
+                    .accessibilityValue(privateKeyProblem.map { "Problem: \($0)" } ?? "")
+            }
+        }
+    }
+
     // MARK: Pre-shared key (write-only, like the private key)
 
     /// Status + write-only entry for the pre-shared key. Never a plain
@@ -239,7 +374,7 @@ struct WireGuardView: View {
                     }
                 }
             } label: {
-                EngineSettingLabel(spec: Self.specs["wg.preshared-key"], changed: hasPresharedKey)
+                EngineSettingLabel(spec: Self.specs["wg.preshared-key"], value: hasPresharedKey)
             }
             LabeledContent("Set / Replace Key") {
                 SecureField("paste base64 pre-shared key", text: $newPresharedKey)
@@ -341,29 +476,65 @@ struct WireGuardView: View {
 
     // MARK: Spec catalog + typed field helpers
 
+    /// In canonical group order (AGENTS.md "Config surfaces"). WireGuard's keys
+    /// ARE its sign-in, so they group there; the wg-quick Interface/Peer split
+    /// survives only in the .conf round-trip, not in the form.
     static let specs = EngineSettingCatalog([
-        .init(id: "wg.address", name: "Addresses",
-              summary: "The in-tunnel IP address(es) this device is assigned, with prefix (e.g. 10.0.0.2/32). From your provider."),
-        .init(id: "wg.dns", name: "DNS Servers",
-              summary: "DNS servers to use while connected. Often points inside the tunnel so private names resolve."),
-        .init(id: "wg.mtu", name: "MTU",
-              summary: "Largest packet size on the tunnel, 1280–1500. Leave empty for the standard 1420; lower it (e.g. 1380) if some sites hang."),
-        .init(id: "wg.listen-port", name: "Listen Port",
-              summary: "UDP port WireGuard listens on locally, 0–65535. Leave empty (or 0) to let the system pick one."),
-        .init(id: "wg.table", name: "Routing Table",
-              summary: "“auto” installs routes for the allowed IPs; “off” installs none (you manage routing yourself). Only applies to configurations you export for other WireGuard clients — SimpleVPN's own engine doesn't use it."),
-        .init(id: "wg.fwmark", name: "Firewall Mark",
-              summary: "A firewall mark placed on the tunnel's own packets, for advanced policy routing. Rarely needed. Only applies to configurations you export for other WireGuard clients — SimpleVPN's own engine doesn't use it."),
-        .init(id: "wg.public-key", name: "Peer Public Key",
-              summary: "The server peer's public key (base64). Identifies and encrypts to the server. From your provider."),
+
+        // MARK: Connection
+
         .init(id: "wg.endpoint", name: "Server Address",
-              summary: "The server's public address and port, host:port (e.g. vpn.example.com:51820) — the Endpoint line of a wg-quick file."),
-        .init(id: "wg.allowed-ips", name: "Allowed IPs",
-              summary: "Which destinations go through this peer. 0.0.0.0/0, ::/0 sends everything (full tunnel); specific subnets make it split."),
+              summary: "The server's public address and port, host:port (e.g. vpn.example.com:51820) — the Endpoint line of a wg-quick file.",
+              group: .connection, default: ""),
+        .init(id: "wg.listen-port", name: "Listen Port",
+              summary: "UDP port WireGuard listens on locally, 0–65535. Leave empty (or 0) to let the system pick one.",
+              group: .connection, default: Int?.none),
+
+        // MARK: Sign-In
+
+        // The single most important field in this editor, and the last one still
+        // hand-rolled: no spec meant no manual anchor, no search hit, and no way
+        // for the CLI or MDM to name it.
+        .init(id: "wg.private-key", name: "Private Key",
+              summary: "This device's own secret key (base64) — the other half of the public key you gave your provider. Kept in your Keychain and never shown again once saved.",
+              group: .signIn, default: false),
+        .init(id: "wg.public-key", name: "Peer Public Key",
+              summary: "The server peer's public key (base64). Identifies and encrypts to the server. From your provider.",
+              group: .signIn, default: ""),
         .init(id: "wg.preshared-key", name: "Pre-shared Key",
-              summary: "Optional extra symmetric key (base64) added on top for post-quantum resistance. Only if your provider gives you one."),
+              summary: "Optional extra symmetric key (base64) added on top for post-quantum resistance. Only if your provider gives you one.",
+              group: .signIn, default: false),
+
+        // MARK: Traffic
+
+        .init(id: "wg.address", name: "Addresses",
+              summary: "The in-tunnel IP address(es) this device is assigned, with prefix (e.g. 10.0.0.2/32). From your provider.",
+              group: .traffic, default: [String]()),
+        .init(id: "wg.allowed-ips", name: "Allowed IPs",
+              summary: "Which destinations go through this peer. 0.0.0.0/0, ::/0 sends everything (full tunnel); specific subnets make it split.",
+              group: .traffic, default: [String]()),
+        .init(id: "wg.dns", name: "DNS Servers",
+              summary: "DNS servers to use while connected. Often points inside the tunnel so private names resolve.",
+              group: .traffic, default: [String]()),
+        .init(id: "wg.mtu", name: "MTU",
+              summary: "Largest packet size on the tunnel, 1280–1500. Leave empty for the standard 1420; lower it (e.g. 1380) if some sites hang.",
+              group: .traffic, default: Int?.none),
+
+        // MARK: Advanced
+        //
+        // Both are routing escape hatches that this app's engine never reads, and
+        // they are each other's siblings — the routing table sat under Traffic
+        // beside the Allowed IPs it can silently make inert.
+
+        .init(id: "wg.table", name: "Routing Table",
+              summary: "“auto” installs routes for the allowed IPs; “off” installs none (you manage routing yourself). Only applies to configurations you export for other WireGuard clients — SimpleVPN's own engine doesn't use it.",
+              group: .advanced, default: ""),
+        .init(id: "wg.fwmark", name: "Firewall Mark",
+              summary: "A firewall mark placed on the tunnel's own packets, for advanced policy routing. Rarely needed. Only applies to configurations you export for other WireGuard clients — SimpleVPN's own engine doesn't use it.",
+              group: .advanced, default: ""),
         .init(id: "wg.keepalive", name: "Persistent Keepalive",
-              summary: "Seconds between keepalive packets to hold the tunnel open through NAT/firewalls, 0–65535. 25 is typical behind NAT; empty or 0 = off."),
+              summary: "Seconds between keepalive packets to hold the tunnel open through NAT/firewalls, 0–65535. 25 is typical behind NAT; empty or 0 = off.",
+              group: .advanced, default: Int?.none),
     ])
 
     /// `wg.table` and `wg.fwmark` never reach our engine — `WireGuardStartConfig`
@@ -381,7 +552,7 @@ struct WireGuardView: View {
                 // Validation rides the field's value (Docs/Accessibility.md).
                 .accessibilityValue(problem.map { "\(binding.wrappedValue). Problem: \($0)" } ?? binding.wrappedValue)
                 .help(help ?? spec.summary)
-        } label: { EngineSettingLabel(spec: spec, changed: !binding.wrappedValue.isEmpty) }
+        } label: { EngineSettingLabel(spec: spec, value: binding.wrappedValue) }
     }
     private func monoField(_ spec: EngineSettingSpec, _ binding: Binding<String>, prompt: String,
                            problem: String? = nil) -> some View {
@@ -389,7 +560,7 @@ struct WireGuardView: View {
             TextField(prompt, text: binding).font(.callout.monospaced()).multilineTextAlignment(.trailing).autocorrectionDisabled()
                 .accessibilityLabel(spec.name)
                 .accessibilityValue(problem.map { "Problem: \($0)" } ?? "")
-        } label: { EngineSettingLabel(spec: spec, changed: !binding.wrappedValue.isEmpty) }
+        } label: { EngineSettingLabel(spec: spec, value: binding.wrappedValue) }
     }
     private func listField(_ spec: EngineSettingSpec, _ binding: Binding<[String]>, prompt: String,
                            problem: String? = nil) -> some View {
@@ -401,7 +572,7 @@ struct WireGuardView: View {
                 .accessibilityLabel(spec.name)
                 .accessibilityValue(problem.map { "\(binding.wrappedValue.joined(separator: ", ")). Problem: \($0)" }
                                     ?? binding.wrappedValue.joined(separator: ", "))
-        } label: { EngineSettingLabel(spec: spec, changed: !binding.wrappedValue.isEmpty) }
+        } label: { EngineSettingLabel(spec: spec, value: binding.wrappedValue) }
     }
 
     /// Whether a private key is available for export — either already in the
@@ -468,6 +639,12 @@ struct WireGuardView: View {
             catch { vpn.lastError = error.localizedDescription }
             customRouting = await commitCustomRouting(vpn, profileID: profileID, profile: toCommit,
                                                       proxyAuthUsername: user, proxyAuthPassword: pass)
+        }
+        // Acknowledge the save on the button, like every other editor.
+        savedTick = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            savedTick = false
         }
     }
 

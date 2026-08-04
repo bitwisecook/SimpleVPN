@@ -25,6 +25,9 @@ struct NativeVPNView: View {
     /// exported .mobileconfig carries them in different payload dictionaries.
     @State private var pppPassword = ""
     @State private var loaded = false
+    /// The saved-confirmation affordance every editor's primary action now has —
+    /// three of six used to save with no visible acknowledgement at all.
+    @State private var savedTick = false
     @State private var customRouting = CustomRoutingProfile()
     @State private var crProxyAuthUsername = ""
     @State private var crProxyAuthPassword = ""
@@ -90,50 +93,80 @@ struct NativeVPNView: View {
         return nil
     }
 
-    var body: some View {
+    /// The config surface: the canonical five groups, in order (AGENTS.md
+    /// "Config surfaces") — Connection → Sign-In → Traffic → Security → Advanced.
+    private var configForm: some View {
         Form {
-            // Canonical group order (AGENTS.md "Config surfaces"):
-            // Connection → Sign-In → Traffic → Security → Advanced.
             Section("Connection") {
                 TextField("Name", text: $draft.name)
-                Picker("Protocol", selection: $draft.kind) {
-                    Text("IKEv2").tag(VPNKind.ikev2)
-                    Text("IPsec (IKEv1)").tag(VPNKind.ipsec)
-                    Text("L2TP / IPsec").tag(VPNKind.l2tp)
+                EngineSettingRow(spec: Self.specs["native.protocol"], value: draft.kind) {
+                    Picker(selection: $draft.kind) {
+                        Text("IKEv2").tag(VPNKind.ikev2)
+                        Text("IPsec (IKEv1)").tag(VPNKind.ipsec)
+                        Text("L2TP / IPsec").tag(VPNKind.l2tp)
+                    } label: {
+                        EngineSettingLabel(spec: Self.specs["native.protocol"], value: draft.kind)
+                    }
+                    .onChange(of: draft.kind) {
+                        // IPsec has no certificate path (no identity picker/import
+                        // exists), so it's always the shared-secret mode — keep
+                        // the model honest even though connect() no longer trusts
+                        // this flag for IPsec either.
+                        if draft.kind == .ipsec { draft.usesSharedSecret = true }
+                    }
                 }
-                .onChange(of: draft.kind) {
-                    // IPsec has no certificate path (no identity picker/import
-                    // exists), so it's always the shared-secret mode — keep
-                    // the model honest even though connect() no longer trusts
-                    // this flag for IPsec either.
-                    if draft.kind == .ipsec { draft.usesSharedSecret = true }
+                EngineSettingRow(spec: Self.specs["native.server"], value: draft.server) {
+                    LabeledContent {
+                        TextField("vpn.example.com", text: $draft.server)
+                            .multilineTextAlignment(.trailing)
+                            .autocorrectionDisabled()
+                            // The title is an EXAMPLE — the spec name is the name.
+                            .accessibilityLabel(Self.specs["native.server"].name)
+                            // Validation rides the field's value (Docs/Accessibility.md).
+                            .accessibilityValue(serverProblem.map { "\(draft.server). Problem: \($0)" } ?? draft.server)
+                    } label: {
+                        EngineSettingLabel(spec: Self.specs["native.server"], value: draft.server)
+                    }
                 }
-                TextField("Server address", text: $draft.server, prompt: Text("vpn.example.com"))
-                    .autocorrectionDisabled()
-                    // Validation rides the field's value (Docs/Accessibility.md).
-                    .accessibilityValue(serverProblem.map { "\(draft.server). Problem: \($0)" } ?? draft.server)
                 if let p = serverProblem {
                     Label(p, systemImage: "exclamationmark.triangle.fill")
                         .font(.callout).foregroundStyle(.orange)
                         .accessibilityLabel("Problem: \(p)")
                 }
-                if draft.kind == .ikev2 {
-                    TextField("Remote identifier (optional)", text: $draft.remoteID,
-                              prompt: Text("defaults to the server address"))
-                }
                 if draft.kind == .ipsec {
-                    TextField("Group / local identifier (optional)", text: $draft.groupOrRealm)
+                    EngineSettingRow(spec: Self.specs["native.group"], value: draft.groupOrRealm) {
+                        LabeledContent {
+                            TextField("optional", text: $draft.groupOrRealm)
+                                .multilineTextAlignment(.trailing)
+                                .autocorrectionDisabled()
+                                .accessibilityLabel(Self.specs["native.group"].name)
+                        } label: {
+                            EngineSettingLabel(spec: Self.specs["native.group"], value: draft.groupOrRealm)
+                        }
+                    }
                 }
                 if draft.kind != .l2tp {
                     // The rule installed is a bare NEOnDemandRuleConnect() — no
                     // SSID, domain or interface conditions exist anywhere in this
                     // app, so say what it really does rather than let "on demand"
                     // imply a condition list the user could have set.
-                    Toggle("Connect on demand", isOn: $draft.onDemand)
-                        .help("Reconnects this VPN whenever any app opens a network connection. There are no per-network conditions — it applies on every network.")
+                    EngineSettingRow(spec: Self.specs["native.on-demand"], value: draft.onDemand) {
+                        Toggle(isOn: $draft.onDemand) {
+                            EngineSettingLabel(spec: Self.specs["native.on-demand"], value: draft.onDemand)
+                        }
                         .accessibilityValue(draft.onDemand
                             ? "on — reconnects whenever any app opens a network connection, on every network"
                             : "off")
+                    }
+                    // Lifecycle sibling of Connect on Demand — both answer "when
+                    // is this VPN up", so they live together (it was in Advanced).
+                    EngineSettingRow(spec: Self.specs["native.disconnect-sleep"],
+                                     value: draft.disconnectOnSleep) {
+                        Toggle(isOn: $draft.disconnectOnSleep) {
+                            EngineSettingLabel(spec: Self.specs["native.disconnect-sleep"],
+                                               value: draft.disconnectOnSleep)
+                        }
+                    }
                 }
             }
 
@@ -142,22 +175,42 @@ struct NativeVPNView: View {
             } else {
                 authSection
                 trafficSection
-                if draft.kind == .ikev2 { securitySection }
+                securitySection
                 advancedSection
                 controlSection
+            }
+        }
+        .formStyle(.grouped)
+        .disabled(ManagedPolicy.lockConfiguration)
+    }
+
+    var body: some View {
+        // Custom Routing is its own TAB in every editor (AGENTS.md "Config
+        // surfaces") — appending it as sections put a second, differently-shaped
+        // config surface inside the run of canonical groups.
+        TabView {
+            configForm
+                .tabItem { Label("Settings", systemImage: "slider.horizontal.3") }
+            Form {
                 CustomRoutingTabView(vpn: vpn, profileID: draft.id, profile: $customRouting,
                                     proxyAuthUsername: $crProxyAuthUsername,
                                     proxyAuthPassword: $crProxyAuthPassword,
                                     kind: draft.kind)
             }
+            .formStyle(.grouped)
+            .disabled(ManagedPolicy.lockConfiguration)
+            .tabItem { Label("Custom Routing", systemImage: "arrow.triangle.branch") }
         }
-        .formStyle(.grouped)
-        .disabled(ManagedPolicy.lockConfiguration)
+        .padding(.top, 10)
         .navigationTitle(draft.name)
         .task { loadOnce() }
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button("Save") { save() }
+                Button { save() } label: {
+                    savedTick ? Label("Saved", systemImage: "checkmark")
+                              : Label("Save", systemImage: "checkmark")
+                }
+                    .buttonStyle(.glassProminent)   // primary action — one idiom in every editor
                     .disabled(saveDisabledReason != nil)
                     // A dead Save must say why — hover AND VoiceOver.
                     .help(saveDisabledReason ?? "Save changes to this VPN")
@@ -173,33 +226,75 @@ struct NativeVPNView: View {
                 // so IPsec always authenticates with a shared secret — the
                 // Cisco-style group PSK, optionally paired with an XAuth
                 // username/password (exactly what a .pcf import produces).
-                SecureField("Shared secret (group PSK)", text: $sharedSecret)
+                EngineSettingRow(spec: Self.specs["native.shared-secret"], value: sharedSecret) {
+                    LabeledContent {
+                        SecureField("group PSK", text: $sharedSecret)
+                            .multilineTextAlignment(.trailing)
+                            .accessibilityLabel(Self.specs["native.shared-secret"].name)
+                    } label: {
+                        EngineSettingLabel(spec: Self.specs["native.shared-secret"], value: sharedSecret)
+                    }
+                }
                 // There was no way to say "no XAuth": a username left behind by
                 // an import kept extended authentication on with nothing to send.
-                Toggle("Also sign in with a username and password (XAuth)", isOn: xauthBinding)
-                    .help("Some concentrators want the group secret alone; others want a personal username and password as well. Turn this off and neither is sent.")
+                EngineSettingRow(spec: Self.specs["native.xauth"], value: draft.usesXAuth) {
+                    Toggle(isOn: xauthBinding) {
+                        EngineSettingLabel(spec: Self.specs["native.xauth"], value: draft.usesXAuth)
+                    }
+                }
                 let xauthOff: String? = draft.usesXAuth ? nil
                     : "Turn on \u{201C}Also sign in with a username and password (XAuth)\u{201D} to use these."
-                TextField("Username (XAuth)", text: $draft.username).textContentType(.username)
-                    .disabled(xauthOff != nil)
-                    .help(xauthOff ?? "The personal username this concentrator expects.")
-                    .accessibilityLabel("XAuth username")
-                    .accessibilityValue(xauthOff.map { "unavailable — \($0)" } ?? draft.username)
-                SecureField("Password (XAuth)", text: $secret)
-                    .disabled(xauthOff != nil)
-                    .help(xauthOff ?? "The personal password this concentrator expects.")
-                    .accessibilityLabel("XAuth password")
-                    .accessibilityValue(xauthOff.map { "unavailable — \($0)" } ?? "")
-                if let xauthOff {
-                    Text(xauthOff).font(.callout).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                EngineSettingRow(spec: Self.specs["native.username"], value: draft.username,
+                                 disabledReason: xauthOff) {
+                    LabeledContent {
+                        TextField("username", text: $draft.username).textContentType(.username)
+                            .multilineTextAlignment(.trailing)
+                            .accessibilityLabel("XAuth username")
+                    } label: {
+                        EngineSettingLabel(spec: Self.specs["native.username"], value: draft.username)
+                    }
+                }
+                EngineSettingRow(spec: Self.specs["native.xauth-password"], value: secret,
+                                 disabledReason: xauthOff) {
+                    LabeledContent {
+                        SecureField("password", text: $secret)
+                            .multilineTextAlignment(.trailing)
+                            .accessibilityLabel("XAuth password")
+                    } label: {
+                        EngineSettingLabel(spec: Self.specs["native.xauth-password"], value: secret)
+                    }
                 }
             } else {
-                Toggle("Use a shared secret (PSK)", isOn: $draft.usesSharedSecret)
-                if !draft.usesSharedSecret {
-                    TextField("Username", text: $draft.username).textContentType(.username)
+                EngineSettingRow(spec: Self.specs["native.auth-method"], value: draft.usesSharedSecret) {
+                    Toggle(isOn: $draft.usesSharedSecret) {
+                        EngineSettingLabel(spec: Self.specs["native.auth-method"],
+                                           value: draft.usesSharedSecret)
+                    }
                 }
-                SecureField(draft.usesSharedSecret ? "Shared secret" : "Password", text: $secret)
+                if !draft.usesSharedSecret {
+                    EngineSettingRow(spec: Self.specs["native.username"], value: draft.username) {
+                        LabeledContent {
+                            TextField("username", text: $draft.username).textContentType(.username)
+                                .multilineTextAlignment(.trailing)
+                                .accessibilityLabel(Self.specs["native.username"].name)
+                        } label: {
+                            EngineSettingLabel(spec: Self.specs["native.username"], value: draft.username)
+                        }
+                    }
+                }
+                // One control, two subjects: `secret` carries the PSK or the
+                // password depending on the toggle above, and they are mutually
+                // exclusive — so it renders under whichever spec applies.
+                let secretSpec = Self.specs[draft.usesSharedSecret ? "native.shared-secret" : "native.password"]
+                EngineSettingRow(spec: secretSpec, value: secret) {
+                    LabeledContent {
+                        SecureField(draft.usesSharedSecret ? "shared secret" : "password", text: $secret)
+                            .multilineTextAlignment(.trailing)
+                            .accessibilityLabel(secretSpec.name)
+                    } label: {
+                        EngineSettingLabel(spec: secretSpec, value: secret)
+                    }
+                }
             }
         } header: {
             Text("Sign-In")
@@ -219,20 +314,50 @@ struct NativeVPNView: View {
 
     @ViewBuilder private var trafficSection: some View {
         Section("Traffic") {
-            EngineSettingRow(spec: Self.specs["native.include-all"], changed: draft.includeAllNetworks) {
-                Toggle(isOn: $draft.includeAllNetworks) { EngineSettingLabel(spec: Self.specs["native.include-all"], changed: draft.includeAllNetworks) }
+            // "Changed" is the SPEC's business now — this row's twin below used to
+            // hand-write an inverted predicate, and two rows disagreeing about
+            // which way "changed" runs is exactly what that produces.
+            EngineSettingRow(spec: Self.specs["native.include-all"], value: draft.includeAllNetworks) {
+                Toggle(isOn: $draft.includeAllNetworks) {
+                    EngineSettingLabel(spec: Self.specs["native.include-all"], value: draft.includeAllNetworks)
+                }
             }
             if draft.includeAllNetworks {
-                EngineSettingRow(spec: Self.specs["native.exclude-local"], changed: !draft.excludeLocalNetworks) {
-                    Toggle(isOn: $draft.excludeLocalNetworks) { EngineSettingLabel(spec: Self.specs["native.exclude-local"], changed: !draft.excludeLocalNetworks) }
+                EngineSettingRow(spec: Self.specs["native.exclude-local"], value: draft.excludeLocalNetworks) {
+                    Toggle(isOn: $draft.excludeLocalNetworks) {
+                        EngineSettingLabel(spec: Self.specs["native.exclude-local"], value: draft.excludeLocalNetworks)
+                    }
                 }
             }
         }
     }
 
-    /// IKEv2 only — the crypto knobs macOS exposes.
+    /// Verifying the SERVER and the channel. Everything macOS exposes here is
+    /// IKEv2-only, so for IPsec the whole group is OMITTED rather than shown empty
+    /// (the canonical-taxonomy rule).
     @ViewBuilder private var securitySection: some View {
-        Section("Security") {
+        if draft.kind == .ikev2 {
+            Section("Security") {
+                // The remote identifier is the identity macOS demands the server's
+                // certificate present — a check on the SERVER, which is why it is
+                // here and not beside the address it verifies.
+                EngineSettingRow(spec: Self.specs["native.remote-id"], value: draft.remoteID) {
+                    LabeledContent {
+                        TextField("defaults to the server address", text: $draft.remoteID)
+                            .multilineTextAlignment(.trailing)
+                            .autocorrectionDisabled()
+                            .accessibilityLabel(Self.specs["native.remote-id"].name)
+                    } label: {
+                        EngineSettingLabel(spec: Self.specs["native.remote-id"], value: draft.remoteID)
+                    }
+                }
+                ikev2CryptoRows
+            }
+        }
+    }
+
+    @ViewBuilder private var ikev2CryptoRows: some View {
+        Group {
             enumRow("native.encryption", $draft.ikeEncryption, [
                 ("", "Automatic"), ("aes256gcm", "AES-256-GCM"), ("aes128gcm", "AES-128-GCM"),
                 ("aes256", "AES-256-CBC"), ("aes128", "AES-128-CBC"), ("chacha20poly1305", "ChaCha20-Poly1305")])
@@ -242,8 +367,10 @@ struct NativeVPNView: View {
                 ("", "Automatic"), ("14", "Group 14 (2048-bit)"), ("15", "Group 15 (3072-bit)"),
                 ("16", "Group 16 (4096-bit)"), ("19", "Group 19 (P-256)"), ("20", "Group 20 (P-384)"),
                 ("21", "Group 21 (P-521)"), ("31", "Group 31 (Curve25519)")])
-            EngineSettingRow(spec: Self.specs["native.pfs"], changed: draft.enablePFS) {
-                Toggle(isOn: $draft.enablePFS) { EngineSettingLabel(spec: Self.specs["native.pfs"], changed: draft.enablePFS) }
+            EngineSettingRow(spec: Self.specs["native.pfs"], value: draft.enablePFS) {
+                Toggle(isOn: $draft.enablePFS) {
+                    EngineSettingLabel(spec: Self.specs["native.pfs"], value: draft.enablePFS)
+                }
             }
             // Apple's API has no "enable PFS" bit: PFS is whether the data channel
             // gets its OWN Diffie-Hellman group, and it borrows the picker's. On
@@ -255,10 +382,10 @@ struct NativeVPNView: View {
             // The model has always applied this to BOTH security associations —
             // there was simply no control for it anywhere, so an imported value
             // (or one set by a future MDM key) could not be seen or changed.
-            EngineSettingRow(spec: Self.specs["native.ike-lifetime"], changed: draft.ikeLifetimeMinutes != nil) {
+            EngineSettingRow(spec: Self.specs["native.ike-lifetime"], value: draft.ikeLifetimeMinutes) {
                 ValidatedNumberField(
                     label: { EngineSettingLabel(spec: Self.specs["native.ike-lifetime"],
-                                                changed: draft.ikeLifetimeMinutes != nil) },
+                                                value: draft.ikeLifetimeMinutes) },
                     prompt: "60",
                     value: $draft.ikeLifetimeMinutes,
                     range: NativeVPNConfig.ikeLifetimeRange,
@@ -267,52 +394,141 @@ struct NativeVPNView: View {
         }
     }
 
+    /// Advanced is IKEv2-only content, so it is OMITTED for IPsec rather than
+    /// shown empty (the canonical-taxonomy rule). Collapsed by default, through
+    /// the shared component every editor now uses.
     @ViewBuilder private var advancedSection: some View {
-        Section("Advanced") {
-            if draft.kind == .ikev2 {
+        if draft.kind == .ikev2 {
+            CollapsibleSettingsSection(group: .advanced, changedCount: advancedChangedCount) {
                 // "Automatic", not "Default": "" now genuinely leaves the OS
                 // value untouched (it used to be applied as .medium, so the
                 // picker's first option named a state it didn't produce).
                 enumRow("native.dpd", $draft.deadPeerDetection, [
                     ("", "Automatic"), ("none", "Off"), ("low", "Low"), ("medium", "Medium"), ("high", "High")])
-                EngineSettingRow(spec: Self.specs["native.mobike"], changed: draft.disableMOBIKE) {
-                    Toggle(isOn: $draft.disableMOBIKE) { EngineSettingLabel(spec: Self.specs["native.mobike"], changed: draft.disableMOBIKE) }
+                EngineSettingRow(spec: Self.specs["native.mobike"], value: draft.disableMOBIKE) {
+                    Toggle(isOn: $draft.disableMOBIKE) {
+                        EngineSettingLabel(spec: Self.specs["native.mobike"], value: draft.disableMOBIKE)
+                    }
                 }
-            }
-            EngineSettingRow(spec: Self.specs["native.disconnect-sleep"], changed: draft.disconnectOnSleep) {
-                Toggle(isOn: $draft.disconnectOnSleep) { EngineSettingLabel(spec: Self.specs["native.disconnect-sleep"], changed: draft.disconnectOnSleep) }
             }
         }
     }
 
+    /// The badge count for Advanced — computed from the specs' own declared
+    /// defaults, so it can never disagree with the rows' bold labels.
+    private var advancedChangedCount: Int {
+        [Self.specs["native.dpd"].isChanged(draft.deadPeerDetection),
+         Self.specs["native.mobike"].isChanged(draft.disableMOBIKE)].count { $0 }
+    }
+
+    /// The catalog, in canonical group order (AGENTS.md "Config surfaces"):
+    /// Connection → Sign-In → Traffic → Security → Advanced. The whole Connection
+    /// and Sign-In block used to be hand-rolled `TextField("…")`s with no spec at
+    /// all — invisible to search, unaddressable by the CLI or MDM, and with no
+    /// manual anchor to link to. Every user-facing control here is now a spec.
     static let specs = EngineSettingCatalog([
-        .init(id: "native.encryption", name: "Encryption",
-              summary: "The cipher for the IKE/child security associations. Leave Automatic unless your admin specifies one; AES-256-GCM is a strong modern default."),
-        .init(id: "native.integrity", name: "Integrity / PRF",
-              summary: "The hash protecting message integrity. Automatic is fine for most servers."),
-        .init(id: "native.dh-group", name: "Diffie-Hellman Group",
-              summary: "The key-exchange group. Higher numbers are stronger; 19–21 are elliptic-curve. Must match what the server offers."),
-        .init(id: "native.dpd", name: "Dead Peer Detection",
-              summary: "How aggressively to probe whether the server is still there, to notice a dropped tunnel. Higher = faster detection, more chatter. Automatic leaves macOS's own choice (every 10 minutes) untouched."),
-        .init(id: "native.ike-lifetime", name: "Key Lifetime (minutes)",
-              summary: "How long each key lasts before the tunnel negotiates a fresh one, 10–1440. Leave empty for macOS's own (60 minutes, or 30 for the data channel); set it only if your admin specifies a value."),
-        .init(id: "native.pfs", name: "Perfect Forward Secrecy",
-              summary: "Rekey the data channel with a fresh key exchange so a stolen key can't decrypt past traffic. Enable if the server requires it."),
-        .init(id: "native.mobike", name: "Disable MOBIKE",
-              summary: "MOBIKE lets the tunnel survive network changes (Wi-Fi ↔ Ethernet). Only disable it if a picky server misbehaves with it on."),
-        .init(id: "native.include-all", name: "Send All Traffic",
-              summary: "Route everything through the VPN (full tunnel). Off means only the server's routes go through it."),
-        .init(id: "native.exclude-local", name: "Allow Local Network Access",
-              summary: "While sending all traffic through the VPN, still let your local network (printers, file shares) stay reachable."),
+
+        // MARK: Connection
+
+        .init(id: "native.protocol", name: "Protocol",
+              summary: "Which VPN protocol macOS runs for this connection. IKEv2 is the modern one; IPsec (IKEv1) suits older Cisco-style concentrators; L2TP is exported as a configuration profile you install.",
+              group: .connection, default: VPNKind.ikev2),
+
+        .init(id: "native.server", name: "Server Address",
+              summary: "The address of the VPN server, as a name like vpn.example.com or an IP address.",
+              group: .connection, default: ""),
+
+        .init(id: "native.group", name: "Group / Local Identifier",
+              summary: "The group name (sometimes \u{201C}tunnel group\u{201D}) that tells the concentrator which of its configurations answers you. Only if your administrator gave you one.",
+              group: .connection, default: ""),
+
+        .init(id: "native.on-demand", name: "Connect on Demand",
+              summary: "Reconnect this VPN whenever any app opens a network connection. There are no per-network conditions — it applies on every network.",
+              group: .connection, default: false),
+
+        // Lifecycle, sibling of Connect on Demand — it answers "when does this
+        // VPN go away", not "how is the tunnel built" (it was under Advanced).
         .init(id: "native.disconnect-sleep", name: "Disconnect on Sleep",
-              summary: "Drop the VPN when the Mac sleeps instead of resuming it on wake. Off keeps it up across sleep."),
+              summary: "Drop the VPN when the Mac sleeps instead of resuming it on wake. Off keeps it up across sleep.",
+              group: .connection, default: false),
+
+        // MARK: Sign-In
+
+        .init(id: "native.auth-method", name: "Use a Shared Secret (PSK)",
+              summary: "How you prove who you are: a shared secret everyone using this VPN has, or your own username and password.",
+              group: .signIn, default: false),
+
+        .init(id: "native.xauth", name: "Also Sign In With a Username and Password (XAuth)",
+              summary: "Some concentrators want the group secret alone; others want a personal username and password as well. Turn this off and neither is sent.",
+              group: .signIn, default: false),
+
+        .init(id: "native.username", name: "Username",
+              summary: "The account name to sign in to this VPN with.",
+              group: .signIn, default: ""),
+
+        .init(id: "native.password", name: "Password",
+              summary: "Your personal password for this VPN. Stored in your Keychain and handed to macOS when the tunnel starts.",
+              group: .signIn, default: ""),
+
+        .init(id: "native.shared-secret", name: "Shared Secret",
+              summary: "The pre-shared key (sometimes \u{201C}group secret\u{201D} or \u{201C}machine secret\u{201D}) — the same one for everyone using this VPN. Stored in your Keychain.",
+              group: .signIn, default: ""),
+
+        .init(id: "native.xauth-password", name: "Password (XAuth)",
+              summary: "The personal password this concentrator asks for on top of the shared secret. Stored in your Keychain.",
+              group: .signIn, default: ""),
+
+        // MARK: Traffic
+
+        .init(id: "native.include-all", name: "Send All Traffic",
+              summary: "Route everything through the VPN (full tunnel). Off means only the server's routes go through it.",
+              group: .traffic, default: false),
+        .init(id: "native.exclude-local", name: "Allow Local Network Access",
+              summary: "While sending all traffic through the VPN, still let your local network (printers, file shares) stay reachable.",
+              group: .traffic, default: true),
+
+        // MARK: Security
+        //
+        // The remote identifier is a SERVER-verification setting: it is the name
+        // the server's certificate has to present, which is what stops a
+        // different server answering for this address. It sat under Connection
+        // next to the address it verifies.
+
+        .init(id: "native.remote-id", name: "Remote Identifier",
+              summary: "The identity the server must prove it has — checked against its certificate. Leave empty to require the server address itself.",
+              group: .security, default: ""),
+
+        .init(id: "native.encryption", name: "Encryption",
+              summary: "The cipher for the IKE/child security associations. Leave Automatic unless your admin specifies one; AES-256-GCM is a strong modern default.",
+              group: .security, default: ""),
+        .init(id: "native.integrity", name: "Integrity / PRF",
+              summary: "The hash protecting message integrity. Automatic is fine for most servers.",
+              group: .security, default: ""),
+        .init(id: "native.dh-group", name: "Diffie-Hellman Group",
+              summary: "The key-exchange group. Higher numbers are stronger; 19–21 are elliptic-curve. Must match what the server offers.",
+              group: .security, default: ""),
+        .init(id: "native.pfs", name: "Perfect Forward Secrecy",
+              summary: "Rekey the data channel with a fresh key exchange so a stolen key can't decrypt past traffic. Enable if the server requires it.",
+              group: .security, default: false),
+        .init(id: "native.ike-lifetime", name: "Key Lifetime (minutes)",
+              summary: "How long each key lasts before the tunnel negotiates a fresh one, 10–1440. Leave empty for macOS's own (60 minutes, or 30 for the data channel); set it only if your admin specifies a value.",
+              group: .security, default: Int?.none),
+
+        // MARK: Advanced
+
+        .init(id: "native.dpd", name: "Dead Peer Detection",
+              summary: "How aggressively to probe whether the server is still there, to notice a dropped tunnel. Higher = faster detection, more chatter. Automatic leaves macOS's own choice (every 10 minutes) untouched.",
+              group: .advanced, default: ""),
+        .init(id: "native.mobike", name: "Disable MOBIKE",
+              summary: "MOBIKE lets the tunnel survive network changes (Wi-Fi ↔ Ethernet). Only disable it if a picky server misbehaves with it on.",
+              group: .advanced, default: false),
     ])
 
     private func enumRow(_ id: String, _ binding: Binding<String>, _ options: [(String, String)]) -> some View {
-        EngineSettingRow(spec: Self.specs[id], changed: !binding.wrappedValue.isEmpty) {
+        EngineSettingRow(spec: Self.specs[id], value: binding.wrappedValue) {
             Picker(selection: binding) {
                 ForEach(options, id: \.0) { Text($0.1).tag($0.0) }
-            } label: { EngineSettingLabel(spec: Self.specs[id], changed: !binding.wrappedValue.isEmpty) }
+            } label: { EngineSettingLabel(spec: Self.specs[id], value: binding.wrappedValue) }
         }
     }
 
@@ -372,20 +588,41 @@ struct NativeVPNView: View {
 
     @ViewBuilder private var l2tpSection: some View {
         Section("Sign-In") {
-            TextField("Username", text: $draft.username).textContentType(.username)
+            // The same three concepts as the other kinds, so the same three specs
+            // — one name per concept, one manual anchor, one search hit.
+            EngineSettingRow(spec: Self.specs["native.username"], value: draft.username) {
+                LabeledContent {
+                    TextField("username", text: $draft.username).textContentType(.username)
+                        .multilineTextAlignment(.trailing)
+                        .accessibilityLabel(Self.specs["native.username"].name)
+                } label: {
+                    EngineSettingLabel(spec: Self.specs["native.username"], value: draft.username)
+                }
+            }
             // L2TP needs BOTH: a user password for PPP and the IPSec shared
             // secret. There was no password field at all, so every exported
             // profile wrote AuthName with no AuthPassword and prompted at connect.
-            SecureField("Password", text: $pppPassword)
-                .accessibilityLabel("L2TP password")
-            Text("Your personal password for this VPN. Stored in your Keychain and written into the exported profile, so connecting doesn't ask again. Clear it to remove both.")
+            EngineSettingRow(spec: Self.specs["native.password"], value: pppPassword) {
+                LabeledContent {
+                    SecureField("password", text: $pppPassword)
+                        .multilineTextAlignment(.trailing)
+                        .accessibilityLabel("L2TP password")
+                } label: {
+                    EngineSettingLabel(spec: Self.specs["native.password"], value: pppPassword)
+                }
+            }
+            Text("Written into the exported profile as well, so connecting doesn't ask again. Clear it to remove both.")
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            SecureField("Shared secret", text: $secret)
-                .accessibilityLabel("L2TP shared secret")
-            Text("The IPSec shared secret (sometimes called the pre-shared key or machine secret) — the same one for everyone using this VPN.")
-                .font(.callout).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            EngineSettingRow(spec: Self.specs["native.shared-secret"], value: secret) {
+                LabeledContent {
+                    SecureField("shared secret", text: $secret)
+                        .multilineTextAlignment(.trailing)
+                        .accessibilityLabel("L2TP shared secret")
+                } label: {
+                    EngineSettingLabel(spec: Self.specs["native.shared-secret"], value: secret)
+                }
+            }
         }
         Section {
             Button("Export Configuration Profile…") { exportMobileconfig() }
@@ -481,6 +718,14 @@ struct NativeVPNView: View {
         Task { @MainActor in
             customRouting = await commitCustomRouting(vpn, profileID: id, profile: toCommit,
                                                       proxyAuthUsername: user, proxyAuthPassword: pass)
+        }
+        // Acknowledge the save on the button, the way Tailscale/Proxy Tunnel and
+        // the OpenVPN editor do — a Save that changes nothing on screen reads as
+        // a Save that didn't happen.
+        savedTick = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            savedTick = false
         }
     }
 
