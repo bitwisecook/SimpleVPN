@@ -22,6 +22,9 @@ struct TrafficLogView: View {
     // rule added/removed elsewhere — another editor, syncIncludes, a Doctor fix —
     // is reflected here immediately.
     private var rules: [RoutingRule] { vpn.routingRules(for: profileID) }
+    /// This VPN's kind — decides whether a divert AROUND it can be applied at all
+    /// (`VPNKind.canDivertOutside`).
+    private var sourceKind: VPNKind? { vpn.profiles.first { $0.id == profileID }?.kind }
     @State private var filter = ""
     @State private var note: String?
     /// Per-flow rolling throughput history, derived by diffing successive polls
@@ -175,18 +178,33 @@ struct TrafficLogView: View {
             .accessibilityLabel(rowSentence(flow, active: active, rateNow: rateNow))
             Menu {
                 if ManagedPolicy.allowDivertOutside {
-                    Button {
-                        Task { await divert(flow, to: .outside) }
-                    } label: { Label("Send outside \(vpnName)", systemImage: "arrow.uturn.right") }
+                    // A kind whose routes we don't own can't carve a destination out
+                    // (macOS owns IKEv2/IPsec routing; SSH carries only its forwards).
+                    // Say so where the action is, rather than storing a rule nothing
+                    // will ever apply — see VPNKind.canDivertOutside.
+                    if let reason = sourceKind?.divertOutsideUnsupportedReason {
+                        Label("Can't send outside \(vpnName) — \(reason)", systemImage: "exclamationmark.triangle")
+                    } else {
+                        Button {
+                            Task { await divert(flow, to: .outside) }
+                        } label: { Label("Send outside \(vpnName)", systemImage: "arrow.uturn.right") }
+                    }
                 }
                 let others = vpn.profiles.filter { $0.id != profileID }
                 if ManagedPolicy.allowDivertOverVPN && !others.isEmpty {
                     Divider()
                     Section("Route over") {
                         ForEach(others) { p in
-                            Button {
-                                Task { await divert(flow, to: .overVPN(profileID: p.id)) }
-                            } label: { Label(p.name, systemImage: "arrow.triangle.branch") }
+                            // Only VPNs that can actually be handed a destination are
+                            // offered. Picking a Tailscale/native/SSH target used to
+                            // store a rule, reconnect both VPNs and change nothing.
+                            if let reason = p.kind.routedInUnsupportedReason {
+                                Label("\(p.name) — \(reason)", systemImage: "exclamationmark.triangle")
+                            } else {
+                                Button {
+                                    Task { await divert(flow, to: .overVPN(profileID: p.id)) }
+                                } label: { Label(p.name, systemImage: "arrow.triangle.branch") }
+                            }
                         }
                     }
                 }
@@ -230,8 +248,16 @@ struct TrafficLogView: View {
         case .outside:
             note = "\(flow.address) will now bypass \(vpnName) and use your normal connection."
         case .overVPN(let target):
-            let name = vpn.profiles.first { $0.id == target }?.name ?? "the other VPN"
+            let p = vpn.profiles.first { $0.id == target }
+            let name = p?.name ?? "the other VPN"
             note = "\(flow.address) will now be routed over \(name) instead of \(vpnName)."
+            // An SSL VPN only carries a routed-in destination when it runs on the
+            // built-in engine: a config using settings that engine can't express
+            // runs through the openconnect tool, which manages its own routes and
+            // never sees this rule. Say it here rather than let it look applied.
+            if p?.kind.isSSLVPN == true {
+                note = (note ?? "") + " This applies while \(name) runs on the built-in engine — with settings only the openconnect tool can carry, it manages its own routes and this has no effect."
+            }
         }
         note = (note ?? "") + " The affected VPNs reconnect to apply the change."
     }

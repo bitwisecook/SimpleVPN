@@ -15,7 +15,7 @@
 # system one is always present and notarization-safe).
 set -euo pipefail
 
-PIN=v9.12                 # openconnect release tag — bump deliberately
+PIN=v9.21                 # openconnect release tag — bump deliberately
 # Pin OpenSSL too. Three engines (this, OpenVPN, SSH) each statically bundle
 # OpenSSL and all three are linked into the same binaries; if two builds pick up
 # different OpenSSL point releases, the linker can resolve one engine's calls

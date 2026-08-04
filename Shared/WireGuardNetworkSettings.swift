@@ -34,10 +34,21 @@ nonisolated enum WireGuardNetworkSettings {
     /// host's routing table changes, exactly like the proxy tunnel's demotion.
     /// `proxySettings` is the app-arbitrated system proxy (Proxy mediator
     /// applier — Docs/StateMediators.md); nil ⇒ none asserted.
+    ///
+    /// `extraExcludedRoutes` are this VPN's `.outside` divert destinations
+    /// (`DivertPlan.outsideCIDRs`) — carve-outs the connect decided, not the
+    /// user's `.conf`, so they stay out of `WireGuardConfig` and are re-passed by
+    /// the provider's live re-apply paths. wg-quick has no "excluded IPs" concept;
+    /// the peer's cryptokey routing still permits these destinations, only the
+    /// host's routing table stops handing them to the tunnel. (The other half of a
+    /// divert — a destination routed INTO this tunnel — is merged into
+    /// `config.allowedIPs` at connect instead, because wireguard-go would drop a
+    /// packet whose destination no peer allows.)
     static func settings(for config: WireGuardConfig,
                          resolvedEndpoint: String,
                          suppressDefaultRoute: Bool = false,
-                         proxySettings: NEProxySettings? = nil) -> NEPacketTunnelNetworkSettings? {
+                         proxySettings: NEProxySettings? = nil,
+                         extraExcludedRoutes: [String] = []) -> NEPacketTunnelNetworkSettings? {
         let locals = TailscaleNetworkSettings.parseAll(config.addresses.map(Self.withPrefixLength))
         guard !locals.isEmpty else { return nil }
 
@@ -59,18 +70,23 @@ nonisolated enum WireGuardNetworkSettings {
             }
         }
 
+        let excluded = TailscaleNetworkSettings.parseAll(extraExcludedRoutes)
         let v4Locals = locals.filter { !$0.isIPv6 }
         let v6Locals = locals.filter(\.isIPv6)
         if !v4Locals.isEmpty {
             let ipv4 = NEIPv4Settings(addresses: v4Locals.map(\.address),
                                       subnetMasks: v4Locals.map(\.ipv4Mask))
             ipv4.includedRoutes = routes.filter { !$0.isIPv6 }.map(ipv4Route)
+            let ex = excluded.filter { !$0.isIPv6 }.map(ipv4Route)
+            if !ex.isEmpty { ipv4.excludedRoutes = ex }
             s.ipv4Settings = ipv4
         }
         if !v6Locals.isEmpty {
             let ipv6 = NEIPv6Settings(addresses: v6Locals.map(\.address),
                                       networkPrefixLengths: v6Locals.map { NSNumber(value: $0.length) })
             ipv6.includedRoutes = routes.filter(\.isIPv6).map(ipv6Route)
+            let ex = excluded.filter(\.isIPv6).map(ipv6Route)
+            if !ex.isEmpty { ipv6.excludedRoutes = ex }
             s.ipv6Settings = ipv6
         }
 

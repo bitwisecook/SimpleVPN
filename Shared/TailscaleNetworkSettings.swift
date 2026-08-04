@@ -64,8 +64,16 @@ nonisolated enum TailscaleNetworkSettings {
     /// `proxySettings` is the app-arbitrated system proxy (Proxy mediator applier —
     /// Docs/StateMediators.md), threaded onto the built settings so `proxy:apply` can
     /// hot-swap it by rebuilding + re-applying from the last netmap. nil ⇒ none.
+    ///
+    /// `extraExcludedRoutes` are this VPN's `.outside` divert destinations
+    /// (`DivertPlan.outsideCIDRs`), carved out alongside the engine's own
+    /// `localRoutes`. Only that half of a divert applies to Tailscale: routing a
+    /// destination INTO a tailnet is the netmap's decision (a subnet router or an
+    /// exit node), so `VPNKind.canAcceptRoutedInTraffic` is false for it and the UI
+    /// says so rather than installing a route no peer would answer for.
     static func settings(for config: TailscaleTunnelConfig,
-                         proxySettings: NEProxySettings? = nil) -> NEPacketTunnelNetworkSettings? {
+                         proxySettings: NEProxySettings? = nil,
+                         extraExcludedRoutes: [String] = []) -> NEPacketTunnelNetworkSettings? {
         let locals = parseAll(config.localAddrs)
         guard !locals.isEmpty else { return nil }
 
@@ -75,7 +83,7 @@ nonisolated enum TailscaleNetworkSettings {
         let s = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: remote)
 
         let routes = parseAll(config.routes)
-        let excluded = parseAll(config.localRoutes)
+        let excluded = parseAll(config.localRoutes + extraExcludedRoutes)
 
         if !v4Locals.isEmpty {
             let ipv4 = NEIPv4Settings(addresses: v4Locals.map(\.address),

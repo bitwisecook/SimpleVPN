@@ -22,6 +22,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
     nonisolated(unsafe) private var pxConfig: ProxyTunnelConfig?      // kept for live default-gateway re-apply
     nonisolated(unsafe) private var pxSuppressDefault = false         // gateway demotion state for the proxy tunnel
     nonisolated(unsafe) private var pxProxySettings: NEProxySettings? // app-arbitrated system proxy for the proxy tunnel (Proxy mediator applier)
+    nonisolated(unsafe) private var pxExtraExcluded: [String] = []     // connect-time carve-outs: the upstream proxy's own /32(/128) + .outside diverts
+    nonisolated(unsafe) private var wgExtraExcluded: [String] = []     // connect-time carve-outs for WireGuard: .outside diverts
     nonisolated(unsafe) private var wgEngine: WireGuardEngine?        // plain-WireGuard engine
     nonisolated(unsafe) private var wgConfig: WireGuardConfig?        // kept (redacted) for live settings re-apply
     nonisolated(unsafe) private var wgSuppressDefault = false         // gateway demotion state for WireGuard
@@ -52,11 +54,31 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         // configuration" before its engine was ever reached.
         let kind = (conf?["vpnType"] as? String).flatMap(VPNKind.init(rawValue:)) ?? .openVPN
 
+        // Org policy travels with the session (startTunnel options), so the
+        // extension enforces it independently of whatever the persisted config
+        // says — a stale profile saved before the policy was pushed can't leak.
+        // Read BEFORE the engine dispatch: these gate the divert plan below, which
+        // every kind (not just OpenVPN) now applies.
+        let policyKeepInside = (options?["policyKeepInside"] as? NSNumber)?.boolValue ?? false
+        let policyNoDiverts  = (options?["policyNoDiverts"]  as? NSNumber)?.boolValue ?? false
+
+        // Divert rules, decoded and policy-gated ONCE for every kind. This used to
+        // live inside the OpenVPN branch, which is why a divert on any other kind
+        // was a silent no-op: the blobs were written by the app for every profile
+        // and read by exactly one engine. Each start path below applies the plan
+        // the way its engine can (bridge API, config merge, or documented refusal —
+        // see VPNKind.canAcceptRoutedInTraffic / canDivertOutside).
+        let divert = DivertPlan.make(providerConfiguration: conf,
+                                     keepInside: policyKeepInside, noDiverts: policyNoDiverts)
+        if !divert.isEmpty {
+            Self.log.log("divert plan: \(divert.outside.count) destination(s) around this VPN, \(divert.inbound.count) routed into it (kind \(kind.rawValue, privacy: .public))")
+        }
+
         // WireGuard: one kind, in-process via the Go engine (wireguard-go's
         // device package inside libtsengine.a).
         if kind == .wireGuard {
             startWireGuard(conf: conf, options: options, profile: profile,
-                           completionHandler: completionHandler)
+                           divert: divert, completionHandler: completionHandler)
             return
         }
 
@@ -65,21 +87,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         // single source of truth for the protocol token.
         if let ocProto = kind.openconnectProtocol {
             startOpenConnect(conf: conf, options: options, profile: profile,
-                             protocol: ocProto, completionHandler: completionHandler)
+                             protocol: ocProto, divert: divert,
+                             completionHandler: completionHandler)
             return
         }
 
         // Tailscale / Headscale: one kind, in-process via the Go engine.
         if kind == .tailscale {
             startTailscale(conf: conf, options: options, profile: profile,
-                           completionHandler: completionHandler)
+                           divert: divert, completionHandler: completionHandler)
             return
         }
 
         // Proxy Tunnel: one kind, in-process via the Go tun2socks engine.
         if kind == .proxyTunnel {
             startProxyTunnel(conf: conf, options: options, profile: profile,
-                             completionHandler: completionHandler)
+                             divert: divert, completionHandler: completionHandler)
             return
         }
 
@@ -95,11 +118,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         // overrides" — a settings problem must never break connecting.
         var overrides = OpenVPNOverrides.decode(from: conf?["overrides"] as? Data)
 
-        // Org policy travels with the session (startTunnel options), so the
-        // extension enforces it independently of whatever the persisted config
-        // says — a stale profile saved before the policy was pushed can't leak.
-        let policyKeepInside = (options?["policyKeepInside"] as? NSNumber)?.boolValue ?? false
-        let policyNoDiverts  = (options?["policyNoDiverts"]  as? NSNumber)?.boolValue ?? false
         if policyKeepInside { overrides.allowUnusedAddrFamilies = .block }
         Self.log.log("overrides: \(overrides.logDescription, privacy: .public) policyKeepInside=\(policyKeepInside) policyNoDiverts=\(policyNoDiverts)")
 
@@ -148,33 +166,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
             Self.log.log("gateway ownership at establish: owned=\(owned.boolValue)")
         }
 
-        // Divert rules. Only *.outside* destinations leave this tunnel (excluded
-        // routes). The source side of *.overVPN* is deliberately NOT excluded here:
-        // excluding it would push that traffic out the physical interface in
-        // CLEARTEXT whenever the target VPN is down. Left in this tunnel it stays
-        // encrypted (fail-closed); when the target VPN is up, its more-specific
-        // included route wins and pulls the destination over the target instead.
-        // routeDest also rejects malformed / default-route (prefix 0) destinations,
-        // so a divert can never swallow the whole default route (full bypass).
-        let rules = RoutingRuleStore.decode(from: conf?["routingRules"] as? Data)
-        // Under ForceKeepInsideVPN or DisableDivertRules, no traffic may be sent
-        // around the VPN — drop every .outside divert regardless of stored rules.
-        let diverted: [[String: Any]] = (policyKeepInside || policyNoDiverts) ? [] : rules.compactMap { rule in
-            guard rule.enabled, case .outside = rule.action, let d = rule.routeDest else { return nil }
-            return d.dictionary
+        // Divert rules (the policy-gated plan built in startTunnel). Only *.outside*
+        // destinations leave this tunnel (excluded routes); destinations other VPNs
+        // route *into* this one become included routes — see DivertPlan for why the
+        // source side of .overVPN is deliberately NOT excluded from its own tunnel.
+        if !divert.outside.isEmpty {
+            b.setDivertedDestinations(divert.outsideDictionaries)
+            Self.log.log("divert: \(divert.outside.count) destination(s) routed around the VPN")
         }
-        if !diverted.isEmpty {
-            b.setDivertedDestinations(diverted)
-            Self.log.log("divert: \(diverted.count) destination(s) routed around the VPN")
-        }
-        // Destinations other VPNs route *into* this one (the target side of
-        // .overVPN, materialised by the app) → included routes. DisableDivertRules
-        // forbids over-VPN diverts too (ForceKeepInside still permits them — the
-        // traffic stays inside a VPN).
-        let includes = policyNoDiverts ? [] : RouteDestStore.decode(from: conf?["routingIncludes"] as? Data)
-        if !includes.isEmpty {
-            b.setIncludedDestinations(includes.map(\.dictionary))
-            Self.log.log("route-in: \(includes.count) destination(s) routed into this VPN")
+        if !divert.inbound.isEmpty {
+            b.setIncludedDestinations(divert.inboundDictionaries)
+            Self.log.log("route-in: \(divert.inbound.count) destination(s) routed into this VPN")
         }
 
         do {
@@ -191,6 +193,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
     /// options (root can't read the keychain), same as OpenVPN.
     private func startOpenConnect(conf: [String: Any]?, options: [String: NSObject]?,
                                   profile: String, protocol ocProto: String,
+                                  divert: DivertPlan,
                                   completionHandler: @escaping (Error?) -> Void) {
         let s = OCClientSettings()
         s.server = (conf?["server"] as? String) ?? (protocolConfiguration.serverAddress ?? "")
@@ -221,6 +224,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
             Self.log.log("gateway ownership at establish (openconnect): owned=\(owned.boolValue)")
         }
 
+        // Divert rules, same contract as OpenVPN: this bridge also builds its own
+        // NEPacketTunnelNetworkSettings from the captured push, so both halves of a
+        // divert apply. Seeded BEFORE connect so the very first tun build carries
+        // them (setup_tun happens on the library's thread).
+        if !divert.outside.isEmpty {
+            b.setDivertedDestinations(divert.outsideDictionaries)
+            Self.log.log("divert (openconnect): \(divert.outside.count) destination(s) routed around the VPN")
+        }
+        if !divert.inbound.isEmpty {
+            b.setIncludedDestinations(divert.inboundDictionaries)
+            Self.log.log("route-in (openconnect): \(divert.inbound.count) destination(s) routed into this VPN")
+        }
+
         do {
             try b.connect(with: s)
             Self.log.log("openconnect connect() started (\(ocProto, privacy: .public))")
@@ -233,7 +249,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
     /// there is one) rides startTunnel options in memory, same invariant as
     /// every other credential — it is never in providerConfiguration.
     private func startTailscale(conf: [String: Any]?, options: [String: NSObject]?,
-                                profile: String, completionHandler: @escaping (Error?) -> Void) {
+                                profile: String, divert: DivertPlan,
+                                completionHandler: @escaping (Error?) -> Void) {
         let config = TailscaleConfig.decode(from: conf?["tailscale"] as? Data)
         // The engine validates too, but catching it here turns a start failure
         // into a settings message before any state is created on disk.
@@ -249,6 +266,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
             ?? (options?["password"] as? String) ?? ""
 
         let engine = TailscaleEngine(provider: self, delegate: self)
+        // Divert: only the "around this VPN" half applies to a tailnet. What a
+        // tailnet CARRIES is the netmap's decision (subnet router / exit node), so
+        // an inbound divert is refused rather than installed as a black hole —
+        // VPNKind.canAcceptRoutedInTraffic is false for .tailscale and the UI says
+        // why. The carve-outs join the engine's own localRoutes on every apply.
+        engine.extraExcludedRoutes = divert.outsideCIDRs
+        if !divert.outside.isEmpty {
+            Self.log.log("divert (tailscale): \(divert.outside.count) destination(s) routed around the VPN")
+        }
+        if !divert.inbound.isEmpty {
+            Self.log.error("route-in (tailscale): \(divert.inbound.count) destination(s) ignored — a tailnet only carries what it advertises")
+        }
         lock.lock(); tsEngine = engine; startCompletion = completionHandler; lock.unlock()
 
         let start = TailscaleStartConfig(config: config, authKey: authKey,
@@ -274,8 +303,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
     /// Credentials ride startTunnel options in memory, same invariant as every
     /// other kind — never in providerConfiguration.
     private func startProxyTunnel(conf: [String: Any]?, options: [String: NSObject]?,
-                                  profile: String, completionHandler: @escaping (Error?) -> Void) {
-        let config = ProxyTunnelConfig.decode(from: conf?["proxytunnel"] as? Data)
+                                  profile: String, divert: DivertPlan,
+                                  completionHandler: @escaping (Error?) -> Void) {
+        var config = ProxyTunnelConfig.decode(from: conf?["proxytunnel"] as? Data)
         // Catch a bad upstream here so it becomes a settings message before any
         // stack is composed.
         if let problem = config.upstreamProblem {
@@ -294,9 +324,37 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         // Absent ⇒ owner (the stock single-VPN behaviour).
         let ownedAtEstablish = (options?["gatewayOwned"] as? NSNumber)?.boolValue ?? true
 
+        // Divert: destinations other VPNs route INTO this tunnel become included
+        // routes. A proxy tunnel re-dials every flow through the upstream proxy, so
+        // any destination it is handed is genuinely carryable — the only reason this
+        // was a no-op is that nothing read the blob here. Merged into the config
+        // (not passed alongside) so the split-tunnel route list is one list; under a
+        // default route they are already covered.
+        if !divert.inbound.isEmpty {
+            config.includedRoutes += divert.inboundCIDRs
+            Self.log.log("route-in (proxy): \(divert.inbound.count) destination(s) routed into this VPN")
+        }
+        // Carve-outs applied on every settings build for this session: the upstream
+        // proxy's own address(es) — resolved ONCE, here, because getaddrinfo must not
+        // run on the live re-apply paths — plus this VPN's .outside diverts. The
+        // proxy /32 is belt and braces: NE already exempts the provider's own
+        // sockets from its tunnel, and now the routing table agrees (see
+        // Vendor/proxy-engine/src/proxy.go dialProxyConn).
+        let proxyCarveOuts = ProxyTunnelNetworkSettings.proxyExclusions(host: config.proxyHost)
+        if proxyCarveOuts.isEmpty, !config.proxyHost.isEmpty {
+            Self.log.log("proxy exclusion: \(config.proxyHost, privacy: .public) did not resolve — relying on NE's own exemption")
+        } else if !proxyCarveOuts.isEmpty {
+            Self.log.log("proxy exclusion: \(proxyCarveOuts.joined(separator: ","), privacy: .public) kept out of the tunnel")
+        }
+        if !divert.outside.isEmpty {
+            Self.log.log("divert (proxy): \(divert.outside.count) destination(s) routed around the VPN")
+        }
+        let carveOuts = proxyCarveOuts + divert.outsideCIDRs
+
         let engine = ProxyTunnelEngine(provider: self, delegate: self)
         lock.lock(); pxEngine = engine; pxProxyHost = config.proxyHost
         pxConfig = config; pxSuppressDefault = !ownedAtEstablish
+        pxExtraExcluded = carveOuts
         startCompletion = completionHandler; lock.unlock()
 
         let start = ProxyTunnelStartConfig(config: config, username: username, password: password)
@@ -314,7 +372,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         let px = lock.withLock { pxProxySettings }
         let settings = ProxyTunnelNetworkSettings.settings(for: config,
                                                            suppressDefaultRoute: !ownedAtEstablish,
-                                                           proxySettings: px)
+                                                           proxySettings: px,
+                                                           extraExcludedRoutes: carveOuts)
         setTunnelNetworkSettings(settings) { [weak self] error in
             guard let self else { return }
             if let error {
@@ -342,8 +401,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
     /// keys ride startTunnel options in memory, same invariant as every other
     /// credential — never in providerConfiguration.
     private func startWireGuard(conf: [String: Any]?, options: [String: NSObject]?,
-                                profile: String, completionHandler: @escaping (Error?) -> Void) {
-        let config = WireGuardConfig.decode(from: conf?["wireguard"] as? Data)
+                                profile: String, divert: DivertPlan,
+                                completionHandler: @escaping (Error?) -> Void) {
+        var config = WireGuardConfig.decode(from: conf?["wireguard"] as? Data)
         // Catch a bad config here so it becomes a settings message before any
         // device is composed.
         if let problem = config.connectProblem {
@@ -369,9 +429,25 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         // tunnel: a non-owner comes up already demoted to split.
         let ownedAtEstablish = (options?["gatewayOwned"] as? NSNumber)?.boolValue ?? true
 
+        // Divert: a destination another VPN routes into this tunnel has to be
+        // allowed by the PEER as well as by the host's routing table — wireguard-go
+        // drops a packet whose destination no peer's allowed IPs cover. So it is
+        // merged into `allowedIPs` (before the engine starts), which the UAPI config
+        // and WireGuardNetworkSettings' included routes are both derived from. Doing
+        // it any other way would install a route into a black hole.
+        if !divert.inbound.isEmpty {
+            config.allowedIPs += divert.inboundCIDRs
+            Self.log.log("route-in (wireguard): \(divert.inbound.count) destination(s) added to this tunnel's allowed IPs")
+        }
+        if !divert.outside.isEmpty {
+            Self.log.log("divert (wireguard): \(divert.outside.count) destination(s) routed around the VPN")
+        }
+        let carveOuts = divert.outsideCIDRs
+
         let engine = WireGuardEngine(provider: self, delegate: self)
         lock.lock(); wgEngine = engine; wgConfig = config
         wgSuppressDefault = !ownedAtEstablish
+        wgExtraExcluded = carveOuts
         startCompletion = completionHandler; lock.unlock()
 
         let start = WireGuardStartConfig(config: config, privateKey: privateKey,
@@ -389,7 +465,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         guard let settings = WireGuardNetworkSettings.settings(for: config,
                                                                resolvedEndpoint: engine.resolvedEndpoint,
                                                                suppressDefaultRoute: !ownedAtEstablish,
-                                                               proxySettings: px) else {
+                                                               proxySettings: px,
+                                                               extraExcludedRoutes: carveOuts) else {
             let error = WireGuardEngineError.engine(
                 kind: "badRequest", message: "None of this tunnel's addresses are usable.")
             writeWGIncident(profile: profile, error: error)
@@ -754,10 +831,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
                 }
             } else if let px = lock.withLock({ pxEngine }) {       // proxy tunnel
                 _ = px   // engine keeps running; only the utun's routes change
-                lock.lock(); pxSuppressDefault = !owned; let cfg = pxConfig; let px = pxProxySettings; lock.unlock()
+                lock.lock(); pxSuppressDefault = !owned; let cfg = pxConfig; let px = pxProxySettings
+                let carveOuts = pxExtraExcluded; lock.unlock()
                 guard let cfg else { reply("error: not connected"); return }
                 let settings = ProxyTunnelNetworkSettings.settings(for: cfg, suppressDefaultRoute: !owned,
-                                                                   proxySettings: px)
+                                                                   proxySettings: px,
+                                                                   extraExcludedRoutes: carveOuts)
                 setTunnelNetworkSettings(settings) { error in
                     Self.log.log("gateway \(owned ? "full" : "split", privacy: .public) (proxy) ok=\(error == nil)")
                     reply(error == nil ? "ok" : "error: settings apply failed")
@@ -773,10 +852,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
             } else if let wg = lock.withLock({ wgEngine }) {       // wireguard
                 // Same live re-apply as the proxy tunnel: the device keeps
                 // running; only the utun's routes (and catch-all DNS) change.
-                lock.lock(); wgSuppressDefault = !owned; let cfg = wgConfig; let px = wgProxySettings; lock.unlock()
+                lock.lock(); wgSuppressDefault = !owned; let cfg = wgConfig; let px = wgProxySettings
+                let carveOuts = wgExtraExcluded; lock.unlock()
                 guard let cfg, let settings = WireGuardNetworkSettings.settings(
                     for: cfg, resolvedEndpoint: wg.resolvedEndpoint,
-                    suppressDefaultRoute: !owned, proxySettings: px)
+                    suppressDefaultRoute: !owned, proxySettings: px,
+                    extraExcludedRoutes: carveOuts)
                 else { reply("error: not connected"); return }
                 setTunnelNetworkSettings(settings) { error in
                     Self.log.log("gateway \(owned ? "full" : "split", privacy: .public) (wireguard) ok=\(error == nil)")
@@ -925,10 +1006,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
                 self.lock.lock()
                 self.pxProxySettings = proxy
                 let cfg = self.pxConfig; let suppress = self.pxSuppressDefault
+                let carveOuts = self.pxExtraExcluded
                 self.lock.unlock()
                 guard let cfg else { reply("error: not connected"); return }
                 let settings = ProxyTunnelNetworkSettings.settings(for: cfg, suppressDefaultRoute: suppress,
-                                                                   proxySettings: proxy)
+                                                                   proxySettings: proxy,
+                                                                   extraExcludedRoutes: carveOuts)
                 self.setTunnelNetworkSettings(settings) { error in
                     reply(error == nil ? "ok" : "error: settings apply failed")
                 }
@@ -948,10 +1031,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
                 self.lock.lock()
                 self.wgProxySettings = proxy
                 let cfg = self.wgConfig; let suppress = self.wgSuppressDefault
+                let carveOuts = self.wgExtraExcluded
                 self.lock.unlock()
                 guard let cfg, let settings = WireGuardNetworkSettings.settings(
                     for: cfg, resolvedEndpoint: wg.resolvedEndpoint,
-                    suppressDefaultRoute: suppress, proxySettings: proxy)
+                    suppressDefaultRoute: suppress, proxySettings: proxy,
+                    extraExcludedRoutes: carveOuts)
                 else { reply("error: not connected"); return }
                 self.setTunnelNetworkSettings(settings) { error in
                     reply(error == nil ? "ok" : "error: settings apply failed")

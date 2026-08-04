@@ -81,6 +81,15 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
     // Mirrors OpenVPN3Bridge's _proxySettings/_dnsOverride.
     NEProxySettings *_proxySettings;   // Proxy mediator applier (owner egress only)
     NEDNSSettings *_dnsOverride;       // DNS mediator applier (this engine's slice)
+    // Divert rules (Shared/RoutingRule.swift · DivertPlan), guarded by _cfgMutex
+    // like the captured config: destinations to route AROUND this VPN and
+    // destinations other VPNs route INTO it. Same shape and same meaning as
+    // OpenVPN3Bridge's _extra* arrays — this bridge builds its own tun settings,
+    // so both halves of a divert apply here too.
+    NSArray<NEIPv4Route *> *_extraV4Excluded;
+    NSArray<NEIPv6Route *> *_extraV6Excluded;
+    NSArray<NEIPv4Route *> *_extraV4Included;
+    NSArray<NEIPv6Route *> *_extraV6Included;
 }
 @end
 
@@ -412,6 +421,51 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
     [v4 addObject:[[NEIPv4Route alloc] initWithDestinationAddress:addr subnetMask:mask]];
 }
 
+// Turn the app's destination dictionaries (@{ "address": NSString, "prefix":
+// NSNumber, "ipv6": NSNumber(bool) } — RouteDest.dictionary) into NE routes.
+// Same decode as OpenVPN3Bridge's, so one wire shape serves both bridges.
+static void oc_splitDests(NSArray<NSDictionary<NSString *, id> *> *dests,
+                          NSMutableArray<NEIPv4Route *> *v4,
+                          NSMutableArray<NEIPv6Route *> *v6) {
+    for (NSDictionary *d in dests) {
+        NSString *address = d[@"address"];
+        int prefix = [d[@"prefix"] intValue];
+        BOOL ipv6 = [d[@"ipv6"] boolValue];
+        if (address.length == 0) continue;
+        if (ipv6) {
+            [v6 addObject:[[NEIPv6Route alloc] initWithDestinationAddress:address networkPrefixLength:@(prefix)]];
+        } else {
+            uint32_t mask = prefix == 0 ? 0 : htonl(0xFFFFFFFFu << (32 - prefix));
+            struct in_addr a; a.s_addr = mask; char buf[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &a, buf, sizeof(buf));
+            [v4 addObject:[[NEIPv4Route alloc] initWithDestinationAddress:address subnetMask:@(buf)]];
+        }
+    }
+}
+
+// Divert rules from the app: destinations to route *around* this VPN.
+- (void)setDivertedDestinations:(NSArray<NSDictionary<NSString *, id> *> *)dests {
+    NSMutableArray<NEIPv4Route *> *v4 = [NSMutableArray new];
+    NSMutableArray<NEIPv6Route *> *v6 = [NSMutableArray new];
+    oc_splitDests(dests, v4, v6);
+    std::lock_guard<std::mutex> hold(_cfgMutex);
+    _extraV4Excluded = v4; _extraV6Excluded = v6;
+    OCLOG("divert: %lu v4 + %lu v6 destinations",
+          (unsigned long)v4.count, (unsigned long)v6.count);
+}
+
+// Destinations other VPNs route *into* this one (the `.overVPN` target side):
+// added to this tunnel's included routes so the OS sends them here.
+- (void)setIncludedDestinations:(NSArray<NSDictionary<NSString *, id> *> *)dests {
+    NSMutableArray<NEIPv4Route *> *v4 = [NSMutableArray new];
+    NSMutableArray<NEIPv6Route *> *v6 = [NSMutableArray new];
+    oc_splitDests(dests, v4, v6);
+    std::lock_guard<std::mutex> hold(_cfgMutex);
+    _extraV4Included = v4; _extraV6Included = v6;
+    OCLOG("route-in: %lu v4 + %lu v6 destinations",
+          (unsigned long)v4.count, (unsigned long)v6.count);
+}
+
 // Build the tun settings from the captured config, honouring the ownership gate:
 // an owner (!_suppressDefault) advertises the default route; a demoted non-owner
 // drops the default but keeps every specific split-include subnet, and drops the
@@ -425,7 +479,10 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
         NEIPv4Settings *v4 = [[NEIPv4Settings alloc] initWithAddresses:_capV4Addrs subnetMasks:_capV4Masks];
         NSMutableArray<NEIPv4Route *> *inc = [(_capV4Split ?: @[]) mutableCopy];
         if (_capHaveV4Default && !_suppressDefault) [inc addObject:[NEIPv4Route defaultRoute]];
+        // Destinations other VPNs route into this one, and this VPN's own diverts.
+        if (_extraV4Included.count) [inc addObjectsFromArray:_extraV4Included];
         v4.includedRoutes = inc;
+        if (_extraV4Excluded.count) v4.excludedRoutes = _extraV4Excluded;
         settings.IPv4Settings = v4;
     }
     if (_capHaveV6 && _capV6Addr) {
@@ -433,7 +490,9 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
                                                  networkPrefixLengths:@[@(_capV6Prefix)]];
         NSMutableArray<NEIPv6Route *> *inc = [(_capV6Split ?: @[]) mutableCopy];
         if (_capHaveV6Default && !_suppressDefault) [inc addObject:[NEIPv6Route defaultRoute]];
+        if (_extraV6Included.count) [inc addObjectsFromArray:_extraV6Included];
         v6.includedRoutes = inc;
+        if (_extraV6Excluded.count) v6.excludedRoutes = _extraV6Excluded;
         settings.IPv6Settings = v6;
     }
     // DNS: the app-arbitrated override (DNS mediator applier) is the sole writer when

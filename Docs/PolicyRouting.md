@@ -3,6 +3,28 @@
 Design doc, 2026-08-03. Status: **agreed direction, phased build**. The near-term
 destination/CIDR divert rules shipped earlier remain the fallback path when PBR is off.
 
+### Which kinds honour a divert rule (2026-08-04)
+
+The divert blobs (`providerConfiguration["routingRules"]` / `["routingIncludes"]`) are
+written by the app for EVERY profile, and used to be read only by the OpenVPN bridge —
+so a divert on any other kind was a silent no-op. They are now decoded and policy-gated
+once per connect (`DivertPlan`, `Shared/RoutingRule.swift`) and applied per kind:
+
+| Kind | Route a destination AROUND it | Route another VPN's destination INTO it |
+|---|---|---|
+| OpenVPN | yes (bridge excluded routes) | yes (bridge included routes) |
+| OpenConnect SSL VPNs | yes (`OpenConnectBridge.setDivertedDestinations:`) | yes (`setIncludedDestinations:`) — **only while the profile runs in-process**; a config that forces the `openconnect` tool (`SubprocessTunnelManager.willRunInProcess`) has the tool managing routes, and the traffic-log note says so |
+| Proxy Tunnel | yes (`extraExcludedRoutes`) | yes (merged into `includedRoutes` at connect) |
+| WireGuard | yes (`extraExcludedRoutes`) | yes — merged into `allowedIPs` at connect, because wireguard-go drops a packet no peer allows |
+| Tailscale | yes (joins the engine's `localRoutes`) | **no** — the netmap decides what a tailnet carries (subnet router / exit node) |
+| IKEv2 / IPsec / L2TP | no — macOS owns the routes | no |
+| SSH | no — forwards/SOCKS, not a route-carrying interface | no |
+
+The "no" cells are `VPNKind.canDivertOutside` / `canAcceptRoutedInTraffic` returning
+false with a user-facing reason; the traffic-log menu shows the reason in place of the
+action, and `syncIncludes` skips those targets so a legacy rule can't reconnect a VPN to
+install a route its engine ignores.
+
 ## Vision
 
 **OFF BY DEFAULT — hard invariant.** PBR is advanced functionality behind a Settings

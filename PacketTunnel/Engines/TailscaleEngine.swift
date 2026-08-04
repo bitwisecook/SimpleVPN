@@ -60,6 +60,15 @@ final class TailscaleEngine: @unchecked Sendable {
     /// Guarded by `lock` like the rest of the mutable session state; merged into the
     /// settings built from every netmap and by `applyProxySettings(_:)`.
     private var proxySettings: NEProxySettings?
+    /// This VPN's `.outside` divert destinations as CIDRs (`DivertPlan.outsideCIDRs`):
+    /// carve-outs the CONNECT decided, merged into every settings build alongside the
+    /// engine's own `localRoutes`. Set once before `start`; `lock`-guarded like the
+    /// rest of the session state because the netmap callback reads it.
+    var extraExcludedRoutes: [String] {
+        get { lock.lock(); defer { lock.unlock() }; return storedExtraExcludedRoutes }
+        set { lock.lock(); storedExtraExcludedRoutes = newValue; lock.unlock() }
+    }
+    private var storedExtraExcludedRoutes: [String] = []
     private var lastState: TailscaleBackendState = .noState
     private var pendingAuthURL: String = ""
     private var startTimer: DispatchSourceTimer?
@@ -255,8 +264,10 @@ final class TailscaleEngine: @unchecked Sendable {
             self.lock.unlock()
             guard !unchanged else { return }
 
-            let px = { self.lock.lock(); defer { self.lock.unlock() }; return self.proxySettings }()
-            guard let settings = TailscaleNetworkSettings.settings(for: config, proxySettings: px) else {
+            let (px, carveOuts) = { self.lock.lock(); defer { self.lock.unlock() }
+                                    return (self.proxySettings, self.storedExtraExcludedRoutes) }()
+            guard let settings = TailscaleNetworkSettings.settings(for: config, proxySettings: px,
+                                                                   extraExcludedRoutes: carveOuts) else {
                 // No addresses yet: the node is registered but the control
                 // plane has not handed out an IP. Nothing to apply, and
                 // applying empty settings would drop what is already there.
@@ -294,10 +305,12 @@ final class TailscaleEngine: @unchecked Sendable {
         lock.lock()
         proxySettings = proxy
         let config = lastConfig
+        let carveOuts = storedExtraExcludedRoutes
         lock.unlock()
         Self.log.log("tailscale applyProxySettings: \(proxy != nil ? "set" : "cleared", privacy: .public)")
         guard let provider, let config,
-              let settings = TailscaleNetworkSettings.settings(for: config, proxySettings: proxy)
+              let settings = TailscaleNetworkSettings.settings(for: config, proxySettings: proxy,
+                                                              extraExcludedRoutes: carveOuts)
         else { return true }   // no netmap yet: honoured at the next netmapChanged
         // The semaphore establishes happens-before between the completion and the wait,
         // so the result is safe to hand back through a small unchecked-Sendable box

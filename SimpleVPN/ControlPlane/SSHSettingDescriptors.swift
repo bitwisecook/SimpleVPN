@@ -12,9 +12,18 @@
 //
 //  Every entry maps to a real SubprocessTunnelConfig field honored by the
 //  connect path (in-process libssh engine and/or /usr/bin/ssh) — nothing here
-//  is aspirational. The pinned host key is the one option only the in-process
-//  engine can enforce; SubprocessTunnelManager.sshPinBlockReason is the single
-//  honesty gate for it.
+//  is aspirational. Two asymmetries, both gated in code rather than left to
+//  this comment:
+//    • the pinned host key is enforced by the IN-PROCESS engine only
+//      (/usr/bin/ssh has no pin-by-hash option) — `sshPinBlockReason` refuses
+//      a config that would silently connect unpinned;
+//    • a jump host and raw `ssh.extra-options` are the SUBPROCESS's alone —
+//      `inProcessSSHSupports` routes those configs to /usr/bin/ssh.
+//  `ssh.keepalive` and `ssh.compression` used to be a third asymmetry (honoured
+//  by the tool, silently ignored in-process); they are now implemented in the
+//  engine as well — a keepalive timer on the session queue sending
+//  `keepalive@openssh.com`, and `SSH_OPTIONS_COMPRESSION` at key exchange — so
+//  both paths honour them.
 //
 
 import Foundation
@@ -65,7 +74,7 @@ enum SSHSettings {
               group: .signIn, default: ""),
 
         .init(id: "ssh.identity-file", name: "Identity File",
-              summary: "A private key file that signs you in without typing anything. Leave empty to use your default keys, the SSH agent, or a password.",
+              summary: "A private key file that signs you in without typing anything — including a hardware security key (an sk- key), which asks you to touch it. Leave empty to use your default keys, the SSH agent, or a password.",
               group: .signIn, default: ""),
 
         .init(id: "ssh.certificate-file", name: "Certificate File",

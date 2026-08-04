@@ -20,6 +20,12 @@ extern int libsshx_channel_open_tun(ssh_channel channel,
                                     uint32_t tun_mode,
                                     uint32_t remote_unit);
 
+// Session keepalive ("keepalive@openssh.com" global request) — same story: libssh's
+// own ssh_send_keepalive() is in src/server.c, which this build does not compile
+// (WITH_SERVER=OFF), and ssh_global_request() is not public API. The wrapper is
+// compiled into the vendored library by Tools/build-libssh-xcframework.sh.
+extern int libsshx_send_keepalive(ssh_session session);
+
 static NSErrorDomain const kSSHErrorDomain = @"SSHBridge";
 static os_log_t gSSHLog(void) {
     static os_log_t log;
@@ -130,11 +136,19 @@ static NSString *hexTail(NSString *s) {
 }
 
 - (BOOL)connectToHost:(NSString *)host port:(int)port timeout:(int)seconds error:(NSError **)error {
-    return [self connectToHost:host port:port timeout:seconds kexAlgorithms:nil error:error];
+    return [self connectToHost:host port:port timeout:seconds kexAlgorithms:nil
+                   compression:NO error:error];
 }
 
 - (BOOL)connectToHost:(NSString *)host port:(int)port timeout:(int)seconds
         kexAlgorithms:(NSString *)kexAlgorithms error:(NSError **)error {
+    return [self connectToHost:host port:port timeout:seconds kexAlgorithms:kexAlgorithms
+                   compression:NO error:error];
+}
+
+- (BOOL)connectToHost:(NSString *)host port:(int)port timeout:(int)seconds
+        kexAlgorithms:(NSString *)kexAlgorithms compression:(BOOL)compression
+                error:(NSError **)error {
     _session = ssh_new();
     if (!_session) { if (error) *error = sshErr(@"Couldn't initialise the SSH session."); return NO; }
     _host = [host copy];
@@ -162,6 +176,15 @@ static NSString *hexTail(NSString *s) {
         if (ssh_options_set(_session, SSH_OPTIONS_KEY_EXCHANGE,
                             kexAlgorithms.UTF8String) != SSH_OK) {
             if (error) *error = sshErrDetail(@"The key-exchange list wasn't accepted.", _session);
+            return NO;
+        }
+    }
+    // Compression (ssh -C). Negotiated at kex, so it must be set before connect.
+    // "yes" asks for zlib in both directions; libssh falls back to no compression
+    // if the server doesn't offer it, which is exactly ssh(1)'s behaviour.
+    if (compression) {
+        if (ssh_options_set(_session, SSH_OPTIONS_COMPRESSION, "yes") != SSH_OK) {
+            if (error) *error = sshErrDetail(@"Compression couldn't be enabled.", _session);
             return NO;
         }
     }
@@ -463,6 +486,11 @@ static NSString *hexTail(NSString *s) {
     return [self openChannelBlocking:^int(ssh_channel c) {
         return libsshx_channel_open_tun(c, (uint32_t)mode, unit);
     } failure:@"The server refused a network tunnel (PermitTunnel?)." error:error];
+}
+
+- (BOOL)sendKeepalive {
+    if (!_session) return NO;
+    return libsshx_send_keepalive(_session) == SSH_OK;
 }
 
 - (void)disconnect {

@@ -418,6 +418,35 @@ struct SSHSettingDescriptorTests {
         #expect(SubprocessTunnelManager.sshPinBlockReason(c) == nil)
     }
 
+    /// A hardware security key (`sk-ssh-ed25519@openssh.com` / `sk-ecdsa…`) is a
+    /// normal identity file to configure but NOT to use: the device signs, so the
+    /// connect waits for a touch. The editor says so up front — a connect that
+    /// silently blocks on a key nobody was told to touch reads as a hang.
+    @Test func securityKeyIdentityFilesAreCalledOutFromTheirPublicHalf() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("sk-note-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let plain = dir.appendingPathComponent("id_ed25519")
+        try Data("PRIVATE".utf8).write(to: plain)
+        try Data("ssh-ed25519 AAAAC3Nz… alex@mac\n".utf8)
+            .write(to: dir.appendingPathComponent("id_ed25519.pub"))
+        #expect(SubprocessTunnelConfig.securityKeyNote(plain.path) == nil)
+
+        let sk = dir.appendingPathComponent("id_ed25519_sk")
+        try Data("PRIVATE".utf8).write(to: sk)
+        try Data("sk-ssh-ed25519@openssh.com AAAAGnNr… alex@mac\n".utf8)
+            .write(to: dir.appendingPathComponent("id_ed25519_sk.pub"))
+        let note = try #require(SubprocessTunnelConfig.securityKeyNote(sk.path))
+        #expect(note.lowercased().contains("touch"))
+        // Passing the public half directly works too, and an unreadable/absent
+        // path is informational-only: no note, never an error.
+        #expect(SubprocessTunnelConfig.securityKeyNote(sk.path + ".pub") != nil)
+        #expect(SubprocessTunnelConfig.securityKeyNote(dir.appendingPathComponent("nope").path) == nil)
+        #expect(SubprocessTunnelConfig.securityKeyNote("") == nil)
+    }
+
     /// The sign-in method, certificate and kex preference are carried
     /// in-process — they must NOT push a config onto the subprocess path
     /// (only jump host, compression and raw extra options do).
@@ -430,7 +459,17 @@ struct SSHSettingDescriptorTests {
         c.sshKexAlgorithms = "sntrup761x25519-sha512"
         c.sshPinnedHostKey = String(repeating: "cd", count: 32)
         #expect(SubprocessTunnelManager.inProcessSSHSupports(c))
+        // Keepalive and compression are honoured IN-PROCESS now (a keepalive timer
+        // on the session queue; SSH_OPTIONS_COMPRESSION at kex), so neither pushes
+        // the connection out to /usr/bin/ssh any more.
         c.compression = true
+        c.serverAliveInterval = 15
+        #expect(SubprocessTunnelManager.inProcessSSHSupports(c))
+        // A jump host and raw ssh_config lines still do — the bridge can't express them.
+        c.useJumpHost = true; c.jumpHost = "bastion.example.com"
+        #expect(!SubprocessTunnelManager.inProcessSSHSupports(c))
+        c.useJumpHost = false; c.jumpHost = ""
+        c.sshExtraOptions = ["Ciphers aes256-gcm@openssh.com"]
         #expect(!SubprocessTunnelManager.inProcessSSHSupports(c))
     }
 }

@@ -60,6 +60,15 @@ typedef NS_ENUM(NSInteger, SSHHostKeyStatus) {
         kexAlgorithms:(nullable NSString *)kexAlgorithms
                 error:(NSError * _Nullable * _Nullable)error;
 
+/// Same again, plus transport compression (`ssh -C` / `Compression yes`). It is
+/// negotiated during key exchange, so it can only be asked for BEFORE connecting;
+/// a server that doesn't offer zlib simply runs uncompressed, like ssh(1).
+- (BOOL)connectToHost:(NSString *)host port:(int)port
+              timeout:(int)seconds
+        kexAlgorithms:(nullable NSString *)kexAlgorithms
+          compression:(BOOL)compression
+                error:(NSError * _Nullable * _Nullable)error;
+
 /// The server host key fingerprint (SHA-256, hex) for known-hosts verification.
 @property (nullable, readonly) NSString *hostKeyFingerprintSHA256;
 
@@ -125,6 +134,12 @@ typedef NS_ENUM(NSInteger, SSHHostKeyStatus) {
 /// a libssh capability libssh2 never had. Needs a ticket (kinit / AD login);
 /// fails cleanly without one.
 - (BOOL)authGSSAPIForUser:(NSString *)user error:(NSError * _Nullable * _Nullable)error;
+
+/// Send a session keepalive ("keepalive@openssh.com", reply requested) — the
+/// in-process equivalent of `ssh -o ServerAliveInterval`. MUST be called on the
+/// session's serial queue like every other call here. NO when there is no
+/// session or the request couldn't be written.
+- (BOOL)sendKeepalive;
 
 /// Open a direct-tcpip channel to host:port through the server (SOCKS / -L).
 - (nullable SSHChannel *)openDirectTCPIPToHost:(NSString *)host port:(int)port

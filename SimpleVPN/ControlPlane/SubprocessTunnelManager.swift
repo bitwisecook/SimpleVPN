@@ -320,12 +320,13 @@ final class SubprocessTunnelManager {
     /// The in-process libssh engine speaks plain host + auth + SOCKS only. Any
     /// knob it can't express must route to /usr/bin/ssh instead — silently
     /// dropping a jump host would dial the target directly and bypass the
-    /// bastion; compression and raw ssh_config options would just be ignored.
+    /// bastion, and raw ssh_config options would just be ignored.
     /// (Certificate, Kerberos, kex preference and the host-key pin all ride
-    /// in-process since the libssh migration.)
+    /// in-process since the libssh migration; keepalive and compression now do
+    /// too — `SSHTunnelEngine.Config.keepaliveInterval` / `.compression` — so
+    /// neither forces the subprocess any more.)
     static func inProcessSSHSupports(_ c: SubprocessTunnelConfig) -> Bool {
         if c.useJumpHost, !c.jumpHost.isEmpty { return false }
-        if c.compression { return false }
         if c.sshExtraOptions.contains(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) { return false }
         return true
     }
@@ -371,7 +372,7 @@ final class SubprocessTunnelManager {
             return "A pinned host key is only enforced in SOCKS proxy mode (the built-in SSH engine). Switch the mode, or clear the pin under Security."
         }
         if !inProcessSSHSupports(c) {
-            return "A pinned host key can't be combined with a jump host, compression, or extra options — those run through /usr/bin/ssh, which can't check the pin. Clear the pin under Security, or remove the conflicting option."
+            return "A pinned host key can't be combined with a jump host or extra options — those run through /usr/bin/ssh, which can't check the pin. Clear the pin under Security, or remove the conflicting option."
         }
         return nil
     }
@@ -392,7 +393,12 @@ final class SubprocessTunnelManager {
             strictHostKey: config.strictHostKey,
             connectTimeout: config.connectTimeout ?? 15,
             authMethod: Self.sshAuthMethod(config).isEmpty ? nil : Self.sshAuthMethod(config),
-            kexAlgorithms: (config.sshKexAlgorithms?.trimmingCharacters(in: .whitespaces)).flatMap { $0.isEmpty ? nil : $0 })
+            kexAlgorithms: (config.sshKexAlgorithms?.trimmingCharacters(in: .whitespaces)).flatMap { $0.isEmpty ? nil : $0 },
+            // ssh.keepalive and ssh.compression are honoured HERE now, not only by
+            // /usr/bin/ssh: the engine arms a keepalive timer on its session queue
+            // and asks for zlib at key exchange.
+            keepaliveInterval: config.serverAliveInterval,
+            compression: config.compression)
         Task { [weak self] in
             do {
                 try await engine.startSOCKS(cfg)

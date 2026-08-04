@@ -655,7 +655,7 @@
 <p>How this tunnel proves who you are. <strong>Automatic</strong> tries your <a href="#ssh-identity-file">identity file</a>, then any keys in the SSH agent, then the <a href="#ssh-password">password</a> — the classic order. Choosing a specific method uses <em>exactly</em> that method, and nothing else is attempted — so what you chose is what actually signs in, and its failure is reported honestly instead of another method quietly succeeding:</p>
 <ul>
   <li><strong>Password</strong> — the saved or typed password only. Keys and the agent are never offered.</li>
-  <li><strong>Key file</strong> — the identity file only (other keys on your Mac are not tried).</li>
+  <li><strong>Key file</strong> — the identity file only (other keys on your Mac are not tried). This includes a <a href="#ssh-identity-file">hardware security key</a>, which asks for a touch.</li>
   <li><strong>Certificate</strong> — the identity file plus its <a href="#ssh-certificate-file">certificate</a>.</li>
   <li><strong>SSH agent</strong> — only keys held by the running SSH agent.</li>
   <li><strong>Kerberos</strong> — your organisation's existing Kerberos ticket (the sign-on from Active Directory, or <code>kinit</code>); nothing to type at all. Never tried unless chosen.</li>
@@ -669,6 +669,7 @@
 <h2 id="ssh-identity-file">Identity File</h2>
 <p class="default">Optional.</p>
 <p>A private key file that signs you in without typing anything (e.g. <code>~/.ssh/id_ed25519</code>). Leave empty to use your default keys, any keys in the SSH agent, or a password. Used by the Automatic, Key file and Certificate <a href="#ssh-auth-method">sign-in methods</a>.</p>
+<p><strong>Hardware security keys.</strong> A key created with <code>ssh-keygen -t ed25519-sk</code> (or <code>-t ecdsa-sk</code>) works here too — point this field at the private half, exactly like any other key. That file is only a handle: the signature is made by the device, so <strong>connecting waits for you to touch the key</strong> (and to enter its PIN if it has one). Plug it in before connecting; a tunnel that seems to hang at sign-in is usually a security key waiting for a touch. Keys held by the SSH agent work as well, in which case the agent — not SimpleVPN — asks for the touch.</p>
 
 <h2 id="ssh-certificate-file">Certificate File</h2>
 <p class="default">Optional.</p>
@@ -713,7 +714,7 @@
 <h2 id="ssh-pinned-host-key">Pinned Host Key</h2>
 <p class="default">Optional.</p>
 <p>The strictest identity check: accept exactly one server key — the one whose SHA-256 fingerprint you paste here — and nothing else, not even entries in known_hosts. Get the fingerprint from the server's administrator, or from the server itself with <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code>. Both <code>SHA256:…</code> and bare 64-character hex forms are accepted.</p>
-<p>The pin is enforced by SimpleVPN's built-in SSH engine (SOCKS proxy mode), which checks it <em>before</em> signing in. The system <code>ssh</code> tool has no equivalent check, so a pinned tunnel refuses to run through it — a pin can't be combined with a <a href="#ssh-proxy-jump">jump host</a>, <a href="#ssh-compression">compression</a>, or <a href="#ssh-extra-options">extra options</a>, and it never falls back.</p>
+<p>The pin is enforced by SimpleVPN's built-in SSH engine (SOCKS proxy mode), which checks it <em>before</em> signing in. The system <code>ssh</code> tool has no equivalent check, so a pinned tunnel refuses to run through it — a pin can't be combined with a <a href="#ssh-proxy-jump">jump host</a> or <a href="#ssh-extra-options">extra options</a>, and it never falls back.</p>
 
 <h2 id="ssh-key-exchange">Key Exchange</h2>
 <p class="default">Default: empty — the engine's built-in preference.</p>
@@ -1049,6 +1050,7 @@
 <p class="default">Optional.</p>
 <p>Networks to send straight out, never through the proxy — even when &ldquo;Send all traffic&rdquo; is on. Useful for a local subnet or a service the proxy can&rsquo;t reach.</p>
 <p>An exclusion that swallows part of an inclusion is legal and does something, just rarely what was meant, so SimpleVPN points it out without blocking it. The same goes for an exclusion that carves out one of your <a href="#px-dns">DNS servers</a>: the resolver still gets used, just directly, outside the proxy.</p>
+<p>One exclusion is added for you and needs no entry here: the <a href="#px-address">proxy's own address</a>. Traffic to the proxy must reach it directly — sending it through the tunnel the proxy is carrying would be a loop — so SimpleVPN resolves the proxy's host when the tunnel connects and keeps that address out of it.</p>
 
 <h2 id="px-dns">DNS Servers</h2>
 <p class="default">Default: empty — keep this Mac&rsquo;s own DNS.</p>

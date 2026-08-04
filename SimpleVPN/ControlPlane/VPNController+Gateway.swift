@@ -221,6 +221,13 @@ extension VPNController {
     /// and reconnect it if the set changed while live.
     private func syncIncludes() async {
         for target in profiles {
+            // A kind whose routes we don't own can't be handed a destination
+            // (VPNKind.canAcceptRoutedInTraffic — Tailscale's netmap decides what a
+            // tailnet carries; macOS owns the native kinds' table; SSH carries only
+            // its forwards). The traffic-log menu no longer offers those targets, but
+            // a rule stored before that check existed must not keep reconnecting a
+            // VPN to install routes its engine will ignore.
+            guard target.kind.canAcceptRoutedInTraffic else { continue }
             let dests: [RouteDest] = profiles
                 .filter { $0.id != target.id }
                 .flatMap { routingRules(for: $0.id) }

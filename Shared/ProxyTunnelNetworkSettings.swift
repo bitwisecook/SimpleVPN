@@ -18,6 +18,9 @@
 
 import Foundation
 import NetworkExtension
+#if canImport(Darwin)
+import Darwin
+#endif
 
 nonisolated enum ProxyTunnelNetworkSettings {
 
@@ -40,9 +43,17 @@ nonisolated enum ProxyTunnelNetworkSettings {
     /// `proxySettings` is the app-arbitrated system proxy (Proxy mediator applier —
     /// Docs/StateMediators.md), threaded onto the built settings so `proxy:apply` can
     /// hot-swap it by rebuilding + re-applying. nil ⇒ no system proxy asserted.
+    ///
+    /// `extraExcludedRoutes` are carve-outs the CONNECT decided rather than the
+    /// user's config: the upstream proxy's own resolved address(es) (see
+    /// `proxyExclusions`) and this VPN's `.outside` divert destinations
+    /// (`DivertPlan.outsideCIDRs`). They are kept out of `ProxyTunnelConfig` so a
+    /// computed route can never be mistaken for something the user typed, and are
+    /// re-passed by every live re-apply path in the provider.
     static func settings(for config: ProxyTunnelConfig,
                          suppressDefaultRoute: Bool = false,
-                         proxySettings: NEProxySettings? = nil) -> NEPacketTunnelNetworkSettings {
+                         proxySettings: NEProxySettings? = nil,
+                         extraExcludedRoutes: [String] = []) -> NEPacketTunnelNetworkSettings {
         let remote = config.proxyHost.isEmpty ? "127.0.0.1" : config.proxyHost
         let s = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: remote)
 
@@ -58,7 +69,7 @@ nonisolated enum ProxyTunnelNetworkSettings {
         } else {
             included = TailscaleNetworkSettings.parseAll(config.includedRoutes)
         }
-        let excluded = TailscaleNetworkSettings.parseAll(config.excludedRoutes)
+        let excluded = TailscaleNetworkSettings.parseAll(config.excludedRoutes + extraExcludedRoutes)
         // Advertised DNS servers must reach the tunnel or the engine never sees
         // the queries; when NOT using the default route, add each resolver's /32
         // (or /128) so a split-route config still resolves through the proxy.
@@ -115,6 +126,61 @@ nonisolated enum ProxyTunnelNetworkSettings {
 
         s.mtu = NSNumber(value: config.mtu > 0 ? config.mtu : ProxyTunnelStartConfig.defaultMTU)
         return s
+    }
+
+    /// The upstream proxy's own address(es) as host routes to keep OUT of this
+    /// tunnel — `["203.0.113.9/32"]`, `["2001:db8::1/128"]`, one per resolved
+    /// address (a proxy behind a round-robin name has several).
+    ///
+    /// Why this exists: the engine dials the proxy with the plain OS dialer, and
+    /// if the utun owns 0.0.0.0/0 that dial would loop back into the tunnel it is
+    /// carrying. Today it works only because NetworkExtension implicitly exempts
+    /// the provider process's own sockets from its own tunnel — true, but not
+    /// something this app states or controls. These /32s make the host routing
+    /// table say it too, so the loop is impossible rather than merely unlikely.
+    ///
+    /// Blocking (`getaddrinfo`): call it ONCE at connect and re-pass the result to
+    /// later re-applies — never from inside `settings(for:)`, which runs on the
+    /// live gateway/proxy hot-swap paths.
+    ///
+    /// A literal address needs no lookup. A name that doesn't resolve yields an
+    /// empty list: NE's implicit exemption still carries the dial, and failing the
+    /// tunnel over a belt-and-braces route would be a regression.
+    static func proxyExclusions(host: String) -> [String] {
+        let h = host.trimmingCharacters(in: .whitespaces)
+        guard !h.isEmpty else { return [] }
+        // Already literal? Then it IS the exclusion — skip the resolver entirely.
+        if TailscaleNetworkSettings.parse(h + (h.contains(":") ? "/128" : "/32")) != nil {
+            return [h + (h.contains(":") ? "/128" : "/32")]
+        }
+
+        var hints = addrinfo(ai_flags: 0, ai_family: AF_UNSPEC, ai_socktype: SOCK_STREAM,
+                             ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil,
+                             ai_addr: nil, ai_next: nil)
+        var out: UnsafeMutablePointer<addrinfo>?
+        guard h.withCString({ getaddrinfo($0, nil, &hints, &out) }) == 0, let first = out else { return [] }
+        defer { freeaddrinfo(first) }
+
+        var cidrs: [String] = []
+        var cursor: UnsafeMutablePointer<addrinfo>? = first
+        while let node = cursor {
+            if let sa = node.pointee.ai_addr {
+                var buf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(sa, node.pointee.ai_addrlen, &buf, socklen_t(buf.count),
+                               nil, 0, NI_NUMERICHOST) == 0 {
+                    let addr = String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) },
+                                      as: UTF8.self)
+                    // Strip a scope id ("fe80::1%en0") — not a route destination.
+                    let bare = addr.split(separator: "%", maxSplits: 1).first.map(String.init) ?? addr
+                    let cidr = bare + (bare.contains(":") ? "/128" : "/32")
+                    if TailscaleNetworkSettings.parse(cidr) != nil, !cidrs.contains(cidr) {
+                        cidrs.append(cidr)
+                    }
+                }
+            }
+            cursor = node.pointee.ai_next
+        }
+        return cidrs
     }
 
     private static func ipv4Route(_ p: TailscaleNetworkSettings.Prefix) -> NEIPv4Route {

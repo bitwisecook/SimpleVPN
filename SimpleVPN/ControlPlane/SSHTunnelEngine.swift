@@ -87,6 +87,14 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
         var authMethod: String? = nil
         /// Key-exchange preference (OpenSSH KexAlgorithms syntax); nil = libssh default.
         var kexAlgorithms: String? = nil
+        /// Session keepalive interval in seconds (`ssh -o ServerAliveInterval`);
+        /// 0 turns it off. The in-process engine used to send NONE while the
+        /// descriptor promised the setting was honoured — the timer below is that
+        /// promise kept.
+        var keepaliveInterval: Int = 30
+        /// Transport compression (`ssh -C`). Negotiated at kex, so it is passed to
+        /// `connect`, not applied afterwards.
+        var compression: Bool = false
     }
 
     /// A sign-in that can't proceed as configured — the message is user-facing.
@@ -113,7 +121,8 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
                 do {
                     try s.connect(toHost: config.host, port: Int32(config.port),
                                   timeout: Int32(max(1, config.connectTimeout)),
-                                  kexAlgorithms: config.kexAlgorithms)
+                                  kexAlgorithms: config.kexAlgorithms,
+                                  compression: config.compression)
                     // Verify the host key BEFORE auth — otherwise we'd hand
                     // credentials to whoever answered (MITM).
                     try s.verifyHostKey(withKnownHosts: config.knownHostsPath,
@@ -134,6 +143,7 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
                 // don't publish a live session (the listener isn't started yet).
                 if self.stopped { s.disconnect(); cont.resume(throwing: CancellationError()); return }
                 self.session = s
+                self.startKeepalive(every: config.keepaliveInterval)
                 cont.resume(returning: ())
             }
         }
@@ -497,7 +507,45 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
         let extras = _forwards; _forwards = [:]
         forwardLock.unlock()
         for l in extras.values { l.cancel() }
-        ssh.async { self.session?.disconnect(); self.session = nil }
+        ssh.async {
+            self.keepaliveTimer?.cancel(); self.keepaliveTimer = nil
+            self.session?.disconnect(); self.session = nil
+        }
         publish(.idle)
     }
+
+    // MARK: - Keepalive (ssh.keepalive · ServerAliveInterval)
+
+    /// Send a `keepalive@openssh.com` global request every `seconds` on the SESSION
+    /// queue — the same queue every other libssh call funnels through, because a
+    /// libssh session is single-threaded and a keepalive racing a channel read would
+    /// corrupt the session state. 0 (or less) means off, exactly like
+    /// `ServerAliveInterval 0`.
+    ///
+    /// This is what an idle in-process tunnel needs: without it a NAT or firewall
+    /// silently forgets the flow and the tunnel is dead long before anything notices.
+    /// The request wants a reply, so a peer that has gone away is detected too — the
+    /// write then fails and the session is torn down by the next channel operation.
+    /// MUST be called on `ssh`.
+    private func startKeepalive(every seconds: Int) {
+        keepaliveTimer?.cancel(); keepaliveTimer = nil
+        guard seconds > 0 else { return }
+        let t = DispatchSource.makeTimerSource(queue: ssh)
+        t.schedule(deadline: .now() + .seconds(seconds), repeating: .seconds(seconds), leeway: .seconds(1))
+        t.setEventHandler { [weak self] in
+            guard let self, let s = self.session else { return }
+            if !s.sendKeepalive() {
+                // Not fatal on its own: the data path reports the real failure. Worth
+                // one line, because "the tunnel died after N minutes idle" is exactly
+                // the story this timer exists to change.
+                Self.log.notice("SSH keepalive could not be sent — the session may be gone")
+            }
+        }
+        t.resume()
+        keepaliveTimer = t
+        Self.log.log("SSH keepalive every \(seconds)s")
+    }
+
+    /// Touched only on the `ssh` queue (armed at connect, cancelled in `stop`).
+    private var keepaliveTimer: DispatchSourceTimer?
 }

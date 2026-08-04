@@ -10,7 +10,6 @@ package pxengine
 import (
 	"context"
 	"io"
-	"net"
 
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
@@ -79,10 +78,4 @@ func (st *engineState) handleTCP(r *tcp.ForwarderRequest) {
 	guestConn := gonet.NewTCPConn(&wq, ep)
 	st.activeFlows.Add(1)
 	go st.pipe(guestConn, proxyConn)
-}
-
-// dialTargetThroughProxy is used by the UDP/DNS path too: a plain net.Conn to
-// targetHost:targetPort tunnelled through the configured proxy.
-func (st *engineState) dialTargetThroughProxy(ctx context.Context, host string, port int) (net.Conn, error) {
-	return st.up.dialThrough(ctx, st.dialer, host, port)
 }

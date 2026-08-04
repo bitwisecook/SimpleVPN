@@ -86,6 +86,18 @@ NS_SWIFT_SENDABLE
 /// keeping the ≤1-owner invariant robust to the app not reconciling live.
 - (void)setInitialDefaultRouteOwned:(BOOL)owned;
 
+/// Divert rules (`Shared/RoutingRule.swift` · `DivertPlan`), mirroring
+/// OpenVPN3Bridge: destinations to route AROUND this VPN become excluded routes.
+/// Each entry is `@{ "address": NSString, "prefix": NSNumber, "ipv6": NSNumber }`
+/// — `RouteDest.dictionary`. Set BEFORE `connectWithSettings:` so the first
+/// `setup_tun` carries them; a later call takes effect on the next settings
+/// re-apply (gateway flip / proxy or DNS apply).
+- (void)setDivertedDestinations:(NSArray<NSDictionary<NSString *, id> *> *)dests;
+
+/// The other half: destinations another VPN routes INTO this one (the `.overVPN`
+/// target side) become included routes, so the OS hands them to this tunnel.
+- (void)setIncludedDestinations:(NSArray<NSDictionary<NSString *, id> *> *)dests;
+
 /// Apply (or clear) the arbitrated system proxy on this tunnel's network settings
 /// (Proxy mediator applier — Docs/StateMediators.md), mirroring OpenVPN3Bridge. The
 /// mediator computes ONE proxy decision and the provider sends it here for the OWNER

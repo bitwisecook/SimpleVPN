@@ -285,6 +285,56 @@ struct ProxyTunnelNetworkSettingsTests {
         #expect(v4.excludedRoutes?.contains { $0.destinationAddress == "192.168.0.0" } == true)
     }
 
+    /// The upstream proxy's own address must never be routed INTO the tunnel it
+    /// carries. NE exempts the provider's own sockets implicitly, but nothing said
+    /// so in the routing table — this is the belt-and-braces half.
+    @Test func upstreamProxyAddressIsExcludedFromTheTunnel() throws {
+        var c = ProxyTunnelConfig()
+        c.upstream = "socks5://203.0.113.9:1080"
+        c.includeDefaultRoute = true
+
+        let carveOuts = ProxyTunnelNetworkSettings.proxyExclusions(host: c.proxyHost)
+        #expect(carveOuts == ["203.0.113.9/32"])
+
+        let settings = ProxyTunnelNetworkSettings.settings(for: c, extraExcludedRoutes: carveOuts)
+        let v4 = try #require(settings.ipv4Settings)
+        let excluded = try #require(v4.excludedRoutes)
+        #expect(excluded.contains { $0.destinationAddress == "203.0.113.9"
+                                    && $0.destinationSubnetMask == "255.255.255.255" })
+        // …and it survives a gateway demotion (the split re-apply path passes the
+        // same carve-outs, so the exclusion can't be lost by re-applying).
+        let demoted = ProxyTunnelNetworkSettings.settings(for: c, suppressDefaultRoute: true,
+                                                         extraExcludedRoutes: carveOuts)
+        #expect(demoted.ipv4Settings?.excludedRoutes?.contains { $0.destinationAddress == "203.0.113.9" } == true)
+    }
+
+    @Test func proxyExclusionsHandleLiteralIPv6AndEmptyHosts() {
+        #expect(ProxyTunnelNetworkSettings.proxyExclusions(host: "2001:db8::1") == ["2001:db8::1/128"])
+        #expect(ProxyTunnelNetworkSettings.proxyExclusions(host: "").isEmpty)
+        // A name that cannot resolve degrades to "no extra route" rather than
+        // failing the tunnel — NE's own exemption still carries the dial.
+        #expect(ProxyTunnelNetworkSettings.proxyExclusions(
+            host: "no-such-host.invalid").isEmpty)
+    }
+
+    /// Destinations another VPN routes INTO a proxy tunnel used to be dropped on
+    /// the floor: the app wrote `routingIncludes` for every kind and only the
+    /// OpenVPN bridge read it.
+    @Test func routedInDestinationsBecomeIncludedRoutesOnASplitTunnel() throws {
+        var c = ProxyTunnelConfig()
+        c.upstream = "socks5://proxy.example:1080"
+        c.includeDefaultRoute = false
+        c.includedRoutes = ["10.0.0.0/8"]
+        let plan = DivertPlan.make(rules: [], inbound: [RouteDest(address: "142.250.0.0", prefix: 16, ipv6: false)],
+                                  keepInside: false, noDiverts: false)
+        c.includedRoutes += plan.inboundCIDRs
+
+        let settings = ProxyTunnelNetworkSettings.settings(for: c, extraExcludedRoutes: plan.outsideCIDRs)
+        let dests = try #require(settings.ipv4Settings?.includedRoutes).map(\.destinationAddress)
+        #expect(dests.contains("10.0.0.0"))
+        #expect(dests.contains("142.250.0.0"))
+    }
+
     @Test func noDNSLeavesResolversAlone() throws {
         var c = ProxyTunnelConfig()
         c.upstream = "socks5://proxy.example:1080"

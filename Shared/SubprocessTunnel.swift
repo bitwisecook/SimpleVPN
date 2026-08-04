@@ -282,6 +282,32 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
             ? nil : "No file at that path."
     }
 
+    /// The SSH key types that live on a hardware security key (FIDO2/U2F): the
+    /// private "key file" is only a handle — the signature is made by the device,
+    /// which is why connecting needs a physical touch.
+    static let securityKeyTypes = ["sk-ssh-ed25519@openssh.com",
+                                   "sk-ecdsa-sha2-nistp256@openssh.com"]
+
+    /// A note for an identity file that is a SECURITY KEY, or nil for an ordinary
+    /// key (and for anything unreadable — this is informational, never blocking).
+    ///
+    /// Why it exists: `sk-` keys work in-process now (the vendored libssh is built
+    /// WITH_FIDO2 — see Tools/build-libssh-xcframework.sh), but connecting stops
+    /// dead waiting for a touch nobody was told about. Detected from the public
+    /// half (`<path>.pub`), whose first field is the key type in clear text; the
+    /// private file is an encrypted blob and is never read for this.
+    static func securityKeyNote(_ path: String) -> String? {
+        let p = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !p.isEmpty else { return nil }
+        var expanded = (p as NSString).expandingTildeInPath
+        if !expanded.hasSuffix(".pub") { expanded += ".pub" }
+        guard let data = FileManager.default.contents(atPath: expanded),
+              let text = String(data: data.prefix(256), encoding: .utf8) else { return nil }
+        let type = text.split(separator: " ", maxSplits: 1).first.map(String.init) ?? ""
+        guard securityKeyTypes.contains(type) else { return nil }
+        return "This is a hardware security key — you'll be asked to touch it each time this tunnel connects."
+    }
+
     // MARK: The pinned server certificate (the ONE server-identity check)
 
     /// Why the pinned server certificate isn't a fingerprint OpenConnect would

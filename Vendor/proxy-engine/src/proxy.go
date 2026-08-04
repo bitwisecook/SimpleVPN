@@ -128,8 +128,20 @@ func parseUpstream(raw, username, password string) (*upstream, error) {
 // dialProxyConn opens the raw TCP (or TLS) connection to the proxy itself,
 // before any CONNECT/SOCKS handshake. base is the real OS dialer: this traffic
 // must leave via the physical interface, NOT back into our own utun (which
-// would be a routing loop). The extension excludes the proxy's address from the
-// tunnel routes for exactly this reason.
+// would be a routing loop).
+//
+// Two things keep it out of the utun, and NEITHER is anything this file does:
+//   - NetworkExtension excludes the provider process's own sockets from the
+//     tunnel it operates, so these dials leave via the physical interface even
+//     when the utun owns 0.0.0.0/0. That is the mechanism the tunnel actually
+//     relies on today.
+//   - Belt and braces: the extension resolves this proxy's host at connect and
+//     adds each literal address as a /32 (/128) excluded route
+//     (Shared/ProxyTunnelNetworkSettings.swift `proxyExclusions`), so the host
+//     routing table itself never points the proxy's address at the utun.
+//
+// There is no interface binding (IP_BOUND_IF) on this dialer — if that ever
+// becomes necessary, it belongs here, on base.
 func (up *upstream) dialProxyConn(ctx context.Context, base *net.Dialer) (net.Conn, error) {
 	conn, err := base.DialContext(ctx, "tcp", up.address)
 	if err != nil {

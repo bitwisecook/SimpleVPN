@@ -272,7 +272,11 @@ struct SubprocessTunnelView: View {
             row("ssh.identity-file", text: $draft.identityFile, prompt: "~/.ssh/id_ed25519",
                 disabled: ["", "key", "certificate"].contains(sshMethod) ? nil
                     : "Not used when signing in with \(sshMethodLabel) — choose Automatic, “Key file” or “Certificate”.",
-                warning: SubprocessTunnelConfig.missingFileWarning(draft.identityFile))
+                warning: SubprocessTunnelConfig.missingFileWarning(draft.identityFile),
+                // An sk- key file works (the built-in engine is built with FIDO2),
+                // but it can't be used without touching the device — say so before
+                // the connect appears to hang.
+                note: SubprocessTunnelConfig.securityKeyNote(draft.identityFile))
             row("ssh.certificate-file", text: optionalText(\.sshCertificateFile), prompt: "~/.ssh/id_ed25519-cert.pub",
                 disabled: sshMethod == "certificate" ? nil
                     : "Choose “Certificate” as the sign-in method to use an SSH certificate.",
@@ -1313,20 +1317,32 @@ struct SubprocessTunnelView: View {
     /// `warning` is a NON-blocking caption under the field — used for "No file at
     /// that path.", which must never stop a save (the file may appear before the
     /// next connect) but is otherwise an opaque tool-startup error.
+    /// `note` is INFORMATIONAL (nothing is wrong) and reads in the secondary
+    /// style — a security key's "you'll be asked to touch it" is not a warning,
+    /// and dressing it as one would teach users to ignore the orange triangle.
     private func row(_ id: String, text: Binding<String>, prompt: String,
-                     disabled: String? = nil, warning: String? = nil) -> some View {
+                     disabled: String? = nil, warning: String? = nil,
+                     note: String? = nil) -> some View {
         EngineSettingRow(spec: spec(id), value: text.wrappedValue,
                          disabledReason: disabled) {
             VStack(alignment: .leading, spacing: 4) {
                 LabeledContent {
                     TextField(prompt, text: text).multilineTextAlignment(.trailing).autocorrectionDisabled()
                         // Validation rides the field's value (Docs/Accessibility.md).
-                        .accessibilityValue(warning.map { "\(text.wrappedValue). \($0)" } ?? text.wrappedValue)
+                        .accessibilityValue([text.wrappedValue, warning, note]
+                            .compactMap { $0 }.joined(separator: ". "))
                 } label: { EngineSettingLabel(spec: spec(id), value: text.wrappedValue) }
                 if let warning, disabled == nil {
                     Label(warning, systemImage: "exclamationmark.triangle.fill")
                         .font(.callout).foregroundStyle(.orange)
                         .accessibilityLabel("Warning: \(warning)")
+                }
+                if let note, disabled == nil {
+                    Label(note, systemImage: "hand.tap")
+                        .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        // Already announced through the field's value above.
+                        .accessibilityHidden(true)
                 }
             }
         }

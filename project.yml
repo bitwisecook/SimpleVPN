@@ -165,6 +165,12 @@ targets:
       # libssh is built WITH_GSSAPI (Kerberos single sign-on); the gss_* symbols
       # resolve against the SDK's MIT shim, which forwards to GSS.framework.
       - sdk: libgssapi_krb5.tbd
+      # …and WITH_FIDO2: the merged archive carries libfido2, whose macOS USB HID
+      # transport talks to security keys through IOKit (IOHIDManager) and
+      # CoreFoundation. Without these an sk-ssh-ed25519 / sk-ecdsa key FILE fails
+      # to link, not merely to authenticate.
+      - sdk: IOKit.framework
+      - sdk: CoreFoundation.framework
 
   # ---- Packet tunnel provider (system extension, Developer ID) ----
   # Sysext is the DMG/sideload path. Appex variant for TestFlight/MAS is added later; both will
