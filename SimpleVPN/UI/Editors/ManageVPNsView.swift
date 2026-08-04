@@ -88,6 +88,11 @@ struct ManageVPNsView: View {
             detailPane
         }
         .frame(minWidth: 760, minHeight: 560)
+        // Note for anyone looking for this window by title (tests, scripting):
+        // an embedded editor's own `.navigationTitle` REPLACES the window's on
+        // macOS, so selecting a VPN retitles this window to that VPN's name —
+        // right for the user, useless as a handle. The scene id ("manage") is
+        // the stable handle; AppKit publishes it as the window's AX identifier.
         .navigationTitle("Manage VPNs")
         .fileImporter(isPresented: $showImporter,
                       allowedContentTypes: Self.importTypes,

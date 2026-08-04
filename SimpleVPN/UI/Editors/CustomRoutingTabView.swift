@@ -879,9 +879,11 @@ struct CustomRoutingTabView: View {
                                  value: profile.proxy.manualURL ?? "",
                                  disabledReason: manualDead) {
                     LabeledContent {
-                        TextField("http(s)://host:port or socks5://host:port", text: Binding(
+                        // prompt:, not a title (a title draws as content here).
+                        TextField("", text: Binding(
                             get: { profile.proxy.manualURL ?? "" },
-                            set: { profile.proxy.manualURL = $0.isEmpty ? nil : $0 }))
+                            set: { profile.proxy.manualURL = $0.isEmpty ? nil : $0 }),
+                                  prompt: Text("http(s)://host:port or socks5://host:port"))
                             .multilineTextAlignment(.trailing)
                             .autocorrectionDisabled()
                             .accessibilityLabel(Self.specs["cr.proxy-manual-url"].name)
@@ -902,9 +904,10 @@ struct CustomRoutingTabView: View {
                 EngineSettingRow(spec: Self.specs["cr.proxy-pac-url"],
                                  value: profile.proxy.pacURL ?? "") {
                     LabeledContent {
-                        TextField("https://example.com/proxy.pac", text: Binding(
+                        TextField("", text: Binding(
                             get: { profile.proxy.pacURL ?? "" },
-                            set: { profile.proxy.pacURL = $0.isEmpty ? nil : $0 }))
+                            set: { profile.proxy.pacURL = $0.isEmpty ? nil : $0 }),
+                                  prompt: Text("https://example.com/proxy.pac"))
                             .multilineTextAlignment(.trailing)
                             .autocorrectionDisabled()
                             .accessibilityLabel(Self.specs["cr.proxy-pac-url"].name)

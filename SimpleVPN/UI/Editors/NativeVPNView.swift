@@ -130,7 +130,7 @@ struct NativeVPNView: View {
                 }
                 EngineSettingRow(spec: Self.specs["native.server"], value: draft.server) {
                     LabeledContent {
-                        TextField("vpn.example.com", text: $draft.server)
+                        TextField("", text: $draft.server, prompt: Text("vpn.example.com"))
                             .multilineTextAlignment(.trailing)
                             .autocorrectionDisabled()
                             // The title is an EXAMPLE — the spec name is the name.
@@ -149,7 +149,7 @@ struct NativeVPNView: View {
                 if draft.kind == .ipsec {
                     EngineSettingRow(spec: Self.specs["native.group"], value: draft.groupOrRealm) {
                         LabeledContent {
-                            TextField("optional", text: $draft.groupOrRealm)
+                            TextField("", text: $draft.groupOrRealm, prompt: Text("optional"))
                                 .multilineTextAlignment(.trailing)
                                 .autocorrectionDisabled()
                                 .accessibilityLabel(Self.specs["native.group"].name)
@@ -254,7 +254,7 @@ struct NativeVPNView: View {
                 // username/password (exactly what a .pcf import produces).
                 EngineSettingRow(spec: Self.specs["native.shared-secret"], value: sharedSecret) {
                     LabeledContent {
-                        SecureField("group PSK", text: $sharedSecret)
+                        SecureField("", text: $sharedSecret, prompt: Text("group PSK"))
                             .multilineTextAlignment(.trailing)
                             .accessibilityLabel(Self.specs["native.shared-secret"].name)
                     } label: {
@@ -273,7 +273,7 @@ struct NativeVPNView: View {
                 EngineSettingRow(spec: Self.specs["native.username"], value: draft.username,
                                  disabledReason: xauthOff) {
                     LabeledContent {
-                        TextField("username", text: $draft.username).textContentType(.username)
+                        TextField("", text: $draft.username, prompt: Text("username")).textContentType(.username)
                             .multilineTextAlignment(.trailing)
                             .accessibilityLabel("XAuth username")
                     } label: {
@@ -283,7 +283,7 @@ struct NativeVPNView: View {
                 EngineSettingRow(spec: Self.specs["native.xauth-password"], value: secret,
                                  disabledReason: xauthOff) {
                     LabeledContent {
-                        SecureField("password", text: $secret)
+                        SecureField("", text: $secret, prompt: Text("password"))
                             .multilineTextAlignment(.trailing)
                             .accessibilityLabel("XAuth password")
                     } label: {
@@ -300,7 +300,7 @@ struct NativeVPNView: View {
                 if !draft.usesSharedSecret {
                     EngineSettingRow(spec: Self.specs["native.username"], value: draft.username) {
                         LabeledContent {
-                            TextField("username", text: $draft.username).textContentType(.username)
+                            TextField("", text: $draft.username, prompt: Text("username")).textContentType(.username)
                                 .multilineTextAlignment(.trailing)
                                 .accessibilityLabel(Self.specs["native.username"].name)
                         } label: {
@@ -372,7 +372,7 @@ struct NativeVPNView: View {
                 // here and not beside the address it verifies.
                 EngineSettingRow(spec: Self.specs["native.remote-id"], value: draft.remoteID) {
                     LabeledContent {
-                        TextField("defaults to the server address", text: $draft.remoteID)
+                        TextField("", text: $draft.remoteID, prompt: Text("defaults to the server address"))
                             .multilineTextAlignment(.trailing)
                             .autocorrectionDisabled()
                             .accessibilityLabel(Self.specs["native.remote-id"].name)
@@ -530,7 +530,7 @@ struct NativeVPNView: View {
             // — one name per concept, one manual anchor, one search hit.
             EngineSettingRow(spec: Self.specs["native.username"], value: draft.username) {
                 LabeledContent {
-                    TextField("username", text: $draft.username).textContentType(.username)
+                    TextField("", text: $draft.username, prompt: Text("username")).textContentType(.username)
                         .multilineTextAlignment(.trailing)
                         .accessibilityLabel(Self.specs["native.username"].name)
                 } label: {
@@ -542,7 +542,7 @@ struct NativeVPNView: View {
             // profile wrote AuthName with no AuthPassword and prompted at connect.
             EngineSettingRow(spec: Self.specs["native.password"], value: pppPassword) {
                 LabeledContent {
-                    SecureField("password", text: $pppPassword)
+                    SecureField("", text: $pppPassword, prompt: Text("password"))
                         .multilineTextAlignment(.trailing)
                         .accessibilityLabel("L2TP password")
                 } label: {
@@ -554,7 +554,7 @@ struct NativeVPNView: View {
                 .fixedSize(horizontal: false, vertical: true)
             EngineSettingRow(spec: Self.specs["native.shared-secret"], value: secret) {
                 LabeledContent {
-                    SecureField("shared secret", text: $secret)
+                    SecureField("", text: $secret, prompt: Text("shared secret"))
                         .multilineTextAlignment(.trailing)
                         .accessibilityLabel("L2TP shared secret")
                 } label: {

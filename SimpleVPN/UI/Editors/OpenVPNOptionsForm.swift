@@ -233,7 +233,7 @@ struct OpenVPNOptionsForm: View {
             }
             SettingRow(id: "openvpn.private-key-password", draft: $draft, context: context) {
                 LabeledContent {
-                    SecureField("required", text: $privateKeyPassword)
+                    SecureField("", text: $privateKeyPassword, prompt: Text("required"))
                         .multilineTextAlignment(.trailing)
                         .frame(maxWidth: 260).frame(maxWidth: .infinity, alignment: .trailing)
                 } label: {
@@ -448,7 +448,7 @@ struct OpenVPNOptionsForm: View {
             if proxyOn {
                 SettingRow(id: "openvpn.proxy-host", draft: $draft, context: context) {
                     LabeledContent {
-                        TextField("proxy.example.com", text: emptyAsNil(\.proxyHost))
+                        TextField("", text: emptyAsNil(\.proxyHost), prompt: Text("proxy.example.com"))
                             .autocorrectionDisabled()
                             .multilineTextAlignment(.trailing)
                             .frame(maxWidth: 260).frame(maxWidth: .infinity, alignment: .trailing)
@@ -472,7 +472,7 @@ struct OpenVPNOptionsForm: View {
                 }
                 SettingRow(id: "openvpn.proxy-username", draft: $draft, context: context) {
                     LabeledContent {
-                        TextField("optional", text: emptyAsNil(\.proxyUsername))
+                        TextField("", text: emptyAsNil(\.proxyUsername), prompt: Text("optional"))
                             .autocorrectionDisabled()
                             .multilineTextAlignment(.trailing)
                             .frame(maxWidth: 260).frame(maxWidth: .infinity, alignment: .trailing)
@@ -483,7 +483,7 @@ struct OpenVPNOptionsForm: View {
                 // row's (SettingRow applies it to all three channels).
                 SettingRow(id: "openvpn.proxy-password", draft: $draft, context: context) {
                     LabeledContent {
-                        SecureField("optional", text: $proxyPassword)
+                        SecureField("", text: $proxyPassword, prompt: Text("optional"))
                             .multilineTextAlignment(.trailing)
                             .frame(maxWidth: 260).frame(maxWidth: .infinity, alignment: .trailing)
                     } label: {

@@ -103,7 +103,9 @@ struct ProxyTunnelView: View {
                     }
                     EngineSettingRow(spec: Self.specs["px.password"], value: password) {
                         LabeledContent {
-                            SecureField("password", text: $password)
+                            // prompt:, not a title — inside LabeledContent a title
+                            // renders as visible text beside the value.
+                            SecureField("", text: $password, prompt: Text("password"))
                                 .multilineTextAlignment(.trailing)
                                 .accessibilityLabel("Proxy password")
                         } label: {

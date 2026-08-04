@@ -91,7 +91,10 @@ struct TailscaleView: View {
             Section("Sign-In") {
                 EngineSettingRow(spec: Self.specs["ts.auth-key"], value: authKey) {
                     LabeledContent {
-                        SecureField("empty = sign in with a browser", text: $authKey)
+                        // prompt:, not a title — a title renders as visible text
+                        // inside LabeledContent (see labeledField).
+                        SecureField("", text: $authKey,
+                                    prompt: Text("empty = sign in with a browser"))
                             .multilineTextAlignment(.trailing)
                             .accessibilityLabel(Self.specs["ts.auth-key"].name)
                             .accessibilityValue(authKey.isEmpty ? "not set — sign in with a browser"
@@ -346,10 +349,15 @@ struct TailscaleView: View {
     private func labeledField(_ spec: EngineSettingSpec, _ binding: Binding<String>,
                               prompt: String, problem: String? = nil) -> some View {
         LabeledContent {
-            TextField(prompt, text: binding)
+            // EMPTY title + a real `prompt:`. A TextField's first argument is its
+            // TITLE, and inside LabeledContent SwiftUI DRAWS that title next to
+            // the value — so passing the example here rendered it as content:
+            // "Name on the Network   Jim-s-MacBook-Pro   Jim-s-MacBook-Pro"
+            // (the example happens to equal the value). `prompt:` is the real
+            // placeholder: visible only while the field is empty.
+            TextField("", text: binding, prompt: Text(prompt))
                 .multilineTextAlignment(.trailing)
                 .autocorrectionDisabled()
-                // The title is an EXAMPLE value — the spec name is the name.
                 .accessibilityLabel(spec.name)
                 .accessibilityValue(problem.map { "\(binding.wrappedValue). Problem: \($0)" }
                                     ?? binding.wrappedValue)

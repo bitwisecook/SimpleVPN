@@ -306,7 +306,7 @@ struct SubprocessTunnelView: View {
                          disabledReason: passwordUnused) {
             VStack(alignment: .leading, spacing: 6) {
                 LabeledContent {
-                    SecureField("optional", text: $password)
+                    SecureField("", text: $password, prompt: Text("optional"))
                         .textContentType(.password)
                         .multilineTextAlignment(.trailing)
                 } label: { EngineSettingLabel(spec: spec("ssh.password"), value: password) }
@@ -342,7 +342,7 @@ struct SubprocessTunnelView: View {
         EngineSettingRow(spec: s, value: pinned) {
             VStack(alignment: .leading, spacing: 4) {
                 LabeledContent {
-                    TextField("SHA256:… or 64 hex characters", text: optionalText(\.sshPinnedHostKey))
+                    TextField("", text: optionalText(\.sshPinnedHostKey), prompt: Text("SHA256:… or 64 hex characters"))
                         .font(.callout.monospaced())
                         .autocorrectionDisabled()
                         .multilineTextAlignment(.trailing)
@@ -582,7 +582,7 @@ struct SubprocessTunnelView: View {
         EngineSettingRow(spec: spec(portID), value: draft.socksPort) {
             VStack(alignment: .leading, spacing: 4) {
                 LabeledContent {
-                    TextField("1080", value: $draft.socksPort, format: .number.grouping(.never))
+                    TextField("", value: $draft.socksPort, format: .number.grouping(.never), prompt: Text("1080"))
                         .multilineTextAlignment(.trailing).frame(maxWidth: 120)
                         // Validation rides the field's value (Docs/Accessibility.md).
                         .accessibilityValue(socksPortError.map { "Problem: \($0)" } ?? "")
@@ -814,7 +814,7 @@ struct SubprocessTunnelView: View {
                                  disabledReason: tokenUnused) {
                     VStack(alignment: .leading, spacing: 4) {
                         LabeledContent {
-                            SecureField("TOTP/HOTP seed", text: $tokenSecret)
+                            SecureField("", text: $tokenSecret, prompt: Text("TOTP/HOTP seed"))
                                 .multilineTextAlignment(.trailing)
                         } label: {
                             EngineSettingLabel(spec: Self.specs["oc.token-secret"], value: tokenSecret)
@@ -843,7 +843,7 @@ struct SubprocessTunnelView: View {
                 EngineSettingRow(spec: Self.specs["oc.key-password"], value: keyPassphrase,
                                  disabledReason: certificateUnused) {
                     LabeledContent {
-                        SecureField("if the key or .p12 is encrypted", text: $keyPassphrase)
+                        SecureField("", text: $keyPassphrase, prompt: Text("if the key or .p12 is encrypted"))
                             .multilineTextAlignment(.trailing)
                     } label: {
                         EngineSettingLabel(spec: Self.specs["oc.key-password"], value: keyPassphrase)
@@ -1060,7 +1060,7 @@ struct SubprocessTunnelView: View {
         EngineSettingRow(spec: s, value: draft.trustedCertSHA256) {
             VStack(alignment: .leading, spacing: 4) {
                 LabeledContent {
-                    TextField("pin-sha256:… or sha256:… (optional)", text: $draft.trustedCertSHA256)
+                    TextField("", text: $draft.trustedCertSHA256, prompt: Text("pin-sha256:… or sha256:… (optional)"))
                         .font(.callout.monospaced())
                         .autocorrectionDisabled()
                         .multilineTextAlignment(.trailing)
@@ -1170,7 +1170,7 @@ struct SubprocessTunnelView: View {
                          disabledReason: passwordUnused) {
             VStack(alignment: .leading, spacing: 6) {
                 LabeledContent {
-                    SecureField("Password", text: $password)
+                    SecureField("", text: $password, prompt: Text("Password"))
                         .textContentType(.password)
                         .multilineTextAlignment(.trailing)
                 } label: {

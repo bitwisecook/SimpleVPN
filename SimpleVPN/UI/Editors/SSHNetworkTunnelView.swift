@@ -108,7 +108,7 @@ struct SSHNetworkTunnelView: View {
                     EngineSettingRow(spec: Self.specs["sshnet.private-key"],
                                      value: !privateKeyPEM.isEmpty) {
                         LabeledContent {
-                            SecureField("-----BEGIN OPENSSH PRIVATE KEY-----", text: $privateKeyPEM)
+                            SecureField("", text: $privateKeyPEM, prompt: Text("-----BEGIN OPENSSH PRIVATE KEY-----"))
                                 .multilineTextAlignment(.trailing)
                                 .accessibilityLabel("SSH private key")
                         } label: {
@@ -121,7 +121,7 @@ struct SSHNetworkTunnelView: View {
                     EngineSettingRow(spec: Self.specs["sshnet.certificate"],
                                      value: !certificatePEM.isEmpty) {
                         LabeledContent {
-                            SecureField("ssh-ed25519-cert-v01@openssh.com AAAA…", text: $certificatePEM)
+                            SecureField("", text: $certificatePEM, prompt: Text("ssh-ed25519-cert-v01@openssh.com AAAA…"))
                                 .multilineTextAlignment(.trailing)
                                 .accessibilityLabel("SSH certificate")
                         } label: {
@@ -251,7 +251,7 @@ struct SSHNetworkTunnelView: View {
             CollapsibleSettingsSection(group: .advanced, changedCount: advancedChangedCount) {
                 EngineSettingRow(spec: Self.specs["sshnet.keepalive"], value: draft.keepaliveSeconds) {
                     LabeledContent {
-                        TextField("30", value: $draft.keepaliveSeconds, format: .number)
+                        TextField("", value: $draft.keepaliveSeconds, format: .number, prompt: Text("30"))
                             .multilineTextAlignment(.trailing)
                             .frame(width: 70)
                             .accessibilityLabel("Keepalive seconds")
