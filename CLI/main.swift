@@ -69,6 +69,17 @@ final class ControlClient {
         if !connected {
             fail("SimpleVPN isn't running (no control socket at \(path))", code: 4)
         }
+        // A socket can exist while the app is still mid-launch (or wedged) — without
+        // timeouts a request then blocks FOREVER. 10s is generous for a local IPC;
+        // `watch` overrides receive back to infinite after subscribing.
+        setTimeout(seconds: 10)
+    }
+
+    /// 0 ⇒ block indefinitely (watch mode).
+    func setTimeout(seconds: Int) {
+        var tv = timeval(tv_sec: seconds, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
     }
 
     func send(_ envelope: ControlRequestEnvelope) {
@@ -266,6 +277,8 @@ case "watch":
     if case .profiles(let list) = client.roundTrip(ControlRequestEnvelope(id: 3, query: .profiles)) {
         for p in list { names[p.id] = p.name }
     }
+    // Watching waits for events indefinitely — lift the request timeout.
+    client.setTimeout(seconds: 0)
     let clock = DateFormatter()
     clock.dateFormat = "HH:mm:ss"
     while let line = client.readLine() {

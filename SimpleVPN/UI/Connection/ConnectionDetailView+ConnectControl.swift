@@ -247,12 +247,13 @@ extension ConnectionDetailView {
         // disabled while input is missing, but a click walks the user to the fix —
         // focus lands on the first empty required field and it gets a little shake.
         // Two-phase when an official Tailscale client is already running: the first
-        // press ARMS (button turns red "Connect anyway"), the second actually connects.
+        // press ARMS (button turns yellow "Ignore Warning and Connect"), the second
+        // actually connects.
         // So a person can't start a conflicting second datapath with one absent-minded
         // click — they have to see the warning and confirm they understand the risk.
         let armed = tailscaleConflict && tailscaleConflictArmed
         return AnyView(
-            Button(armed ? "Connect anyway" : "Connect") {
+            Button(armed ? "Ignore Warning and Connect" : "Connect") {
                 guard canConnect else { nudgeMissingInput(); return }
                 if tailscaleConflict && !tailscaleConflictArmed {
                     withAnimation(reduceMotion ? nil : .snappy(duration: 0.2)) {
@@ -263,7 +264,10 @@ extension ConnectionDetailView {
                 connectTask = Task { await connect() }
             }
                 .buttonStyle(.glassProminent).controlSize(.large)
-                .tint(armed ? .red : (canConnect ? nil : .gray))
+                // Yellow whenever the official client is running — the caution
+                // colours the whole conflict state, not just the armed press
+                // (and not red: it's a warning being overridden, not destruction).
+                .tint(tailscaleConflict ? .yellow : (canConnect ? nil : .gray))
                 .opacity(canConnect ? 1 : 0.6)
                 .accessibilityHint(canConnect
                                    ? (tailscaleConflict ? "Not recommended — the Tailscale app is already running" : "")
