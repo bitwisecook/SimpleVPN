@@ -47,6 +47,7 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                 Button { dismissed = true } label: { Image(systemName: "xmark") }
                     .buttonStyle(.borderless)
                     .help("Hide until next launch — this card comes back until a connect succeeds")
+                    .accessibilityLabel("Hide setup card")
             }
             Text("The configuration file says how to reach \(profile.name) — but not how you sign in. Two quick questions:")
                 .font(.callout).foregroundStyle(.secondary)
@@ -139,6 +140,10 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                                   isActive: !reduceMotion && !linked)
             }
             .contentShape(Rectangle())
+            // One element with the well's own words; the drag itself has no
+            // keyboard path, so say where the keyboard-operable one lives.
+            .accessibilityElement(children: .combine)
+            .accessibilityHint("Dragging isn't required — you can also link the item under this VPN in Manage VPNs.")
             // 1Password's own drag payload first (it names account, vault AND
             // item), then a link, then op://, then the bare title — see
             // OnePasswordDropItem.

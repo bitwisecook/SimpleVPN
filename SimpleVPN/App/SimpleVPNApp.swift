@@ -29,6 +29,9 @@ struct SimpleVPNApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var vpn = VPNController()
     @State private var control: ControlPlaneDispatcher
+    /// Speaks connection transitions to VoiceOver ("Tig Lab connected") off the
+    /// dispatcher's one event stream — see AccessibilityAnnouncer.
+    @State private var announcer: AccessibilityAnnouncer
     /// The CLI's socket (ControlServer): hosts the SAME dispatcher out-of-process.
     private let controlServer = ControlServer()
     @State private var labels = LabelStore()
@@ -82,6 +85,9 @@ struct SimpleVPNApp: App {
         let dispatcher = ControlPlaneDispatcher(vpn: vpn)
         _control = State(initialValue: dispatcher)
         VPNIntentSupport.register(dispatcher)   // Shortcuts route through the same entry
+        // VoiceOver announcements ride the same stream as the CLI's `watch` —
+        // one more subscriber, no second status derivation.
+        _announcer = State(initialValue: AccessibilityAnnouncer(dispatcher: dispatcher, vpn: vpn))
         // The extension doctor rides the same instances; it also installs the
         // stats-timeout wake-up into vpn. The CLI may never heal disruptively,
         // so while a consent-gated repair is pending, wire connects answer

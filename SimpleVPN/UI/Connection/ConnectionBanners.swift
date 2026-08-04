@@ -137,6 +137,7 @@ struct UnreachableHereBanner: View {   // was private — internal for the file 
         }
         .padding(12)
         .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -188,6 +189,7 @@ struct StuckConnectingBanner: View {   // was private — internal for the file 
         }
         .padding(12)
         .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
     }
 }
 

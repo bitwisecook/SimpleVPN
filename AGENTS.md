@@ -181,7 +181,9 @@ as `{password}{otp}` (no `static-challenge`). No client cert → `ENABLE_EXTERNA
   infrastructure stays protocol-neutral. New VPN kinds (WireGuard, IPsec, …) switch on `VPNKind` at
   four seams: NE protocol object, editor form, importer, connect flow.
 - **Manual:** `SimpleVPN/Resources/Manual/manual.html`, WKWebView window id "manual", anchors generated
-  from descriptor ids — keep them in sync.
+  from descriptor ids — keep them in sync. **ALL documentation is EMBEDDED in the app** (binding):
+  every engine/feature manual ships inside the bundle and setting rows deep-link to bundled anchors —
+  never a web URL. A VPN app's documentation must work exactly when the network doesn't.
 - **GeoIP:** country-level DB-IP mmdb under `Vendor/geoip/` (gitignored); `Tools/fetch-geoip.sh`
   refreshes it when >1 week old (hooked into `build-notarize-install.sh`, soft-fails offline).
   Map land geometry: `Tools/convert-naturalearth.py` → `SimpleVPN/Resources/Map/land-110m.bin`.

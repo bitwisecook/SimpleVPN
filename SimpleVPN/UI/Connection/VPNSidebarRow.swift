@@ -35,7 +35,13 @@ struct VPNSidebarRow: View {
                 .frame(width: 26, height: 26)
 
             VStack(alignment: .leading, spacing: 2) {
+                // The name element carries the WHOLE row for assistive tech —
+                // "Tig Lab, OpenVPN, connected, owns the default route, Lab" —
+                // so VoiceOver hears one sentence, not five fragments. The
+                // status line and pills below are hidden as duplicates; the
+                // endpoint picker stays its own element (it's interactive).
                 Text(profile.name).lineLimit(1).truncationMode(.tail)
+                    .accessibilityLabel(rowAccessibilitySummary)
                 if endpoints.count > 1 {
                     endpointPicker
                     // The picker replaces the status line, but "waiting on you"
@@ -43,12 +49,15 @@ struct VPNSidebarRow: View {
                     if missingTypedInput != nil,
                        profile.status == .disconnected || profile.status == .invalid {
                         Text(statusText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            .accessibilityHidden(true)
                     }
                 } else {
                     Text(statusText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        .accessibilityHidden(true)
                 }
                 if !labelDefs.isEmpty {
                     HStack(spacing: 4) { ForEach(labelDefs) { LabelPill(label: $0) } }
+                        .accessibilityHidden(true)
                 }
             }
 
@@ -57,6 +66,27 @@ struct VPNSidebarRow: View {
         }
         .padding(.vertical, 6)
         .frame(minHeight: 52)
+    }
+
+    /// The row as one sentence: name, protocol, live state (same words the
+    /// visible status line uses, plus the dot-only degraded/captive states),
+    /// route ownership, then the user's labels.
+    private var rowAccessibilitySummary: String {
+        var bits = [profile.name, profile.kind.displayName, rowStateDescription]
+        if vpn.routes.effectiveGatewayOwner == profile.id { bits.append("owns the default route") }
+        bits.append(contentsOf: labelDefs.map(\.name))
+        return bits.joined(separator: ", ")
+    }
+
+    private var rowStateDescription: String {
+        if reconfiguring { return "applying changes" }
+        // The degraded/captive states live only in the dot's color — statusText
+        // still says "Connected" — so they must be said here in words.
+        if profile.status == .connected, !isPaused,
+           dotState == .degraded || dotState == .captivePortal {
+            return dotState.accessibilityDescription
+        }
+        return statusText
     }
 
     // MARK: Reactive transport controls (~34pt tall)
@@ -80,21 +110,24 @@ struct VPNSidebarRow: View {
             switch profile.status {
             case .connected, .reasserting:
                 if isPaused {
-                    circle("play.fill", tint: .green, help: "Resume") { Task { await vpn.resume(id: profile.id) } }
+                    circle("play.fill", tint: .green, help: "Resume",
+                           label: "Resume \(profile.name)") { Task { await vpn.resume(id: profile.id) } }
                         .transition(.blurReplace)
                 } else if vpn.uiPrefs(for: profile.id).allowPause {
                     // Opt-in per VPN — the default row is just stop.
                     pauseControl
                         .transition(.blurReplace)
                 }
-                circle("stop.fill", tint: .red, help: "Disconnect") { vpn.disconnect(id: profile.id) }
+                circle("stop.fill", tint: .red, help: "Disconnect",
+                       label: "Disconnect \(profile.name)") { vpn.disconnect(id: profile.id) }
             case .connecting, .disconnecting:
                 DrawnSpinner().frame(width: 34, height: 34)
                     .transition(.blurReplace)
                 // Always offer a way out of "Connecting…" — a gateway that can't be
                 // reached is retried indefinitely, so a spinner alone traps the user.
                 if profile.status == .connecting {
-                    circle("xmark.circle.fill", tint: UI.cancelRed, help: "Cancel connecting") { vpn.disconnect(id: profile.id) }
+                    circle("xmark.circle.fill", tint: UI.cancelRed, help: "Cancel connecting",
+                           label: "Cancel connecting \(profile.name)") { vpn.disconnect(id: profile.id) }
                         .transition(.blurReplace)
                 }
             default:
@@ -102,7 +135,8 @@ struct VPNSidebarRow: View {
                 // app can't keep — it can only fail. Offer the step that unblocks it.
                 if ext?.needsApproval == true, ext?.isActivated == false {
                     circle("lock.shield", tint: .orange,
-                           help: "macOS needs your permission before SimpleVPN can connect") {
+                           help: "macOS needs your permission before SimpleVPN can connect",
+                           label: "Allow VPN access") {
                         Task { await ext?.activate() }
                     }
                     .transition(.blurReplace)
@@ -112,13 +146,14 @@ struct VPNSidebarRow: View {
                     // VPN and shakes the field that needs filling in.
                     circle("play.fill", tint: .gray,
                            help: missing == .code ? "Enter your verification code first"
-                                                  : "Enter your sign-in first") {
+                                                  : "Enter your sign-in first",
+                           label: "Connect \(profile.name) — needs \(missing == .code ? "your verification code" : "your sign-in") first") {
                         vpn.nudgeCredentials(id: profile.id)
                     }
                     .transition(.blurReplace)
-                    .accessibilityLabel("Connect \(profile.name) — needs \(missing == .code ? "your verification code" : "your sign-in") first")
                 } else {
-                    circle("play.fill", tint: .green, help: "Connect") { play() }
+                    circle("play.fill", tint: .green, help: "Connect",
+                           label: "Connect \(profile.name)") { play() }
                         .transition(.blurReplace)
                 }
             }
@@ -143,10 +178,15 @@ struct VPNSidebarRow: View {
         .glassEffect(.regular.tint(.orange.opacity(0.28)).interactive(), in: Circle())
         .help("Bypass — pause and send traffic outside the VPN")
         .accessibilityLabel("Bypass \(profile.name)")
+        .accessibilityValue(rowStateDescription)
         .accessibilityHint("Pauses the VPN and sends its traffic outside the tunnel, unprotected, until you resume.")
     }
 
-    private func circle(_ symbol: String, tint: Color, help: String, action: @escaping () -> Void) -> some View {
+    /// `label` names the icon-only button for VoiceOver/Voice Control (the help
+    /// tooltip is hover-only); its value tracks the VPN's live state so a
+    /// focused control says what the connection is doing right now.
+    private func circle(_ symbol: String, tint: Color, help: String, label: String,
+                        action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol).font(.title3)
                 .frame(width: 34, height: 34)
@@ -156,6 +196,8 @@ struct VPNSidebarRow: View {
         .buttonStyle(.plain)
         .glassEffect(.regular.tint(tint.opacity(0.28)).interactive(), in: Circle())
         .help(help)
+        .accessibilityLabel(label)
+        .accessibilityValue(rowStateDescription)
     }
 
     private func play() {
@@ -218,6 +260,10 @@ struct VPNSidebarRow: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
+        // The visible label is an icon + the current pick — name the control
+        // itself and keep the pick as its live value.
+        .accessibilityLabel("Endpoint")
+        .accessibilityValue(currentEndpointLabel)
     }
 
     /// Ordered with whatever measurements already exist — this row never starts

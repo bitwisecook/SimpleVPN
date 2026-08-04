@@ -593,6 +593,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                 Image(systemName: "touchid")
                     .font(.title2)
                     .foregroundStyle(.pink)
+                    .accessibilityHidden(true)   // decorative; the text says "Touch ID"
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Sign-in protected by Touch ID").font(.callout.weight(.semibold))
                     Text(requiresOTP && biometricInfo.hasTOTP
@@ -616,6 +617,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                 .menuStyle(.borderlessButton)
                 .fixedSize()
                 .help("Change how these credentials are stored")
+                .accessibilityLabel("Credential protection options")
             }
             .padding(12)
             .background(.pink.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))

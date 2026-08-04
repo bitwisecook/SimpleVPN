@@ -14,6 +14,7 @@
 //
 
 import SwiftUI
+import Accessibility
 
 @MainActor
 @Observable
@@ -99,5 +100,12 @@ private struct ToastLayer: ViewModifier {
                 }
             }
             .animation(reduceMotion ? nil : .snappy(duration: 0.28), value: center.current?.id)
+            // SPOKEN, not just shown: a toast self-dismisses, so a VoiceOver user
+            // who isn't focused on it would otherwise never know it happened.
+            // Posted per toast id (newest wins, like the visual layer).
+            .onChange(of: center.current?.id) { _, _ in
+                guard let toast = center.current else { return }
+                AccessibilityNotification.Announcement(toast.message).post()
+            }
     }
 }

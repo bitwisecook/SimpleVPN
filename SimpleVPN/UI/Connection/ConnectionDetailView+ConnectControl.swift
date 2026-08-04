@@ -196,6 +196,7 @@ extension ConnectionDetailView {
         .glassEffectID("trailing-stop", in: connectGlass)
         .help(connecting ? "Cancel connecting" : "Disconnect")
         .accessibilityLabel(connecting ? "Cancel connecting" : "Disconnect")
+        .accessibilityValue(VPNController.statusText(vpn.displayStatus(for: profile.id)))
     }
 
     private func workingPill(_ text: String, tint: Color) -> some View {
@@ -209,6 +210,9 @@ extension ConnectionDetailView {
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
         .glassEffect(.regular.tint(tint.opacity(0.22)), in: .capsule)
+        // One element, saying the state once — not "In progress, Connecting…".
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(text)
     }
 
     private var connectButton: some View {
@@ -269,6 +273,9 @@ extension ConnectionDetailView {
                 // (and not red: it's a warning being overridden, not destruction).
                 .tint(tailscaleConflict ? .yellow : (canConnect ? nil : .gray))
                 .opacity(canConnect ? 1 : 0.6)
+                // The value is the VPN's live state, so a focused Connect button
+                // answers "what is this connection doing" without hunting for it.
+                .accessibilityValue(VPNController.statusText(vpn.displayStatus(for: profile.id)))
                 .accessibilityHint(canConnect
                                    ? (tailscaleConflict ? "Not recommended — the Tailscale app is already running" : "")
                                    : (missingInputHint ?? ""))

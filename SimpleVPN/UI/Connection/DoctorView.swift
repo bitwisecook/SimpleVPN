@@ -145,6 +145,7 @@ private struct ManagerSettingRow: View {
                     Image(systemName: setting.symbol)
                         .foregroundStyle(setting.riskyWhenOn && desiredOn ? .orange : .secondary)
                         .frame(width: 20)
+                        .accessibilityHidden(true)   // decorative; the title names the setting
                     Text(setting.title)
                     if setting.riskyWhenOn && desiredOn {
                         Text("weakens security").font(.caption2).foregroundStyle(.orange)
@@ -217,6 +218,7 @@ private struct InfoRow: View {
                 }
             }
         }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -236,6 +238,7 @@ struct ExtensionDoctorCard: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "stethoscope").foregroundStyle(.orange).font(.title3).frame(width: 22)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 4) {
                 Text(surface.title).font(.callout).bold()
                 Text(surface.detail).font(.callout).foregroundStyle(.secondary)
@@ -251,6 +254,9 @@ struct ExtensionDoctorCard: View {
                 .tint(.orange)
                 .controlSize(.small)
                 .disabled(healing)
+                // Mid-repair the label is only a spinner — keep the name stable.
+                .accessibilityLabel(surface.actionLabel)
+                .accessibilityValue(healing ? "In progress" : "")
                 .padding(.top, 2)
             }
             Spacer(minLength: 0)
@@ -285,6 +291,7 @@ private struct DoctorCard: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: icon).foregroundStyle(accent).font(.title3).frame(width: 22)
+                .accessibilityHidden(true)   // severity is in the title/detail words
             VStack(alignment: .leading, spacing: 4) {
                 Text(finding.title).font(.callout).bold()
                 Text(finding.detail).font(.callout).foregroundStyle(.secondary)
@@ -302,6 +309,9 @@ private struct DoctorCard: View {
                         .tint(finding.risky ? .orange : .accentColor)
                         .controlSize(.small)
                         .disabled(applying)
+                        // Mid-apply the label is only a spinner — keep the name stable.
+                        .accessibilityLabel(label)
+                        .accessibilityValue(applying ? "In progress" : "")
                     }
                     Button("Learn more") {
                         router?.navigate(to: finding.manualAnchor)

@@ -76,6 +76,34 @@ enum DotState: Equatable {
         case .captivePortal: .indigo
         }
     }
+
+    /// Differentiate Without Color: a bare circle differs only by hue, so each
+    /// state gets its own SF-symbol SHAPE too (StatusDot swaps to these when the
+    /// accommodation is on). Same palette — shape is added, color isn't removed.
+    var symbolName: String {
+        switch self {
+        case .off: "circle"
+        case .busy: "circle.dotted"
+        case .connected: "checkmark.circle.fill"
+        case .paused: "pause.circle.fill"
+        case .degraded: "exclamationmark.circle.fill"
+        case .captivePortal: "questionmark.circle.fill"
+        }
+    }
+
+    /// The state in words, for the combined labels of rows and pills — the dot
+    /// itself is accessibility-hidden everywhere, so this is how its information
+    /// reaches VoiceOver (color is never the only carrier).
+    var accessibilityDescription: String {
+        switch self {
+        case .off: "disconnected"
+        case .busy: "working"
+        case .connected: "connected"
+        case .paused: "paused"
+        case .degraded: "connection problem"
+        case .captivePortal: "sign-in page in the way"
+        }
+    }
 }
 
 /// The status dot, alive only while something needs attention. Each animated
@@ -98,6 +126,7 @@ struct StatusDot: View {
     let state: DotState
     var size: CGFloat = 8
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
     /// 0 = at rest, 1 = the state's rhythm at full swing.
     @State private var amplitude: Double = 0
 
@@ -119,6 +148,22 @@ struct StatusDot: View {
     }
 
     var body: some View {
+        if differentiateWithoutColor {
+            // Differentiate Without Color: the state's identity must not ride on
+            // hue alone, so the dot becomes a per-state SF-symbol shape. Static
+            // on purpose — the shape now carries what the rhythm carried.
+            Image(systemName: state.symbolName)
+                .resizable().scaledToFit()
+                .foregroundStyle(state.color)
+                .frame(width: size, height: size)
+                .animation(.easeOut(duration: 0.25), value: state)
+                .accessibilityHidden(true)   // rows/pills carry the status in text
+        } else {
+            animatedDot
+        }
+    }
+
+    private var animatedDot: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: amplitude == 0)) { context in
             let t = context.date.timeIntervalSinceReferenceDate
             let motion = motion(at: t)
@@ -216,6 +261,17 @@ struct VPNRow: View {
             Spacer(minLength: 6)
             ForEach(labelDefs) { LabelPill(label: $0) }
         }
+        // One element, one sentence — not a logo, a name and n pill fragments.
+        // The dot is hidden, so its state rides here in words.
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilitySummary)
+    }
+
+    private var accessibilitySummary: String {
+        let state = dotState ?? .from(status: profile.status)
+        var bits = [profile.name, profile.kind.displayName, state.accessibilityDescription]
+        bits.append(contentsOf: labelDefs.map(\.name))
+        return bits.joined(separator: ", ")
     }
 }
 
@@ -232,6 +288,9 @@ struct LogoBadge: View {
                 .overlay(Circle().strokeBorder(.white.opacity(0.9), lineWidth: 1)
                     .opacity(state == .connected ? 1 : 0))
         }
+        // Decorative by convention: every badge sits beside text that carries
+        // the name AND the dot's state in words (rows, headers, menu rows).
+        .accessibilityHidden(true)
     }
     @ViewBuilder private var logo: some View {
         if let cg = LogoStore.load(id) { Image(decorative: cg, scale: 1).resizable().scaledToFill() }
@@ -245,12 +304,18 @@ struct LogoWell: View {
     let pick: () -> Void
     let drop: (URL) -> Void
     var body: some View {
-        content
-            .frame(width: 64, height: 64)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
-            .contentShape(Rectangle())
-            .onTapGesture(perform: pick)
-            .dropDestination(for: URL.self) { urls, _ in if let u = urls.first { drop(u); return true }; return false }
+        // A real Button, not onTapGesture: a tap gesture is invisible to
+        // VoiceOver and unreachable by keyboard; a button is both for free.
+        Button(action: pick) {
+            content
+                .frame(width: 64, height: 64)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .dropDestination(for: URL.self) { urls, _ in if let u = urls.first { drop(u); return true }; return false }
+        .accessibilityLabel("VPN logo")
+        .accessibilityHint("Choose an image. You can also drop one here.")
     }
     @ViewBuilder private var content: some View {
         if let image { Image(decorative: image, scale: 1).resizable().scaledToFit() }
@@ -293,6 +358,10 @@ struct AutoFillField<Focus: Hashable>: NSViewRepresentable {
         case .password: field.contentType = .password
         case .oneTimeCode: field.contentType = .oneTimeCode
         }
+        // NSAccessibility: placeholderString only surfaces as AXPlaceholderValue,
+        // which VoiceOver stops reading the moment the field has content — the
+        // field needs a real AXDescription of its own to stay nameable.
+        field.setAccessibilityLabel(placeholder)
         // Fill the grid column like the SwiftUI fields these replace.
         field.setContentHuggingPriority(.defaultLow, for: .horizontal)
         return field
@@ -376,6 +445,10 @@ struct LabelChip: View {
                 .foregroundStyle(on ? AnyShapeStyle(.black.opacity(0.78)) : AnyShapeStyle(.primary))
         }
         .buttonStyle(.plain)
+        // It toggles — say so, and say which way it currently is (the filled
+        // capsule is the only visual carrier, and that's color+fill only).
+        .accessibilityAddTraits(.isToggle)
+        .accessibilityValue(on ? "On" : "Off")
     }
 }
 

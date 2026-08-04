@@ -110,6 +110,7 @@ struct OnePasswordBrowsePopover: View {
                     .buttonStyle(.borderless)
                     .foregroundStyle(.secondary)
                     .help("Clear the search")
+                    .accessibilityLabel("Clear search")
             }
         }
         .padding(6)

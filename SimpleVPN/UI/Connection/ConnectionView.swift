@@ -95,10 +95,14 @@ struct ConnectionView: View {
                 Text(name).lineLimit(1)
                 Text(kindLabel).font(.caption).foregroundStyle(.secondary)
             }
+            // One sentence per row; the (hidden) dot's state rides in words.
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(name), \(kindLabel), \(dot.accessibilityDescription)")
             Spacer(minLength: 8)
             Button(action: stop) { Image(systemName: "stop.fill") }
                 .buttonStyle(.borderless).foregroundStyle(.secondary)
                 .help("Disconnect")
+                .accessibilityLabel("Disconnect \(name)")
         }
     }
 
@@ -258,6 +262,7 @@ struct ConnectionView: View {
                 ToolbarItem {
                     Button { openWindow(id: "manage") } label: { Image(systemName: "slider.horizontal.3") }
                         .help("Manage VPNs")
+                        .accessibilityLabel("Manage VPNs")
                 }
             }
         } detail: {
@@ -283,6 +288,8 @@ struct ConnectionView: View {
                 ToolbarItem {
                     Button { showInspector.toggle() } label: { Image(systemName: "sidebar.trailing") }
                         .help(showInspector ? "Hide live details" : "Show live details — traffic, map and connection info")
+                        .accessibilityLabel("Live details")
+                        .accessibilityValue(showInspector ? "Shown" : "Hidden")
                 }
             }
         }
@@ -399,6 +406,7 @@ private struct EmptyVPNsPrompt: View {
                     // way the OTP shake hints "type here" — quiet, not looping motion.
                     .symbolEffect(.wiggle, options: .repeat(.periodic(delay: 5)),
                                   isActive: !reduceMotion && !targeted)
+                    .accessibilityHidden(true)   // decorative; the text below says it all
                 Text("Drag a VPN configuration here")
                     .font(.callout).foregroundStyle(.secondary)
                 Text("OpenVPN (.ovpn / .conf), WireGuard (.conf), Cisco (.xml / .pcf), or a 1Password item")
@@ -413,7 +421,10 @@ private struct EmptyVPNsPrompt: View {
                     .foregroundStyle(targeted ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
             }
             .animation(.snappy(duration: 0.2), value: targeted)
+            .accessibilityElement(children: .combine)
             .accessibilityLabel("Drop zone for VPN configuration files")
+            // Dragging isn't keyboard-operable — point at the path that is.
+            .accessibilityHint("Use the Import Configuration button to choose a file instead.")
         }
         // Mirrors the window-wide handler's types, so the visible target and the
         // invisible one can't disagree about what's droppable.

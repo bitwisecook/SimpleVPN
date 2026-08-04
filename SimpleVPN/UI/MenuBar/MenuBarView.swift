@@ -527,6 +527,10 @@ struct MenuBarView: View {
             }
         }
         .help(rowHelp(p))
+        // One sentence per row (the dot and glyph are visuals-only): name +
+        // state; the hint says what a press does, which changes with the state.
+        .accessibilityLabel("\(p.name), \(dotState.accessibilityDescription)")
+        .accessibilityHint(busy ? "" : rowHelp(p))
     }
 
     private func rowAction(_ p: VPNController.Profile) {
@@ -570,14 +574,19 @@ struct MenuBarView: View {
     }
 
     @ViewBuilder private func trailingGlyph(_ p: VPNController.Profile) -> some View {
-        switch p.status {
-        case .connected, .reasserting:
-            Image(systemName: vpn.pausedProfiles.contains(p.id) ? "play.circle.fill" : "stop.circle.fill")
-        case .connecting, .disconnecting:
-            DrawnSpinner()
-        default:
-            Image(systemName: "arrow.right.circle")
+        // Decorative: the row's accessibility label + hint carry the state and
+        // the action; without this the glyph reads as a second, cryptic element.
+        Group {
+            switch p.status {
+            case .connected, .reasserting:
+                Image(systemName: vpn.pausedProfiles.contains(p.id) ? "play.circle.fill" : "stop.circle.fill")
+            case .connecting, .disconnecting:
+                DrawnSpinner()
+            default:
+                Image(systemName: "arrow.right.circle")
+            }
         }
+        .accessibilityHidden(true)
     }
 
     // MARK: Other backends (SSH / OpenConnect / native IKEv2) — visible + stoppable
@@ -609,10 +618,13 @@ struct MenuBarView: View {
         HStack(spacing: 8) {
             StatusDot(state: dot)
             Text(name).lineLimit(1)
+                // The dot is hidden — its state rides here in words.
+                .accessibilityLabel("\(name), \(dot.accessibilityDescription)")
             Spacer(minLength: 8)
             Button(action: stop) { Image(systemName: "stop.circle.fill") }
                 .buttonStyle(.plain).foregroundStyle(.secondary)
                 .help("Disconnect")
+                .accessibilityLabel("Disconnect \(name)")
         }
         .padding(.horizontal, 14).padding(.vertical, 3)
     }
@@ -713,6 +725,9 @@ struct MenuBarView: View {
             }
         }
         .help(active ? "Disconnect \(comp.name)" : "Connect \(comp.name)")
+        // The bare member count would read as a mystery number.
+        .accessibilityLabel("\(comp.name), \(active ? "connected" : "disconnected"), \(comp.members.count) VPNs")
+        .accessibilityHint(active ? "Disconnects the whole group." : "Connects the whole group.")
     }
 }
 

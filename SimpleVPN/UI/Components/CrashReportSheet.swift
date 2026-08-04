@@ -82,6 +82,9 @@ struct CrashReportSheet: View {
                     CrashDiagnostics.markHandled(reports)
                     dismiss()
                 }
+                // ESC declines, same as the button — a sheet with no escape path
+                // traps keyboard and VoiceOver users.
+                .keyboardShortcut(.cancelAction)
                 Button("Report on GitHub…") { open() }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.glassProminent)

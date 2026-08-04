@@ -426,6 +426,15 @@ struct FailurePathDiagram: View {
             case .unknown: Color.gray.opacity(0.45)
             }
         }
+        /// The verdict in words for the diagram's combined accessibility value.
+        var accessibilityWord: String {
+            switch self {
+            case .ok: "OK"
+            case .failed: "failed"
+            case .portal: "sign-in page in the way"
+            case .unknown: "not checked"
+            }
+        }
     }
     private struct Hop {
         let icon: String
@@ -594,6 +603,10 @@ struct FailurePathDiagram: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(hops.compactMap(\.verdict).first ?? "Connection path")
+        // The per-hop verdicts as the element's value, so VoiceOver hears the
+        // same story the colors tell: "Your Mac: OK, this network: OK, …".
+        .accessibilityValue(hops.map { "\($0.label): \($0.state.accessibilityWord)" }
+            .joined(separator: ", "))
     }
 
     private func node(_ hop: Hop) -> some View {
