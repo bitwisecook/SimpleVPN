@@ -72,7 +72,10 @@ struct TailscaleView: View {
                         .textFieldStyle(.roundedBorder)
                         .autocorrectionDisabled()
                         .accessibilityLabel(Self.specs["ts.hostname"].name)
+                        .accessibilityValue(hostnameWarning.map { "\(draft.hostname). \($0)" } ?? draft.hostname)
                 }
+                // Non-blocking: the name is legal, it just won't survive intact.
+                if let w = hostnameWarning { SettingCaveat(w) }
             }
 
             Section("Sign-In") {
@@ -80,8 +83,11 @@ struct TailscaleView: View {
                     SecureField("Leave empty to sign in with a browser", text: $authKey)
                         .textFieldStyle(.roundedBorder)
                         .accessibilityLabel(Self.specs["ts.auth-key"].name)
-                        .accessibilityValue(authKey.isEmpty ? "not set — sign in with a browser" : "set")
+                        .accessibilityValue(authKey.isEmpty ? "not set — sign in with a browser"
+                                            : (authKeyWarning.map { "set. \($0)" } ?? "set"))
                 }
+                // Non-blocking: Headscale's keys legitimately look different.
+                if let w = authKeyWarning { SettingCaveat(w) }
                 if authKey.isEmpty {
                     Label("SimpleVPN will open a sign-in page the first time you connect. After that this Mac stays signed in.",
                           systemImage: "safari")
@@ -107,6 +113,13 @@ struct TailscaleView: View {
                 }
                 if draft.useExitNode {
                     exitNodePicker
+                    // On with nothing chosen is a tunnel that carries traffic
+                    // nowhere — say so here, and block Save and Connect.
+                    if let p = draft.exitNodeSelectionProblem {
+                        Label(p, systemImage: "exclamationmark.triangle.fill")
+                            .font(.callout).foregroundStyle(.orange)
+                            .accessibilityLabel("Problem: \(p)")
+                    }
                     Toggle("Allow local network access (printers, files)", isOn: $draft.exitNodeAllowLANAccess)
                 }
             }
@@ -211,6 +224,9 @@ struct TailscaleView: View {
                 .textFieldStyle(.roundedBorder)
                 .autocorrectionDisabled()
                 .accessibilityLabel("Exit machine address")
+                // Validation rides the field's value (Docs/Accessibility.md).
+                .accessibilityValue(TailscaleConfig.exitNodeProblem(draft.exitNode)
+                                    .map { "\(draft.exitNode). Problem: \($0)" } ?? draft.exitNode)
         } else {
             Picker("Machine", selection: $draft.exitNode) {
                 Text("Choose…").tag("")
@@ -245,10 +261,19 @@ struct TailscaleView: View {
         return list.isEmpty ? nil : TailscaleConfig.routesProblem(list)
     }
 
+    /// Non-blocking nudges (the name is legal; the key may be a Headscale one).
+    private var hostnameWarning: String? { TailscaleConfig.hostnameWarning(draft.hostname) }
+    private var authKeyWarning: String? {
+        TailscaleConfig.authKeyWarning(authKey, preset: draft.preset)
+    }
+
     private var saveDisabledReason: String? {
         if saving { return "Saving…" }
         if name.trimmingCharacters(in: .whitespaces).isEmpty { return "Give this VPN a name first." }
         if let p = draft.controlURLProblem { return p }
+        // Ungated before: saving this produced a tunnel that silently sent
+        // traffic nowhere.
+        if let p = draft.exitNodeSelectionProblem { return p }
         if let p = advertiseProblem { return p }
         return nil
     }
@@ -280,6 +305,8 @@ struct TailscaleView: View {
         saving = true
         defer { saving = false }
         draft.advertiseRoutes = TailscaleConfig.splitRoutes(advertiseText)
+        // normalized() on every save path (the OpenVPNOverrides rule).
+        draft = draft.normalized()
         do {
             try await vpn.rename(id: profileID, to: name)
             try await vpn.setTailscaleConfig(draft, for: profileID)

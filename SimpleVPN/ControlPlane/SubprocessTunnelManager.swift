@@ -89,7 +89,9 @@ final class SubprocessTunnelManager {
         // --non-inter — fail fast with the actual fix instead.
         // (Not under SSO: the token never reaches the argv there — the identity
         // provider asks for the code in the browser.)
-        if config.kind.isSSLVPN, !config.tokenMode.isEmpty,
+        // (Not for yubioath either: the code comes off the YubiKey, so there is
+        // no seed to store and requiring one would block a working setup.)
+        if config.kind.isSSLVPN, SubprocessTunnelConfig.tokenModeRequiresSecret(config.tokenMode),
            Self.openconnectAuthMode(config) != "sso",
            (KeychainCredentialStore.loadCredentials(profile: "tunnel.\(config.id).token")?.password ?? "").isEmpty {
             live[config.id] = Live(status: .failed(

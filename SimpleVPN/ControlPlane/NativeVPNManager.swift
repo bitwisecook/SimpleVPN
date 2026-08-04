@@ -35,9 +35,14 @@ struct NativeVPNConfig: Codable, Sendable, Equatable, Identifiable {
 
     // Comprehensive IKEv2 knobs (empty/nil = use the OS default). Crypto choices
     // map to NEVPNIKEv2* enums; "" means "let macOS negotiate its default".
-    var ikeEncryption = ""          // "" | aes128 | aes256 | aes128gcm | aes256gcm | 3des | chacha20poly1305
-    var ikeIntegrity = ""           // "" | sha256 | sha384 | sha512 | sha160 | sha96
-    var ikeDHGroup = ""             // "" | 14 | 15 | 16 | 19 | 20 | 21 | 31 | 2
+    //
+    // 3DES/DES, SHA-1 (sha96/sha160) and DH groups below 14 are API_OBSOLETED as
+    // of macOS 26 — the enum cases no longer exist, so they are deliberately
+    // absent from these value sets. Don't re-add them: the picker would offer a
+    // choice the apply path can only ignore.
+    var ikeEncryption = ""          // "" | aes128 | aes256 | aes128gcm | aes256gcm | chacha20poly1305
+    var ikeIntegrity = ""           // "" | sha256 | sha384 | sha512
+    var ikeDHGroup = ""             // "" | 14 | 15 | 16 | 19 | 20 | 21 | 31
     var ikeLifetimeMinutes: Int? = nil
     var deadPeerDetection = ""      // "" | none | low | medium | high
     var disableMOBIKE = false
@@ -45,6 +50,62 @@ struct NativeVPNConfig: Codable, Sendable, Equatable, Identifiable {
     var disconnectOnSleep = false
     var includeAllNetworks = false  // send *all* traffic (incl. local) into the tunnel
     var excludeLocalNetworks = true // keep LAN reachable when includeAllNetworks is on
+
+    // MARK: Legal ranges (single source of truth for UI validation)
+
+    /// `lifetimeMinutes` on both security associations. Apple's accepted window;
+    /// the OS defaults are 60 (IKE SA) and 30 (child SA). Outside this range the
+    /// value is refused when the configuration is saved, which surfaces as an
+    /// opaque "configuration invalid".
+    static let ikeLifetimeRange = 10...1440
+
+    /// Trim, and collapse an out-of-range lifetime back to "OS default" (nil).
+    /// Called from every save path, the same shape as
+    /// `OpenVPNOverrides.normalized()`.
+    func normalized() -> NativeVPNConfig {
+        var n = self
+        n.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        n.server = server.trimmingCharacters(in: .whitespacesAndNewlines)
+        n.remoteID = remoteID.trimmingCharacters(in: .whitespacesAndNewlines)
+        n.username = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        n.groupOrRealm = groupOrRealm.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let m = n.ikeLifetimeMinutes, !Self.ikeLifetimeRange.contains(m) { n.ikeLifetimeMinutes = nil }
+        return n
+    }
+
+    /// Why this server address can't be used — nil when it's fine. Save and
+    /// Connect only checked `.isEmpty`, so a typo (or a pasted URL, or a
+    /// host:port) reached NEVPNManager and came back as an IKE timeout minutes
+    /// later with nothing pointing at the field.
+    static func serverProblem(_ raw: String) -> String? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return "Enter the server's address." }
+        // An IP literal is always fine.
+        var bytes = [UInt8](repeating: 0, count: 16)
+        let isV6 = s.contains(":") && !s.contains("://")
+        if s.withCString({ inet_pton(isV6 ? AF_INET6 : AF_INET, $0, &bytes) == 1 }) { return nil }
+        if s.contains("://") {
+            return "Enter just the server's address (like vpn.example.com), not a web address."
+        }
+        if s.contains("@") {
+            return "Enter just the server's address — the username goes in the Sign-In section."
+        }
+        if s.contains("/") {
+            return "Enter just the server's address (like vpn.example.com), with nothing after it."
+        }
+        if s.contains(":") {
+            return "Enter just the server's address — IKEv2 and IPsec have no port to set."
+        }
+        if s.hasPrefix(".") || s.hasSuffix(".") || s.contains("..") {
+            return "\(s) isn't a valid server address."
+        }
+        guard s.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == ".") }) else {
+            return "\(s) isn't a valid server address — use the name or IP address your admin gave you."
+        }
+        return nil
+    }
+
+    var serverProblem: String? { Self.serverProblem(server) }
 }
 
 /// Where a native VPN's secrets live, and what saving one must do to each
@@ -142,7 +203,9 @@ final class NativeVPNManager {
 
     // MARK: CRUD (local field store; the OS holds only the connected one)
 
-    func save(_ c: NativeVPNConfig) {
+    func save(_ raw: NativeVPNConfig) {
+        // normalized() on every save path (the OpenVPNOverrides rule).
+        let c = raw.normalized()
         if let i = store.firstIndex(where: { $0.id == c.id }) { store[i] = c } else { store.append(c) }
         persist()
     }
@@ -321,22 +384,30 @@ final class NativeVPNManager {
     /// something for IPsec, not just IKEv2.
     private func applyCommonOptions(_ c: NativeVPNConfig, to p: NEVPNProtocol) {
         p.disconnectOnSleep = c.disconnectOnSleep
-        if #available(macOS 15.0, *) {
-            p.includeAllNetworks = c.includeAllNetworks
-            p.excludeLocalNetworks = c.excludeLocalNetworks
-        }
+        // NO availability gate. Both properties are API_AVAILABLE(macos(10.15))
+        // per <NetworkExtension/NEVPNProtocol.h>, and this app's deployment
+        // target is macOS 26 — the `if #available(macOS 15.0, *)` that used to
+        // wrap these was wrong on both counts (wrong version, and unreachable-
+        // false anyway). While it was there the two Traffic toggles were live in
+        // the UI and did nothing to the protocol object on any system where the
+        // check could fail, i.e. the UI could lie.
+        p.includeAllNetworks = c.includeAllNetworks
+        p.excludeLocalNetworks = c.excludeLocalNetworks
     }
 
     /// Map the comprehensive IKEv2 fields onto the protocol object; each blank
     /// value leaves the OS default in place.
     private func applyIKEv2Options(_ c: NativeVPNConfig, to p: NEVPNProtocolIKEv2) {
         applyCommonOptions(c, to: p)
+        // "" means "leave the OS default alone" — the same meaning "" carries in
+        // every other field here. It used to fall through to `.medium`, so the
+        // picker's first option said "Default" while quietly pinning a value.
         switch c.deadPeerDetection {
         case "none": p.deadPeerDetectionRate = .none
         case "low": p.deadPeerDetectionRate = .low
         case "high": p.deadPeerDetectionRate = .high
         case "medium": p.deadPeerDetectionRate = .medium
-        default: p.deadPeerDetectionRate = .medium
+        default: break
         }
         p.disableMOBIKE = c.disableMOBIKE
         for sa in [p.ikeSecurityAssociationParameters, p.childSecurityAssociationParameters] {
@@ -351,16 +422,26 @@ final class NativeVPNManager {
             case "aes256": sa.encryptionAlgorithm = .algorithmAES256
             case "aes128gcm": sa.encryptionAlgorithm = NEVPNIKEv2EncryptionAlgorithm(rawValue: 5)!
             case "aes256gcm": sa.encryptionAlgorithm = .algorithmAES256GCM
-            case "chacha20poly1305": if #available(macOS 14.0, *) { sa.encryptionAlgorithm = .algorithmChaCha20Poly1305 }
-            default: break   // 3DES etc. are unavailable on macOS — OS default stands
+            // NEVPNIKEv2EncryptionAlgorithmChaCha20Poly1305 is
+            // API_AVAILABLE(macos(10.15)) — the `if #available(macOS 14.0, *)`
+            // that used to wrap this was wrong, and with a macOS 26 deployment
+            // target it was also unreachable-false-free. Either way the picker
+            // needs no filtering: every listed cipher is applied on every system
+            // this app runs on.
+            case "chacha20poly1305": sa.encryptionAlgorithm = .algorithmChaCha20Poly1305
+            default: break   // "" — the OS default stands
             }
             switch c.ikeIntegrity {
             case "sha256": sa.integrityAlgorithm = .SHA256
             case "sha384": sa.integrityAlgorithm = .SHA384
             case "sha512": sa.integrityAlgorithm = .SHA512
-            default: break   // SHA-1 variants are unavailable on macOS
+            default: break   // "" — the OS default stands (SHA-1 is obsoleted)
             }
-            if let m = c.ikeLifetimeMinutes { sa.lifetimeMinutes = Int32(m) }
+            // Out of range would be refused by saveToPreferences as an opaque
+            // "configuration invalid"; normalized() has already dropped one.
+            if let m = c.ikeLifetimeMinutes, NativeVPNConfig.ikeLifetimeRange.contains(m) {
+                sa.lifetimeMinutes = Int32(m)
+            }
         }
         // The DH group picker always sets the IKE SA's group (or leaves the OS
         // default on "Automatic"). The child SA's diffieHellmanGroup is what

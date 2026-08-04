@@ -160,6 +160,33 @@ extension ProxyTunnelConfig {
 
 extension ProxyTunnelConfig {
 
+    // MARK: Legal ranges (single source of truth for UI validation)
+
+    /// A TCP port. 0 is not "auto" for a proxy — there is nothing to connect to.
+    nonisolated static let portRange = 1...65535
+    /// utun MTU. The floor is IPv4's minimum reassembly buffer; the ceiling is
+    /// standard Ethernet. Flows are re-dialled as fresh TCP, so the engine is
+    /// forgiving here — but a value outside this can't be carried by the link.
+    nonisolated static let mtuRange = 576...1500
+
+    /// Trim, drop empties, and pull numbers back into range — called from every
+    /// save path, the same shape as `OpenVPNOverrides.normalized()`, so the
+    /// stored value can never be one the editor's own ranges would refuse.
+    nonisolated func normalized() -> ProxyTunnelConfig {
+        var n = self
+        n.upstream = upstream.trimmingCharacters(in: .whitespacesAndNewlines)
+        func cleanList(_ l: [String]) -> [String] {
+            l.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        }
+        n.includedRoutes = cleanList(includedRoutes)
+        n.excludedRoutes = cleanList(excludedRoutes)
+        n.dnsServers = cleanList(dnsServers)
+        if !Self.mtuRange.contains(n.mtu) { n.mtu = ProxyTunnelStartConfig.defaultMTU }
+        // Included routes are meaningless under a full tunnel; keep them (the
+        // user may toggle back) but never carry a stale credential-bearing URL.
+        return n
+    }
+
     /// Why this upstream URL can't be used, in the user's language — nil when
     /// it's fine. Mirrors parseUpstream() in the Go shim; both sides must agree
     /// or the editor accepts something the engine rejects.
@@ -180,6 +207,11 @@ extension ProxyTunnelConfig {
             // be persisted in providerConfiguration otherwise.
             return "Put the username and password in the sign-in fields below, not in the address."
         }
+        // URLComponents accepts "proxy.example.com:0" and "…:99999" happily; the
+        // engine's Dial then fails at connect with nothing to look at.
+        if let port = comps.port, !portRange.contains(port) {
+            return "\(port) isn't a valid port — use 1 to 65535."
+        }
         return nil
     }
 
@@ -190,6 +222,13 @@ extension ProxyTunnelConfig {
     /// Self-contained (not delegating to TailscaleConfig) because this must be
     /// nonisolated for the connect flow, and TailscaleConfig's helpers are
     /// MainActor-isolated in the app target.
+    ///
+    /// The host-bit check is NOT cosmetic here and NOT the same failure as
+    /// elsewhere: these routes become `NEIPv4Route(destinationAddress:subnetMask:)`,
+    /// and NetworkExtension does not error on host bits — it installs the MASKED
+    /// prefix. So `10.0.0.5/8` silently routes all of 10/8, which is worse than
+    /// a rejection: the user gets something other than what they typed, with no
+    /// message anywhere. Hence the same "try X/n" wording as TailscaleConfig.
     nonisolated static func routeProblem(_ raw: String) -> String? {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { return "Enter a network like 192.168.1.0/24." }
@@ -206,6 +245,9 @@ extension ProxyTunnelConfig {
         var bytes = [UInt8](repeating: 0, count: 16)
         let ok = address.withCString { inet_pton(isV6 ? AF_INET6 : AF_INET, $0, &bytes) == 1 }
         guard ok else { return "\(address) isn't a valid address." }
+        guard !hasHostBits(bytes, prefix: prefix, byteCount: isV6 ? 16 : 4) else {
+            return "\(s) isn't the start of a network — try \(masked(address: bytes, prefix: prefix, isV6: isV6))/\(prefix)."
+        }
         return nil
     }
 
@@ -215,6 +257,76 @@ extension ProxyTunnelConfig {
             if let p = routeProblem(r) { return p }
         }
         return nil
+    }
+
+    /// Why a DNS server address can't be used — nil when it's fine.
+    ///
+    /// Deliberately NOT `routeProblem`: a resolver is a single ADDRESS, so a
+    /// prefix is meaningless — `1.1.1.1/32` is not a valid nameserver, and
+    /// NEDNSSettings silently drops what it can't parse, which shows up as "DNS
+    /// just stopped working" with nothing in the UI to explain it.
+    nonisolated static func dnsServerProblem(_ raw: String) -> String? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return "Enter a DNS server address like 1.1.1.1." }
+        if s.contains("/") {
+            return "\(s) is a network, not a DNS server — enter just the address (like 1.1.1.1)."
+        }
+        let isV6 = s.contains(":")
+        var bytes = [UInt8](repeating: 0, count: 16)
+        let ok = s.withCString { inet_pton(isV6 ? AF_INET6 : AF_INET, $0, &bytes) == 1 }
+        guard ok else { return "\(s) isn't a valid DNS server address." }
+        return nil
+    }
+
+    /// First problem across the DNS-server list, or nil.
+    nonisolated static func dnsServersProblem(_ list: [String]) -> String? {
+        for d in list {
+            if let p = dnsServerProblem(d) { return p }
+        }
+        return nil
+    }
+
+    /// Non-blocking: excluded routes that overlap an included one. Legal, and
+    /// the exclusion wins — but it is never what someone means to type, so the
+    /// editor says so without stopping the save.
+    nonisolated static func routeOverlapWarning(included: [String], excluded: [String]) -> String? {
+        for e in excluded where routeProblem(e) == nil {
+            for i in included where routeProblem(i) == nil {
+                if RoutePrefixMath.overlaps(e, i) {
+                    return "\(e) overlaps \(i), which you're sending through the proxy — the exclusion wins, so that part of \(i) stays direct."
+                }
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func hasHostBits(_ bytes: [UInt8], prefix: Int, byteCount: Int) -> Bool {
+        for i in 0..<byteCount {
+            let bitsBefore = i * 8
+            if prefix >= bitsBefore + 8 { continue }          // whole byte inside the prefix
+            let keep = max(0, min(8, prefix - bitsBefore))
+            let mask: UInt8 = keep == 0 ? 0 : UInt8(truncatingIfNeeded: 0xFF << (8 - keep))
+            if bytes[i] & ~mask != 0 { return true }
+        }
+        return false
+    }
+
+    private nonisolated static func masked(address bytes: [UInt8], prefix: Int, isV6: Bool) -> String {
+        let byteCount = isV6 ? 16 : 4
+        var out = bytes
+        for i in 0..<byteCount {
+            let bitsBefore = i * 8
+            let keep = max(0, min(8, prefix - bitsBefore))
+            let mask: UInt8 = keep == 0 ? 0 : UInt8(truncatingIfNeeded: 0xFF << (8 - keep))
+            out[i] = bytes[i] & mask
+        }
+        var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+        return out.withUnsafeBytes { raw -> String in
+            guard let base = raw.baseAddress,
+                  let p = inet_ntop(isV6 ? AF_INET6 : AF_INET, base, &buf, socklen_t(INET6_ADDRSTRLEN))
+            else { return "" }
+            return String(cString: p)
+        }
     }
 
     /// Parse a comma/newline/space separated list into individual CIDR entries.
@@ -232,6 +344,10 @@ extension ProxyTunnelConfig {
         }
         if let p = Self.routesProblem(includedRoutes) { return p }
         if let p = Self.routesProblem(excludedRoutes) { return p }
+        // DNS was skipped entirely: NEDNSSettings silently drops a server it
+        // can't parse, so a typo showed up as "DNS stopped working", never as a
+        // refused connect.
+        if let p = Self.dnsServersProblem(dnsServers) { return p }
         return nil
     }
 }

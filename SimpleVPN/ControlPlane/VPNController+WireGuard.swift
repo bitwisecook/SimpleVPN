@@ -79,7 +79,10 @@ extension VPNController {
         guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
         guard let mgr = managers[id],
               let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { return }
-        var stored = config.redactedForStorage()
+        // normalized() on every save path (the OpenVPNOverrides rule): trimmed
+        // strings, no empty list entries, and out-of-range numbers collapsed to
+        // "engine default" rather than persisted for the engine to choke on.
+        var stored = config.normalized().redactedForStorage()
         stored.id = id
         var conf = proto.providerConfiguration ?? [:]
         conf["profile"] = id
@@ -149,6 +152,15 @@ extension VPNController {
         let secrets = wireGuardSecrets(for: id)
         guard !secrets.privateKey.isEmpty else {
             throw err("Set this tunnel's private key first — it's in the config your provider gave you (Manage VPNs ▸ this VPN ▸ Set / Replace Key).")
+        }
+        // The keys live in the keychain, so connectProblem can't see them: a
+        // truncated one (the classic 43-character paste) otherwise reached the
+        // engine and failed the handshake with nothing to look at.
+        if let problem = WireGuardConfig.keyProblem(secrets.privateKey) {
+            throw err("This tunnel's private key isn't usable. \(problem)")
+        }
+        if let problem = WireGuardConfig.keyProblem(secrets.presharedKey) {
+            throw err("This tunnel's pre-shared key isn't usable. \(problem)")
         }
 
         var options: [String: NSObject] = ["wgPrivateKey": secrets.privateKey as NSString]

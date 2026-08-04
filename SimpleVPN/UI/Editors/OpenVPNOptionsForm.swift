@@ -792,49 +792,5 @@ struct ManualLink: View {
     }
 }
 
-/// Numeric text field over an optional Int with range validation: empty = default
-/// (nil), out-of-range shows an inline error and stores nothing.
-private struct ValidatedNumberField<Label: View>: View {
-    @ViewBuilder let label: Label
-    let prompt: String
-    @Binding var value: Int?
-    let range: ClosedRange<Int>
-    let invalidMessage: String
-
-    @State private var text = ""
-    @State private var invalid = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            LabeledContent {
-                TextField(prompt, text: $text)
-                    .multilineTextAlignment(.trailing)
-                    .frame(maxWidth: 120).frame(maxWidth: .infinity, alignment: .trailing)
-                    .onChange(of: text) { _, newValue in commit(newValue) }
-                    .onChange(of: value) { _, newValue in
-                        // External change (Reset to Default / Reset All): resync.
-                        let shown = Int(text.trimmingCharacters(in: .whitespaces))
-                        if newValue != shown { text = newValue.map(String.init) ?? ""; invalid = false }
-                    }
-                    .onAppear { text = value.map(String.init) ?? "" }
-            } label: { label }
-            if invalid {
-                Text(invalidMessage)
-                    .font(.callout)
-                    .foregroundStyle(.red)
-                    .accessibilityLabel("Error: \(invalidMessage)")
-            }
-        }
-    }
-
-    private func commit(_ newValue: String) {
-        let trimmed = newValue.trimmingCharacters(in: .whitespaces)
-        if trimmed.isEmpty {
-            value = nil; invalid = false
-        } else if let n = Int(trimmed), range.contains(n) {
-            value = n; invalid = false
-        } else {
-            invalid = true   // keep the last good stored value
-        }
-    }
-}
+// ValidatedNumberField — the shared range-validating numeric control — now lives
+// in UI/Components/ValidatedNumberField.swift so every editor uses the same one.

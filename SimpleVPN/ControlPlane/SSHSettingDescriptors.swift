@@ -35,7 +35,7 @@ enum SSHSettings {
               group: .connection),
 
         .init(id: "ssh.connect-timeout", name: "Connect Timeout",
-              summary: "Give up connecting after this many seconds if the server doesn't answer. Empty means the system default.",
+              summary: "Give up connecting after this many seconds (1–600) if the server doesn't answer. Empty means the system default.",
               group: .connection),
 
         .init(id: "ssh.proxy-jump", name: "Jump Host",

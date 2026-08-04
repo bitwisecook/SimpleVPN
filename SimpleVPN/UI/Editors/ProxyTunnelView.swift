@@ -124,14 +124,28 @@ struct ProxyTunnelView: View {
                         .font(.callout).foregroundStyle(.orange)
                         .accessibilityLabel("Problem: \(p)")
                 }
+                // Non-blocking: an exclusion that swallows part of an inclusion
+                // is legal and does something — just rarely what was meant.
+                if let w = overlapWarning {
+                    SettingCaveat(w)
+                }
                 EngineSettingRow(spec: Self.specs["px.dns"], changed: !dnsText.isEmpty) {
                     TextField("1.1.1.1, 8.8.8.8", text: $dnsText)
                         .textFieldStyle(.roundedBorder)
                         .autocorrectionDisabled()
                         .accessibilityLabel(Self.specs["px.dns"].name)
+                        // A bad resolver is the FIELD's problem — NE just drops
+                        // it, and DNS stops with nothing said anywhere.
+                        .accessibilityValue(dnsProblem.map { "\(dnsText). Problem: \($0)" } ?? dnsText)
+                }
+                if let p = dnsProblem {
+                    Label(p, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout).foregroundStyle(.orange)
+                        .accessibilityLabel("Problem: \(p)")
                 }
                 EngineSettingRow(spec: Self.specs["px.mtu"], changed: draft.mtu != ProxyTunnelStartConfig.defaultMTU) {
-                    Stepper("MTU: \(draft.mtu)", value: $draft.mtu, in: 576...1500, step: 4)
+                    Stepper("MTU: \(draft.mtu)", value: $draft.mtu,
+                            in: ProxyTunnelConfig.mtuRange, step: 4)
                         .accessibilityLabel("MTU")
                         .accessibilityValue("\(draft.mtu)")
                 }
@@ -204,6 +218,18 @@ struct ProxyTunnelView: View {
         let list = ProxyTunnelConfig.splitRoutes(excludedText)
         return list.isEmpty ? nil : ProxyTunnelConfig.routesProblem(list)
     }
+    /// A resolver is an ADDRESS, never a prefix — see `dnsServerProblem`.
+    private var dnsProblem: String? {
+        let list = ProxyTunnelConfig.splitRoutes(dnsText)
+        return list.isEmpty ? nil : ProxyTunnelConfig.dnsServersProblem(list)
+    }
+    /// Non-blocking, and only once both lists parse.
+    private var overlapWarning: String? {
+        guard includedProblem == nil, excludedProblem == nil else { return nil }
+        return ProxyTunnelConfig.routeOverlapWarning(
+            included: ProxyTunnelConfig.splitRoutes(includedText),
+            excluded: ProxyTunnelConfig.splitRoutes(excludedText))
+    }
 
     /// The upstream URL assembled from the preset scheme and the address field.
     private var composedUpstream: String {
@@ -225,6 +251,7 @@ struct ProxyTunnelView: View {
         }
         if let p = includedProblem { return p }
         if let p = excludedProblem { return p }
+        if let p = dnsProblem { return p }
         return nil
     }
 
@@ -267,6 +294,8 @@ struct ProxyTunnelView: View {
         draft.includedRoutes = ProxyTunnelConfig.splitRoutes(includedText)
         draft.excludedRoutes = ProxyTunnelConfig.splitRoutes(excludedText)
         draft.dnsServers = ProxyTunnelConfig.splitRoutes(dnsText)
+        // normalized() on every save path (the OpenVPNOverrides rule).
+        draft = draft.normalized()
         do {
             try await vpn.rename(id: profileID, to: name)
             try await vpn.setProxyTunnelConfig(draft, for: profileID)

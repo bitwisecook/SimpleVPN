@@ -161,9 +161,23 @@ struct TailscaleConfigTests {
     // MARK: Advertised-CIDR validation (must mirror parseRoutes in main.go)
 
     @Test func validNetworksAreAccepted() {
-        for good in ["192.168.1.0/24", "10.0.0.0/8", "fd00::/8", "0.0.0.0/0"] {
+        for good in ["192.168.1.0/24", "10.0.0.0/8", "fd00::/8", "0.0.0.0/1"] {
             #expect(TailscaleConfig.routeProblem(good) == nil, "\(good) should be accepted")
         }
+    }
+
+    /// `0.0.0.0/0` passed every other check and was then refused by the control
+    /// server ("use --advertise-exit-node"), i.e. a silent connect failure. It's
+    /// rejected here, and the message points at the setting that does what the
+    /// user wanted.
+    @Test func advertisingEverythingIsRejectedAndPointsAtTheExitNodeSetting() throws {
+        #expect(TailscaleConfig.advertisePrefixLengthRange.lowerBound == 1)
+        for zero in ["0.0.0.0/0", "::/0"] {
+            let problem = try #require(TailscaleConfig.routeProblem(zero), "\(zero) should be rejected")
+            #expect(problem.localizedCaseInsensitiveContains("internet traffic"))
+        }
+        // /1 is not the same mistake — it's merely unusual, and legal.
+        #expect(TailscaleConfig.routeProblem("128.0.0.0/1") == nil)
     }
 
     @Test func hostBitsAreRejectedWithTheCorrectedSuggestion() throws {
@@ -183,6 +197,91 @@ struct TailscaleConfigTests {
         #expect(TailscaleConfig.splitRoutes("  ").isEmpty)
         #expect(TailscaleConfig.routesProblem(["10.0.0.0/8", "nonsense"]) != nil)
         #expect(TailscaleConfig.routesProblem([]) == nil)
+    }
+
+    // MARK: Exit node (a tunnel that blackholes everything, previously ungated)
+
+    /// Three shapes are legal because all three are what people have to hand:
+    /// the machine's tailnet address, its stable node id, or its name.
+    @Test func exitNodeAcceptsAnAddressAnIdOrAName() {
+        for good in ["100.64.0.1", "100.101.102.103", "100.127.255.254",
+                     "nabc123CDEF", "office-mac", "office-mac.tail1234.ts.net",
+                     "fd7a:115c:a1e0::1"] {
+            #expect(TailscaleConfig.exitNodeProblem(good) == nil, "\(good) should be accepted")
+        }
+        // Empty is "nothing chosen" — that's the toggle's question, not this one's.
+        #expect(TailscaleConfig.exitNodeProblem("") == nil)
+        #expect(TailscaleConfig.exitNodeProblem("   ") == nil)
+    }
+
+    @Test func exitNodeRejectsNetworksAndAddressesOffThisNetwork() throws {
+        // A network, not a machine.
+        #expect(TailscaleConfig.exitNodeProblem("100.64.0.0/10") != nil)
+        // A real address, but not one this network hands out.
+        let problem = try #require(TailscaleConfig.exitNodeProblem("8.8.8.8"))
+        #expect(problem.contains("100.64"))
+        #expect(TailscaleConfig.exitNodeProblem("192.168.1.10") != nil)
+        #expect(TailscaleConfig.exitNodeProblem("100.63.255.255") != nil)  // just below the range
+        #expect(TailscaleConfig.exitNodeProblem("100.128.0.0") != nil)     // just above it
+        #expect(TailscaleConfig.exitNodeProblem("what is this") != nil)
+    }
+
+    /// The setting switched ON with nothing chosen started a tunnel that sent
+    /// traffic NOWHERE — no default route to any machine, and no direct path
+    /// either. Neither Save nor Connect checked it.
+    @Test func exitNodeOnWithNothingChosenIsBlocked() throws {
+        var c = TailscaleConfig()
+        #expect(c.exitNodeSelectionProblem == nil)              // off: nothing to check
+        c.useExitNode = true
+        let problem = try #require(c.exitNodeSelectionProblem)
+        #expect(!problem.isEmpty)
+        c.exitNode = "100.64.0.9"
+        #expect(c.exitNodeSelectionProblem == nil)
+        c.exitNode = "8.8.8.8"
+        #expect(c.exitNodeSelectionProblem != nil)              // chosen, but not a machine here
+        // Switching the feature off stops it mattering again.
+        c.useExitNode = false
+        #expect(c.exitNodeSelectionProblem == nil)
+    }
+
+    // MARK: Non-blocking warnings
+
+    @Test func hostnamesThatTailscaleWouldRewriteAreWarnedAboutNotBlocked() {
+        #expect(TailscaleConfig.hostnameWarning("") == nil)
+        #expect(TailscaleConfig.hostnameWarning("jims-mac") == nil)
+        #expect(TailscaleConfig.hostnameWarning("mac2") == nil)
+        // Tailscale silently sanitizes these, so the admin page shows a
+        // different name than the one typed here.
+        #expect(TailscaleConfig.hostnameWarning("Jim's MacBook Pro") != nil)
+        #expect(TailscaleConfig.hostnameWarning("mac_underscore") != nil)
+        #expect(TailscaleConfig.hostnameWarning(String(repeating: "a", count: 64)) != nil)
+        #expect(TailscaleConfig.hostnameWarning(
+            String(repeating: "a", count: TailscaleConfig.hostnameMaxLength)) == nil)
+    }
+
+    @Test func anAuthKeyThatDoesNotLookLikeOneIsANudgeNotABlock() {
+        #expect(TailscaleConfig.authKeyWarning("tskey-auth-abc123", preset: .tailscale) == nil)
+        #expect(TailscaleConfig.authKeyWarning("", preset: .tailscale) == nil)
+        #expect(TailscaleConfig.authKeyWarning("abc123", preset: .tailscale) != nil)
+        // Headscale's keys legitimately look different — never warn there.
+        #expect(TailscaleConfig.authKeyWarning("abc123", preset: .headscale) == nil)
+    }
+
+    @Test func normalizedTrimsEverythingAndKeepsTheChosenExitNode() {
+        var c = TailscaleConfig()
+        c.controlURL = "  https://hs.example.com  "
+        c.hostname = " office-mac\n"
+        c.exitNode = " 100.64.0.9 "
+        c.advertiseRoutes = [" 10.0.0.0/8 ", "", "   "]
+        let n = c.normalized()
+        #expect(n.controlURL == "https://hs.example.com")
+        #expect(n.hostname == "office-mac")
+        #expect(n.exitNode == "100.64.0.9")
+        #expect(n.advertiseRoutes == ["10.0.0.0/8"])
+        // The chosen machine is KEPT when the toggle is off — the start payload
+        // already refuses to send it, and clearing it would throw away a choice.
+        #expect(!n.useExitNode)
+        #expect(n.normalized().exitNode == "100.64.0.9")
     }
 
     // MARK: State machine

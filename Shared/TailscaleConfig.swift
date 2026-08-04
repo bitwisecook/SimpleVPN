@@ -119,6 +119,40 @@ extension TailscaleConfig {
 
 extension TailscaleConfig {
 
+    // MARK: Legal ranges / limits (single source of truth for UI validation)
+
+    /// A machine name is a DNS label: at most 63 characters. Tailscale sanitizes
+    /// silently (so a bad name becomes a different name than the one on screen);
+    /// Headscale may refuse outright. Hence a warning, not a block.
+    static let hostnameMaxLength = 63
+    /// The tailnet's own address space (RFC 6598 carrier-grade NAT, which is what
+    /// Tailscale hands out) — the range a machine address must fall inside.
+    static let tailnetPrefix = "100.64.0.0/10"
+    /// Advertised prefix lengths. /0 is DELIBERATELY excluded: Tailscale and
+    /// Headscale both refuse `0.0.0.0/0` as an advertised route and tell you to
+    /// advertise an exit node instead, so accepting it here is a silent
+    /// connect failure.
+    static let advertisePrefixLengthRange = 1...128
+    /// What a Tailscale auth key looks like. Headscale's keys don't follow it,
+    /// so this only ever produces a warning.
+    static let authKeyPrefix = "tskey-"
+
+    /// Trim everything and drop empties — called from every save path, the same
+    /// shape as `OpenVPNOverrides.normalized()`.
+    func normalized() -> TailscaleConfig {
+        var n = self
+        n.controlURL = controlURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        n.hostname = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
+        n.exitNode = exitNode.trimmingCharacters(in: .whitespacesAndNewlines)
+        n.advertiseRoutes = advertiseRoutes
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        // `exitNode` is deliberately KEPT when the toggle is off: the start
+        // payload already refuses to send it, and clearing it here would throw
+        // away what the user picked the moment they toggled the feature off.
+        return n
+    }
+
     /// Why this control-server address can't be used, in the user's language —
     /// nil when it's fine. Mirrors validateControlURL() in the Go shim; both
     /// sides must agree or the editor accepts something the engine rejects.
@@ -171,6 +205,12 @@ extension TailscaleConfig {
         guard prefix >= 0, prefix <= maxPrefix else {
             return "\(s) has a length outside 0–\(maxPrefix)."
         }
+        // A /0 passes every other check and is then refused by the control
+        // server ("use --advertise-exit-node"), i.e. a silent connect failure.
+        // Point at the setting that actually does what they wanted.
+        guard prefix >= advertisePrefixLengthRange.lowerBound else {
+            return "\(s) covers everything, which your network won't accept as a shared network. To carry other machines' internet traffic, turn on \u{201C}Send all internet traffic through another machine\u{201D} on THOSE machines instead."
+        }
         var bytes = [UInt8](repeating: 0, count: 16)
         let ok = address.withCString { inet_pton(isV6 ? AF_INET6 : AF_INET, $0, &bytes) == 1 }
         guard ok else { return "\(address) isn't a valid address." }
@@ -178,6 +218,75 @@ extension TailscaleConfig {
             return "\(s) isn't the start of a network — try \(masked(address: bytes, prefix: prefix, isV6: isV6))/\(prefix)."
         }
         return nil
+    }
+
+    /// Why this exit machine can't be used — nil when it's fine (and nil for an
+    /// empty string; whether an empty one is ALLOWED depends on the toggle, and
+    /// that's `exitNodeSelectionProblem`'s question).
+    ///
+    /// Three shapes are legal, because all three are what people have to hand:
+    /// the machine's address in the tailnet range, its stable node id from
+    /// TSStatus (`nabc123…`), or its DNS name.
+    static func exitNodeProblem(_ raw: String) -> String? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return nil }
+        if s.contains("/") {
+            return "Enter one machine, not a network — its address (100.x.y.z), its name, or the id from your admin page."
+        }
+        // An address: it must be one of the tailnet's own.
+        var bytes = [UInt8](repeating: 0, count: 16)
+        let isV6 = s.contains(":")
+        if s.withCString({ inet_pton(isV6 ? AF_INET6 : AF_INET, $0, &bytes) == 1 }) {
+            guard !isV6 else { return nil }             // Tailscale's own fd7a:… range
+            guard RoutePrefixMath.overlaps("\(s)/32", tailnetPrefix) else {
+                return "\(s) isn't an address on this network — machines here are numbered 100.64.x.x to 100.127.x.x."
+            }
+            return nil
+        }
+        // A stable node id.
+        if s.hasPrefix("n"), s.dropFirst().allSatisfy({ $0.isLetter || $0.isNumber }), s.count > 1 {
+            return nil
+        }
+        // Otherwise it must look like a name.
+        guard s.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "." }) else {
+            return "\(s) isn't a machine address, name or id."
+        }
+        return nil
+    }
+
+    /// The exit-node setting as a whole: on with nothing chosen starts a tunnel
+    /// that sends traffic NOWHERE — no default route to any machine, and no
+    /// direct path either. Gated at Save and at Connect because it is silent.
+    var exitNodeSelectionProblem: String? {
+        guard useExitNode else { return nil }
+        if exitNode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Choose which machine carries your internet traffic — with the setting on and no machine chosen, nothing gets through."
+        }
+        return Self.exitNodeProblem(exitNode)
+    }
+
+    /// Non-blocking: Tailscale silently rewrites a machine name that isn't a
+    /// plain DNS label, so the name on the admin page stops matching the one
+    /// here; Headscale may refuse it outright.
+    static func hostnameWarning(_ raw: String) -> String? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return nil }
+        if s.count > hostnameMaxLength {
+            return "Names are cut to \(hostnameMaxLength) characters, so this Mac will appear under a shortened name."
+        }
+        if s.contains(where: { !($0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-")) }) {
+            return "Only letters, numbers and hyphens survive — anything else is replaced, so this Mac may appear under a different name than the one typed here."
+        }
+        return nil
+    }
+
+    /// Non-blocking: a Tailscale auth key starts `tskey-`. Headscale's keys
+    /// don't, so this can only ever be a nudge — most often "you pasted half
+    /// of it".
+    static func authKeyWarning(_ raw: String, preset: Preset) -> String? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty, preset == .tailscale, !s.hasPrefix(authKeyPrefix) else { return nil }
+        return "A Tailscale setup key starts with \u{201C}\(authKeyPrefix)\u{201D} — check you pasted the whole key. (Keys from your own server look different, and that's fine.)"
     }
 
     /// Parse a comma/newline/space separated list into individual entries. The

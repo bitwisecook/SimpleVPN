@@ -49,3 +49,72 @@ struct NativeVPNSecretsTests {
         #expect(NativeVPNSecrets.groupPSKProfile("abc") == "native.abc.secret")
     }
 }
+
+// MARK: - Field validation
+//
+// Save and Connect only ever checked `server.isEmpty`, so a typo'd address
+// reached NEVPNManager and came back minutes later as an opaque IKE timeout —
+// and `ikeLifetimeMinutes` had no control anywhere, so an imported value could
+// neither be seen nor corrected.
+
+struct NativeVPNConfigValidationTests {
+
+    @Test func aRealServerAddressIsAccepted() {
+        for good in ["vpn.example.com", "vpn", "192.0.2.10", "2001:db8::1",
+                     "vpn-1.eu.example.co.uk"] {
+            #expect(NativeVPNConfig.serverProblem(good) == nil, "\(good) should be accepted")
+        }
+        // Whitespace from a paste is not the user's mistake.
+        #expect(NativeVPNConfig.serverProblem("  vpn.example.com \n") == nil)
+    }
+
+    @Test func aBadServerAddressIsRefusedInsteadOfTimingOut() {
+        for bad in ["", "   ", "https://vpn.example.com", "vpn.example.com/path",
+                    "vpn.example.com:4500", "user@vpn.example.com",
+                    "vpn..example.com", ".example.com", "example.com.",
+                    "vpn example com", "vpn_example.com"] {
+            #expect(NativeVPNConfig.serverProblem(bad) != nil, "\(bad) should be rejected")
+        }
+    }
+
+    /// Apple's accepted `lifetimeMinutes` window. Outside it, saveToPreferences
+    /// refuses the whole configuration as "invalid" with nothing naming the field.
+    @Test func lifetimeRangeIsApplesOwn() {
+        #expect(NativeVPNConfig.ikeLifetimeRange == 10...1440)
+        #expect(!NativeVPNConfig.ikeLifetimeRange.contains(0))
+        #expect(!NativeVPNConfig.ikeLifetimeRange.contains(9))
+        #expect(NativeVPNConfig.ikeLifetimeRange.contains(10))
+        #expect(NativeVPNConfig.ikeLifetimeRange.contains(60))    // the OS default for the IKE SA
+        #expect(NativeVPNConfig.ikeLifetimeRange.contains(30))    // …and for the child SA
+        #expect(NativeVPNConfig.ikeLifetimeRange.contains(1440))
+        #expect(!NativeVPNConfig.ikeLifetimeRange.contains(1441))
+    }
+
+    @Test func normalizedTrimsAndDropsAnOutOfRangeLifetime() {
+        var c = NativeVPNConfig()
+        c.name = "  Work  "
+        c.server = " vpn.example.com\n"
+        c.username = " alex "
+        c.remoteID = " vpn.example.com "
+        c.groupOrRealm = " staff "
+        c.ikeLifetimeMinutes = 5
+        let n = c.normalized()
+        #expect(n.name == "Work")
+        #expect(n.server == "vpn.example.com")
+        #expect(n.username == "alex")
+        #expect(n.remoteID == "vpn.example.com")
+        #expect(n.groupOrRealm == "staff")
+        #expect(n.ikeLifetimeMinutes == nil)                     // back to the OS default
+        c.ikeLifetimeMinutes = 480
+        #expect(c.normalized().ikeLifetimeMinutes == 480)
+        c.ikeLifetimeMinutes = 100_000
+        #expect(c.normalized().ikeLifetimeMinutes == nil)
+    }
+
+    /// The picker's first option is "" and must mean "leave macOS's own choice
+    /// alone" — it used to be applied as `.medium`, so the option named a state
+    /// it didn't produce.
+    @Test func deadPeerDetectionDefaultIsAnEmptyString() {
+        #expect(NativeVPNConfig().deadPeerDetection.isEmpty)
+    }
+}

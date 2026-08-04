@@ -99,10 +99,137 @@ struct WireGuardStartConfigTests {
         #expect(WireGuardConfig.routeProblem("10.0.0.0") != nil)
     }
 
+    // MARK: Key validation (the commonest real-world WireGuard failure)
+
+    /// A base64 key of exactly 32 bytes, the only length WireGuard accepts.
+    private static func validKey(_ byte: UInt8 = 1) -> String {
+        Data(repeating: byte, count: WireGuardConfig.keyByteCount).base64EncodedString()
+    }
+
+    @Test func aRealKeyIsAccepted() {
+        let key = Self.validKey()
+        #expect(key.count == 44)                               // 43 + one "=" of padding
+        #expect(WireGuardConfig.keyProblem(key) == nil)
+        // Surrounding whitespace from a paste is not the user's mistake.
+        #expect(WireGuardConfig.keyProblem("  \(key)\n") == nil)
+        // Empty is "not set", a different question — never this one's problem.
+        #expect(WireGuardConfig.keyProblem("") == nil)
+        #expect(WireGuardConfig.keyProblem("   ") == nil)
+    }
+
+    /// THE real-world case: a 43-character paste — the key copied without its
+    /// trailing "=". Every layer accepted it until the handshake, which failed
+    /// silently.
+    @Test func aTruncatedKeyIsRejected() throws {
+        let key = Self.validKey()
+        let truncated = String(key.dropLast())                 // 43 chars, no padding
+        #expect(truncated.count == 43)
+        let problem = try #require(WireGuardConfig.keyProblem(truncated))
+        #expect(!problem.isEmpty)
+        // Wrong length in the other direction too.
+        #expect(WireGuardConfig.keyProblem(
+            Data(repeating: 2, count: 16).base64EncodedString()) != nil)
+        #expect(WireGuardConfig.keyProblem(
+            Data(repeating: 2, count: 64).base64EncodedString()) != nil)
+        // Not base64 at all.
+        #expect(WireGuardConfig.keyProblem("PUB") != nil)
+        #expect(WireGuardConfig.keyProblem("not a key at all!!") != nil)
+    }
+
+    // MARK: Interface addresses are NOT routes
+
+    /// `10.0.0.2/24` is a perfectly ordinary tunnel address — the prefix
+    /// describes the on-link network, not a route — so the host-bit check that
+    /// belongs on Allowed IPs must never run here. Refusing what the engine
+    /// accepts is the other half of the rule.
+    @Test func interfaceAddressesMayCarryHostBits() {
+        for good in ["10.0.0.2/32", "10.0.0.2/24", "10.0.0.2", "fd00::2/64", "fd00::2",
+                     "192.168.1.55/16", "0.0.0.0/0"] {
+            #expect(WireGuardConfig.interfaceAddressProblem(good) == nil, "\(good) should be accepted")
+        }
+        // The contrast that motivates the separate validator.
+        #expect(WireGuardConfig.routeProblem("10.0.0.2/24") != nil)
+        #expect(WireGuardConfig.interfaceAddressProblem("10.0.0.2/24") == nil)
+    }
+
+    @Test func malformedInterfaceAddressesAreRejected() {
+        for bad in ["", "  ", "banana", "10.0.0.2/33", "fd00::2/129", "10.0.0.2/-1",
+                    "10.0.0.2/x", "999.1.1.1"] {
+            #expect(WireGuardConfig.interfaceAddressProblem(bad) != nil, "\(bad) should be rejected")
+        }
+        #expect(WireGuardConfig.addressesProblem(["10.0.0.2/32", "banana"]) != nil)
+        #expect(WireGuardConfig.addressesProblem(["10.0.0.2/32", "fd00::2/64"]) == nil)
+        #expect(WireGuardConfig.addressesProblem([]) == nil)
+    }
+
+    // MARK: Ranges (the UI bound and the stored bound are the same constant)
+
+    /// The Go side only rejects `mtu <= 0` (`if mtu <= 0 { 1420 }`), so 1 was
+    /// "accepted" and produced a tunnel that dropped every packet. 1280 is the
+    /// IPv6 minimum link MTU.
+    @Test func rangeBoundariesAreTheEnginesOwn() {
+        #expect(WireGuardConfig.mtuRange == 1280...1500)
+        #expect(!WireGuardConfig.mtuRange.contains(1))
+        #expect(!WireGuardConfig.mtuRange.contains(1279))
+        #expect(WireGuardConfig.mtuRange.contains(1280))
+        #expect(WireGuardConfig.mtuRange.contains(WireGuardStartConfig.defaultMTU))
+        #expect(WireGuardConfig.mtuRange.contains(1500))
+        #expect(!WireGuardConfig.mtuRange.contains(1501))
+
+        // 0 = auto, so the port range starts there — unlike a proxy's.
+        #expect(WireGuardConfig.listenPortRange == 0...65535)
+        #expect(WireGuardConfig.listenPortRange.contains(0))
+        #expect(!WireGuardConfig.listenPortRange.contains(65536))
+        #expect(!WireGuardConfig.listenPortRange.contains(-1))
+
+        // uint16 seconds on the wire; 0 = off, 25 typical behind NAT.
+        #expect(WireGuardConfig.keepaliveRange == 0...65535)
+        #expect(WireGuardConfig.keepaliveRange.contains(0))
+        #expect(WireGuardConfig.keepaliveRange.contains(25))
+        #expect(!WireGuardConfig.keepaliveRange.contains(65536))
+
+        // Legal WireGuard, but a caveat's worth of trouble on this Mac.
+        #expect(WireGuardConfig.privilegedPortRange.contains(1))
+        #expect(WireGuardConfig.privilegedPortRange.contains(1023))
+        #expect(!WireGuardConfig.privilegedPortRange.contains(1024))
+        #expect(!WireGuardConfig.privilegedPortRange.contains(51820))
+    }
+
+    @Test func normalizedTrimsAndDropsOutOfRangeNumbers() {
+        var c = WireGuardConfig()
+        c.name = "  Home  "
+        c.endpoint = " vpn.example.com:51820\n"
+        c.peerPublicKey = " \(Self.validKey()) "
+        c.addresses = ["10.0.0.2/32", "", "  "]
+        c.allowedIPs = [" 0.0.0.0/0 ", ""]
+        c.dns = ["", " 1.1.1.1"]
+        c.mtu = 1                      // "accepted" by the engine, drops every packet
+        c.listenPort = 70000
+        c.persistentKeepalive = 99_999
+        let n = c.normalized()
+        #expect(n.name == "Home")
+        #expect(n.endpoint == "vpn.example.com:51820")
+        #expect(n.peerPublicKey == Self.validKey())
+        #expect(n.addresses == ["10.0.0.2/32"])
+        #expect(n.allowedIPs == ["0.0.0.0/0"])
+        #expect(n.dns == ["1.1.1.1"])
+        #expect(n.mtu == nil)          // back to "engine default"
+        #expect(n.listenPort == nil)
+        #expect(n.persistentKeepalive == nil)
+        // In-range values survive untouched.
+        c.mtu = 1380; c.listenPort = 51820; c.persistentKeepalive = 25
+        let ok = c.normalized()
+        #expect(ok.mtu == 1380)
+        #expect(ok.listenPort == 51820)
+        #expect(ok.persistentKeepalive == 25)
+    }
+
     @Test func connectProblemGatesTheEssentials() {
         var c = WireGuardConfig()
         #expect(c.connectProblem != nil)                       // brand new: no peer key
         c.peerPublicKey = "PUB"
+        #expect(c.connectProblem != nil)                       // not a 32-byte key
+        c.peerPublicKey = Self.validKey()
         #expect(c.connectProblem != nil)                       // no endpoint
         c.endpoint = "vpn.example.com:51820"
         c.addresses = []
@@ -114,6 +241,17 @@ struct WireGuardStartConfigTests {
         // The private key is deliberately NOT part of connectProblem — it lives
         // in the keychain, not in this (redacted) value.
         #expect(c.connectProblem == nil)
+        // A truncated pre-shared key IS caught when one is present.
+        c.presharedKey = String(Self.validKey(2).dropLast())
+        #expect(c.connectProblem != nil)
+        c.presharedKey = Self.validKey(2)
+        #expect(c.connectProblem == nil)
+        // An interface address with host bits stays fine (it isn't a route).
+        c.presharedKey = ""
+        c.addresses = ["10.0.0.2/24"]
+        #expect(c.connectProblem == nil)
+        c.addresses = ["10.0.0.2/33"]
+        #expect(c.connectProblem != nil)
     }
 
     // MARK: Redaction invariant

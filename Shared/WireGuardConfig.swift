@@ -170,6 +170,54 @@ nonisolated extension WireGuardConfig {
 
 nonisolated extension WireGuardConfig {
 
+    // MARK: Legal ranges (single source of truth for UI validation)
+    //
+    // Mirrors OpenVPNOverrides's block: the editor's bound and the stored bound
+    // are the same constant, so they cannot drift.
+
+    /// Tunnel MTU. The floor is the IPv6 minimum link MTU (RFC 8200); the Go
+    /// side only rejects `mtu <= 0` (`if mtu <= 0 { 1420 }`), so 1 is accepted
+    /// today and produces a tunnel that drops every packet. The ceiling is
+    /// standard Ethernet — anything larger can't leave the Mac.
+    static let mtuRange = 1280...1500
+    /// Local UDP port wireguard-go binds. 0 = let the system choose one.
+    static let listenPortRange = 0...65535
+    /// Ports only root may bind. Legal WireGuard, but not for OUR extension —
+    /// hence a caveat on the row rather than a refusal.
+    static let privilegedPortRange = 1...1023
+    /// `PersistentKeepalive` is a uint16 number of seconds on the wire.
+    /// 0 = off; 25 is the usual value behind NAT.
+    static let keepaliveRange = 0...65535
+    /// A WireGuard key is a Curve25519 scalar or point — exactly 32 bytes,
+    /// which is 44 characters of base64 (43 + one "=" of padding).
+    static let keyByteCount = 32
+
+    /// Trim, drop empties, and collapse out-of-range numbers back to "engine
+    /// default" (nil). Called from every save path so the stored value can
+    /// never be one the editor's own ranges would refuse — the same shape as
+    /// `OpenVPNOverrides.normalized()`.
+    func normalized() -> WireGuardConfig {
+        var n = self
+        func clean(_ s: String) -> String { s.trimmingCharacters(in: .whitespacesAndNewlines) }
+        func cleanList(_ l: [String]) -> [String] {
+            l.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        }
+        n.name = clean(name)
+        n.endpoint = clean(endpoint)
+        n.peerPublicKey = clean(peerPublicKey)
+        n.privateKey = clean(privateKey)
+        n.presharedKey = clean(presharedKey)
+        n.fwMark = clean(fwMark)
+        n.table = clean(table)
+        n.addresses = cleanList(addresses)
+        n.allowedIPs = cleanList(allowedIPs)
+        n.dns = cleanList(dns)
+        if let v = n.mtu, !Self.mtuRange.contains(v) { n.mtu = nil }
+        if let v = n.listenPort, !Self.listenPortRange.contains(v) { n.listenPort = nil }
+        if let v = n.persistentKeepalive, !Self.keepaliveRange.contains(v) { n.persistentKeepalive = nil }
+        return n
+    }
+
     /// The endpoint's host half (for serverAddress / probes / the map pin).
     var endpointHost: String {
         let s = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -265,6 +313,60 @@ nonisolated extension WireGuardConfig {
         return nil
     }
 
+    /// Why this device's own tunnel address can't be used — nil when it's fine.
+    ///
+    /// DELIBERATELY NOT `routeProblem`: an INTERFACE address legitimately carries
+    /// host bits — `10.0.0.2/24` is exactly what a provider hands you, and the
+    /// prefix there describes the on-link network, not a route. Running the
+    /// route check over this row would reject a perfectly correct config, which
+    /// is the other half of the rule (never refuse what the engine accepts).
+    /// So: a real address, and a prefix in range when one is written at all.
+    static func interfaceAddressProblem(_ raw: String) -> String? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return "Enter this device's tunnel address, like 10.0.0.2/32." }
+        let parts = s.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
+        let address = String(parts[0])
+        let isV6 = address.contains(":")
+        var bytes = [UInt8](repeating: 0, count: 16)
+        let ok = address.withCString { inet_pton(isV6 ? AF_INET6 : AF_INET, $0, &bytes) == 1 }
+        guard ok else { return "\(address) isn't a valid address." }
+        // A bare address is fine — wg-quick and the settings builder both give
+        // it a host prefix. Only a prefix that IS written gets range-checked.
+        if parts.count == 2 {
+            let maxPrefix = isV6 ? 128 : 32
+            guard let prefix = Int(parts[1]), prefix >= 0, prefix <= maxPrefix else {
+                return "\(s) has a length outside 0\u{2013}\(maxPrefix)."
+            }
+        }
+        return nil
+    }
+
+    /// First problem across the interface-address list, or nil.
+    static func addressesProblem(_ list: [String]) -> String? {
+        for a in list {
+            if let p = interfaceAddressProblem(a) { return p }
+        }
+        return nil
+    }
+
+    /// Why a base64 key can't be used — nil when it decodes to exactly 32 bytes
+    /// (and nil for an empty string: "not set" is a different question, asked by
+    /// whoever needs the key). An empty-handed 43-character paste — a key copied
+    /// without its trailing "=" — is THE commonest real-world WireGuard mistake,
+    /// and today it reaches the engine and fails the handshake with nothing for
+    /// the user to look at.
+    static func keyProblem(_ raw: String) -> String? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return nil }
+        guard let data = Data(base64Encoded: s) else {
+            return "That isn't a valid key \u{2014} a WireGuard key is 44 characters of base64, ending in \u{201C}=\u{201D}."
+        }
+        guard data.count == Self.keyByteCount else {
+            return "A WireGuard key is exactly \(Self.keyByteCount) bytes \u{2014} 44 characters of base64, ending in \u{201C}=\u{201D}. This one decodes to \(data.count) byte\(data.count == 1 ? "" : "s"); check the whole key was copied."
+        }
+        return nil
+    }
+
     /// Why the whole config can't connect (the connect-flow gate), or nil.
     /// Deliberately does NOT check the private key: that lives in the keychain,
     /// not in this (redacted) value — the connect flow checks it separately.
@@ -272,14 +374,21 @@ nonisolated extension WireGuardConfig {
         if peerPublicKey.trimmingCharacters(in: .whitespaces).isEmpty {
             return "Enter the server peer's public key."
         }
+        // A truncated key is accepted by every layer until the handshake, where
+        // it fails silently — so it's refused here, with the endpoint.
+        if let p = Self.keyProblem(peerPublicKey) { return p }
         if let p = Self.endpointProblem(endpoint) { return p }
         if addresses.isEmpty {
             return "Add this device's tunnel address (like 10.0.0.2/32) — it's in the config your provider gave you."
         }
+        if let p = Self.addressesProblem(addresses) { return p }
         if allowedIPs.isEmpty {
             return "Add at least one allowed network (0.0.0.0/0, ::/0 sends everything)."
         }
         if let p = Self.routesProblem(allowedIPs) { return p }
+        // Only when one is actually present in this (usually redacted) copy —
+        // the connect flow validates what the user typed separately.
+        if let p = Self.keyProblem(presharedKey) { return p }
         return nil
     }
 }
@@ -388,7 +497,10 @@ final class WireGuardStore {
     /// this profile's "wg.<id>" identity, and only a redacted copy is persisted.
     /// Callers that need the real values back (export, doctor/probe) use
     /// `WireGuardConfig.withSecretsFromKeychain()`.
-    func save(_ c: WireGuardConfig) {
+    func save(_ raw: WireGuardConfig) {
+        // Normalize on the way in (every save path does) so a stored value can
+        // never be one the editor's own ranges would refuse.
+        let c = raw.normalized()
         if !c.privateKey.isEmpty || !c.presharedKey.isEmpty {
             try? KeychainCredentialStore.saveCredentials(
                 profile: c.keychainProfile,

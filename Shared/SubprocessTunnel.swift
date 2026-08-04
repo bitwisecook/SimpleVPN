@@ -153,6 +153,101 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     var preferInProcess = false
 
     var isDefault: Bool { self == SubprocessTunnelConfig(id: id) }
+
+    // MARK: Legal ranges & closed value sets
+    //
+    // Single source of truth for UI validation, mirroring OpenVPNOverrides's
+    // block: the editor's bound and the stored bound are the same constant, so
+    // they cannot drift. Every bound below is the tool's own — ssh_config(5) for
+    // the ssh.* fields, openconnect(8) for the oc.* ones.
+
+    /// Any TCP port. 0 is not "auto" here — ssh would refuse it.
+    static let portRange = 1...65535
+    /// The local SOCKS listener binds without root, so the floor is 1024.
+    static let socksPortRange = 1024...65535
+    /// `-o ConnectTimeout`. 0 means "the system's own", which ssh spells by
+    /// leaving the option out — so the floor is 1, and empty means default.
+    static let connectTimeoutRange = 1...600
+    /// `-o ServerAliveInterval`. 0 turns keepalives off.
+    static let keepaliveRange = 0...86_400
+    /// `--mtu`: the TUNNEL's MTU. Floor is IPv4's minimum reassembly buffer
+    /// (RFC 791); ceiling is standard Ethernet — the tunnel rides an IP path.
+    static let ocMTURange = 576...1500
+    /// `--base-mtu`: the MTU of the PATH, which may be a jumbo-frame link.
+    static let baseMTURange = 576...9000
+    /// `--reconnect-timeout`, seconds. 0 = give up immediately.
+    static let reconnectTimeoutRange = 0...86_400
+    /// `--force-dpd`, seconds. 0 = leave the protocol's own rate.
+    static let forceDPDRange = 0...3600
+
+    /// Exactly what `--os=` accepts (openconnect's `openconnect_set_reported_os`).
+    /// Free text here meant a typo was accepted and then rejected by the tool at
+    /// startup with an opaque error.
+    static let spoofOSValues = ["linux", "linux-64", "win", "mac-intel", "android", "apple-ios"]
+    /// Exactly what `--token-mode=` accepts, minus "" (= none).
+    static let tokenModeValues = ["totp", "hotp", "oidc", "rsa", "yubioath"]
+
+    /// Whether a token mode needs a stored seed. `yubioath` reads the code off
+    /// the YubiKey itself — requiring a seed for it would block a working
+    /// configuration, which is the other half of the validation rule.
+    static func tokenModeRequiresSecret(_ mode: String) -> Bool {
+        !mode.isEmpty && mode != "yubioath"
+    }
+
+    /// Trim, and collapse out-of-range numbers back to "tool default" (nil) or
+    /// the documented fallback. Called from every save path, the same shape as
+    /// `OpenVPNOverrides.normalized()`.
+    func normalized() -> SubprocessTunnelConfig {
+        var n = self
+        func clean(_ s: String) -> String { s.trimmingCharacters(in: .whitespacesAndNewlines) }
+        n.name = clean(name)
+        n.server = clean(server)
+        n.username = clean(username)
+        n.jumpHost = clean(jumpHost)
+        n.jumpUsername = clean(jumpUsername)
+        n.identityFile = clean(identityFile)
+        n.jumpIdentityFile = clean(jumpIdentityFile)
+        n.realm = clean(realm)
+        n.caFile = clean(caFile)
+        n.clientCertFile = clean(clientCertFile)
+        n.clientKeyFile = clean(clientKeyFile)
+        n.csdWrapper = clean(csdWrapper)
+        n.proxyURL = clean(proxyURL)
+        n.proxyUsername = clean(proxyUsername)
+        n.trustedCertSHA256 = clean(trustedCertSHA256)
+        n.usergroup = clean(usergroup)
+        n.localHostname = clean(localHostname)
+        n.userAgent = clean(userAgent)
+        n.versionString = clean(versionString)
+        n.forwards = forwards.map(clean).filter { !$0.isEmpty }
+        n.sshExtraOptions = sshExtraOptions.map(clean).filter { !$0.isEmpty }
+        n.extraArgs = extraArgs.map(clean).filter { !$0.isEmpty }
+
+        if let v = n.port, !Self.portRange.contains(v) { n.port = nil }
+        if let v = n.jumpPort, !Self.portRange.contains(v) { n.jumpPort = nil }
+        if let v = n.connectTimeout, !Self.connectTimeoutRange.contains(v) { n.connectTimeout = nil }
+        if !Self.keepaliveRange.contains(n.serverAliveInterval) { n.serverAliveInterval = 30 }
+        if !Self.socksPortRange.contains(n.socksPort) { n.socksPort = 1080 }
+        if let v = n.ocMTU, !Self.ocMTURange.contains(v) { n.ocMTU = nil }
+        if let v = n.baseMTU, !Self.baseMTURange.contains(v) { n.baseMTU = nil }
+        if let v = n.reconnectTimeout, !Self.reconnectTimeoutRange.contains(v) { n.reconnectTimeout = nil }
+        if let v = n.forceDPD, !Self.forceDPDRange.contains(v) { n.forceDPD = nil }
+        // A value the tool would reject at startup is not worth persisting.
+        if !n.spoofOS.isEmpty, !Self.spoofOSValues.contains(n.spoofOS) { n.spoofOS = "" }
+        if !n.tokenMode.isEmpty, !Self.tokenModeValues.contains(n.tokenMode) { n.tokenMode = "" }
+        return n
+    }
+
+    /// Non-blocking: a path that isn't there. The tool fails at startup with an
+    /// opaque error, so saying it here is cheap and high-signal — but it is a
+    /// WARNING, never a block: the file may be created, mounted or synced
+    /// between now and the next connect.
+    static func missingFileWarning(_ path: String) -> String? {
+        let p = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !p.isEmpty else { return nil }
+        return FileManager.default.fileExists(atPath: (p as NSString).expandingTildeInPath)
+            ? nil : "No file at that path."
+    }
 }
 
 extension VPNKind {
@@ -205,7 +300,9 @@ final class SubprocessTunnelStore {
 
     init() { load() }
 
-    func save(_ t: SubprocessTunnelConfig) {
+    func save(_ raw: SubprocessTunnelConfig) {
+        // normalized() on every save path (the OpenVPNOverrides rule).
+        let t = raw.normalized()
         if let i = tunnels.firstIndex(where: { $0.id == t.id }) { tunnels[i] = t }
         else { tunnels.append(t) }
         persist()

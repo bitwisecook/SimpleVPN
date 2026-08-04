@@ -71,6 +71,101 @@ struct ProxyTunnelConfigTests {
         #expect(ProxyTunnelConfig.upstreamProblem("socks5://") != nil)             // no host
         // Credentials in the URL are refused — they'd land in providerConfiguration.
         #expect(ProxyTunnelConfig.upstreamProblem("socks5://user:pass@host:1080") != nil)
+        // A port outside 1...65535 has nothing to dial; the engine failed at
+        // connect with nothing to look at.
+        #expect(ProxyTunnelConfig.portRange == 1...65535)
+        #expect(ProxyTunnelConfig.upstreamProblem("socks5://host:0") != nil)
+        #expect(ProxyTunnelConfig.upstreamProblem("socks5://host:99999") != nil)
+        #expect(ProxyTunnelConfig.upstreamProblem("socks5://host:1") == nil)
+        #expect(ProxyTunnelConfig.upstreamProblem("socks5://host:65535") == nil)
+    }
+
+    // MARK: Route validation — the host-bit REGRESSION
+    //
+    // routeProblem's doc comment always claimed "no host bits set" and the code
+    // never checked. That mattered more here than anywhere else: px routes become
+    // NEIPv4Route(destinationAddress:subnetMask:), and NE does not error on host
+    // bits — it installs the MASKED prefix. So the user got something other than
+    // what they typed, silently. Mirrors the Tailscale test of the same name.
+
+    @Test func validNetworksAreAccepted() {
+        for good in ["192.168.1.0/24", "10.0.0.0/8", "0.0.0.0/0", "fd00::/8", "::/0"] {
+            #expect(ProxyTunnelConfig.routeProblem(good) == nil, "\(good) should be accepted")
+        }
+    }
+
+    @Test func hostBitsAreRejectedWithTheCorrectedSuggestion() throws {
+        let problem = try #require(ProxyTunnelConfig.routeProblem("192.168.1.7/24"))
+        #expect(problem.contains("192.168.1.0/24"))
+        let v6 = try #require(ProxyTunnelConfig.routeProblem("fd00::1/8"))
+        #expect(v6.contains("fd00::/8"))
+        // …and the whole-list helper carries it through.
+        #expect(ProxyTunnelConfig.routesProblem(["10.0.0.0/8", "10.1.2.3/16"]) != nil)
+        #expect(ProxyTunnelConfig.routesProblem(["10.0.0.0/8", "192.168.0.0/16"]) == nil)
+    }
+
+    @Test func malformedNetworksAreRejected() {
+        for bad in ["192.168.1.0", "banana", "10.0.0.0/33", "10.0.0.0/-1", "/24", "999.1.1.0/24", ""] {
+            #expect(ProxyTunnelConfig.routeProblem(bad) != nil, "\(bad) should be rejected")
+        }
+    }
+
+    // MARK: DNS servers (had NO validation at all — NE silently dropped them)
+
+    @Test func dnsServersAreAddressesNotNetworks() {
+        for good in ["1.1.1.1", "8.8.4.4", "2606:4700:4700::1111", "fd00::53"] {
+            #expect(ProxyTunnelConfig.dnsServerProblem(good) == nil, "\(good) should be accepted")
+        }
+        // A prefix is meaningless for a resolver — deliberately NOT routeProblem.
+        #expect(ProxyTunnelConfig.dnsServerProblem("1.1.1.1/32") != nil)
+        #expect(ProxyTunnelConfig.dnsServerProblem("10.0.0.0/8") != nil)
+        // Neither is a hostname, or nothing at all.
+        for bad in ["", "  ", "dns.example.com", "1.1.1", "999.1.1.1", "banana"] {
+            #expect(ProxyTunnelConfig.dnsServerProblem(bad) != nil, "\(bad) should be rejected")
+        }
+        #expect(ProxyTunnelConfig.dnsServersProblem([]) == nil)
+        #expect(ProxyTunnelConfig.dnsServersProblem(["1.1.1.1", "8.8.8.8"]) == nil)
+        #expect(ProxyTunnelConfig.dnsServersProblem(["1.1.1.1", "1.1.1.1/32"]) != nil)
+    }
+
+    // MARK: Overlap (non-blocking — legal, but rarely what was meant)
+
+    @Test func anExclusionThatSwallowsAnInclusionIsWarnedAbout() throws {
+        let warning = try #require(ProxyTunnelConfig.routeOverlapWarning(
+            included: ["10.0.0.0/8"], excluded: ["10.1.0.0/16"]))
+        #expect(warning.contains("10.1.0.0/16"))
+        #expect(warning.contains("10.0.0.0/8"))
+        // Containment the other way round counts too.
+        #expect(ProxyTunnelConfig.routeOverlapWarning(
+            included: ["10.1.0.0/16"], excluded: ["10.0.0.0/8"]) != nil)
+        // Disjoint networks, different families, and empty lists are all silent.
+        #expect(ProxyTunnelConfig.routeOverlapWarning(
+            included: ["10.0.0.0/8"], excluded: ["192.168.0.0/16"]) == nil)
+        #expect(ProxyTunnelConfig.routeOverlapWarning(
+            included: ["10.0.0.0/8"], excluded: ["fd00::/8"]) == nil)
+        #expect(ProxyTunnelConfig.routeOverlapWarning(included: [], excluded: []) == nil)
+    }
+
+    // MARK: Ranges + normalization
+
+    @Test func normalizedTrimsAndPullsTheMTUBackIntoRange() {
+        #expect(ProxyTunnelConfig.mtuRange == 576...1500)
+        var c = ProxyTunnelConfig()
+        c.upstream = "  socks5://h:1080 "
+        c.includedRoutes = [" 10.0.0.0/8 ", "", "  "]
+        c.excludedRoutes = [""]
+        c.dnsServers = [" 1.1.1.1", ""]
+        c.mtu = 9000
+        let n = c.normalized()
+        #expect(n.upstream == "socks5://h:1080")
+        #expect(n.includedRoutes == ["10.0.0.0/8"])
+        #expect(n.excludedRoutes.isEmpty)
+        #expect(n.dnsServers == ["1.1.1.1"])
+        #expect(n.mtu == ProxyTunnelStartConfig.defaultMTU)
+        c.mtu = 1400
+        #expect(c.normalized().mtu == 1400)
+        c.mtu = 100
+        #expect(c.normalized().mtu == ProxyTunnelStartConfig.defaultMTU)
     }
 
     @Test func presetDerivesFromScheme() {
@@ -89,6 +184,15 @@ struct ProxyTunnelConfigTests {
         #expect(c.connectProblem != nil)   // nothing would be routed
         c.includedRoutes = ["10.0.0.0/8"]
         #expect(c.connectProblem == nil)
+        // DNS was skipped by the gate entirely: a typo meant "DNS stopped
+        // working" with nothing said anywhere.
+        c.dnsServers = ["1.1.1.1/32"]
+        #expect(c.connectProblem != nil)
+        c.dnsServers = ["1.1.1.1"]
+        #expect(c.connectProblem == nil)
+        // And a route with host bits is caught before it can be silently masked.
+        c.includedRoutes = ["10.1.2.3/16"]
+        #expect(c.connectProblem != nil)
     }
 
     // MARK: Lenient decoding (app ↔ extension version skew)

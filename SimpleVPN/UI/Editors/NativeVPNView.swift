@@ -34,7 +34,9 @@ struct NativeVPNView: View {
     /// otherwise a short caption naming what's missing, for both the Connect
     /// button's disabled state and a visible reason (never just a dead button).
     private var missingFieldCaption: String? {
-        if draft.server.isEmpty { return "Enter a server address to connect." }
+        // Was `.isEmpty` only: a typo'd server reached NEVPNManager and came
+        // back as an opaque IKE timeout.
+        if let p = draft.serverProblem { return p }
         switch draft.kind {
         case .ipsec:
             if sharedSecret.isEmpty { return "Enter the shared secret (PSK) to connect." }
@@ -47,6 +49,19 @@ struct NativeVPNView: View {
             }
         default: break
         }
+        return nil
+    }
+
+    /// Why this server address won't work, or nil. Shown inline AND used by both
+    /// gates — a bad address used to surface only as an opaque IKE timeout.
+    private var serverProblem: String? {
+        draft.server.isEmpty ? nil : draft.serverProblem
+    }
+
+    /// Why Save is unavailable, in the user's language, or nil.
+    private var saveDisabledReason: String? {
+        if draft.name.trimmingCharacters(in: .whitespaces).isEmpty { return "Give this VPN a name first." }
+        if let p = draft.serverProblem { return p }
         return nil
     }
 
@@ -68,7 +83,15 @@ struct NativeVPNView: View {
                     // this flag for IPsec either.
                     if draft.kind == .ipsec { draft.usesSharedSecret = true }
                 }
-                TextField("Server address", text: $draft.server, prompt: Text("vpn.example.com")).autocorrectionDisabled()
+                TextField("Server address", text: $draft.server, prompt: Text("vpn.example.com"))
+                    .autocorrectionDisabled()
+                    // Validation rides the field's value (Docs/Accessibility.md).
+                    .accessibilityValue(serverProblem.map { "\(draft.server). Problem: \($0)" } ?? draft.server)
+                if let p = serverProblem {
+                    Label(p, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout).foregroundStyle(.orange)
+                        .accessibilityLabel("Problem: \(p)")
+                }
                 if draft.kind == .ikev2 {
                     TextField("Remote identifier (optional)", text: $draft.remoteID,
                               prompt: Text("defaults to the server address"))
@@ -102,13 +125,10 @@ struct NativeVPNView: View {
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") { save() }
-                    .disabled(draft.name.isEmpty || draft.server.isEmpty)
+                    .disabled(saveDisabledReason != nil)
                     // A dead Save must say why — hover AND VoiceOver.
-                    .help(draft.name.isEmpty ? "Give this VPN a name first."
-                          : draft.server.isEmpty ? "Enter the server address first."
-                          : "Save changes to this VPN")
-                    .accessibilityValue(draft.name.isEmpty ? "unavailable — give this VPN a name first"
-                          : draft.server.isEmpty ? "unavailable — enter the server address first" : "")
+                    .help(saveDisabledReason ?? "Save changes to this VPN")
+                    .accessibilityValue(saveDisabledReason.map { "unavailable — \($0)" } ?? "")
             }
         }
     }
@@ -167,14 +187,29 @@ struct NativeVPNView: View {
             EngineSettingRow(spec: Self.specs["native.pfs"], changed: draft.enablePFS) {
                 Toggle(isOn: $draft.enablePFS) { EngineSettingLabel(spec: Self.specs["native.pfs"], changed: draft.enablePFS) }
             }
+            // The model has always applied this to BOTH security associations —
+            // there was simply no control for it anywhere, so an imported value
+            // (or one set by a future MDM key) could not be seen or changed.
+            EngineSettingRow(spec: Self.specs["native.ike-lifetime"], changed: draft.ikeLifetimeMinutes != nil) {
+                ValidatedNumberField(
+                    label: { EngineSettingLabel(spec: Self.specs["native.ike-lifetime"],
+                                                changed: draft.ikeLifetimeMinutes != nil) },
+                    prompt: "60",
+                    value: $draft.ikeLifetimeMinutes,
+                    range: NativeVPNConfig.ikeLifetimeRange,
+                    invalidMessage: "Enter a lifetime between 10 and 1440 minutes. Leave empty to keep macOS's own (60 minutes, or 30 for the data channel).")
+            }
         }
     }
 
     @ViewBuilder private var advancedSection: some View {
         Section("Advanced") {
             if draft.kind == .ikev2 {
+                // "Automatic", not "Default": "" now genuinely leaves the OS
+                // value untouched (it used to be applied as .medium, so the
+                // picker's first option named a state it didn't produce).
                 enumRow("native.dpd", $draft.deadPeerDetection, [
-                    ("", "Default"), ("none", "Off"), ("low", "Low"), ("medium", "Medium"), ("high", "High")])
+                    ("", "Automatic"), ("none", "Off"), ("low", "Low"), ("medium", "Medium"), ("high", "High")])
                 EngineSettingRow(spec: Self.specs["native.mobike"], changed: draft.disableMOBIKE) {
                     Toggle(isOn: $draft.disableMOBIKE) { EngineSettingLabel(spec: Self.specs["native.mobike"], changed: draft.disableMOBIKE) }
                 }
@@ -193,7 +228,9 @@ struct NativeVPNView: View {
         .init(id: "native.dh-group", name: "Diffie-Hellman Group",
               summary: "The key-exchange group. Higher numbers are stronger; 19–21 are elliptic-curve. Must match what the server offers."),
         .init(id: "native.dpd", name: "Dead Peer Detection",
-              summary: "How aggressively to probe whether the server is still there, to notice a dropped tunnel. Higher = faster detection, more chatter."),
+              summary: "How aggressively to probe whether the server is still there, to notice a dropped tunnel. Higher = faster detection, more chatter. Automatic leaves macOS's own choice (every 10 minutes) untouched."),
+        .init(id: "native.ike-lifetime", name: "Key Lifetime (minutes)",
+              summary: "How long each key lasts before the tunnel negotiates a fresh one, 10–1440. Leave empty for macOS's own (60 minutes, or 30 for the data channel); set it only if your admin specifies a value."),
         .init(id: "native.pfs", name: "Perfect Forward Secrecy",
               summary: "Rekey the data channel with a fresh key exchange so a stolen key can't decrypt past traffic. Enable if the server requires it."),
         .init(id: "native.mobike", name: "Disable MOBIKE",

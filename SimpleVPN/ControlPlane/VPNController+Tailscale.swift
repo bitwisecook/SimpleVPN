@@ -88,10 +88,12 @@ extension VPNController {
         return String(cleaned).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
-    func setTailscaleConfig(_ config: TailscaleConfig, for id: String) async throws {
+    func setTailscaleConfig(_ raw: TailscaleConfig, for id: String) async throws {
         guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
         guard let mgr = managers[id],
               let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { return }
+        // normalized() on every save path (the OpenVPNOverrides rule).
+        let config = raw.normalized()
         var conf = proto.providerConfiguration ?? [:]
         conf["profile"] = id
         conf["vpnType"] = VPNKind.tailscale.rawValue
@@ -132,6 +134,10 @@ extension VPNController {
         }
         let config = tailscaleConfig(for: id)
         if let problem = config.controlURLProblem { throw err(problem) }
+        // An exit node switched on with nothing chosen starts a tunnel that
+        // carries traffic nowhere — silent, and indistinguishable from "the
+        // internet is down". It was ungated at both Save and Connect.
+        if let problem = config.exitNodeSelectionProblem { throw err(problem) }
         if let problem = TailscaleConfig.routesProblem(config.advertiseRoutes) { throw err(problem) }
 
         // The auth key is a credential: it goes through startTunnel options in

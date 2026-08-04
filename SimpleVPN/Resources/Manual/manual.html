@@ -221,6 +221,7 @@
   <a href="#native-dh-group">Diffie-Hellman Group</a>
   <a href="#native-dpd">Dead Peer Detection</a>
   <a href="#native-pfs">Perfect Forward Secrecy</a>
+  <a href="#native-ike-lifetime">Key Lifetime</a>
   <a href="#native-mobike">MOBIKE</a>
   <a href="#native-include-all">Send All Traffic</a>
   <a href="#native-exclude-local">Allow Local Network Access</a>
@@ -737,12 +738,16 @@
 <p>The key-exchange group for setting up the secure channel. Higher numbers are stronger; 19–21 and 31 are elliptic-curve (fast and strong). It must match a group the server offers, or the connection fails.</p>
 
 <h2 id="native-dpd">Dead Peer Detection</h2>
-<p class="default">Default: medium.</p>
-<p>How aggressively to check the server is still reachable so a dropped tunnel is noticed quickly. Higher reacts faster at the cost of a little extra traffic; Off relies on normal timeouts.</p>
+<p class="default">Default: Automatic — macOS's own rate, a check every 10 minutes.</p>
+<p>How aggressively to check the server is still reachable so a dropped tunnel is noticed quickly. Higher reacts faster at the cost of a little extra traffic; Off relies on normal timeouts. Automatic leaves the choice to macOS rather than pinning a rate.</p>
 
 <h2 id="native-pfs">Perfect Forward Secrecy</h2>
 <p class="default">Default: off.</p>
 <p>Runs a fresh key exchange when rekeying the data channel, so compromising one key can't decrypt earlier traffic. Turn on if the server requires PFS.</p>
+
+<h2 id="native-ike-lifetime">Key Lifetime</h2>
+<p class="default">Default: macOS's own — 60 minutes for the sign-in channel, 30 for the data channel.</p>
+<p>How long each negotiated key is used before the tunnel quietly agrees a fresh one. Shorter lifetimes limit how much traffic a single stolen key could ever expose, at the cost of a little more renegotiation; longer ones do the opposite. Accepted values are 10 to 1440 minutes (24 hours). Leave it empty unless your administrator gives you a figure — the setting applies to both channels, and a value your server disagrees with shows up as a tunnel that reconnects on a timer.</p>
 
 <h2 id="native-mobike">MOBIKE</h2>
 <p class="default">Default: on.</p>

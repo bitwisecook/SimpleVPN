@@ -61,10 +61,12 @@ extension VPNController {
         return id
     }
 
-    func setProxyTunnelConfig(_ config: ProxyTunnelConfig, for id: String) async throws {
+    func setProxyTunnelConfig(_ raw: ProxyTunnelConfig, for id: String) async throws {
         guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
         guard let mgr = managers[id],
               let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { return }
+        // normalized() on every save path (the OpenVPNOverrides rule).
+        let config = raw.normalized()
         var conf = proto.providerConfiguration ?? [:]
         conf["profile"] = id
         conf["vpnType"] = VPNKind.proxyTunnel.rawValue

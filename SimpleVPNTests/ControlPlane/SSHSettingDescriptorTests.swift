@@ -88,6 +88,127 @@ struct SSHSettingDescriptorTests {
         #expect(decoded.sshKexAlgorithms == nil)
     }
 
+    // MARK: Legal ranges & closed value sets
+    //
+    // Every one of these fields was an unbounded TextField: a value the tool
+    // would refuse at startup was accepted here and surfaced as an opaque
+    // "openconnect exited 1" / "ssh: bad configuration option".
+
+    @Test func rangesAreTheToolsOwn() {
+        #expect(SubprocessTunnelConfig.portRange == 1...65535)
+        #expect(!SubprocessTunnelConfig.portRange.contains(0))
+        #expect(!SubprocessTunnelConfig.portRange.contains(65536))
+
+        // The local SOCKS listener binds without root, so the floor is 1024.
+        #expect(SubprocessTunnelConfig.socksPortRange == 1024...65535)
+        #expect(!SubprocessTunnelConfig.socksPortRange.contains(1023))
+        #expect(SubprocessTunnelConfig.socksPortRange.contains(1080))
+
+        // 0 would mean "no timeout", which ssh spells by omitting the option.
+        #expect(SubprocessTunnelConfig.connectTimeoutRange == 1...600)
+        #expect(!SubprocessTunnelConfig.connectTimeoutRange.contains(0))
+        #expect(!SubprocessTunnelConfig.connectTimeoutRange.contains(601))
+
+        #expect(SubprocessTunnelConfig.keepaliveRange.contains(0))       // 0 = off
+        #expect(SubprocessTunnelConfig.keepaliveRange.contains(30))      // the default
+
+        // The tunnel's MTU rides an IP path; the BASE MTU describes that path,
+        // which may be a jumbo-frame link — hence two different ceilings.
+        #expect(SubprocessTunnelConfig.ocMTURange == 576...1500)
+        #expect(SubprocessTunnelConfig.baseMTURange == 576...9000)
+        #expect(!SubprocessTunnelConfig.ocMTURange.contains(9000))
+        #expect(SubprocessTunnelConfig.baseMTURange.contains(9000))
+        #expect(!SubprocessTunnelConfig.baseMTURange.contains(575))
+
+        #expect(SubprocessTunnelConfig.reconnectTimeoutRange == 0...86_400)
+        #expect(SubprocessTunnelConfig.forceDPDRange == 0...3600)
+        #expect(!SubprocessTunnelConfig.forceDPDRange.contains(3601))
+    }
+
+    /// `--os=` and `--token-mode=` take closed sets. `rsa` and `yubioath` were
+    /// missing from the picker, so a working configuration couldn't be expressed.
+    @Test func closedValueSetsMatchOpenConnect() {
+        #expect(SubprocessTunnelConfig.spoofOSValues
+                == ["linux", "linux-64", "win", "mac-intel", "android", "apple-ios"])
+        #expect(SubprocessTunnelConfig.tokenModeValues
+                == ["totp", "hotp", "oidc", "rsa", "yubioath"])
+        // A YubiKey holds its own secret — demanding a seed would block a
+        // working setup, which is the other half of the validation rule.
+        #expect(SubprocessTunnelConfig.tokenModeRequiresSecret("totp"))
+        #expect(SubprocessTunnelConfig.tokenModeRequiresSecret("rsa"))
+        #expect(!SubprocessTunnelConfig.tokenModeRequiresSecret("yubioath"))
+        #expect(!SubprocessTunnelConfig.tokenModeRequiresSecret(""))
+        // Every offered value has a human label.
+        for v in SubprocessTunnelConfig.spoofOSValues {
+            #expect(!SubprocessTunnelView.spoofOSLabel(v).isEmpty)
+        }
+    }
+
+    @Test func normalizedTrimsAndDropsOutOfRangeNumbers() {
+        var c = SubprocessTunnelConfig()
+        c.name = "  Work  "
+        c.server = " vpn.example.com\n"
+        c.forwards = [" L 8080:internal:80 ", "", "  "]
+        c.extraArgs = ["", " --no-dtls "]
+        c.port = 0
+        c.jumpPort = 99_999
+        c.connectTimeout = 0
+        c.serverAliveInterval = -5
+        c.socksPort = 80
+        c.ocMTU = 9000
+        c.baseMTU = 100
+        c.reconnectTimeout = -1
+        c.forceDPD = 4000
+        c.spoofOS = "windoze"
+        c.tokenMode = "magic"
+        let n = c.normalized()
+        #expect(n.name == "Work")
+        #expect(n.server == "vpn.example.com")
+        #expect(n.forwards == ["L 8080:internal:80"])
+        #expect(n.extraArgs == ["--no-dtls"])
+        #expect(n.port == nil)
+        #expect(n.jumpPort == nil)
+        #expect(n.connectTimeout == nil)
+        #expect(n.serverAliveInterval == 30)
+        #expect(n.socksPort == 1080)
+        #expect(n.ocMTU == nil)
+        #expect(n.baseMTU == nil)
+        #expect(n.reconnectTimeout == nil)
+        #expect(n.forceDPD == nil)
+        #expect(n.spoofOS.isEmpty)          // the tool would refuse it at startup
+        #expect(n.tokenMode.isEmpty)
+
+        // In-range values survive untouched.
+        c.port = 2222; c.jumpPort = 22; c.connectTimeout = 10
+        c.serverAliveInterval = 0; c.socksPort = 1081
+        c.ocMTU = 1400; c.baseMTU = 9000; c.reconnectTimeout = 0; c.forceDPD = 30
+        c.spoofOS = "win"; c.tokenMode = "yubioath"
+        let ok = c.normalized()
+        #expect(ok.port == 2222)
+        #expect(ok.jumpPort == 22)
+        #expect(ok.connectTimeout == 10)
+        #expect(ok.serverAliveInterval == 0)
+        #expect(ok.socksPort == 1081)
+        #expect(ok.ocMTU == 1400)
+        #expect(ok.baseMTU == 9000)
+        #expect(ok.reconnectTimeout == 0)
+        #expect(ok.forceDPD == 30)
+        #expect(ok.spoofOS == "win")
+        #expect(ok.tokenMode == "yubioath")
+    }
+
+    /// Non-blocking, and it must stay that way: a file may be created, mounted
+    /// or synced between saving the tunnel and the next connect.
+    @Test func aMissingFileIsWarnedAboutNotBlocked() {
+        #expect(SubprocessTunnelConfig.missingFileWarning("") == nil)
+        #expect(SubprocessTunnelConfig.missingFileWarning("   ") == nil)
+        #expect(SubprocessTunnelConfig.missingFileWarning("/etc/hosts") == nil)
+        // Tilde paths are expanded before the check — the tool expands them too.
+        #expect(SubprocessTunnelConfig.missingFileWarning("~") == nil)
+        #expect(SubprocessTunnelConfig.missingFileWarning(
+            "/definitely/not/here/\(UUID().uuidString).pem") != nil)
+    }
+
     // MARK: argv wiring (subprocess path honors the new fields)
 
     private func sshArgs(_ mutate: (inout SubprocessTunnelConfig) -> Void) -> [String] {

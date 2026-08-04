@@ -69,8 +69,12 @@ struct SubprocessTunnelView: View {
                 cliStatusRow
                 if draft.kind == .ssh {
                     row("ssh.server", text: $draft.server, prompt: "ssh.example.com")
-                    intRow("ssh.port", value: $draft.port, prompt: "22")
-                    intRow("ssh.connect-timeout", value: $draft.connectTimeout, prompt: "system default")
+                    intRow("ssh.port", value: $draft.port, prompt: "22",
+                           range: SubprocessTunnelConfig.portRange,
+                           invalidMessage: "Enter a port between 1 and 65535. Leave empty for SSH's own 22.")
+                    intRow("ssh.connect-timeout", value: $draft.connectTimeout, prompt: "system default",
+                           range: SubprocessTunnelConfig.connectTimeoutRange,
+                           invalidMessage: "Enter a timeout between 1 and 600 seconds. Leave empty to use the system's own.")
                     jumpHostRows
                 } else if draft.kind.isSSLVPN {
                     TextField("Server address", text: $draft.server, prompt: Text("vpn.example.com")).autocorrectionDisabled()
@@ -191,10 +195,12 @@ struct SubprocessTunnelView: View {
             // a disabled row says which choice re-enables it (.help + AX value).
             row("ssh.identity-file", text: $draft.identityFile, prompt: "~/.ssh/id_ed25519",
                 disabled: ["", "key", "certificate"].contains(sshMethod) ? nil
-                    : "Not used when signing in with \(sshMethodLabel) — choose Automatic, “Key file” or “Certificate”.")
+                    : "Not used when signing in with \(sshMethodLabel) — choose Automatic, “Key file” or “Certificate”.",
+                warning: SubprocessTunnelConfig.missingFileWarning(draft.identityFile))
             row("ssh.certificate-file", text: optionalText(\.sshCertificateFile), prompt: "~/.ssh/id_ed25519-cert.pub",
                 disabled: sshMethod == "certificate" ? nil
-                    : "Choose “Certificate” as the sign-in method to use an SSH certificate.")
+                    : "Choose “Certificate” as the sign-in method to use an SSH certificate.",
+                warning: SubprocessTunnelConfig.missingFileWarning(draft.sshCertificateFile ?? ""))
             sshPasswordRow
         }
     }
@@ -292,9 +298,12 @@ struct SubprocessTunnelView: View {
         Toggle("Connect via a jump host (bastion)", isOn: $draft.useJumpHost)
         if draft.useJumpHost {
             row("ssh.proxy-jump", text: $draft.jumpHost, prompt: "bastion.example.com")
-            intRow("ssh.jump-port", value: $draft.jumpPort, prompt: "22")
+            intRow("ssh.jump-port", value: $draft.jumpPort, prompt: "22",
+                   range: SubprocessTunnelConfig.portRange,
+                   invalidMessage: "Enter a port between 1 and 65535. Leave empty for SSH's own 22.")
             row("ssh.jump-username", text: $draft.jumpUsername, prompt: "alex")
-            row("ssh.jump-identity-file", text: $draft.jumpIdentityFile, prompt: "~/.ssh/id_bastion")
+            row("ssh.jump-identity-file", text: $draft.jumpIdentityFile, prompt: "~/.ssh/id_bastion",
+                warning: SubprocessTunnelConfig.missingFileWarning(draft.jumpIdentityFile))
             SecureField("Jump password (optional)", text: $jumpPassword)
             Text("The jump host signs in on its own — its key and password above are independent of the server's, and the password stays in your login keychain.")
                 .font(.callout).foregroundStyle(.secondary)
@@ -465,10 +474,12 @@ struct SubprocessTunnelView: View {
         }
     }
 
-    /// The local SOCKS listener binds without root, so the floor is 1024.
+    /// The local SOCKS listener binds without root, so the floor is 1024. The
+    /// bound is the config's own constant, so the UI range and the stored range
+    /// can't drift (see `SubprocessTunnelConfig.socksPortRange`).
     private var socksPortError: String? {
-        (1024...65535).contains(draft.socksPort) ? nil
-            : "Use a SOCKS port between 1024 and 65535 — ports below 1024 need root."
+        SubprocessTunnelConfig.socksPortRange.contains(draft.socksPort) ? nil
+            : "Use a SOCKS port between \(SubprocessTunnelConfig.socksPortRange.lowerBound) and \(SubprocessTunnelConfig.socksPortRange.upperBound) — ports below 1024 need root."
     }
 
     @ViewBuilder private var socksSectionBody: some View {
@@ -683,11 +694,17 @@ struct SubprocessTunnelView: View {
                     Text("TOTP").tag("totp")
                     Text("HOTP").tag("hotp")
                     Text("OIDC").tag("oidc")
+                    // openconnect takes these two as well; leaving them out
+                    // meant a working configuration couldn't be expressed.
+                    Text("RSA SecurID").tag("rsa")
+                    Text("YubiKey (OATH)").tag("yubioath")
                 } label: {
                     EngineSettingLabel(spec: Self.specs["oc.token-mode"], changed: !draft.tokenMode.isEmpty)
                 }
             }
-            if !draft.tokenMode.isEmpty {
+            // YubiKey codes come off the key itself, so no seed is stored (or
+            // required) for that mode.
+            if SubprocessTunnelConfig.tokenModeRequiresSecret(draft.tokenMode) {
                 EngineSettingRow(spec: Self.specs["oc.token-secret"], changed: !tokenSecret.isEmpty,
                                  disabledReason: tokenUnused) {
                     VStack(alignment: .leading, spacing: 4) {
@@ -706,9 +723,11 @@ struct SubprocessTunnelView: View {
             // Client-certificate sign-in — inert unless the certificate method
             // is chosen, because the argv now only carries these under it.
             row("oc.client-cert", text: $draft.clientCertFile, prompt: "~/client.pem or .p12",
-                disabled: certificateUnused)
+                disabled: certificateUnused,
+                warning: SubprocessTunnelConfig.missingFileWarning(draft.clientCertFile))
             row("oc.client-key", text: $draft.clientKeyFile, prompt: "~/client.key (optional)",
-                disabled: certificateUnused)
+                disabled: certificateUnused,
+                warning: SubprocessTunnelConfig.missingFileWarning(draft.clientKeyFile))
             if !draft.clientCertFile.isEmpty || !draft.clientKeyFile.isEmpty {
                 EngineSettingRow(spec: Self.specs["oc.key-password"], changed: !keyPassphrase.isEmpty,
                                  disabledReason: certificateUnused) {
@@ -756,6 +775,26 @@ struct SubprocessTunnelView: View {
         sslMethod == "sso"
             ? "Not used with single sign-on — your identity provider asks for the code on its own page."
             : nil
+    }
+
+    /// Non-blocking: the wrapper script isn't there. openconnect fails at
+    /// startup with an opaque error, so say it now — but never block a save,
+    /// since the file may be created before the next connect.
+    private var csdWrapperWarning: String? {
+        SubprocessTunnelConfig.missingFileWarning(draft.csdWrapper)
+    }
+
+    /// Plain-language name for one of openconnect's `--os=` values.
+    static func spoofOSLabel(_ value: String) -> String {
+        switch value {
+        case "linux": "Linux (32-bit)"
+        case "linux-64": "Linux (64-bit)"
+        case "win": "Windows"
+        case "mac-intel": "macOS"
+        case "android": "Android"
+        case "apple-ios": "iOS"
+        default: value
+        }
     }
 
     /// Why the "skip host checker" toggle is inert, or nil: a host-checker
@@ -822,6 +861,8 @@ struct SubprocessTunnelView: View {
                 // Clearing the field means "the default (30)", never 0 —
                 // 0 would silently turn keepalives off.
                 intRow("ssh.keepalive", value: Binding(get: { draft.serverAliveInterval }, set: { draft.serverAliveInterval = $0 ?? 30 }), prompt: "30",
+                       range: SubprocessTunnelConfig.keepaliveRange,
+                       invalidMessage: "Enter an interval between 0 and 86400 seconds — 0 turns keepalives off. Leave empty for the default 30.",
                        changed: draft.serverAliveInterval != 30)
                 toggleRow("ssh.compression", isOn: $draft.compression)
                 linesRow("ssh.extra-options", $draft.sshExtraOptions, prompt: "Ciphers aes256-gcm@openssh.com")
@@ -847,7 +888,8 @@ struct SubprocessTunnelView: View {
         Section("Security") {
             TextField("Pinned cert SHA-256 (optional)", text: $draft.trustedCertSHA256)
                 .font(.callout.monospaced())
-            row("oc.cafile", text: $draft.caFile, prompt: "~/vpn-ca.pem")
+            row("oc.cafile", text: $draft.caFile, prompt: "~/vpn-ca.pem",
+                warning: SubprocessTunnelConfig.missingFileWarning(draft.caFile))
             Toggle("Require perfect forward secrecy", isOn: $draft.enablePFS)
         }
     }
@@ -855,7 +897,18 @@ struct SubprocessTunnelView: View {
     @ViewBuilder private var sslAdvanced: some View {
         Section {
             DisclosureGroup(isExpanded: $sslAdvancedExpanded) {
-                row("oc.os", text: $draft.spoofOS, prompt: "mac-intel")
+                // openconnect accepts a CLOSED set here — free text let a typo
+                // through to be refused at startup with an opaque error.
+                EngineSettingRow(spec: Self.specs["oc.os"], changed: !draft.spoofOS.isEmpty) {
+                    Picker(selection: $draft.spoofOS) {
+                        Text("Don't say (this Mac)").tag("")
+                        ForEach(SubprocessTunnelConfig.spoofOSValues, id: \.self) {
+                            Text(Self.spoofOSLabel($0)).tag($0)
+                        }
+                    } label: {
+                        EngineSettingLabel(spec: Self.specs["oc.os"], changed: !draft.spoofOS.isEmpty)
+                    }
+                }
                 toggleRow("oc.no-dtls", isOn: $draft.disableDTLS)
                 // A wrapper below WINS over this toggle in the argv — say so
                 // instead of letting the toggle look effective.
@@ -872,6 +925,12 @@ struct SubprocessTunnelView: View {
                 // F5 APM / Cisco endpoint posture (host checker / EPA).
                 LabeledContent("Host-checker wrapper") {
                     TextField("/path/to/csd-wrapper.sh", text: $draft.csdWrapper).autocorrectionDisabled()
+                        .accessibilityValue(csdWrapperWarning.map { "\(draft.csdWrapper). \($0)" } ?? draft.csdWrapper)
+                }
+                if let w = csdWrapperWarning {
+                    Label(w, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout).foregroundStyle(.orange)
+                        .accessibilityLabel("Warning: \(w)")
                 }
                 Text("F5 APM and Cisco run an endpoint (posture) check at sign-in. Provide a wrapper script to satisfy it, or turn on “skip host-checker” above to bypass it where the server allows.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -897,10 +956,18 @@ struct SubprocessTunnelView: View {
                 LabeledContent("Client version string") {
                     TextField("spoof e.g. 4.10.05085", text: $draft.versionString).autocorrectionDisabled()
                 }
-                intRow("oc.reconnect-timeout", value: $draft.reconnectTimeout, prompt: "300")
-                intRow("oc.mtu", value: $draft.ocMTU, prompt: "auto")
-                intRow("oc.base-mtu", value: $draft.baseMTU, prompt: "auto")
-                intRow("oc.force-dpd", value: $draft.forceDPD, prompt: "off")
+                intRow("oc.reconnect-timeout", value: $draft.reconnectTimeout, prompt: "300",
+                       range: SubprocessTunnelConfig.reconnectTimeoutRange,
+                       invalidMessage: "Enter a number of seconds between 0 and 86400 — 0 gives up as soon as the tunnel drops.")
+                intRow("oc.mtu", value: $draft.ocMTU, prompt: "auto",
+                       range: SubprocessTunnelConfig.ocMTURange,
+                       invalidMessage: "Enter an MTU between 576 and 1500. Leave empty to let OpenConnect work it out.")
+                intRow("oc.base-mtu", value: $draft.baseMTU, prompt: "auto",
+                       range: SubprocessTunnelConfig.baseMTURange,
+                       invalidMessage: "Enter the path's MTU, between 576 and 9000 (jumbo frames). Leave empty to let OpenConnect work it out.")
+                intRow("oc.force-dpd", value: $draft.forceDPD, prompt: "off",
+                       range: SubprocessTunnelConfig.forceDPDRange,
+                       invalidMessage: "Enter an interval between 0 and 3600 seconds — 0 leaves the protocol's own rate.")
                 linesRow("oc.extra-args", $draft.extraArgs, prompt: "--no-http-keepalive")
             } label: {
                 advancedDisclosureLabel($sslAdvancedExpanded)
@@ -994,7 +1061,8 @@ struct SubprocessTunnelView: View {
         }
         // --token-mode without its seed would just die under --non-inter (the
         // token isn't used under SSO, so it isn't required there either).
-        if draft.kind.isSSLVPN, !draft.tokenMode.isEmpty, tokenSecret.isEmpty, sslMethod != "sso" {
+        if draft.kind.isSSLVPN, SubprocessTunnelConfig.tokenModeRequiresSecret(draft.tokenMode),
+           tokenSecret.isEmpty, sslMethod != "sso" {
             return "Verification-code token (\(draft.tokenMode.uppercased())) needs its secret — add it under Sign-In."
         }
         return nil
@@ -1047,35 +1115,48 @@ struct SubprocessTunnelView: View {
         .init(id: "oc.sso-browser", name: "Sign-In Browser",
               summary: "Which browser (and profile) opens the single sign-on page, so passkeys and saved passwords are where you keep them."),
         .init(id: "oc.token-mode", name: "Verification-Code Token",
-              summary: "Have SimpleVPN generate the verification code (TOTP/HOTP/OIDC) instead of you typing it. Used alongside password or certificate sign-in."),
+              summary: "Have OpenConnect produce the verification code (TOTP, HOTP, OIDC, RSA SecurID or a YubiKey) instead of you typing it. Used alongside password or certificate sign-in."),
         .init(id: "oc.token-secret", name: "Token Secret",
-              summary: "The seed your verification codes are generated from. Stored in your login keychain and handed over in a private file — never on the command line."),
+              summary: "The seed your verification codes are generated from. Stored in your login keychain and handed over in a private file — never on the command line. Not needed for a YubiKey, which holds its own."),
         .init(id: "oc.cafile", name: "CA Certificate File",
               summary: "A PEM file of extra certificate authorities to trust for the VPN server, if it uses a private CA."),
         .init(id: "oc.os", name: "Reported OS",
-              summary: "The operating system OpenConnect claims to be, which some servers policy-check. e.g. mac-intel, win, linux-64."),
+              summary: "The operating system OpenConnect claims to be, which some servers policy-check. Pick one only if your gateway refuses a Mac; anything else isn't a value OpenConnect accepts."),
         .init(id: "oc.no-dtls", name: "Disable DTLS",
               summary: "Force the slower-but-more-compatible TLS transport instead of UDP DTLS. Turn on only if DTLS is blocked or flaky."),
         .init(id: "oc.disable-csd", name: "Skip Host Checker",
               summary: "Bypass the server's endpoint-posture/host-checker script. May be required to connect from an unmanaged Mac; some servers refuse without it."),
         .init(id: "oc.reconnect-timeout", name: "Reconnect Timeout",
-              summary: "How long (seconds) to keep retrying a dropped tunnel before giving up."),
+              summary: "How long (0–86400 seconds) to keep retrying a dropped tunnel before giving up."),
         .init(id: "oc.mtu", name: "MTU",
-              summary: "Largest tunnel packet size. Leave empty to auto-detect; lower it if transfers stall."),
+              summary: "Largest tunnel packet size, 576–1500. Leave empty to auto-detect; lower it if transfers stall."),
         .init(id: "oc.base-mtu", name: "Base MTU",
-              summary: "The MTU of the underlying network path, used to size the tunnel. Leave empty to auto-detect."),
+              summary: "The MTU of the underlying network path (576–9000, allowing jumbo frames), used to size the tunnel. Leave empty to auto-detect."),
         .init(id: "oc.force-dpd", name: "Dead-Peer Detection (seconds)",
-              summary: "Send a liveness probe this often and reconnect fast if the server stops answering. Empty leaves the protocol default."),
+              summary: "Send a liveness probe this often (0–3600 seconds) and reconnect fast if the server stops answering. Empty leaves the protocol default."),
         .init(id: "oc.extra-args", name: "Extra Arguments",
               summary: "Raw OpenConnect flags (one per row) for site-specific needs not covered above."),
     ])
 
+    /// `warning` is a NON-blocking caption under the field — used for "No file at
+    /// that path.", which must never stop a save (the file may appear before the
+    /// next connect) but is otherwise an opaque tool-startup error.
     private func row(_ id: String, text: Binding<String>, prompt: String,
-                     disabled: String? = nil) -> some View {
+                     disabled: String? = nil, warning: String? = nil) -> some View {
         EngineSettingRow(spec: spec(id), changed: !text.wrappedValue.isEmpty,
                          disabledReason: disabled) {
-            LabeledContent { TextField(prompt, text: text).multilineTextAlignment(.trailing).autocorrectionDisabled() }
-                label: { EngineSettingLabel(spec: spec(id), changed: !text.wrappedValue.isEmpty) }
+            VStack(alignment: .leading, spacing: 4) {
+                LabeledContent {
+                    TextField(prompt, text: text).multilineTextAlignment(.trailing).autocorrectionDisabled()
+                        // Validation rides the field's value (Docs/Accessibility.md).
+                        .accessibilityValue(warning.map { "\(text.wrappedValue). \($0)" } ?? text.wrappedValue)
+                } label: { EngineSettingLabel(spec: spec(id), changed: !text.wrappedValue.isEmpty) }
+                if let warning, disabled == nil {
+                    Label(warning, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout).foregroundStyle(.orange)
+                        .accessibilityLabel("Warning: \(warning)")
+                }
+            }
         }
     }
     private func toggleRow(_ id: String, isOn: Binding<Bool>, disabled: String? = nil) -> some View {
@@ -1083,14 +1164,21 @@ struct SubprocessTunnelView: View {
             Toggle(isOn: isOn) { EngineSettingLabel(spec: spec(id), changed: isOn.wrappedValue) }
         }
     }
+    /// Every numeric row goes through the shared `ValidatedNumberField`, so an
+    /// out-of-range value shows an inline error and is never stored — rather
+    /// than being handed to ssh/openconnect to reject at startup with an opaque
+    /// message. The range always comes from `SubprocessTunnelConfig`'s own
+    /// `…Range` block, so the UI bound and the stored bound can't drift.
     /// `changed` defaults to "a value is set"; pass it explicitly for fields
     /// whose binding always has a value (e.g. keepalive's non-optional default).
     private func intRow(_ id: String, value: Binding<Int?>, prompt: String,
+                        range: ClosedRange<Int>, invalidMessage: String,
                         changed: Bool? = nil) -> some View {
         let isChanged = changed ?? (value.wrappedValue != nil)
         return EngineSettingRow(spec: spec(id), changed: isChanged) {
-            LabeledContent { TextField(prompt, value: value, format: .number.grouping(.never)).multilineTextAlignment(.trailing).frame(maxWidth: 120) }
-                label: { EngineSettingLabel(spec: spec(id), changed: isChanged) }
+            ValidatedNumberField(
+                label: { EngineSettingLabel(spec: spec(id), changed: isChanged) },
+                prompt: prompt, value: value, range: range, invalidMessage: invalidMessage)
         }
     }
     private func linesRow(_ id: String, _ binding: Binding<[String]>, prompt: String) -> some View {
@@ -1120,8 +1208,12 @@ struct SubprocessTunnelView: View {
     }
 
     private var portField: some View {
-        TextField("Port", value: $draft.port, format: .number.grouping(.never))
-            .frame(maxWidth: 120)
+        ValidatedNumberField(
+            label: { Text("Port") },
+            prompt: "443",
+            value: $draft.port,
+            range: SubprocessTunnelConfig.portRange,
+            invalidMessage: "Enter a port between 1 and 65535. Leave empty for the standard HTTPS port.")
     }
     private func intField(_ title: String, value: Binding<Int>) -> some View {
         TextField(title, value: value, format: .number.grouping(.never)).frame(maxWidth: 160)
