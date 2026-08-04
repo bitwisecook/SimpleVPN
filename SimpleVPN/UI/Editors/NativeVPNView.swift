@@ -281,10 +281,10 @@ struct NativeVPNView: View {
         guard !loaded else { return }
         loaded = true
         if draft.kind == .ipsec { draft.usesSharedSecret = true }   // no cert path — always PSK
-        let base = KeychainCredentialStore.loadCredentials(profile: "native.\(draft.id)")
+        let base = KeychainCredentialStore.loadCredentials(profile: NativeVPNSecrets.baseProfile(draft.id))
         secret = base?.password ?? ""
         guard draft.kind == .ipsec else { return }
-        if let group = KeychainCredentialStore.loadCredentials(profile: "native.\(draft.id).secret") {
+        if let group = KeychainCredentialStore.loadCredentials(profile: NativeVPNSecrets.groupPSKProfile(draft.id)) {
             sharedSecret = group.password
         } else if !secret.isEmpty {
             // Backward compat: earlier builds (and the Cisco .pcf importer,
@@ -315,14 +315,13 @@ struct NativeVPNView: View {
     private func save() {
         if draft.kind == .ipsec { draft.usesSharedSecret = true }
         manager.save(draft)
-        if !secret.isEmpty {
-            try? KeychainCredentialStore.saveCredentials(profile: "native.\(draft.id)",
-                                                         .init(username: draft.username, password: secret))
-        }
-        if draft.kind == .ipsec, !sharedSecret.isEmpty {
-            try? KeychainCredentialStore.saveCredentials(profile: "native.\(draft.id).secret",
-                                                         .init(username: "", password: sharedSecret))
-        }
+        // Emptying a secret field REMOVES the stored secret (SubprocessTunnelView's
+        // rule for every one of its secrets): writing only when non-empty left the
+        // previous password in the keychain, so the next Connect still signed in
+        // with a password the user believed they had deleted.
+        NativeVPNSecrets.apply(
+            NativeVPNSecrets.plan(kind: draft.kind, secret: secret, sharedSecret: sharedSecret),
+            id: draft.id, username: draft.username)
         // save() is synchronous (called inline from several button actions, incl.
         // Export), so the commit runs in the background — harmless since it's
         // idempotent and CustomRoutingTabView's own onDisappear covers "left before

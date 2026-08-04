@@ -663,38 +663,116 @@ struct SubprocessTunnelView: View {
             TextField("Realm / group (optional)", text: $draft.realm)
             passwordRows
 
-            // SAML / SSO sign-in browser + profile (F5 APM, GlobalProtect, AnyConnect).
-            BrowserPicker(selection: $draft.browser,
-                          systemDefaultLabel: "App default (\(appBrowserSummary))")
-            Text("If this VPN signs in with SAML/SSO, the browser (and profile) used for the sign-in page. “App default” follows Settings; pick a specific browser here to override it for this VPN.")
-                .font(.caption).foregroundStyle(.secondary)
+            // SAML / SSO sign-in browser + profile — live only under SSO, and
+            // only for the kinds whose browser sign-in flow actually exists.
+            EngineSettingRow(spec: Self.specs["oc.sso-browser"], changed: !draft.browser.isOSDefault,
+                             disabledReason: ssoBrowserUnused) {
+                VStack(alignment: .leading, spacing: 4) {
+                    BrowserPicker(selection: $draft.browser,
+                                  systemDefaultLabel: "App default (\(appBrowserSummary))")
+                    Text("“App default” follows Settings; pick a specific browser here to override it for this VPN.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
 
             // Software verification-code token (secret stored in the keychain).
-            Picker("Verification-code token", selection: $draft.tokenMode) {
-                Text("None").tag("")
-                Text("TOTP").tag("totp")
-                Text("HOTP").tag("hotp")
-                Text("OIDC").tag("oidc")
+            EngineSettingRow(spec: Self.specs["oc.token-mode"], changed: !draft.tokenMode.isEmpty,
+                             disabledReason: tokenUnused) {
+                Picker(selection: $draft.tokenMode) {
+                    Text("None").tag("")
+                    Text("TOTP").tag("totp")
+                    Text("HOTP").tag("hotp")
+                    Text("OIDC").tag("oidc")
+                } label: {
+                    EngineSettingLabel(spec: Self.specs["oc.token-mode"], changed: !draft.tokenMode.isEmpty)
+                }
             }
             if !draft.tokenMode.isEmpty {
-                SecureField("Token secret (TOTP/HOTP seed)", text: $tokenSecret)
-                Text("Stored in your login keychain and handed to openconnect via a private temporary file at connect — never on the command line. Required: without it the connection fails before starting.")
-                    .font(.caption).foregroundStyle(.secondary)
+                EngineSettingRow(spec: Self.specs["oc.token-secret"], changed: !tokenSecret.isEmpty,
+                                 disabledReason: tokenUnused) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        LabeledContent {
+                            SecureField("TOTP/HOTP seed", text: $tokenSecret)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            EngineSettingLabel(spec: Self.specs["oc.token-secret"], changed: !tokenSecret.isEmpty)
+                        }
+                        Text("Required: without it the connection fails before starting.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
             }
 
-            // Client-certificate sign-in.
-            LabeledContent("Client certificate") {
-                TextField("~/client.pem or .p12", text: $draft.clientCertFile).autocorrectionDisabled()
-            }
-            LabeledContent("Client private key") {
-                TextField("~/client.key (optional)", text: $draft.clientKeyFile).autocorrectionDisabled()
-            }
+            // Client-certificate sign-in — inert unless the certificate method
+            // is chosen, because the argv now only carries these under it.
+            row("oc.client-cert", text: $draft.clientCertFile, prompt: "~/client.pem or .p12",
+                disabled: certificateUnused)
+            row("oc.client-key", text: $draft.clientKeyFile, prompt: "~/client.key (optional)",
+                disabled: certificateUnused)
             if !draft.clientCertFile.isEmpty || !draft.clientKeyFile.isEmpty {
-                SecureField("Key / PKCS#12 passphrase (if encrypted)", text: $keyPassphrase)
-                Text("Stored in your login keychain and passed to openconnect as --key-password when the key or .p12 is encrypted.")
-                    .font(.caption).foregroundStyle(.secondary)
+                EngineSettingRow(spec: Self.specs["oc.key-password"], changed: !keyPassphrase.isEmpty,
+                                 disabledReason: certificateUnused) {
+                    LabeledContent {
+                        SecureField("if the key or .p12 is encrypted", text: $keyPassphrase)
+                            .multilineTextAlignment(.trailing)
+                    } label: {
+                        EngineSettingLabel(spec: Self.specs["oc.key-password"], changed: !keyPassphrase.isEmpty)
+                    }
+                }
             }
         }
+    }
+
+    /// The sign-in method this tunnel will actually use — the same rule the argv
+    /// builder follows, so the form can never claim one thing while openconnect
+    /// does another.
+    private var sslMethod: String { SubprocessTunnelManager.openconnectAuthMode(draft) }
+
+    private var sslMethodLabel: String {
+        switch sslMethod {
+        case "certificate": "a client certificate"
+        case "sso": "single sign-on"
+        default: "a password"
+        }
+    }
+
+    /// Why the password rows are inert, or nil when they're in play.
+    private var passwordUnused: String? {
+        switch sslMethod {
+        case "certificate": "Not used when signing in with a client certificate — choose “Password” as the sign-in method to send one."
+        case "sso": "Not used when signing in with single sign-on — the password is typed in your browser, at your identity provider."
+        default: nil
+        }
+    }
+
+    /// Why the client-certificate rows are inert, or nil.
+    private var certificateUnused: String? {
+        sslMethod == "certificate" ? nil
+            : "Not used when signing in with \(sslMethodLabel) — choose “Client certificate” as the sign-in method to present one."
+    }
+
+    /// Why the verification-code token rows are inert, or nil.
+    private var tokenUnused: String? {
+        sslMethod == "sso"
+            ? "Not used with single sign-on — your identity provider asks for the code on its own page."
+            : nil
+    }
+
+    /// Why the "skip host checker" toggle is inert, or nil: a host-checker
+    /// wrapper is passed instead of the skip, whatever this toggle says.
+    private var csdSkipOverridden: String? {
+        let wrapper = draft.csdWrapper.trimmingCharacters(in: .whitespaces)
+        guard !wrapper.isEmpty else { return nil }
+        return "Overridden by the host-checker wrapper “\((wrapper as NSString).lastPathComponent)” below, which runs instead. Clear that wrapper to skip the check."
+    }
+
+    /// Why the sign-in browser picker is inert, or nil.
+    private var ssoBrowserUnused: String? {
+        if !draft.kind.supportsExternalBrowserSSO {
+            return "\(draft.kind.displayName) has no browser sign-in flow in openconnect, so no browser is opened."
+        }
+        return sslMethod == "sso" ? nil
+            : "Only used with single sign-on — choose “Single sign-on (SAML / passkey)” as the sign-in method."
     }
 
     /// Kind-specific gateway blurb — the seven SSL-VPN kinds are different
@@ -779,7 +857,9 @@ struct SubprocessTunnelView: View {
             DisclosureGroup(isExpanded: $sslAdvancedExpanded) {
                 row("oc.os", text: $draft.spoofOS, prompt: "mac-intel")
                 toggleRow("oc.no-dtls", isOn: $draft.disableDTLS)
-                toggleRow("oc.disable-csd", isOn: $draft.disableCSD)
+                // A wrapper below WINS over this toggle in the argv — say so
+                // instead of letting the toggle look effective.
+                toggleRow("oc.disable-csd", isOn: $draft.disableCSD, disabled: csdSkipOverridden)
                 if draft.kind == .globalProtect {
                     Text("Skipping the host checker also stubs GlobalProtect's HIP report — gateways that require a HIP submission may refuse or restrict the session.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -828,10 +908,24 @@ struct SubprocessTunnelView: View {
         }
     }
 
-    /// Password + remember rows, shared by both kinds' Sign-In sections.
+    /// Password + Remember for the SSL-VPN kinds, as a descriptor row (summary,
+    /// manual link) and inert under the methods that never send a password —
+    /// the same treatment `sshPasswordRow` gives the SSH surface. Disabling
+    /// alone would be theatre; the argv builder is what stopped transmitting it.
     @ViewBuilder private var passwordRows: some View {
-        SecureField("Password", text: $password).textContentType(.password)
-        Toggle("Remember password", isOn: $remember)
+        EngineSettingRow(spec: Self.specs["oc.password"], changed: !password.isEmpty,
+                         disabledReason: passwordUnused) {
+            VStack(alignment: .leading, spacing: 6) {
+                LabeledContent {
+                    SecureField("Password", text: $password)
+                        .textContentType(.password)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    EngineSettingLabel(spec: Self.specs["oc.password"], changed: !password.isEmpty)
+                }
+                Toggle("Remember password", isOn: $remember)
+            }
+        }
     }
 
     @ViewBuilder private var controlSection: some View {
@@ -889,8 +983,18 @@ struct SubprocessTunnelView: View {
         if draft.server.isEmpty {
             return "Enter the server address."
         }
-        // --token-mode without its seed would just die under --non-inter.
-        if draft.kind.isSSLVPN, !draft.tokenMode.isEmpty, tokenSecret.isEmpty {
+        // A password inside the server/proxy address would be stored in the
+        // clear and land on the tool's command line.
+        if let reason = SubprocessTunnelManager.addressCredentialReason(draft) {
+            return reason
+        }
+        // The chosen sign-in method missing its material would fail at connect.
+        if let reason = SubprocessTunnelManager.sslAuthBlockReason(draft) {
+            return reason
+        }
+        // --token-mode without its seed would just die under --non-inter (the
+        // token isn't used under SSO, so it isn't required there either).
+        if draft.kind.isSSLVPN, !draft.tokenMode.isEmpty, tokenSecret.isEmpty, sslMethod != "sso" {
             return "Verification-code token (\(draft.tokenMode.uppercased())) needs its secret — add it under Sign-In."
         }
         return nil
@@ -932,6 +1036,20 @@ struct SubprocessTunnelView: View {
     }
 
     static let specs = EngineSettingCatalog([
+        .init(id: "oc.password", name: "Password",
+              summary: "The password for this VPN. Used by password sign-in only — a client certificate or single sign-on doesn't send it."),
+        .init(id: "oc.client-cert", name: "Client Certificate",
+              summary: "A certificate file (PEM or .p12) that identifies YOU to the gateway, instead of a password. Used by certificate sign-in only."),
+        .init(id: "oc.client-key", name: "Client Private Key",
+              summary: "The private key for the client certificate, when it isn't inside the certificate file itself."),
+        .init(id: "oc.key-password", name: "Key / PKCS#12 Passphrase",
+              summary: "The passphrase protecting your client key or .p12 file. Stored in your login keychain."),
+        .init(id: "oc.sso-browser", name: "Sign-In Browser",
+              summary: "Which browser (and profile) opens the single sign-on page, so passkeys and saved passwords are where you keep them."),
+        .init(id: "oc.token-mode", name: "Verification-Code Token",
+              summary: "Have SimpleVPN generate the verification code (TOTP/HOTP/OIDC) instead of you typing it. Used alongside password or certificate sign-in."),
+        .init(id: "oc.token-secret", name: "Token Secret",
+              summary: "The seed your verification codes are generated from. Stored in your login keychain and handed over in a private file — never on the command line."),
         .init(id: "oc.cafile", name: "CA Certificate File",
               summary: "A PEM file of extra certificate authorities to trust for the VPN server, if it uses a private CA."),
         .init(id: "oc.os", name: "Reported OS",
@@ -960,8 +1078,8 @@ struct SubprocessTunnelView: View {
                 label: { EngineSettingLabel(spec: spec(id), changed: !text.wrappedValue.isEmpty) }
         }
     }
-    private func toggleRow(_ id: String, isOn: Binding<Bool>) -> some View {
-        EngineSettingRow(spec: spec(id), changed: isOn.wrappedValue) {
+    private func toggleRow(_ id: String, isOn: Binding<Bool>, disabled: String? = nil) -> some View {
+        EngineSettingRow(spec: spec(id), changed: isOn.wrappedValue, disabledReason: disabled) {
             Toggle(isOn: isOn) { EngineSettingLabel(spec: spec(id), changed: isOn.wrappedValue) }
         }
     }

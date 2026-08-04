@@ -29,7 +29,11 @@ struct EngineSettingSpec: Identifiable, Sendable {
 /// A spec table keyed by id, with a terse literal builder.
 struct EngineSettingCatalog: Sendable {
     private let byID: [String: EngineSettingSpec]
+    /// Declaration order — what a catalog's form renders, and what tests walk to
+    /// hold every id to the contract (a name, a summary, a real manual anchor).
+    let all: [EngineSettingSpec]
     init(_ specs: [EngineSettingSpec]) {
+        all = specs
         byID = Dictionary(uniqueKeysWithValues: specs.map { ($0.id, $0) })
     }
     /// Force-unwrap: a missing id is a programming error caught immediately in dev.

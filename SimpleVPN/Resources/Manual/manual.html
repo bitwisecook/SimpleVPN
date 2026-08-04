@@ -198,12 +198,21 @@
   <a href="#ssh-extra-options">Extra Options</a>
 
   <h2>SSL VPN (OpenConnect)</h2>
+  <a href="#oc-password">Password</a>
+  <a href="#oc-client-cert">Client Certificate</a>
+  <a href="#oc-client-key">Client Private Key</a>
+  <a href="#oc-key-password">Key / PKCS#12 Passphrase</a>
+  <a href="#oc-sso-browser">Sign-In Browser</a>
+  <a href="#oc-token-mode">Verification-Code Token</a>
+  <a href="#oc-token-secret">Token Secret</a>
   <a href="#oc-cafile">CA Certificate File</a>
   <a href="#oc-os">Reported OS</a>
   <a href="#oc-no-dtls">Disable DTLS</a>
   <a href="#oc-disable-csd">Skip Host Checker</a>
   <a href="#oc-reconnect-timeout">Reconnect Timeout</a>
   <a href="#oc-mtu">MTU</a>
+  <a href="#oc-base-mtu">Base MTU</a>
+  <a href="#oc-force-dpd">Dead-Peer Detection</a>
   <a href="#oc-extra-args">Extra Arguments</a>
 
   <h2>Native (IKEv2 / IPsec)</h2>
@@ -522,6 +531,7 @@
 <h2 id="wg-preshared-key">Pre-shared Key</h2>
 <p class="default">Optional.</p>
 <p>An extra symmetric key layered on top of the normal WireGuard key exchange, for defence against future quantum attacks. Both sides must share the same value. Only set it if your provider gives you one.</p>
+<p>It is key material, so it is treated like the private key: the row says whether one is stored, never what it is. Paste a new value into <strong>Set / Replace Key</strong> to change it, or press <strong>Remove</strong> and save to take it off — clearing really clears, it doesn't leave the old key in the keychain.</p>
 
 <h2 id="wg-keepalive">Persistent Keepalive</h2>
 <p class="default">Default: off.</p>
@@ -646,6 +656,34 @@
 
 <!-- ══════════════════ SSL VPN (OpenConnect) ══════════════════ -->
 
+<h2 id="oc-password">Password</h2>
+<p class="default">Optional — required by password sign-in.</p>
+<p>Your password for the VPN, kept in your login keychain when “Remember password” is on and handed to OpenConnect on a private pipe — never on its command line. It is sent only by the <strong>Password</strong> sign-in method: with <a href="#oc-client-cert">Client certificate</a> or single sign-on selected the field is inert, and nothing is transmitted. Whichever method you choose is the one used — no other is quietly attempted.</p>
+
+<h2 id="oc-client-cert">Client Certificate</h2>
+<p class="default">Optional — required by certificate sign-in.</p>
+<p>A file that identifies <em>you</em> to the gateway instead of a password: a PEM certificate, or a <code>.p12</code>/PKCS#12 bundle holding the certificate and its key together. Choose the <strong>Client certificate</strong> sign-in method to use it. Under the Password or single-sign-on methods this file is ignored entirely — it is not presented “just in case”, because a certificate offered alongside a password takes over the whole sign-in.</p>
+
+<h2 id="oc-client-key">Client Private Key</h2>
+<p class="default">Optional.</p>
+<p>The private key belonging to the <a href="#oc-client-cert">client certificate</a>, for the common case where they are two separate files. Leave empty for a <code>.p12</code> bundle or a PEM file that already contains the key.</p>
+
+<h2 id="oc-key-password">Key / PKCS#12 Passphrase</h2>
+<p class="default">Optional.</p>
+<p>The passphrase that decrypts your client key or <code>.p12</code> file. Stored in your login keychain and used only by certificate sign-in.</p>
+
+<h2 id="oc-sso-browser">Sign-In Browser</h2>
+<p class="default">Default: the app default (Settings).</p>
+<p>Which browser — and, for Chrome/Edge/Firefox, which profile — opens the single-sign-on page, so your passkeys, security key and saved passwords are where you already keep them. Used only by the <strong>Single sign-on</strong> method, and only for the protocols OpenConnect can browser-sign-in (Cisco AnyConnect, GlobalProtect, Pulse); for the others no browser is opened at all.</p>
+
+<h2 id="oc-token-mode">Verification-Code Token</h2>
+<p class="default">Default: None.</p>
+<p>Let SimpleVPN generate the verification code the gateway asks for, instead of you reading it off a phone: <strong>TOTP</strong> (time-based), <strong>HOTP</strong> (counter-based) or <strong>OIDC</strong>. Works alongside password or certificate sign-in. With single sign-on it isn't used — the identity provider asks for the code on its own page.</p>
+
+<h2 id="oc-token-secret">Token Secret</h2>
+<p class="default">Required when a token mode is set.</p>
+<p>The seed your codes are generated from (the string or QR contents your administrator issued). It is stored in your login keychain and handed to OpenConnect in a private, short-lived <code>0600</code> file — never on the command line, where any local process could read it. Without it the connection fails before it starts.</p>
+
 <h2 id="oc-cafile">CA Certificate File</h2>
 <p class="default">Optional.</p>
 <p>A PEM file of certificate authorities to trust for the VPN server, for organisations that issue their server certificate from a private CA. Not needed when the server uses a normal public certificate.</p>
@@ -661,6 +699,7 @@
 <h2 id="oc-disable-csd">Skip Host Checker</h2>
 <p class="default">Default: off.</p>
 <p>Many corporate servers run a “host checker” / endpoint-posture script before admitting you. This replaces that step with a no-op so an unmanaged Mac can connect.</p>
+<p>A <strong>host-checker wrapper</strong> (under Advanced) takes precedence: when one is set, that script runs and this toggle does nothing, so the toggle is shown as unavailable and names the wrapper instead of pretending to apply.</p>
 <div class="warn">Bypassing posture checks may violate your organisation's access policy. Some servers also refuse to connect without it — it cuts both ways.</div>
 
 <h2 id="oc-reconnect-timeout">Reconnect Timeout</h2>
@@ -670,6 +709,14 @@
 <h2 id="oc-mtu">MTU</h2>
 <p class="default">Default: auto-detected.</p>
 <p>The largest packet size the tunnel carries. Leave empty unless transfers stall, then lower it (e.g. 1300).</p>
+
+<h2 id="oc-base-mtu">Base MTU</h2>
+<p class="default">Default: auto-detected.</p>
+<p>The MTU of the network path <em>underneath</em> the tunnel, which OpenConnect uses to size the tunnel itself. Leave empty; set it only when the link's real MTU can't be detected (some mobile or PPPoE paths).</p>
+
+<h2 id="oc-force-dpd">Dead-Peer Detection</h2>
+<p class="default">Default: the protocol's own interval.</p>
+<p>Send a liveness probe this often (seconds) and reconnect quickly when the server stops answering. Lower values notice a dead tunnel sooner at the cost of a little traffic.</p>
 
 <h2 id="oc-extra-args">Extra Arguments</h2>
 <p class="default">Optional.</p>

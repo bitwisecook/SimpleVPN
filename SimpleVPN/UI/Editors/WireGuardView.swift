@@ -31,6 +31,16 @@ struct WireGuardView: View {
     /// keychain — the same "set it, never reveal it" convention as any
     /// password field.
     @State private var newPrivateKey = ""
+    /// Same write-only entry for the pre-shared key. It IS key material — a
+    /// symmetric secret kept in the keychain (WireGuard's post-quantum extra) —
+    /// so it gets the private key's treatment exactly: the row says whether one
+    /// is stored, and the value is never rendered.
+    @State private var newPresharedKey = ""
+    /// Set by "Remove": clears the stored pre-shared key on Save. A write-only
+    /// field can only ever REPLACE a secret, and this one is optional — without
+    /// this a user could never take it off again (and clearing must really
+    /// clear, not leave the old key in the keychain and in use).
+    @State private var removePresharedKey = false
 
     var body: some View {
         Form {
@@ -67,8 +77,8 @@ struct WireGuardView: View {
                 EngineSettingRow(spec: Self.specs["wg.public-key"], changed: !draft.peerPublicKey.isEmpty) {
                     monoField(Self.specs["wg.public-key"], $draft.peerPublicKey, prompt: "base64 public key")
                 }
-                EngineSettingRow(spec: Self.specs["wg.preshared-key"], changed: !draft.presharedKey.isEmpty) {
-                    monoField(Self.specs["wg.preshared-key"], $draft.presharedKey, prompt: "optional base64")
+                EngineSettingRow(spec: Self.specs["wg.preshared-key"], changed: hasPresharedKey) {
+                    presharedKeyRows
                 }
             }
 
@@ -151,6 +161,51 @@ struct WireGuardView: View {
         }
         .padding()
         .onAppear { pasteFocused = true }
+    }
+
+    // MARK: Pre-shared key (write-only, like the private key)
+
+    /// Status + write-only entry for the pre-shared key. Never a plain
+    /// TextField: rendering it would put a live symmetric key on screen (and in
+    /// any screenshot) for a value nobody needs to read back.
+    @ViewBuilder private var presharedKeyRows: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            LabeledContent {
+                HStack(spacing: 8) {
+                    Text(presharedKeyStatus).foregroundStyle(.secondary)
+                    if !draft.presharedKey.isEmpty, !removePresharedKey {
+                        Button("Remove") { removePresharedKey = true; newPresharedKey = "" }
+                            .controlSize(.small)
+                            .accessibilityLabel("Remove pre-shared key")
+                    }
+                }
+            } label: {
+                EngineSettingLabel(spec: Self.specs["wg.preshared-key"], changed: hasPresharedKey)
+            }
+            LabeledContent("Set / Replace Key") {
+                SecureField("paste base64 pre-shared key", text: $newPresharedKey)
+                    .font(.callout.monospaced())
+                    .multilineTextAlignment(.trailing)
+                    .autocorrectionDisabled()
+                    .accessibilityLabel("Set or replace the pre-shared key")
+                    // Typing a replacement cancels a pending removal — the last
+                    // thing the user did is the thing that happens.
+                    .onChange(of: newPresharedKey) {
+                        if !newPresharedKey.isEmpty { removePresharedKey = false }
+                    }
+            }
+        }
+    }
+
+    /// Whether a pre-shared key will be in use after Save.
+    private var hasPresharedKey: Bool {
+        !newPresharedKey.isEmpty || (!draft.presharedKey.isEmpty && !removePresharedKey)
+    }
+
+    private var presharedKeyStatus: String {
+        if !newPresharedKey.isEmpty { return "•••••• (saved on Save)" }
+        if removePresharedKey { return "removed on Save" }
+        return draft.presharedKey.isEmpty ? "not set" : "•••••• (in Keychain)"
     }
 
     // MARK: Spec catalog + typed field helpers
@@ -237,6 +292,16 @@ struct WireGuardView: View {
             draft.privateKey = newPrivateKey
             newPrivateKey = ""
         }
+        // Same for the pre-shared key, plus the explicit removal: an emptied
+        // value is passed on (not nil), so clearing really clears the keychain
+        // item instead of leaving the old key stored and still in use.
+        if !newPresharedKey.isEmpty {
+            draft.presharedKey = newPresharedKey
+            newPresharedKey = ""
+        } else if removePresharedKey {
+            draft.presharedKey = ""
+        }
+        removePresharedKey = false
         // The keys go to the keychain; only a redacted copy is persisted —
         // the same move on every save path. The private key is nil (leave
         // alone) unless something set it: typing in the write-only field, or
@@ -265,6 +330,10 @@ struct WireGuardView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         var toExport = draft
         if !newPrivateKey.isEmpty { toExport.privateKey = newPrivateKey }
+        // Export what Save would store — including an unsaved replacement or
+        // removal of the pre-shared key.
+        if !newPresharedKey.isEmpty { toExport.presharedKey = newPresharedKey }
+        else if removePresharedKey { toExport.presharedKey = "" }
         try? toExport.serialize().write(to: url, atomically: true, encoding: .utf8)
     }
 }

@@ -190,6 +190,14 @@ nonisolated extension WireGuardConfig {
     static func endpointProblem(_ raw: String) -> String? {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if s.isEmpty { return "Enter the server's address as host:port (like vpn.example.com:51820)." }
+        // The endpoint is persisted in providerConfiguration (and becomes the
+        // shown server address), so anything credential-shaped typed here would
+        // be stored in the clear — and WireGuard has no username or password to
+        // carry anyway: the keys ARE the sign-in. Same rule, same reason, as
+        // ProxyTunnelConfig.upstreamProblem and the Tailscale control URL.
+        if s.contains("@") {
+            return "The endpoint is just the server's address and port — no username or password."
+        }
         let hostPart: Substring
         let portPart: Substring
         if s.hasPrefix("[") {   // [v6]:port

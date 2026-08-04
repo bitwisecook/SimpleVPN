@@ -134,7 +134,22 @@ extension TailscaleConfig {
             // Plain http would carry the node key in the clear.
             return "The address must start with https://"
         }
+        // Reject credentials in the address (https://user:secret@host). This
+        // URL is persisted in providerConfiguration, NOT the keychain, so a
+        // password here would be stored in the clear — the same rule, for the
+        // same reason, as ProxyTunnelConfig.upstreamProblem.
+        if Self.hasUserInfo(s) {
+            return "Take the username and password out of the address — sign in with an auth key (or your browser) under Sign-In."
+        }
         return nil
+    }
+
+    /// Whether a URL string carries a userinfo component (anything before an
+    /// "@" in the authority). Scans the authority itself rather than trusting
+    /// `URL.user`, which silently drops what it can't parse.
+    private static func hasUserInfo(_ s: String) -> Bool {
+        guard let schemeEnd = s.range(of: "://") else { return false }
+        return s[schemeEnd.upperBound...].prefix { $0 != "/" }.contains("@")
     }
 
     var controlURLProblem: String? {

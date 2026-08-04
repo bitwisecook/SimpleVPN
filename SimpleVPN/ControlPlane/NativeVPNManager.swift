@@ -47,6 +47,63 @@ struct NativeVPNConfig: Codable, Sendable, Equatable, Identifiable {
     var excludeLocalNetworks = true // keep LAN reachable when includeAllNetworks is on
 }
 
+/// Where a native VPN's secrets live, and what saving one must do to each
+/// keychain row. Expressed as a PLAN rather than inline `if !secret.isEmpty`
+/// writes so the rule that clearing a field really removes the stored secret —
+/// instead of leaving the old one in the keychain and still authenticating at
+/// the next Connect — is one rule, in one place, and directly testable.
+nonisolated enum NativeVPNSecrets {
+
+    /// What a save does to one row.
+    enum Action: Equatable, Sendable {
+        case write(String)
+        case delete
+    }
+
+    /// The two rows a native config can own: the base secret (the IKEv2
+    /// password or PSK, or the IPsec XAuth password) and the IPsec group PSK.
+    struct Plan: Equatable, Sendable {
+        var base: Action
+        var groupPSK: Action
+    }
+
+    /// Credential-row ids (the persistent-reference accounts `connect()` writes
+    /// share the base names — see `apply`).
+    static func baseProfile(_ id: String) -> String { "native.\(id)" }
+    static func groupPSKProfile(_ id: String) -> String { "native.\(id).secret" }
+
+    /// An empty field means "no such secret" — hence `.delete`, never "leave
+    /// whatever was there". Only IPsec has a group PSK, so switching a VPN away
+    /// from IPsec removes it too.
+    static func plan(kind: VPNKind, secret: String, sharedSecret: String) -> Plan {
+        Plan(base: secret.isEmpty ? .delete : .write(secret),
+             groupPSK: kind == .ipsec && !sharedSecret.isEmpty ? .write(sharedSecret) : .delete)
+    }
+
+    /// Perform a plan. A delete removes BOTH the credential row and the
+    /// persistent-reference copy `connect()` made from it — leaving either
+    /// behind is a stale-secret leak (the rule `NativeVPNManager.remove(_:)`
+    /// already follows).
+    @MainActor static func apply(_ plan: Plan, id: String, username: String) {
+        switch plan.base {
+        case .write(let secret):
+            try? KeychainCredentialStore.saveCredentials(
+                profile: baseProfile(id), .init(username: username, password: secret))
+        case .delete:
+            KeychainCredentialStore.deleteCredentials(profile: baseProfile(id))
+            KeychainCredentialStore.deleteNativeSecret(account: "native.\(id)")
+        }
+        switch plan.groupPSK {
+        case .write(let psk):
+            try? KeychainCredentialStore.saveCredentials(
+                profile: groupPSKProfile(id), .init(username: "", password: psk))
+        case .delete:
+            KeychainCredentialStore.deleteCredentials(profile: groupPSKProfile(id))
+            KeychainCredentialStore.deleteNativeSecret(account: "native.\(id).psk")
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class NativeVPNManager {
@@ -148,14 +205,26 @@ final class NativeVPNManager {
                 p.serverAddress = c.server
                 p.remoteIdentifier = c.remoteID.isEmpty ? c.server : c.remoteID
                 p.localIdentifier = c.username
+                // A reference is only written for a secret that EXISTS: storing
+                // the empty string would hand the OS a valid-looking reference
+                // to nothing (and some concentrators reject the empty attempt
+                // rather than falling through to a prompt).
                 if c.usesSharedSecret {
                     p.authenticationMethod = .sharedSecret
-                    p.sharedSecretReference = try KeychainCredentialStore.persistentReference(forSecret: secret, account: baseAccount)
+                    if !secret.isEmpty {
+                        p.sharedSecretReference = try KeychainCredentialStore.persistentReference(forSecret: secret, account: baseAccount)
+                    } else {
+                        KeychainCredentialStore.deleteNativeSecret(account: baseAccount)
+                    }
                 } else {
                     p.authenticationMethod = .none
                     p.useExtendedAuthentication = true      // EAP username/password
                     p.username = c.username
-                    p.passwordReference = try KeychainCredentialStore.persistentReference(forSecret: secret, account: baseAccount)
+                    if !secret.isEmpty {
+                        p.passwordReference = try KeychainCredentialStore.persistentReference(forSecret: secret, account: baseAccount)
+                    } else {
+                        KeychainCredentialStore.deleteNativeSecret(account: baseAccount)
+                    }
                 }
                 applyIKEv2Options(c, to: p)
                 proto = p
@@ -163,7 +232,10 @@ final class NativeVPNManager {
                 let p = NEVPNProtocolIPSec()
                 p.serverAddress = c.server
                 p.username = c.username
-                p.useExtendedAuthentication = true
+                // XAuth is OPTIONAL here (the group PSK alone is sometimes the
+                // whole sign-in): claim extended authentication only when there
+                // is actually a username or password to send.
+                p.useExtendedAuthentication = !c.username.isEmpty || !secret.isEmpty
                 p.localIdentifier = c.groupOrRealm.isEmpty ? nil : c.groupOrRealm
                 // Certificate/identity authentication isn't wired up (no
                 // identity picker or import path exists) — the only mode that
@@ -171,8 +243,19 @@ final class NativeVPNManager {
                 // secret optionally paired with XAuth username/password (the
                 // Cisco-style combo CiscoImport produces from .pcf files).
                 p.authenticationMethod = .sharedSecret
-                p.sharedSecretReference = try KeychainCredentialStore.persistentReference(forSecret: sharedSecret, account: pskAccount)
-                p.passwordReference = try KeychainCredentialStore.persistentReference(forSecret: secret, account: baseAccount)
+                if !sharedSecret.isEmpty {
+                    p.sharedSecretReference = try KeychainCredentialStore.persistentReference(forSecret: sharedSecret, account: pskAccount)
+                } else {
+                    KeychainCredentialStore.deleteNativeSecret(account: pskAccount)
+                }
+                // An empty XAuth password must leave passwordReference NIL — a
+                // reference to "" is an empty XAuth attempt, which some
+                // concentrators refuse outright.
+                if !secret.isEmpty {
+                    p.passwordReference = try KeychainCredentialStore.persistentReference(forSecret: secret, account: baseAccount)
+                } else {
+                    KeychainCredentialStore.deleteNativeSecret(account: baseAccount)
+                }
                 applyCommonOptions(c, to: p)
                 proto = p
             default:

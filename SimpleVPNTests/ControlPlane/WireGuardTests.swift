@@ -82,6 +82,10 @@ struct WireGuardStartConfigTests {
         #expect(WireGuardConfig.endpointProblem("host:99999") != nil)
         #expect(WireGuardConfig.endpointProblem("2001:db8::1") != nil)   // v6 needs brackets
         #expect(WireGuardConfig.endpointProblem(":51820") != nil)        // no host
+        // The endpoint is persisted in providerConfiguration in the clear —
+        // credential-shaped input is refused rather than stored.
+        #expect(WireGuardConfig.endpointProblem("user:secret@vpn.example.com:51820") != nil)
+        #expect(WireGuardConfig.endpointProblem("user@vpn.example.com:51820") != nil)
     }
 
     @Test func routeValidationMatchesEngine() {
@@ -126,6 +130,24 @@ struct WireGuardStartConfigTests {
         #expect(stored.peerPublicKey == "PUB")
         #expect(stored.endpoint == "h:1")
         #expect(stored.id == c.id)
+    }
+
+    /// The pre-shared key is key material, so the editor treats it exactly like
+    /// the private key: write-only, and never in the persisted blob. This pins
+    /// the model half of that — the encoded providerConfiguration blob carries
+    /// neither secret, whatever the in-memory value holds.
+    @Test func neitherKeyReachesThePersistedBlob() throws {
+        var c = WireGuardConfig()
+        c.privateKey = "PRIVATE-KEY-VALUE"
+        c.presharedKey = "PRESHARED-KEY-VALUE"
+        c.peerPublicKey = "PUB"
+        let blob = try #require(c.redactedForStorage().encodedBlob())
+        let json = String(decoding: blob, as: UTF8.self)
+        #expect(!json.contains("PRIVATE-KEY-VALUE"))
+        #expect(!json.contains("PRESHARED-KEY-VALUE"))
+        // …and the export path still gets the real values (that's why the editor
+        // loads them from the keychain without ever rendering them).
+        #expect(c.serialize().contains("PresharedKey = PRESHARED-KEY-VALUE"))
     }
 }
 

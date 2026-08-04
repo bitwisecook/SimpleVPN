@@ -139,6 +139,20 @@ struct TailscaleConfigTests {
         }
     }
 
+    /// The control URL is persisted in providerConfiguration, never the
+    /// keychain — credentials embedded in it would be stored in the clear.
+    @Test func credentialsInTheAddressAreRejected() {
+        for bad in ["https://user:secret@headscale.example.com",
+                    "https://user@headscale.example.com",
+                    "https://user:secret@headscale.example.com:8443/",
+                    "https://user:secret@headscale.example.com/path"] {
+            #expect(TailscaleConfig.controlURLProblem(bad, preset: .headscale) != nil,
+                    "\(bad) embeds credentials and must be rejected")
+        }
+        // An "@" beyond the authority is just a path — not a credential.
+        #expect(TailscaleConfig.controlURLProblem("https://headscale.example.com/a@b", preset: .headscale) == nil)
+    }
+
     @Test func headscaleRequiresAnAddressButTailscaleDoesNot() {
         #expect(TailscaleConfig.controlURLProblem("", preset: .headscale) != nil)
         #expect(TailscaleConfig.controlURLProblem("", preset: .tailscale) == nil)

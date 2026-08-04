@@ -72,9 +72,25 @@ final class SubprocessTunnelManager {
     func connect(_ config: SubprocessTunnelConfig, password: String?) {
         guard tasks[config.id] == nil, sshEngines[config.id] == nil,
               !inProcessNE.contains(config.id), authTasks[config.id] == nil else { return }
+        // A password embedded in the server or proxy address would be persisted
+        // unencrypted AND handed to the tool on its command line (`ps`-readable).
+        if let reason = Self.addressCredentialReason(config) {
+            live[config.id] = Live(status: .failed(reason))
+            return
+        }
+        // The chosen SSL-VPN sign-in method missing its material: refuse with the
+        // fix rather than let openconnect fail opaquely (the SSH rule, applied
+        // to the openconnect surface too).
+        if let reason = Self.sslAuthBlockReason(config) {
+            live[config.id] = Live(status: .failed(reason))
+            return
+        }
         // Token mode without a stored seed would just let openconnect die under
         // --non-inter — fail fast with the actual fix instead.
+        // (Not under SSO: the token never reaches the argv there — the identity
+        // provider asks for the code in the browser.)
         if config.kind.isSSLVPN, !config.tokenMode.isEmpty,
+           Self.openconnectAuthMode(config) != "sso",
            (KeychainCredentialStore.loadCredentials(profile: "tunnel.\(config.id).token")?.password ?? "").isEmpty {
             live[config.id] = Live(status: .failed(
                 "Verification-code token is set to \(config.tokenMode.uppercased()) but no token secret is stored — add it under Sign-In ▸ Token secret and save."))
@@ -741,61 +757,13 @@ final class SubprocessTunnelManager {
             // pulse / f5 / fortinet / array), no root via ocproxy. openfortivpn is
             // the Fortinet-only fallback (needs root).
             if let oc = TunnelCLI.openconnect.resolvedPath {
-                let proto = c.kind.openconnectProtocol ?? "anyconnect"
-                // SSO never reaches this builder: connect() routes it through the
-                // bundled ocauth-helper (connectSSO), and the cookie transport has
-                // its own argv (cookieCommand). A stale "sso" on a kind with no
-                // browser flow falls back to password — connectSubprocess logs it.
-                var a = ["--protocol=\(proto)", "--non-inter", "--passwd-on-stdin"]
-                if !c.username.isEmpty { a += ["--user=\(c.username)"] }
-                // TODO(fortinet): verify --authgroup actually carries the Fortinet
-                // realm (vs a portal path / --usergroup) — needs a real gateway.
-                if !c.realm.isEmpty { a += ["--authgroup=\(c.realm)"] }
-                if !c.usergroup.isEmpty { a += ["--usergroup=\(c.usergroup)"] }
-                if !c.trustedCertSHA256.isEmpty { a += ["--servercert=pin-sha256:\(c.trustedCertSHA256)"] }
-                if !c.caFile.isEmpty { a += ["--cafile=\((c.caFile as NSString).expandingTildeInPath)"] }
-                if !c.spoofOS.isEmpty { a += ["--os=\(c.spoofOS)"] }
-                if !c.localHostname.isEmpty { a += ["--local-hostname=\(c.localHostname)"] }
-                if !c.userAgent.isEmpty { a += ["--useragent=\(c.userAgent)"] }
-                if !c.versionString.isEmpty { a += ["--version-string=\(c.versionString)"] }
-                if !c.ocCompression.isEmpty { a += ["--compression=\(c.ocCompression)"] }
-                if c.enablePFS { a.append("--pfs") }
-                if c.disableIPv6 { a.append("--disable-ipv6") }
-                if c.noHTTPKeepalive { a.append("--no-http-keepalive") }
-                if c.disableDTLS { a.append("--no-dtls") }
-                // Client-certificate auth (PEM / PKCS#12) + optional separate key.
-                if !c.clientCertFile.isEmpty { a += ["--certificate=\((c.clientCertFile as NSString).expandingTildeInPath)"] }
-                if !c.clientKeyFile.isEmpty { a += ["--sslkey=\((c.clientKeyFile as NSString).expandingTildeInPath)"] }
-                // Encrypted key / PKCS#12: the passphrase the editor stored under
-                // "tunnel.<id>.privateKey". --key-password is openconnect's only
-                // non-interactive way to take it (no stdin/file variant exists).
-                if !c.clientCertFile.isEmpty || !c.clientKeyFile.isEmpty,
-                   let kp = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(c.id).privateKey")?.password,
-                   !kp.isEmpty {
-                    a += ["--key-password=\(kp)"]
-                }
-                // Software token (OTP): mode + secret. The secret is the long-lived
-                // TOTP/HOTP seed — never place it on argv (world-readable via `ps`).
-                // openconnect accepts --token-secret=@FILE; we pass a 0600 temp file.
-                if !c.tokenMode.isEmpty {
-                    a += ["--token-mode=\(c.tokenMode)"]
-                    if let ref = Self.tokenSecretFileArgument(for: c) { a += ["--token-secret=\(ref)"] }
-                }
-                // Host-checker / endpoint posture (F5 EPA, Cisco CSD, GP/NC trojan):
-                // a real wrapper wins over the skip; otherwise "disable" stubs it out.
-                if !c.csdWrapper.isEmpty { a += ["--csd-wrapper=\((c.csdWrapper as NSString).expandingTildeInPath)"] }
-                else if c.disableCSD { a += ["--csd-wrapper=/usr/bin/true"] }
-                if let t = c.reconnectTimeout { a += ["--reconnect-timeout=\(t)"] }
-                if let d = c.forceDPD { a += ["--force-dpd=\(d)"] }
-                if let m = c.ocMTU { a += ["--mtu=\(m)"] }
-                if let bm = c.baseMTU { a += ["--base-mtu=\(bm)"] }
-                if let proxy = proxyArgument(for: c) { a += ["--proxy=\(proxy)"] }
-                if let ocproxy = TunnelCLI.ocproxy.resolvedPath {
-                    a += ["--script-tun", "--script", "\(ocproxy) -D \(c.socksPort)"]
-                }
-                a += c.extraArgs
-                a.append(serverURL(c))
-                return (oc, a, password.map { Data(($0 + "\n").utf8) })
+                // The password is written to stdin ONLY when the argv asked for
+                // it. In certificate mode nothing reads stdin, and that unread
+                // write is what used to hang the connect (or surface as an
+                // opaque certificate error).
+                let stdin = openconnectAuthMode(c) == "password"
+                    ? password.map { Data(($0 + "\n").utf8) } : nil
+                return (oc, openconnectArgs(for: c), stdin)
             }
             if c.kind == .fortinet, let ofv = TunnelCLI.openfortivpn.resolvedPath {
                 var a = [serverURL(c), "--username=\(c.username)"]
@@ -808,6 +776,142 @@ final class SubprocessTunnelManager {
         default:
             return nil
         }
+    }
+
+    // MARK: OpenConnect sign-in method (the chosen method is the one used)
+
+    /// The sign-in method the openconnect argv is built for, normalized:
+    /// "password" | "certificate" | "sso". The picker's choice is authoritative —
+    /// the builder no longer infers auth from whatever file paths happen to be
+    /// filled in, which is what let stale certificate paths silently turn a
+    /// "Password" tunnel into certificate authentication.
+    ///
+    /// "sso" only survives for kinds whose browser flow exists, and those never
+    /// reach the builder (connect() routes them through the bundled
+    /// ocauth-helper, and the signed-in session has its own `cookieCommand`
+    /// argv). A stale "sso" on a kind without that flow falls back to password —
+    /// connectSubprocess logs the fallback.
+    static func openconnectAuthMode(_ c: SubprocessTunnelConfig) -> String {
+        switch c.authMode {
+        case "certificate": "certificate"
+        case "sso" where c.kind.supportsExternalBrowserSSO: "sso"
+        default: "password"
+        }
+    }
+
+    /// Why the chosen SSL-VPN sign-in method can't work as configured, or nil —
+    /// the twin of `sshAuthBlockReason`: the editor's Connect button and
+    /// connect() consult the same rule, so a doomed sign-in is refused with its
+    /// fix instead of failing opaquely inside openconnect.
+    static func sslAuthBlockReason(_ c: SubprocessTunnelConfig) -> String? {
+        guard c.kind.isSSLVPN else { return nil }
+        guard openconnectAuthMode(c) == "certificate" else { return nil }
+        if c.clientCertFile.trimmingCharacters(in: .whitespaces).isEmpty {
+            return "Certificate sign-in needs a client certificate file — set it under Sign-In."
+        }
+        // The Fortinet-only openfortivpn fallback is driven with a password on
+        // stdin and carries no certificate flags — it would sign in with a
+        // password while the picker said certificate.
+        if c.kind == .fortinet, !TunnelCLI.openconnect.isAvailable {
+            return "Certificate sign-in needs openconnect — the openfortivpn fallback can't present a client certificate. \(TunnelCLI.openconnect.installHint)"
+        }
+        return nil
+    }
+
+    /// Whether an address carries a PASSWORD in its userinfo
+    /// ("https://user:secret@host"). A bare username ("alex@host", which ssh
+    /// accepts as a target) is not a secret and stays allowed.
+    static func passwordInAddress(_ raw: String) -> Bool {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let scheme = s.range(of: "://") { s = String(s[scheme.upperBound...]) }
+        let authority = s.prefix { $0 != "/" }
+        guard let at = authority.lastIndex(of: "@") else { return false }
+        return authority[..<at].contains(":")
+    }
+
+    /// Why an address in this config can't be used, or nil. These configs are
+    /// persisted unencrypted (UserDefaults) and the address is handed to the
+    /// tool on its command line, where any local process can read it with `ps` —
+    /// so a password embedded in one is refused, the same rule (and reason) as
+    /// `ProxyTunnelConfig.upstreamProblem`. For the proxy it would also defeat
+    /// the explicit "include proxy password in process arguments" opt-in.
+    static func addressCredentialReason(_ c: SubprocessTunnelConfig) -> String? {
+        if passwordInAddress(c.server) {
+            return "Take the password out of the server address — put it in the Password field under Sign-In."
+        }
+        if c.proxyMode == .manual, passwordInAddress(c.proxyURL) {
+            return "Take the password out of the proxy address — put it in the proxy password field under Connection."
+        }
+        return nil
+    }
+
+    /// The openconnect argv for a config (everything after the executable),
+    /// split out from `command(for:)` so the flag set is testable without
+    /// openconnect installed.
+    static func openconnectArgs(for c: SubprocessTunnelConfig) -> [String] {
+        let proto = c.kind.openconnectProtocol ?? "anyconnect"
+        let mode = openconnectAuthMode(c)
+        var a = ["--protocol=\(proto)", "--non-inter"]
+        // Password mode: the password rides stdin and NO certificate flag is
+        // passed. openconnect prefers a certificate when one is configured, so
+        // a stale cert path used to win over the piped password — certificate
+        // auth while the UI said "Password".
+        if mode == "password" { a.append("--passwd-on-stdin") }
+        if !c.username.isEmpty { a += ["--user=\(c.username)"] }
+        // TODO(fortinet): verify --authgroup actually carries the Fortinet
+        // realm (vs a portal path / --usergroup) — needs a real gateway.
+        if !c.realm.isEmpty { a += ["--authgroup=\(c.realm)"] }
+        if !c.usergroup.isEmpty { a += ["--usergroup=\(c.usergroup)"] }
+        if !c.trustedCertSHA256.isEmpty { a += ["--servercert=pin-sha256:\(c.trustedCertSHA256)"] }
+        if !c.caFile.isEmpty { a += ["--cafile=\((c.caFile as NSString).expandingTildeInPath)"] }
+        if !c.spoofOS.isEmpty { a += ["--os=\(c.spoofOS)"] }
+        if !c.localHostname.isEmpty { a += ["--local-hostname=\(c.localHostname)"] }
+        if !c.userAgent.isEmpty { a += ["--useragent=\(c.userAgent)"] }
+        if !c.versionString.isEmpty { a += ["--version-string=\(c.versionString)"] }
+        if !c.ocCompression.isEmpty { a += ["--compression=\(c.ocCompression)"] }
+        if c.enablePFS { a.append("--pfs") }
+        if c.disableIPv6 { a.append("--disable-ipv6") }
+        if c.noHTTPKeepalive { a.append("--no-http-keepalive") }
+        if c.disableDTLS { a.append("--no-dtls") }
+        // Certificate mode ONLY: the client certificate (PEM / PKCS#12), its
+        // optional separate key, and the key's passphrase — never alongside
+        // --passwd-on-stdin.
+        if mode == "certificate" {
+            if !c.clientCertFile.isEmpty { a += ["--certificate=\((c.clientCertFile as NSString).expandingTildeInPath)"] }
+            if !c.clientKeyFile.isEmpty { a += ["--sslkey=\((c.clientKeyFile as NSString).expandingTildeInPath)"] }
+            // Encrypted key / PKCS#12: the passphrase the editor stored under
+            // "tunnel.<id>.privateKey". --key-password is openconnect's only
+            // non-interactive way to take it (no stdin/file variant exists).
+            if let kp = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(c.id).privateKey")?.password,
+               !kp.isEmpty {
+                a += ["--key-password=\(kp)"]
+            }
+        }
+        // Software token (OTP): mode + secret. The secret is the long-lived
+        // TOTP/HOTP seed — never place it on argv (world-readable via `ps`).
+        // openconnect accepts --token-secret=@FILE; we pass a 0600 temp file.
+        // Not under SSO: the identity provider asks for the code itself.
+        if mode != "sso", !c.tokenMode.isEmpty {
+            a += ["--token-mode=\(c.tokenMode)"]
+            if let ref = Self.tokenSecretFileArgument(for: c) { a += ["--token-secret=\(ref)"] }
+        }
+        // Host-checker / endpoint posture (F5 EPA, Cisco CSD, GP/NC trojan):
+        // a real wrapper wins over the skip; otherwise "disable" stubs it out.
+        // (The editor disables the skip toggle and names the wrapper, so the
+        // override is visible rather than silent.)
+        if !c.csdWrapper.isEmpty { a += ["--csd-wrapper=\((c.csdWrapper as NSString).expandingTildeInPath)"] }
+        else if c.disableCSD { a += ["--csd-wrapper=/usr/bin/true"] }
+        if let t = c.reconnectTimeout { a += ["--reconnect-timeout=\(t)"] }
+        if let d = c.forceDPD { a += ["--force-dpd=\(d)"] }
+        if let m = c.ocMTU { a += ["--mtu=\(m)"] }
+        if let bm = c.baseMTU { a += ["--base-mtu=\(bm)"] }
+        if let proxy = proxyArgument(for: c) { a += ["--proxy=\(proxy)"] }
+        if let ocproxy = TunnelCLI.ocproxy.resolvedPath {
+            a += ["--script-tun", "--script", "\(ocproxy) -D \(c.socksPort)"]
+        }
+        a += c.extraArgs
+        a.append(serverURL(c))
+        return a
     }
 
     /// Transport argv for a session ocauth-helper already signed in: connect to
