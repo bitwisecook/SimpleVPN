@@ -47,9 +47,16 @@ enum NativeVPNSettings {
               summary: "How you prove who you are: a shared secret everyone using this VPN has, or your own username and password.",
               group: .signIn, default: false),
 
+        // `default: true`, matching the MODEL: `NativeVPNConfig.usesXAuth` is
+        // `xauth ?? !username.isEmpty`, and every IPsec config that reaches this
+        // row with a username — which is every Cisco `.pcf` import, they always
+        // carry one — therefore rests at ON. Declaring `false` made the row
+        // permanently bold and had VoiceOver say "changed from default" on a VPN
+        // nobody had touched. `NativeVPNSecrets.plan`'s own `xauth:` parameter
+        // default is `true` for the same reason.
         .init(id: "native.xauth", name: "Also Sign In With a Username and Password (XAuth)",
               summary: "Some concentrators want the group secret alone; others want a personal username and password as well. Turn this off and neither is sent.",
-              group: .signIn, default: false),
+              group: .signIn, default: true),
 
         .init(id: "native.username", name: "Username",
               summary: "The account name to sign in to this VPN with.",

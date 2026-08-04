@@ -570,7 +570,8 @@ struct CustomRoutingTests {
         // 10.0.0.0/8 contains BOTH the sibling rule 10.1.0.0/16 and the pushed 10.2.0.0/16.
         let pushed = PushedIntentSnapshot.Routes(advertisedPrefixes: ["10.2.0.0/16"], wantsDefault: false)
         let issues = CustomRoutingValidator.validate(f, against: pushed)
-        let issue = try? #require(issues.first { $0.field == "target" && $0.message.hasPrefix("10.0.0.0/8 overlaps") })
+        let issue = issues.first { $0.field == "target" && $0.message.hasPrefix("10.0.0.0/8 overlaps") }
+        #expect(issue != nil)
         #expect(issue?.related.count == 2)
         #expect(issue?.related.contains { $0.kind == .pushedRoute && $0.value == "10.2.0.0/16" } == true)
         #expect(issue?.related.contains {
@@ -686,5 +687,78 @@ struct CustomRoutingTests {
         var accept = ProxyCustomization(); accept.mode = .accept
         let dSame = CustomRoutingDiff.diffProxy(filter: accept, pushed: pushedPAC)
         #expect(dSame.items.first?.delta == .unchanged)
+    }
+}
+
+// MARK: - MDM LockConfiguration reaches Custom Routing (the policy-bypass fix)
+
+/// Routes, DNS and the system proxy ARE connection settings, and the Custom
+/// Routing proxy sign-in is a keychain write — so `LockConfiguration` governs them
+/// exactly as it governs the engine overrides. It didn't: the OpenVPN editor's tab
+/// had no `.disabled` and the setter had no guard, so under a managed lock all of
+/// it stayed editable and persisted. Both halves are fixed; the guard below the UI
+/// is the one that matters, because the UI must never be the only enforcement
+/// point (`SettingRenderingTests` covers the modifier in all six editors).
+@MainActor
+struct CustomRoutingManagedLockTests {
+
+    private static let lockKey = "LockConfiguration"
+
+    private func withLock(_ body: () async throws -> Void) async rethrows {
+        let previous = UserDefaults.standard.object(forKey: Self.lockKey)
+        UserDefaults.standard.set(true, forKey: Self.lockKey)
+        defer {
+            if let previous { UserDefaults.standard.set(previous, forKey: Self.lockKey) }
+            else { UserDefaults.standard.removeObject(forKey: Self.lockKey) }
+        }
+        #expect(ManagedPolicy.lockConfiguration)
+        try await body()
+    }
+
+    private func filter() -> CustomRoutingProfile {
+        var p = CustomRoutingProfile()
+        p.dns.addSearchDomains = ["corp.example.com"]
+        return p
+    }
+
+    @Test func theSetterRefusesUnderAManagedLock() async throws {
+        let id = "lock-test-\(UUID().uuidString)"
+        let store = CustomRoutingFallbackStore()
+        defer { store.clear(id) }
+        let vpn = VPNController()
+
+        await withLock {
+            await #expect(throws: (any Error).self) {
+                try await vpn.setCustomRouting(filter(), for: id)
+            }
+            // …and nothing was written on the way to throwing.
+            #expect(store.load(id) == CustomRoutingProfile())
+            #expect(vpn.customRouting(for: id) == CustomRoutingProfile())
+        }
+
+        // Unlocked, the same call persists — so the guard is the lock, not a bug.
+        try await vpn.setCustomRouting(filter(), for: id)
+        #expect(store.load(id).dns.addSearchDomains == ["corp.example.com"])
+    }
+
+    /// The commit helper every editor's Save calls stops BEFORE
+    /// `syncCustomRoutingProxyAuth`, which is the keychain write — a locked
+    /// configuration must not have its proxy credential rewritten (or deleted)
+    /// either.
+    @Test func theCommitHelperIsANoOpUnderAManagedLock() async throws {
+        let id = "lock-commit-\(UUID().uuidString)"
+        let store = CustomRoutingFallbackStore()
+        defer { store.clear(id) }
+        let vpn = VPNController()
+        let wanted = filter()
+
+        await withLock {
+            let out = await commitCustomRouting(vpn, profileID: id, profile: wanted,
+                                                proxyAuthUsername: "alex", proxyAuthPassword: "s3cret")
+            // Returned untouched — no authSource ref invented, nothing persisted.
+            #expect(out == wanted)
+            #expect(out.proxy.authSource == nil)
+            #expect(store.load(id) == CustomRoutingProfile())
+        }
     }
 }

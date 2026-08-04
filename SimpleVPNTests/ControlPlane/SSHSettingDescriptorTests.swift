@@ -170,13 +170,15 @@ struct SSHSettingDescriptorTests {
         #expect(n.jumpPort == nil)
         #expect(n.connectTimeout == nil)
         #expect(n.serverAliveInterval == 30)
-        #expect(n.socksPort == 1080)
         #expect(n.ocMTU == nil)
         #expect(n.baseMTU == nil)
         #expect(n.reconnectTimeout == nil)
         #expect(n.forceDPD == nil)
-        #expect(n.spoofOS.isEmpty)          // the tool would refuse it at startup
-        #expect(n.tokenMode.isEmpty)
+        // DELIBERATELY UNTOUCHED — a stored value is never silently rewritten.
+        // See `aStoredSOCKSPortIsNeverRewrittenBehindTheUsersBack` below.
+        #expect(n.socksPort == 80)
+        #expect(n.spoofOS == "windoze")
+        #expect(n.tokenMode == "magic")
 
         // In-range values survive untouched.
         c.port = 2222; c.jumpPort = 22; c.connectTimeout = 10
@@ -195,6 +197,96 @@ struct SSHSettingDescriptorTests {
         #expect(ok.forceDPD == 30)
         #expect(ok.spoofOS == "win")
         #expect(ok.tokenMode == "yubioath")
+    }
+
+    /// REGRESSION (data loss). `normalized()` runs on EVERY save, and it used to
+    /// move an out-of-range SOCKS port to 1080 and blank an unrecognised `--os=` /
+    /// `--token-mode=`. Both are STORED values: apps, browser profiles and notes
+    /// point at that port, so moving it on an unrelated save breaks them and makes
+    /// the number appear to change by itself — and blanking a value someone stored
+    /// loses it with no trace. The editor blocks Save on the port and caveats the
+    /// other two instead.
+    @Test func aStoredSOCKSPortIsNeverRewrittenBehindTheUsersBack() {
+        var c = SubprocessTunnelConfig()
+        c.socksPort = 80            // illegal for our unprivileged listener
+        c.spoofOS = "windoze"       // openconnect would refuse it
+        c.tokenMode = "magic"
+        // Save something unrelated…
+        c.name = " Work "
+        let n = c.normalized()
+        #expect(n.name == "Work")
+        #expect(n.socksPort == 80, "an unrelated save moved the stored SOCKS port")
+        #expect(n.spoofOS == "windoze", "an unrelated save blanked the stored reported OS")
+        #expect(n.tokenMode == "magic", "an unrelated save blanked the stored token mode")
+        // …and each one says what is wrong with it, in the user's language.
+        #expect(SubprocessTunnelConfig.socksPortProblem(80) != nil)
+        #expect(SubprocessTunnelConfig.socksPortProblem(1080) == nil)
+        #expect(SubprocessTunnelConfig.spoofOSProblem("windoze") != nil)
+        #expect(SubprocessTunnelConfig.spoofOSProblem("win") == nil)
+        #expect(SubprocessTunnelConfig.spoofOSProblem("") == nil)
+        #expect(SubprocessTunnelConfig.tokenModeProblem("magic") != nil)
+        #expect(SubprocessTunnelConfig.tokenModeProblem("totp") == nil)
+        #expect(SubprocessTunnelConfig.tokenModeProblem("") == nil)
+    }
+
+    /// REGRESSION (silent security/behaviour change). Gating the `--certificate` /
+    /// `--sslkey` flags on `authMode` turned every existing certificate profile
+    /// into a password one, because the model default is "password" and that
+    /// picker was inert until the batch that started reading it — so nobody had
+    /// ever set it. A stored client certificate IS the answer.
+    @Test func aStoredClientCertificateMigratesToCertificateSignIn() {
+        var cert = SubprocessTunnelConfig()
+        cert.kind = .ciscoAnyConnect
+        cert.clientCertFile = "~/client.p12"
+        #expect(cert.authMode == "password")            // the default nobody set
+
+        var keyOnly = SubprocessTunnelConfig()
+        keyOnly.kind = .f5apm
+        keyOnly.clientKeyFile = "~/client.key"
+
+        // Untouched: no certificate material, so nothing to infer.
+        var plain = SubprocessTunnelConfig()
+        plain.kind = .fortinet
+
+        // Untouched: SSH has no `authMode` concept and its own auth pinning.
+        var ssh = SubprocessTunnelConfig()
+        ssh.kind = .ssh
+        ssh.clientCertFile = "~/nonsense.p12"
+
+        // Untouched: an explicit choice is never overridden.
+        var sso = SubprocessTunnelConfig()
+        sso.kind = .globalProtect
+        sso.authMode = "sso"
+        sso.clientCertFile = "~/client.p12"
+
+        let (out, changed) = SubprocessTunnelStore.migrated([cert, keyOnly, plain, ssh, sso])
+        #expect(changed)
+        #expect(out[0].authMode == "certificate")
+        #expect(out[1].authMode == "certificate")
+        #expect(out[2].authMode == "password")
+        #expect(out[3].authMode == "password")
+        #expect(out[4].authMode == "sso")
+        // …and the argv follows, which is the point: the flags come back.
+        #expect(SubprocessTunnelManager.openconnectArgs(for: out[0])
+                .contains { $0.hasPrefix("--certificate=") })
+        #expect(!SubprocessTunnelManager.openconnectArgs(for: out[0]).contains("--passwd-on-stdin"))
+        // Idempotent — a second load changes nothing.
+        #expect(!SubprocessTunnelStore.migrated(out).changed)
+    }
+
+    /// The pre-existing SSO fixup still works, and still only for the kinds with
+    /// no browser flow.
+    @Test func staleSSOStillFallsBackToPasswordOnKindsWithoutABrowserFlow() {
+        var stale = SubprocessTunnelConfig()
+        stale.kind = .fortinet          // no --external-browser flow
+        stale.authMode = "sso"
+        var fine = SubprocessTunnelConfig()
+        fine.kind = .ciscoAnyConnect    // has one
+        fine.authMode = "sso"
+        let (out, changed) = SubprocessTunnelStore.migrated([stale, fine])
+        #expect(changed)
+        #expect(out[0].authMode == "password")
+        #expect(out[1].authMode == "sso")
     }
 
     /// Non-blocking, and it must stay that way: a file may be created, mounted

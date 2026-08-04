@@ -52,8 +52,34 @@ final class SettingsSearch {
     /// into a FortiGate one, and the related links have to follow.
     var kind: VPNKind?
 
+    /// Which of this editor's settings are gated OUT of the form right now, and
+    /// why (`SettingVisibility`). Pushed by the host editor from its draft.
+    ///
+    /// A reveal for one of these can't work — there is no row to scroll to, pulse
+    /// or focus — and the flipping of the gate is not ours to do: it is a config
+    /// value, and turning on "Use an exit node" because someone asked what the
+    /// exit-node picker is would edit their VPN. So the reveal says the truth
+    /// instead of pretending (`unavailable` below), which is the half of this that
+    /// matters most: the announcement used to claim "Showing X, in Y" for every
+    /// gated row in five of the six editors.
+    var visibility = SettingVisibility.everythingShown
+
+    /// Why `id` isn't on screen in this editor, or nil when it is (or when it
+    /// isn't this editor's setting at all).
+    func hiddenReason(_ id: String) -> String? { visibility.reason(id) }
+
+    /// The last reveal that couldn't land, for the editor to show beside its
+    /// search field. Cleared on the same timer as the pulse.
+    private(set) var unavailable: UnavailableReveal?
+
+    struct UnavailableReveal: Equatable, Sendable {
+        let name: String
+        let reason: String
+    }
+
     private var byID: [String: any SearchableSetting]
     private var clearTask: Task<Void, Never>?
+    private var unavailableTask: Task<Void, Never>?
 
     init(_ catalog: [any SearchableSetting], kind: VPNKind? = nil) {
         self.catalog = catalog
@@ -91,13 +117,37 @@ final class SettingsSearch {
 
     /// Navigate to a setting: expand its section, unhide it, scroll to it, pulse
     /// it, focus it, and say so.
+    ///
+    /// …or, when the editor has gated the row out of the form entirely, say THAT
+    /// and stop. A jump that lands nowhere while announcing that it landed is the
+    /// worst of the three possible outcomes.
     func reveal(_ setting: any SearchableSetting) {
+        query = ""
+        if let why = hiddenReason(setting.id) {
+            revealGroup = nil
+            revealTargetID = nil
+            highlightedID = nil
+            unavailable = UnavailableReveal(name: setting.name, reason: why)
+            AccessibilityAnnouncer.sayNow("\(setting.name) isn\u{2019}t shown for this VPN. \(why)")
+            // A sentence to read, not a flash: it lives long enough to act on.
+            unavailableTask?.cancel()
+            unavailableTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(12))
+                guard !Task.isCancelled else { return }
+                self?.unavailable = nil
+            }
+            return
+        }
+        unavailableTask?.cancel()
+        unavailable = nil
         revealGroup = setting.canonicalGroup
         revealTargetID = setting.id
         revealGeneration += 1
         highlightedID = setting.id
-        query = ""
+        scheduleClear()
+    }
 
+    private func scheduleClear() {
         clearTask?.cancel()
         clearTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(1.8))

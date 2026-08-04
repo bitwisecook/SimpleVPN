@@ -227,15 +227,48 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
         if let v = n.jumpPort, !Self.portRange.contains(v) { n.jumpPort = nil }
         if let v = n.connectTimeout, !Self.connectTimeoutRange.contains(v) { n.connectTimeout = nil }
         if !Self.keepaliveRange.contains(n.serverAliveInterval) { n.serverAliveInterval = 30 }
-        if !Self.socksPortRange.contains(n.socksPort) { n.socksPort = 1080 }
+        // The SOCKS port is DELIBERATELY not rewritten. It is a STORED value other
+        // things point at — apps configured against it, a browser profile, a
+        // colleague's notes — so silently moving it to 1080 on an unrelated save
+        // breaks them and makes the number appear to change by itself. The editor
+        // blocks Save with `socksPortError` instead (the field already knows), so
+        // an out-of-range value can only arrive from an import/CLI/MDM, and
+        // `socksPortProblem` is what surfaces it there.
         if let v = n.ocMTU, !Self.ocMTURange.contains(v) { n.ocMTU = nil }
         if let v = n.baseMTU, !Self.baseMTURange.contains(v) { n.baseMTU = nil }
         if let v = n.reconnectTimeout, !Self.reconnectTimeoutRange.contains(v) { n.reconnectTimeout = nil }
         if let v = n.forceDPD, !Self.forceDPDRange.contains(v) { n.forceDPD = nil }
-        // A value the tool would reject at startup is not worth persisting.
-        if !n.spoofOS.isEmpty, !Self.spoofOSValues.contains(n.spoofOS) { n.spoofOS = "" }
-        if !n.tokenMode.isEmpty, !Self.tokenModeValues.contains(n.tokenMode) { n.tokenMode = "" }
+        // NOT blanked. Both are stored values a user (or an importer) put there on
+        // purpose, and quietly emptying one on an unrelated save loses it with no
+        // trace — the same rule the SOCKS port now follows. The tool would reject
+        // the value at startup, so it is CAVEATED on its row instead
+        // (`spoofOSProblem` / `tokenModeProblem`), where it can be seen and fixed.
         return n
+    }
+
+    /// Why this reported OS isn't one `--os=` accepts, or nil. Non-blocking (the
+    /// row shows it as a caveat): the value is the user's, and it may be one a
+    /// newer openconnect knows about.
+    static func spoofOSProblem(_ raw: String) -> String? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty, !spoofOSValues.contains(s) else { return nil }
+        return "OpenConnect only reports one of \(spoofOSValues.joined(separator: ", ")) — it refuses \u{201C}\(s)\u{201D} at startup. Pick one above, or clear it to report this Mac as it is."
+    }
+
+    /// Why this token mode isn't one `--token-mode=` accepts, or nil. Same
+    /// non-blocking treatment as `spoofOSProblem`.
+    static func tokenModeProblem(_ raw: String) -> String? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty, !tokenModeValues.contains(s) else { return nil }
+        return "OpenConnect only accepts one of \(tokenModeValues.joined(separator: ", ")) — it refuses \u{201C}\(s)\u{201D} at startup. Pick one above, or choose \u{201C}None\u{201D}."
+    }
+
+    /// Why this SOCKS port can't be used, or nil. BLOCKING (the editor's Save):
+    /// the listener would fail to bind, and the alternative — quietly resetting a
+    /// stored port to 1080 — breaks whatever was pointed at the old one.
+    static func socksPortProblem(_ port: Int) -> String? {
+        guard !socksPortRange.contains(port) else { return nil }
+        return "Use a SOCKS port between \(socksPortRange.lowerBound) and \(socksPortRange.upperBound) \u{2014} ports below 1024 need root."
     }
 
     /// Non-blocking: a path that isn't there. The tool fails at startup with an
@@ -380,17 +413,41 @@ final class SubprocessTunnelStore {
 
     private func load() {
         guard let d = UserDefaults.standard.data(forKey: Self.key),
-              var list = try? JSONDecoder().decode([SubprocessTunnelConfig].self, from: d) else { return }
-        // SSO saved on a kind openconnect can't browser-sign-in (configs predate
-        // the gating): fall back to password so connect doesn't silently fail
-        // under --non-inter. The editor shows a note explaining the switch.
-        var migrated = false
-        for i in list.indices where list[i].authMode == "sso" && !list[i].kind.supportsExternalBrowserSSO {
-            list[i].authMode = "password"
-            migrated = true
+              let list = try? JSONDecoder().decode([SubprocessTunnelConfig].self, from: d) else { return }
+        let (fixed, changed) = Self.migrated(list)
+        tunnels = fixed
+        if changed { persist() }
+    }
+
+    /// The load-time fixups, as a PURE function so each one is testable without
+    /// UserDefaults. Both exist because a field's meaning changed after configs
+    /// were already saved against the old one.
+    static func migrated(_ input: [SubprocessTunnelConfig]) -> (list: [SubprocessTunnelConfig], changed: Bool) {
+        var list = input
+        var changed = false
+        for i in list.indices {
+            // 1. SSO saved on a kind openconnect can't browser-sign-in (configs
+            // predate the gating): fall back to password so connect doesn't
+            // silently fail under --non-inter. The editor explains the switch.
+            if list[i].authMode == "sso", !list[i].kind.supportsExternalBrowserSSO {
+                list[i].authMode = "password"
+                changed = true
+            }
+            // 2. CERTIFICATE AUTH, recovered. `authMode` defaults to "password"
+            // and its picker was INERT until the batch that started gating the
+            // `--certificate`/`--sslkey` flags on it — so nobody had ever set it,
+            // and every profile that authenticated with a client certificate
+            // suddenly sent `--passwd-on-stdin` with no certificate and failed.
+            // A stored client certificate or key IS the answer to "which method",
+            // for exactly the profiles that were signing in that way yesterday.
+            if list[i].kind.isSSLVPN, list[i].authMode == "password",
+               !list[i].clientCertFile.trimmingCharacters(in: .whitespaces).isEmpty
+                || !list[i].clientKeyFile.trimmingCharacters(in: .whitespaces).isEmpty {
+                list[i].authMode = "certificate"
+                changed = true
+            }
         }
-        tunnels = list
-        if migrated { persist() }
+        return (list, changed)
     }
     private func persist() {
         if let d = try? JSONEncoder().encode(tunnels) { UserDefaults.standard.set(d, forKey: Self.key) }

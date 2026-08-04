@@ -15,11 +15,40 @@ import Testing
 struct NativeVPNSecretsTests {
 
     @Test func clearingASecretDeletesItInsteadOfLeavingTheOldOne() {
-        // IKEv2: emptying the password/PSK field removes the stored secret.
+        // IKEv2: emptying the password/PSK field removes the stored secret. The
+        // OTHER kinds' rows are `.leave` — IKEv2 has no field for them, so
+        // "empty" there means "not loaded", not "the user removed it".
         #expect(NativeVPNSecrets.plan(kind: .ikev2, secret: "", sharedSecret: "")
-                == .init(base: .delete, groupPSK: .delete))
+                == .init(base: .delete, groupPSK: .leave, pppPassword: .leave))
         #expect(NativeVPNSecrets.plan(kind: .ikev2, secret: "pw", sharedSecret: "")
-                == .init(base: .write("pw"), groupPSK: .delete))
+                == .init(base: .write("pw"), groupPSK: .leave, pppPassword: .leave))
+    }
+
+    /// REGRESSION (data loss). Switching the Protocol picker to look at a config
+    /// and switching back — or pressing Export, which saves first — used to DELETE
+    /// the rows the newly-selected kind doesn't own, because the editor loaded only
+    /// the current kind's secret and the plan deleted the rest. The group PSK and
+    /// the PPP password went out of the keychain unrecoverably, with no warning.
+    @Test func switchingProtocolLeavesTheOtherKindsSecretsAlone() {
+        // Standing on IKEv2 with an IPsec group PSK and an L2TP PPP password in
+        // the keychain and nothing in those (unrendered) fields.
+        let viewingIKEv2 = NativeVPNSecrets.plan(kind: .ikev2, secret: "pw",
+                                                 sharedSecret: "", pppPassword: "")
+        #expect(viewingIKEv2.groupPSK == .leave, "a kind switch deleted the IPsec group PSK")
+        #expect(viewingIKEv2.pppPassword == .leave, "a kind switch deleted the L2TP PPP password")
+
+        // Standing on IPsec: the PPP row is not IPsec's to touch…
+        let viewingIPsec = NativeVPNSecrets.plan(kind: .ipsec, secret: "xauth",
+                                                 sharedSecret: "psk", pppPassword: "")
+        #expect(viewingIPsec.pppPassword == .leave)
+        // …but its OWN emptied row still really clears (the original rule).
+        #expect(NativeVPNSecrets.plan(kind: .ipsec, secret: "x", sharedSecret: "").groupPSK == .delete)
+
+        // Standing on L2TP: the group PSK is not L2TP's to touch.
+        let viewingL2TP = NativeVPNSecrets.plan(kind: .l2tp, secret: "psk",
+                                                sharedSecret: "", pppPassword: "userpw")
+        #expect(viewingL2TP.groupPSK == .leave)
+        #expect(NativeVPNSecrets.plan(kind: .l2tp, secret: "psk", pppPassword: "").pppPassword == .delete)
     }
 
     /// IPsec carries two independent secrets: the group PSK and the OPTIONAL
@@ -33,41 +62,70 @@ struct NativeVPNSecretsTests {
                 == .init(base: .write("xauth"), groupPSK: .delete))
     }
 
-    /// Only IPsec has a group PSK — switching a VPN to another kind must not
-    /// leave its group secret behind in the keychain.
-    @Test func onlyIPsecKeepsAGroupPSK() {
+    /// Only IPsec OWNS a group PSK — but a kind that doesn't own the row also has
+    /// no field for it, so it may not delete it either. Deletion belongs to the
+    /// kind that owns it (an emptied field) and to `remove(_:)` (profile deleted).
+    @Test func onlyIPsecOwnsTheGroupPSKRow() {
         for kind in [VPNKind.ikev2, .l2tp] {
-            #expect(NativeVPNSecrets.plan(kind: kind, secret: "s", sharedSecret: "psk").groupPSK == .delete,
-                    "\(kind) must not retain a group PSK")
+            #expect(NativeVPNSecrets.plan(kind: kind, secret: "s", sharedSecret: "psk").groupPSK == .leave,
+                    "\(kind) must not write OR delete the group PSK")
         }
     }
 
-    /// IPsec with XAuth turned OFF sends no username/password at all, so keeping
-    /// the old XAuth password would leave a secret behind for a mode that no
-    /// longer uses it — the same clear-deletes rule, reached by a toggle instead
-    /// of an emptied field.
-    @Test func turningXAuthOffRemovesTheStoredXAuthPassword() {
-        #expect(NativeVPNSecrets.plan(kind: .ipsec, secret: "xauth", sharedSecret: "psk", xauth: false)
-                == .init(base: .delete, groupPSK: .write("psk")))
-        // …and turning it back on stores it again.
-        #expect(NativeVPNSecrets.plan(kind: .ipsec, secret: "xauth", sharedSecret: "psk", xauth: true)
-                == .init(base: .write("xauth"), groupPSK: .write("psk")))
+    /// REGRESSION (data loss). Turning XAuth off used to `.delete` the XAuth
+    /// password — while the row stayed on screen showing dots — so a toggle flip
+    /// destroyed a password unrecoverably. The security goal is that nothing
+    /// username/password-shaped is SENT, which `connect()` already guarantees; the
+    /// only thing this save may drop is the persistent-reference copy.
+    /// `CustomRoutingTabView.syncCustomRoutingProxyAuth` documents the same choice
+    /// for the same situation ("a mode flip shouldn't lose what was typed").
+    @Test func turningXAuthOffKeepsThePasswordAndOnlyDropsTheReference() {
+        let off = NativeVPNSecrets.plan(kind: .ipsec, secret: "xauth", sharedSecret: "psk", xauth: false)
+        #expect(off.base == .write("xauth"), "turning XAuth off destroyed the stored password")
+        #expect(off.groupPSK == .write("psk"))
+        #expect(off.dropBaseReference, "the persistent-reference copy must still go")
+        // Turning it back on keeps it and references it again.
+        let on = NativeVPNSecrets.plan(kind: .ipsec, secret: "xauth", sharedSecret: "psk", xauth: true)
+        #expect(on.base == .write("xauth"))
+        #expect(!on.dropBaseReference)
+        // Emptying the FIELD is still a real removal — that rule is untouched.
+        #expect(NativeVPNSecrets.plan(kind: .ipsec, secret: "", sharedSecret: "psk", xauth: true).base == .delete)
         // The flag is IPsec's alone — IKEv2's one secret is never an XAuth password.
-        #expect(NativeVPNSecrets.plan(kind: .ikev2, secret: "pw", sharedSecret: "", xauth: false)
-                == .init(base: .write("pw"), groupPSK: .delete))
+        let ikev2 = NativeVPNSecrets.plan(kind: .ikev2, secret: "pw", sharedSecret: "", xauth: false)
+        #expect(ikev2.base == .write("pw"))
+        #expect(!ikev2.dropBaseReference)
     }
 
-    /// Only L2TP has a PPP (user) password, and clearing it must really clear —
-    /// otherwise the next export writes a password the user thought they removed.
-    @Test func onlyL2TPKeepsAPPPPassword() {
+    /// Only L2TP OWNS a PPP (user) password. Clearing it while ON L2TP must really
+    /// clear — otherwise the next export writes a password the user thought they
+    /// removed — and no other kind may touch the row.
+    @Test func onlyL2TPOwnsThePPPPasswordRow() {
         #expect(NativeVPNSecrets.plan(kind: .l2tp, secret: "psk", pppPassword: "userpw")
-                == .init(base: .write("psk"), groupPSK: .delete, pppPassword: .write("userpw")))
+                == .init(base: .write("psk"), groupPSK: .leave, pppPassword: .write("userpw")))
         #expect(NativeVPNSecrets.plan(kind: .l2tp, secret: "psk", pppPassword: "").pppPassword == .delete)
         for kind in [VPNKind.ikev2, .ipsec] {
             #expect(NativeVPNSecrets.plan(kind: kind, secret: "s", sharedSecret: "psk",
-                                          pppPassword: "userpw").pppPassword == .delete,
-                    "\(kind) must not retain a PPP password")
+                                          pppPassword: "userpw").pppPassword == .leave,
+                    "\(kind) must not write OR delete the PPP password")
         }
+    }
+
+    /// `native.xauth`'s DECLARED default has to match the model's, or an untouched
+    /// VPN reads as changed: the row is bold and VoiceOver says "changed from
+    /// default". `usesXAuth` is `xauth ?? !username.isEmpty`, which is ON for every
+    /// config that reaches this row with a username — every Cisco `.pcf` import,
+    /// since they always carry one.
+    @MainActor
+    @Test func theXAuthSpecDefaultMatchesTheModelsOwn() {
+        var imported = NativeVPNConfig()
+        imported.kind = .ipsec
+        imported.username = "alex"          // what a .pcf import leaves behind
+        #expect(imported.usesXAuth)
+        #expect(!NativeVPNSettings.catalog["native.xauth"].isChanged(imported.usesXAuth),
+                "an untouched imported IPsec VPN reads as changed from default")
+        // Explicitly turning it off IS a change.
+        imported.xauth = false
+        #expect(NativeVPNSettings.catalog["native.xauth"].isChanged(imported.usesXAuth))
     }
 
     /// The row ids are a storage contract (the migration in NativeVPNView and

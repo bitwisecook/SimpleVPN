@@ -35,7 +35,13 @@ extension VPNController {
     /// LIVE-APPLY it immediately: re-arbitrate + push through the route/DNS/proxy appliers
     /// with no reconnect. Safe to call when the profile is offline — it then only persists
     /// and takes effect on the next connect.
-    func setCustomRouting(_ profile: CustomRoutingProfile, for id: String) async {
+    /// MDM `LockConfiguration` covers this exactly as it covers the engine
+    /// settings — routes, DNS and the system proxy are connection settings, and
+    /// the proxy sign-in is a keychain write. The guard lives HERE, below the UI,
+    /// so the disabled tab is a courtesy rather than the enforcement point (the
+    /// shape `setWireGuardConfig`/`setOverrides` already had).
+    func setCustomRouting(_ profile: CustomRoutingProfile, for id: String) async throws {
+        guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
         guard let mgr = managers[id],
               let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else {
             // No NE manager: the native NEVPNManager kinds live here permanently (their

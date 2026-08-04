@@ -106,10 +106,15 @@ func loadCustomRoutingProxyAuthFields(profileID: String) -> (username: String, p
 @MainActor
 func commitCustomRouting(_ vpn: VPNController, profileID: String, profile: CustomRoutingProfile,
                          proxyAuthUsername: String, proxyAuthPassword: String) async -> CustomRoutingProfile {
+    // Under an MDM configuration lock nothing here may happen — not the persist,
+    // and NOT the keychain write `syncCustomRoutingProxyAuth` would do. Returning
+    // the profile untouched leaves the caller's state exactly as it was.
+    guard !ManagedPolicy.lockConfiguration else { return profile }
     var p = profile
     syncCustomRoutingProxyAuth(username: proxyAuthUsername, password: proxyAuthPassword,
                               profile: &p, profileID: profileID)
-    await vpn.setCustomRouting(sanitizedCustomRoutingProfile(p), for: profileID)
+    do { try await vpn.setCustomRouting(sanitizedCustomRoutingProfile(p), for: profileID) }
+    catch { vpn.lastError = error.localizedDescription }
     return p
 }
 

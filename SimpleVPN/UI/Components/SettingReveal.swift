@@ -68,6 +68,17 @@ private struct SettingRevealModifier: ViewModifier {
               search.revealGeneration != handledGeneration else { return }
         handledGeneration = search.revealGeneration
         axFocused = true
+        // THE ROW ANNOUNCES, not the scroll host. The host said "Showing X, in Y"
+        // whether or not any row existed to show — and five of the six editors
+        // gate rows on the config, so for those the sentence was simply false.
+        // Announcing from here means the claim is made by something that is, by
+        // construction, on screen. (`SettingsSearch.reveal` says the honest
+        // opposite when the row is gated out — see `SettingVisibility`.)
+        if let s = search.setting(settingID) {
+            let group = s.canonicalGroup?.title
+            AccessibilityAnnouncer.sayNow(group.map { "Showing \(s.name), in \($0)" }
+                                          ?? "Showing \(s.name)")
+        }
         pulseTask?.cancel()
         pulseTask = Task { @MainActor in
             if reduceMotion {
@@ -146,28 +157,71 @@ private struct SettingsRevealScroll<Content: View>: View {
     @Environment(SettingsSearch.self) private var search: SettingsSearch?
     @ViewBuilder let content: Content
 
+    /// The generation this form already scrolled for. Needed because the scroll
+    /// now runs from TWO places, and must happen once.
+    @State private var handledGeneration = 0
+
     var body: some View {
         ScrollViewReader { proxy in
             content
-                .onChange(of: search?.revealGeneration ?? 0) {
-                    guard let search, let id = search.revealTargetID else { return }
-                    Task { @MainActor in
-                        // Let any container the reveal just opened (a collapsed
-                        // CollapsibleSettingsSection, a conditionally-rendered
-                        // sub-form) lay out before scrolling to a row that may
-                        // not have existed a frame ago.
-                        try? await Task.sleep(for: .milliseconds(80))
-                        withAnimation { proxy.scrollTo(id, anchor: .center) }
-                        // The reveal is a scroll, a colour wash and a focus move —
-                        // all invisible to VoiceOver. Say where we landed.
-                        if let s = search.setting(id) {
-                            let group = s.canonicalGroup?.title
-                            AccessibilityAnnouncer.sayNow(group.map { "Showing \(s.name), in \($0)" }
-                                                          ?? "Showing \(s.name)")
-                        }
-                    }
-                }
+                .onChange(of: search?.revealGeneration ?? 0) { scroll(proxy) }
+                // CROSS-TAB REVEALS. `SettingsEditorShell` selects the destination
+                // tab, so this Form is CREATED after the generation changed and its
+                // `onChange` above never fires — the reveal then only pulsed and
+                // focused, and it LOOKED like it worked purely because AppKit
+                // scrolls a focused control into view. A DISABLED row (an MDM lock,
+                // an inert setting) takes no focus, so the pulse happened
+                // off-screen with nothing to see. Same scroll, same guard, from
+                // "the form just appeared with a target already pending".
+                .onAppear { scroll(proxy) }
         }
+    }
+
+    private func scroll(_ proxy: ScrollViewProxy) {
+        guard let search, let id = search.revealTargetID,
+              search.revealGeneration != handledGeneration else { return }
+        handledGeneration = search.revealGeneration
+        Task { @MainActor in
+            // Let any container the reveal just opened (a collapsed
+            // CollapsibleSettingsSection, a conditionally-rendered sub-form) lay
+            // out before scrolling to a row that may not have existed a frame ago.
+            try? await Task.sleep(for: .milliseconds(80))
+            withAnimation { proxy.scrollTo(id, anchor: .center) }
+        }
+        // The announcement is the ROW's (SettingRevealModifier): it is the only
+        // thing that knows the row exists.
+    }
+}
+
+// MARK: - Unhiding a target before the scroll
+
+/// Give an editor a chance to open a purely-VISUAL container that hides the
+/// reveal target (a disclosure, a sub-form toggle) before the scroll runs — the
+/// pattern `OpenVPNOptionsForm` hand-wrote for its proxy rows and cipher strings,
+/// as one shared modifier so the other five editors have the idiom too.
+///
+/// STRICTLY for view state. A gate that is part of the CONFIG (Tailscale's exit
+/// node, IPsec's XAuth, the Protocol picker) must NOT be flipped to satisfy a
+/// jump — that edits the user's VPN because they asked a question about it. Those
+/// are declared in `SettingVisibility` instead, and the reveal says so.
+private struct SettingRevealUnhide: ViewModifier {
+    let unhide: (String) -> Void
+    @Environment(SettingsSearch.self) private var search: SettingsSearch?
+    @State private var handledGeneration = 0
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: search?.revealGeneration ?? 0) { act() }
+            // Same reason the scroll needs it: a cross-tab reveal creates this
+            // view after the generation changed.
+            .onAppear { act() }
+    }
+
+    private func act() {
+        guard let search, let id = search.revealTargetID,
+              search.revealGeneration != handledGeneration else { return }
+        handledGeneration = search.revealGeneration
+        unhide(id)
     }
 }
 
@@ -175,5 +229,11 @@ extension View {
     /// Make this form the scroll target for setting reveals.
     func revealsSettings() -> some View {
         SettingsRevealScroll { self }
+    }
+
+    /// Open this form's own visual containers for a reveal target. See
+    /// `SettingRevealUnhide` for what may and may not be flipped here.
+    func unhidesRevealTarget(_ unhide: @escaping (String) -> Void) -> some View {
+        modifier(SettingRevealUnhide(unhide: unhide))
     }
 }

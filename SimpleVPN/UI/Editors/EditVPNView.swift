@@ -309,6 +309,12 @@ struct EditVPNView: View {
         }
         .formStyle(.grouped)
         .revealsSettings()
+        // Routes, DNS and the proxy (including a proxy sign-in that goes to the
+        // keychain) ARE connection settings, so a managed lock covers them — the
+        // other five editors' Custom Routing tabs already carried this and this
+        // one didn't. `commitCustomRouting`/`setCustomRouting` refuse under the
+        // lock too: the UI is never the only enforcement point.
+        .disabled(ManagedPolicy.lockConfiguration)
     }
 
     private var generalTab: some View {

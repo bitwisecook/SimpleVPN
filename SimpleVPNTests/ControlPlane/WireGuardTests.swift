@@ -165,12 +165,15 @@ struct WireGuardStartConfigTests {
     // MARK: Ranges (the UI bound and the stored bound are the same constant)
 
     /// The Go side only rejects `mtu <= 0` (`if mtu <= 0 { 1420 }`), so 1 was
-    /// "accepted" and produced a tunnel that dropped every packet. 1280 is the
-    /// IPv6 minimum link MTU.
+    /// "accepted" and produced a tunnel that dropped every packet. The floor is
+    /// IPv4's minimum reassembly buffer — NOT the IPv6 minimum link MTU, because
+    /// sub-1280 MTUs are legal WireGuard and common on PPPoE / double-NAT links.
     @Test func rangeBoundariesAreTheEnginesOwn() {
-        #expect(WireGuardConfig.mtuRange == 1280...1500)
+        #expect(WireGuardConfig.mtuRange == 576...1500)
         #expect(!WireGuardConfig.mtuRange.contains(1))
-        #expect(!WireGuardConfig.mtuRange.contains(1279))
+        #expect(!WireGuardConfig.mtuRange.contains(575))
+        #expect(WireGuardConfig.mtuRange.contains(576))
+        #expect(WireGuardConfig.mtuRange.contains(1200))
         #expect(WireGuardConfig.mtuRange.contains(1280))
         #expect(WireGuardConfig.mtuRange.contains(WireGuardStartConfig.defaultMTU))
         #expect(WireGuardConfig.mtuRange.contains(1500))
@@ -222,6 +225,121 @@ struct WireGuardStartConfigTests {
         #expect(ok.mtu == 1380)
         #expect(ok.listenPort == 51820)
         #expect(ok.persistentKeepalive == 25)
+    }
+
+    // MARK: Regressions — the save paths that used to destroy data
+
+    /// REGRESSION (data loss). `normalized()` runs on EVERY `setWireGuardConfig`,
+    /// and the floor used to be 1280 — so a provider-issued 1200 (PPPoE) or 1240
+    /// (double NAT) imported from a `.conf` silently became "engine default 1420"
+    /// on the next unrelated save, and a working tunnel started hanging on large
+    /// packets. Sub-1280 costs IPv6 and nothing else; it is a caveat, not a
+    /// refusal, and the Go side only rejects `mtu <= 0`.
+    @Test func aLegalSub1280MTUSurvivesEverySave() {
+        for mtu in [576, 1200, 1240, 1279] {
+            var c = WireGuardConfig()
+            c.mtu = mtu
+            #expect(c.normalized().mtu == mtu, "a save threw away a legal MTU of \(mtu)")
+            // Saving twice must be as stable as saving once.
+            #expect(c.normalized().normalized().mtu == mtu)
+            // Non-blocking, and it reaches the engine as typed.
+            #expect(WireGuardConfig.mtuProblem(mtu) == nil)
+            #expect(WireGuardConfig.mtuBelowIPv6MinimumCaveat(mtu) != nil || mtu >= 1280)
+            #expect(WireGuardStartConfig(config: c, privateKey: "", presharedKey: "").mtu == mtu)
+        }
+        // 1280 and above carries IPv6, so there is nothing to caveat.
+        #expect(WireGuardConfig.mtuBelowIPv6MinimumCaveat(1280) == nil)
+        #expect(WireGuardConfig.mtuBelowIPv6MinimumCaveat(nil) == nil)
+        // Genuinely out of range is BLOCKED (Save says why) rather than rewritten
+        // silently — the editor's `saveDisabledReason` asks this.
+        #expect(WireGuardConfig.mtuProblem(9000) != nil)
+        #expect(WireGuardConfig.mtuProblem(0) != nil)
+        #expect(WireGuardConfig.mtuProblem(nil) == nil)
+    }
+
+    /// REGRESSION (data loss). An import replaced the draft WHOLESALE, so a `.conf`
+    /// with no `PresharedKey` blanked the draft's copy — and `save()` passed the
+    /// pre-shared key as a VALUE ("replace") while the private key was passed as
+    /// nil ("leave alone"), so the blank was written over the stored key. Both keys
+    /// follow the same rule now.
+    @Test func importingAConfNeverDestroysAStoredKey() {
+        var stored = WireGuardConfig()
+        stored.id = "profile-1"
+        stored.name = "Work"
+        stored.privateKey = Self.validKey()
+        stored.presharedKey = Self.validKey()
+
+        // A real provider `.conf`: peer + endpoint, no keys of its own at all.
+        let keyless = """
+        [Interface]
+        Address = 10.7.0.2/32
+        DNS = 10.7.0.1
+        [Peer]
+        PublicKey = \(Self.validKey())
+        Endpoint = vpn.example.com:51820
+        AllowedIPs = 0.0.0.0/0
+        """
+        let afterImport = stored.applyingImport(WireGuardConfig.parse(keyless, name: "x"), name: nil)
+        #expect(afterImport.id == "profile-1")                  // identity is not imported
+        #expect(afterImport.name == "Work")                     // a paste keeps the name
+        #expect(afterImport.endpoint == "vpn.example.com:51820") // …but the fields it carries win
+        #expect(afterImport.addresses == ["10.7.0.2/32"])
+        #expect(afterImport.privateKey == stored.privateKey, "the import destroyed the private key")
+        #expect(afterImport.presharedKey == stored.presharedKey, "the import destroyed the pre-shared key")
+
+        // A `.conf` that DOES carry keys replaces them, and a file import renames.
+        let withKeys = keyless + "\nPresharedKey = \(Self.validKey(7))"
+        let replaced = stored.applyingImport(WireGuardConfig.parse(withKeys, name: "Home"), name: "Home")
+        #expect(replaced.name == "Home")
+        #expect(replaced.presharedKey == Self.validKey(7))
+
+        // And the save decision: nil = leave alone, "" = remove, value = replace.
+        #expect(WireGuardConfig.presharedKeyToSave(draft: "", removing: false) == nil)
+        #expect(WireGuardConfig.presharedKeyToSave(draft: "   ", removing: false) == nil)
+        #expect(WireGuardConfig.presharedKeyToSave(draft: "", removing: true) == "")
+        #expect(WireGuardConfig.presharedKeyToSave(draft: "abc", removing: false) == "abc")
+        // An explicit Remove wins — that is the ONE thing that clears a key.
+        #expect(WireGuardConfig.presharedKeyToSave(draft: "abc", removing: true) == "")
+    }
+
+    /// REGRESSION (data loss). `Table = main` — anything in `rt_tables` — is valid
+    /// wg-quick, and was blanked on save, so an exported `.conf` silently lost the
+    /// line.
+    @Test func aNamedRoutingTableSurvivesTheSave() {
+        for name in ["main", "local", "default", "vpn_table", "table-1", "51820"] {
+            var c = WireGuardConfig()
+            c.table = name
+            #expect(WireGuardConfig.isValidTable(name), "\(name) isn't accepted as a Table")
+            #expect(WireGuardConfig.tableProblem(name) == nil)
+            #expect(c.normalized().table == name, "a save threw away Table = \(name)")
+            #expect(c.serialize().contains("Table = \(name)"))
+        }
+        // Still refused: something that could not be one token on one line.
+        for bad in ["main table", "one\ttwo", "nope!", ""] where !bad.isEmpty {
+            #expect(!WireGuardConfig.isValidTable(bad), "\(bad) shouldn't be a valid Table")
+            #expect(WireGuardConfig.tableProblem(bad) != nil)
+        }
+        #expect(WireGuardConfig.tableProblem("") == nil)   // not set is not a problem
+    }
+
+    /// REGRESSION. A wg-quick `DNS =` line legitimately carries SEARCH DOMAINS
+    /// beside the resolvers; they parse as neither prefix nor address, and were
+    /// reported as uncovered — telling the user to "add corp.example.com/32 to
+    /// Allowed IPs", which is not a thing.
+    @Test func dnsCoverageIgnoresSearchDomains() {
+        let uncovered = WireGuardConfig.dnsOutsideAllowedIPs(
+            dns: ["10.7.0.1", "corp.example.com", "example.com", "fd00::53"],
+            allowedIPs: ["192.168.0.0/24"])
+        #expect(uncovered == ["10.7.0.1", "fd00::53"])
+
+        // Covered resolvers are still silent, and a full tunnel reports nothing.
+        #expect(WireGuardConfig.dnsOutsideAllowedIPs(dns: ["10.7.0.1", "corp.example.com"],
+                                                     allowedIPs: ["10.7.0.0/24"]).isEmpty)
+        #expect(WireGuardConfig.dnsOutsideAllowedIPs(dns: ["1.1.1.1", "corp.example.com"],
+                                                     allowedIPs: ["0.0.0.0/0", "::/0"]).isEmpty)
+        #expect(WireGuardConfig.isIPLiteral("10.7.0.1"))
+        #expect(WireGuardConfig.isIPLiteral("fd00::53"))
+        #expect(!WireGuardConfig.isIPLiteral("corp.example.com"))
     }
 
     @Test func connectProblemGatesTheEssentials() {

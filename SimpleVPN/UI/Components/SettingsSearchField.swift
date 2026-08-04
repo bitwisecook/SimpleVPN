@@ -76,6 +76,16 @@ struct SettingsSearchField: View {
             Text("No settings match \u{201C}\(search.query)\u{201D}")
                 .font(.callout).foregroundStyle(.secondary)
         }
+        // A hit (or a related link) whose row this VPN's settings gate out of the
+        // form. The jump used to do NOTHING and announce that it had worked; this
+        // is the honest version, and it says what would bring the row back.
+        if let missing = search.unavailable {
+            Label("\u{201C}\(missing.name)\u{201D} isn\u{2019}t shown for this VPN. \(missing.reason)",
+                  systemImage: "eye.slash")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel("\(missing.name) isn\u{2019}t shown for this VPN. \(missing.reason)")
+        }
     }
 
     private func pick(_ d: any SearchableSetting) {

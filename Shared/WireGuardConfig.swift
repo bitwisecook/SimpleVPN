@@ -148,6 +148,37 @@ extension WireGuardConfig {
         c.presharedKey = ""
         return c
     }
+
+    /// This config with an imported `.conf` applied over it. Every field the file
+    /// carries wins — that is what importing means — with ONE exception: a file
+    /// that carries no `PrivateKey` (or no `PresharedKey`) is not an instruction
+    /// to DELETE the stored one. The editor used to replace the draft wholesale,
+    /// so importing a `.conf` without a `PresharedKey` line blanked the draft's
+    /// copy, and Save then wrote that blank over the key in the keychain.
+    ///
+    /// `name` is the imported file's name when there is one (a file import), nil
+    /// when the text came from the paste sheet and the VPN keeps the name it has.
+    func applyingImport(_ imported: WireGuardConfig, name: String?) -> WireGuardConfig {
+        var next = imported
+        next.id = id                                    // identity is never imported
+        next.name = name ?? self.name
+        if next.privateKey.isEmpty { next.privateKey = privateKey }
+        if next.presharedKey.isEmpty { next.presharedKey = presharedKey }
+        return next
+    }
+
+    /// What `setWireGuardSecrets` must be handed for the pre-shared key: nil =
+    /// leave the stored one alone, "" = remove it, a value = replace it.
+    ///
+    /// The private key already followed this rule and the pre-shared key did not:
+    /// it was passed as a plain value, so an EMPTY draft (an import that carried
+    /// no key) read as "replace with nothing" and destroyed the stored key. Only
+    /// the explicit Remove button clears it now.
+    static func presharedKeyToSave(draft: String, removing: Bool) -> String? {
+        if removing { return "" }
+        let s = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        return s.isEmpty ? nil : s
+    }
 }
 
 // MARK: - providerConfiguration blob
@@ -175,11 +206,19 @@ nonisolated extension WireGuardConfig {
     // Mirrors OpenVPNOverrides's block: the editor's bound and the stored bound
     // are the same constant, so they cannot drift.
 
-    /// Tunnel MTU. The floor is the IPv6 minimum link MTU (RFC 8200); the Go
-    /// side only rejects `mtu <= 0` (`if mtu <= 0 { 1420 }`), so 1 is accepted
-    /// today and produces a tunnel that drops every packet. The ceiling is
-    /// standard Ethernet — anything larger can't leave the Mac.
-    static let mtuRange = 1280...1500
+    /// Tunnel MTU. The floor is IPv4's minimum reassembly buffer (RFC 791), the
+    /// same floor `SubprocessTunnelConfig.ocMTURange` uses: sub-1280 MTUs are
+    /// LEGAL WireGuard and common in the wild — PPPoE and double-NAT providers
+    /// ship 1200/1240 in the `.conf` they hand you, and wg-quick honours it. The
+    /// floor used to be 1280 (IPv6's minimum link MTU), which meant `normalized()`
+    /// silently threw a working 1200 away on the next save and left the tunnel
+    /// hanging on large packets. Below 1280 is a CAVEAT (no IPv6), not a refusal —
+    /// see `mtuBelowIPv6MinimumCaveat`. The ceiling is standard Ethernet: anything
+    /// larger can't leave the Mac.
+    static let mtuRange = 576...1500
+    /// The IPv6 minimum link MTU (RFC 8200). Legal to go below — it just costs
+    /// IPv6 inside the tunnel.
+    static let ipv6MinimumMTU = 1280
     /// Local UDP port wireguard-go binds. 0 = let the system choose one.
     static let listenPortRange = 0...65535
     /// Ports only root may bind. Legal WireGuard, but not for OUR extension —
@@ -192,10 +231,34 @@ nonisolated extension WireGuardConfig {
     /// which is 44 characters of base64 (43 + one "=" of padding).
     static let keyByteCount = 32
 
+    /// The non-blocking caveat for an MTU below the IPv6 minimum, or nil. The
+    /// tunnel works — it just can't carry IPv6, because no IPv6 link may have an
+    /// MTU under 1280 (RFC 8200 §5).
+    static func mtuBelowIPv6MinimumCaveat(_ mtu: Int?) -> String? {
+        guard let mtu, mtu < ipv6MinimumMTU else { return nil }
+        return "\(mtu) is below 1280, the smallest MTU IPv6 allows, so this tunnel can carry IPv4 only — anything IPv6 inside it will fail. That is fine (and sometimes necessary) on a link that can't carry more; raise it to 1280 or above if you need IPv6."
+    }
+
+    /// Why this MTU can't be stored, in the user's language, or nil. BLOCKING
+    /// (the editor's Save), which is the alternative to what `normalized()` used
+    /// to do: silently replace the number with "engine default" and let the user
+    /// discover it later.
+    static func mtuProblem(_ mtu: Int?) -> String? {
+        guard let mtu, !mtuRange.contains(mtu) else { return nil }
+        return "Enter an MTU between \(mtuRange.lowerBound) and \(mtuRange.upperBound), or leave it empty for the engine's own \(WireGuardStartConfig.defaultMTU)."
+    }
+
     /// Trim, drop empties, and collapse out-of-range numbers back to "engine
     /// default" (nil). Called from every save path so the stored value can
     /// never be one the editor's own ranges would refuse — the same shape as
     /// `OpenVPNOverrides.normalized()`.
+    ///
+    /// It is a BACKSTOP for values that arrive from an import, the CLI or MDM, not
+    /// the thing that decides what a user's Save does: the editor blocks Save on
+    /// an out-of-range MTU or an unusable `Table` (`mtuProblem`, `tableProblem`)
+    /// rather than letting this quietly rewrite what they typed. A silent rewrite
+    /// here is how a working 1200-byte MTU became "engine default 1420" on an
+    /// unrelated save.
     func normalized() -> WireGuardConfig {
         var n = self
         func clean(_ s: String) -> String { s.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -215,23 +278,44 @@ nonisolated extension WireGuardConfig {
         if let v = n.mtu, !Self.mtuRange.contains(v) { n.mtu = nil }
         if let v = n.listenPort, !Self.listenPortRange.contains(v) { n.listenPort = nil }
         if let v = n.persistentKeepalive, !Self.keepaliveRange.contains(v) { n.persistentKeepalive = nil }
-        // Both are CLOSED value sets in wg-quick's own grammar, not free text: a
-        // typo used to round-trip straight into an exported .conf that wg-quick
-        // then refuses ("Table"/"FwMark": bad value). Anything illegal collapses
-        // back to "not set", the same way an out-of-range number does above.
+        // Both have a grammar in wg-quick, and only a value OUTSIDE it collapses
+        // to "not set" — the editor blocks Save on one (so this is the CLI/MDM/
+        // import backstop, never the thing that rewrites what a user typed).
+        // `Table` accepts rt_tables NAMES as well as numbers: `Table = main` is
+        // valid wg-quick and used to be blanked here, dropping the line from any
+        // exported .conf.
         if !n.table.isEmpty, !Self.isValidTable(n.table) { n.table = "" }
         if !n.fwMark.isEmpty, !Self.isValidFwMark(n.fwMark) { n.fwMark = "" }
         return n
     }
 
-    /// wg-quick's `Table` grammar: `auto`, `off`, or a routing-table number.
-    /// (SimpleVPN's own engine never reads it — it only reaches an exported file.)
+    /// wg-quick's `Table` grammar: `auto`, `off`, a routing-table NUMBER, or a
+    /// routing-table NAME. wg-quick passes anything else straight to
+    /// `ip route … table <value>`, which resolves names out of `rt_tables` — so
+    /// `Table = main` is perfectly good wg-quick and used to be blanked on save,
+    /// silently dropping the line from an exported `.conf`.
     static let tableNumberRange = 0...0xFFFF_FFFF
     static func isValidTable(_ raw: String) -> Bool {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if s == "auto" || s == "off" { return true }
-        guard let n = Int(s) else { return false }
-        return tableNumberRange.contains(n)
+        if let n = Int(s) { return tableNumberRange.contains(n) }
+        return isValidTableName(s)
+    }
+
+    /// An `rt_tables` name: what iproute2 will look up. Its own parser takes a
+    /// token of printable non-space characters, so the only thing refused here is
+    /// something that could not be one identifier on one line.
+    static func isValidTableName(_ raw: String) -> Bool {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty, s.count <= 64 else { return false }
+        return s.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "_-.".contains($0)) }
+    }
+
+    /// Why this routing table isn't one wg-quick would take, or nil.
+    static func tableProblem(_ raw: String) -> String? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.isEmpty || isValidTable(s) { return nil }
+        return "Enter a routing-table name (like main) or a number up to 4294967295 — or choose auto/off above."
     }
 
     /// wg-quick's `FwMark` grammar: `off`, or an unsigned 32-bit number written in
@@ -442,12 +526,27 @@ nonisolated extension WireGuardConfig {
         return dns.compactMap { raw in
             let server = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !server.isEmpty else { return nil }
+            // A wg-quick `DNS =` line legitimately carries SEARCH DOMAINS beside
+            // the resolvers ("DNS = 10.0.0.53, corp.example.com"). A domain is
+            // not an address, has no prefix to be covered by, and used to be
+            // reported here as uncovered — advising the user to "add
+            // corp.example.com/32 to Allowed IPs", which is not a thing.
+            guard isIPLiteral(server) else { return nil }
             if server.contains(":") ? coversV6 : coversV4 { return nil }
             // No prefix of the same family overlaps this address ⇒ uncovered.
             // A bare address parses as a host prefix, so `overlaps` compares it
             // against each allowed network at that network's own length.
             return prefixes.contains { RoutePrefixMath.overlaps(server, $0) } ? nil : server
         }
+    }
+
+    /// Whether this is a bare IPv4/IPv6 address literal (as opposed to a search
+    /// domain, which a wg-quick `DNS =` line may also carry).
+    nonisolated static func isIPLiteral(_ raw: String) -> Bool {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return false }
+        var bytes = [UInt8](repeating: 0, count: 16)
+        return s.withCString { inet_pton(s.contains(":") ? AF_INET6 : AF_INET, $0, &bytes) == 1 }
     }
 
     /// The caveat text for one uncovered resolver.

@@ -46,7 +46,11 @@ private struct SettingsEditorShell: ViewModifier {
     private func consume() {
         guard let route = router?.consume(surfaces: surfaces, profileID: profileID) else { return }
         tab = route.tab
-        search.reveal(id: route.settingID)
+        // ONE HOP LATER. The host publishes its `SettingVisibility` from its own
+        // `onAppear`, and SwiftUI does not order `onAppear` between siblings — so
+        // revealing inline can consult a stale "everything is shown" and jump to a
+        // row that this VPN's settings gate out of the form.
+        Task { @MainActor in search.reveal(id: route.settingID) }
     }
 }
 

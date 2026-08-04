@@ -134,7 +134,12 @@ struct WireGuardView: View {
                 EngineSettingRow(spec: Self.specs["wg.mtu"], value: draft.mtu) {
                     MTUField(spec: Self.specs["wg.mtu"], value: $draft.mtu,
                              range: WireGuardConfig.mtuRange, prompt: "1420",
-                             invalidMessage: "Enter an MTU between 1280 and 1500. Below 1280 the tunnel can't carry IPv6 at all, and the engine would silently drop packets.")
+                             invalidMessage: "Enter an MTU between \(WireGuardConfig.mtuRange.lowerBound) and \(WireGuardConfig.mtuRange.upperBound). Leave it empty for the engine's own 1420.")
+                }
+                // Below 1280 is LEGAL and sometimes the only thing that works
+                // (PPPoE, double NAT) — a caveat, never a refusal.
+                if let caveat = WireGuardConfig.mtuBelowIPv6MinimumCaveat(draft.mtu) {
+                    SettingCaveat(caveat)
                 }
                 TrafficCrossLinks(gatewayNote: gatewayNote)
             }
@@ -233,9 +238,13 @@ struct WireGuardView: View {
 
     // MARK: Routing-table / firewall-mark rows (closed value sets, not free text)
 
-    /// `Table` is `auto | off | <number>`. A Picker over the two words plus a
-    /// "Custom…" numeric case, so the only reachable values are the ones wg-quick
-    /// accepts — it was an unconstrained TextField.
+    /// `Table` is `auto | off | <number> | <rt_tables name>`. A Picker over the two
+    /// words plus a "Custom…" case, so the only reachable values are the ones
+    /// wg-quick accepts — it was an unconstrained TextField.
+    ///
+    /// The custom case is TEXT, not a number: wg-quick hands anything that isn't
+    /// `auto`/`off` to `ip route … table <value>`, which resolves NAMES out of
+    /// `rt_tables`, so `Table = main` is valid and used to be blanked on save.
     @ViewBuilder private var tableRow: some View {
         let spec = Self.specs["wg.table"]
         let word = draft.table.trimmingCharacters(in: .whitespaces).lowercased()
@@ -245,7 +254,7 @@ struct WireGuardView: View {
                 get: { isCustom ? "custom" : word },
                 set: { choice in
                     switch choice {
-                    case "custom": draft.table = tableNumberText.isEmpty ? "0" : tableNumberText
+                    case "custom": draft.table = tableNumberText.isEmpty ? "main" : tableNumberText
                     case "": draft.table = ""
                     default: draft.table = choice
                     }
@@ -253,21 +262,27 @@ struct WireGuardView: View {
                 Text("Not set — wg-quick's own default (auto)").tag("")
                 Text("auto — install routes for the allowed IPs").tag("auto")
                 Text("off — install no routes").tag("off")
-                Text("Custom table number…").tag("custom")
+                Text("Custom table…").tag("custom")
             } label: {
                 EngineSettingLabel(spec: spec, value: draft.table)
             }
             .help(Self.exportOnlyHelp)
             if isCustom {
-                ValidatedNumberField(
-                    label: { Text("Table number").foregroundStyle(.secondary) },
-                    prompt: "0",
-                    value: Binding(
-                        get: { Int(draft.table.trimmingCharacters(in: .whitespaces)) },
-                        set: { draft.table = $0.map(String.init) ?? "" }),
-                    range: WireGuardConfig.tableNumberRange,
-                    invalidMessage: "Enter a routing-table number between 0 and 4294967295, or choose auto/off above.")
-                    .padding(.leading, 16)
+                LabeledContent("Table") {
+                    // Assigning `tableNumberText` here is what makes the state
+                    // below do its job: it was never written, so flipping to
+                    // auto/off and back always came up empty.
+                    TextField("main or 51820", text: Binding(
+                        get: { draft.table },
+                        set: { draft.table = $0; tableNumberText = $0 }))
+                        .font(.callout.monospaced())
+                        .multilineTextAlignment(.trailing)
+                        .autocorrectionDisabled()
+                        .accessibilityLabel("Routing table name or number")
+                        .accessibilityValue(tableProblem.map { "\(draft.table). Problem: \($0)" } ?? draft.table)
+                }
+                .padding(.leading, 16)
+                problemLabel(tableProblem)
             }
         }
     }
@@ -275,6 +290,9 @@ struct WireGuardView: View {
     /// The last value typed into the custom table field, so flipping to "Custom…"
     /// and back doesn't lose it.
     @State private var tableNumberText = ""
+
+    /// Why this routing table isn't one wg-quick would take, or nil.
+    private var tableProblem: String? { WireGuardConfig.tableProblem(draft.table) }
 
     /// `FwMark` is `off | <uint32>`, decimal or `0x…` hex — so it can't be a plain
     /// numeric field. A Picker for "off" plus a validated text case.
@@ -487,6 +505,13 @@ struct WireGuardView: View {
         if let p = presharedKeyProblem { return p }
         if let p = addressProblem { return p }
         if let p = allowedIPsProblem { return p }
+        // Both used to be absent here while `normalized()` quietly REWROTE them
+        // on save (an out-of-range MTU became "engine default", an unrecognised
+        // Table became "not set"). Blocking with the reason is the house rule; a
+        // silent rewrite of a stored value never is.
+        if let p = WireGuardConfig.mtuProblem(draft.mtu) { return p }
+        if let p = tableProblem { return p }
+        if let p = fwMarkProblem { return p }
         return nil
     }
 
@@ -558,6 +583,10 @@ struct WireGuardView: View {
         // works and the private-key row can say "set".
         draft = vpn.wireGuardConfig(for: profileID).withSecretsFromKeychain()
         if draft.name.isEmpty { draft.name = vpn.displayName(for: profileID) }
+        // Seed the remembered custom-table text from what is stored, so flipping
+        // the picker to auto/off and back restores what was there.
+        let word = draft.table.trimmingCharacters(in: .whitespaces).lowercased()
+        if !draft.table.isEmpty, word != "auto", word != "off" { tableNumberText = draft.table }
         customRouting = vpn.customRouting(for: profileID)
         (crProxyAuthUsername, crProxyAuthPassword) = loadCustomRoutingProxyAuthFields(profileID: profileID)
     }
@@ -570,35 +599,38 @@ struct WireGuardView: View {
     }
 
     private func applyParsed(_ text: String, name: String? = nil) {
-        let parsed = WireGuardConfig.parse(text, name: name ?? draft.name)
-        var next = parsed
-        next.id = profileID                      // keep identity
-        if name == nil { next.name = draft.name }
-        draft = next
+        // An import REPLACES what the file carries and nothing else: a `.conf`
+        // with no PresharedKey line is not "delete my pre-shared key". Replacing
+        // the draft wholesale blanked both secrets, and save() then wrote the
+        // blank pre-shared key over the stored one (see `applyingImport`).
+        draft = draft.applyingImport(WireGuardConfig.parse(text, name: name ?? draft.name),
+                                     name: name)
     }
 
     private func save() {
+        // Captured BEFORE the fields are consumed: an explicit Remove is the only
+        // thing that clears the stored pre-shared key.
+        let removingPSK = removePresharedKey && newPresharedKey.isEmpty
         if !newPrivateKey.isEmpty {
             draft.privateKey = newPrivateKey
             newPrivateKey = ""
         }
-        // Same for the pre-shared key, plus the explicit removal: an emptied
-        // value is passed on (not nil), so clearing really clears the keychain
-        // item instead of leaving the old key stored and still in use.
         if !newPresharedKey.isEmpty {
             draft.presharedKey = newPresharedKey
             newPresharedKey = ""
-        } else if removePresharedKey {
+        } else if removingPSK {
             draft.presharedKey = ""
         }
         removePresharedKey = false
-        // The keys go to the keychain; only a redacted copy is persisted —
-        // the same move on every save path. The private key is nil (leave
-        // alone) unless something set it: typing in the write-only field, or
-        // an import that carried one.
-        vpn.setWireGuardSecrets(privateKey: draft.privateKey.isEmpty ? nil : draft.privateKey,
-                                presharedKey: draft.presharedKey,
-                                for: profileID)
+        // The keys go to the keychain; only a redacted copy is persisted — the
+        // same move on every save path. BOTH keys use the same nil convention
+        // ("leave the stored one alone"): the pre-shared key used to be passed as
+        // a plain value, so an import that carried no key destroyed it.
+        vpn.setWireGuardSecrets(
+            privateKey: draft.privateKey.isEmpty ? nil : draft.privateKey,
+            presharedKey: WireGuardConfig.presharedKeyToSave(draft: draft.presharedKey,
+                                                             removing: removingPSK),
+            for: profileID)
         // Fire-and-forget: save() is called synchronously from a plain Button
         // action; both persists are idempotent, and CustomRoutingTabView's own
         // onDisappear covers the case where the view closes before this lands.

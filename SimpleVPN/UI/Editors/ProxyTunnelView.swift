@@ -217,6 +217,11 @@ struct ProxyTunnelView: View {
             .tag(SettingsTab.customRouting)
             .tabItem { Label("Custom Routing", systemImage: "arrow.triangle.branch") }
         }
+        // Which rows this draft gates OUT, so a search hit or a related link
+        // naming one says so instead of jumping nowhere (SettingVisibility).
+        // Inner, so the shell's route consumption can't read a stale table.
+        .onAppear { search.visibility = SettingVisibility.proxyTunnel(draft) }
+        .onChange(of: SettingVisibility.proxyTunnel(draft)) { _, new in search.visibility = new }
         .settingsEditor(search: search, tab: $tab,
                         surfaces: [.proxyTunnel, .customRouting], profileID: profileID)
         .padding(.top, 10)

@@ -239,6 +239,12 @@ struct TailscaleView: View {
             .tag(SettingsTab.customRouting)
             .tabItem { Label("Custom Routing", systemImage: "arrow.triangle.branch") }
         }
+        // Which rows this draft gates OUT, so a search hit or a related link
+        // naming one says so instead of jumping nowhere (SettingVisibility).
+        // BEFORE .settingsEditor so it is the inner modifier: the shell consumes
+        // an incoming route on appear, and it must not read a stale table.
+        .onAppear { search.visibility = SettingVisibility.tailscale(draft) }
+        .onChange(of: SettingVisibility.tailscale(draft)) { _, new in search.visibility = new }
         .settingsEditor(search: search, tab: $tab,
                         surfaces: [.tailscale, .customRouting], profileID: profileID)
         .padding(.top, 10)

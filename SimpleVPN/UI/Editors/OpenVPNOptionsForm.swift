@@ -66,10 +66,14 @@ struct OpenVPNOptionsForm: View {
         .onChange(of: draft.proxyHost != nil) { _, hasHost in
             if hasHost { proxyOn = true }   // draft loaded/replaced externally
         }
-        .onChange(of: search?.revealGeneration ?? 0) {
-            guard let id = search?.revealTargetID else { return }
-            // UNHIDE the target before the shared scroll runs: a row behind a
-            // toggle or a disclosure isn't in the hierarchy for scrollTo to find.
+        // UNHIDE the target before the shared scroll runs: a row behind a toggle
+        // or a disclosure isn't in the hierarchy for scrollTo to find. Both of
+        // these are pure VIEW state (the proxy sub-form's master toggle mirrors
+        // `draft.proxyHost != nil`; the cipher disclosure holds nothing), which is
+        // the only kind of gate a reveal may flip — see `SettingRevealUnhide`.
+        // Shared modifier now, so it also fires for a CROSS-TAB reveal, where this
+        // form is created after the generation changed.
+        .unhidesRevealTarget { id in
             if id.hasPrefix("openvpn.proxy-") { proxyOn = true }
             if id == "openvpn.tls-cipher-list" || id == "openvpn.tls-ciphersuites" {
                 cipherStringsExpanded = true

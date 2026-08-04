@@ -144,6 +144,13 @@ struct SubprocessTunnelView: View {
             .tag(SettingsTab.customRouting)
             .tabItem { Label("Custom Routing", systemImage: "arrow.triangle.branch") }
         }
+        // Which rows this draft gates OUT — this editor serves eight kinds across
+        // two surfaces, so most of its catalog is off screen at any moment. A
+        // search hit or a related link naming one now says so instead of jumping
+        // nowhere (SettingVisibility). Inner, so the shell's route consumption
+        // can't read a stale table.
+        .onAppear { search.visibility = SettingVisibility.subprocess(draft) }
+        .onChange(of: SettingVisibility.subprocess(draft)) { _, new in search.visibility = new }
         .settingsEditor(search: search, tab: $tab,
                         surfaces: [.ssh, .openConnect, .customRouting], profileID: draft.id)
         // The Kind picker turns an SSH tunnel into a FortiGate one and back, so
@@ -159,14 +166,10 @@ struct SubprocessTunnelView: View {
                               : Label("Save", systemImage: "checkmark")
                 }
                     .buttonStyle(.glassProminent)   // primary action — one idiom in every editor
-                    .disabled(draft.name.trimmingCharacters(in: .whitespaces).isEmpty || draft.server.isEmpty)
+                    .disabled(saveDisabledReason != nil)
                     // A dead button must say why (the rule ConnectionView follows).
-                    .help(draft.name.trimmingCharacters(in: .whitespaces).isEmpty ? "Give this tunnel a name first."
-                          : draft.server.isEmpty ? "Enter the server address first."
-                          : "Save changes to this tunnel")
-                    .accessibilityValue(draft.name.trimmingCharacters(in: .whitespaces).isEmpty
-                          ? "unavailable — give this tunnel a name first"
-                          : draft.server.isEmpty ? "unavailable — enter the server address first" : "")
+                    .help(saveDisabledReason ?? "Save changes to this tunnel")
+                    .accessibilityValue(saveDisabledReason.map { "unavailable — \($0)" } ?? "")
             }
         }
     }
@@ -551,8 +554,14 @@ struct SubprocessTunnelView: View {
     /// bound is the config's own constant, so the UI range and the stored range
     /// can't drift (see `SubprocessTunnelConfig.socksPortRange`).
     private var socksPortError: String? {
-        SubprocessTunnelConfig.socksPortRange.contains(draft.socksPort) ? nil
-            : "Use a SOCKS port between \(SubprocessTunnelConfig.socksPortRange.lowerBound) and \(SubprocessTunnelConfig.socksPortRange.upperBound) — ports below 1024 need root."
+        SubprocessTunnelConfig.socksPortProblem(draft.socksPort)
+    }
+
+    /// Whether the SOCKS port is a control this kind/mode actually has — the test
+    /// Save applies, so an SSH port-forward tunnel isn't blocked by a port it
+    /// never binds.
+    private var usesSOCKSPort: Bool {
+        (draft.kind == .ssh && draft.sshMode == .socks) || draft.kind.isSSLVPN
     }
 
     @ViewBuilder private var socksSectionBody: some View {
@@ -782,9 +791,17 @@ struct SubprocessTunnelView: View {
                     // meant a working configuration couldn't be expressed.
                     Text("RSA SecurID").tag("rsa")
                     Text("YubiKey (OATH)").tag("yubioath")
+                    // Same as `oc.os`: a stored value from outside the set is
+                    // SHOWN rather than blanked behind the user's back.
+                    if SubprocessTunnelConfig.tokenModeProblem(draft.tokenMode) != nil {
+                        Text(draft.tokenMode).tag(draft.tokenMode)
+                    }
                 } label: {
                     EngineSettingLabel(spec: Self.specs["oc.token-mode"], value: draft.tokenMode)
                 }
+            }
+            if let caveat = SubprocessTunnelConfig.tokenModeProblem(draft.tokenMode) {
+                SettingCaveat(caveat)
             }
             // YubiKey codes come off the key itself, so no seed is stored (or
             // required) for that mode.
@@ -809,6 +826,12 @@ struct SubprocessTunnelView: View {
             row("oc.client-cert", text: $draft.clientCertFile, prompt: "~/client.pem or .p12",
                 disabled: certificateUnused,
                 warning: SubprocessTunnelConfig.missingFileWarning(draft.clientCertFile))
+            // A certificate is set but the method says Password: openconnect is
+            // handed no certificate flag at all, so the sign-in silently becomes
+            // a password one. Say it beside the certificate, where it is set.
+            if let caveat = certificateSetButUnusedCaveat {
+                SettingCaveat(caveat)
+            }
             row("oc.client-key", text: $draft.clientKeyFile, prompt: "~/client.key (optional)",
                 disabled: certificateUnused,
                 warning: SubprocessTunnelConfig.missingFileWarning(draft.clientKeyFile))
@@ -830,6 +853,19 @@ struct SubprocessTunnelView: View {
     /// builder follows, so the form can never claim one thing while openconnect
     /// does another.
     private var sslMethod: String { SubprocessTunnelManager.openconnectAuthMode(draft) }
+
+    /// A client certificate is configured while the method is Password (or SSO),
+    /// so it will NOT be presented — the exact state that turned every
+    /// certificate profile into a failing password one when the flags started
+    /// being gated on the picker. `SubprocessTunnelStore.migrated` repairs the
+    /// profiles that predate the picker; this catches the case someone creates.
+    private var certificateSetButUnusedCaveat: String? {
+        guard sslMethod != "certificate" else { return nil }
+        let hasCert = !draft.clientCertFile.trimmingCharacters(in: .whitespaces).isEmpty
+            || !draft.clientKeyFile.trimmingCharacters(in: .whitespaces).isEmpty
+        guard hasCert else { return nil }
+        return "This certificate isn't sent: the sign-in method above is \(sslMethodLabel), and only \u{201C}Client certificate\u{201D} presents one. Choose Client certificate to use it."
+    }
 
     private var sslMethodLabel: String {
         switch sslMethod {
@@ -1047,9 +1083,19 @@ struct SubprocessTunnelView: View {
                         ForEach(SubprocessTunnelConfig.spoofOSValues, id: \.self) {
                             Text(Self.spoofOSLabel($0)).tag($0)
                         }
+                        // A stored value from outside the set (an import, the CLI,
+                        // MDM) gets its own row so the picker SHOWS it rather than
+                        // coming up blank — `normalized()` no longer blanks it,
+                        // because quietly deleting what someone stored is worse.
+                        if SubprocessTunnelConfig.spoofOSProblem(draft.spoofOS) != nil {
+                            Text(draft.spoofOS).tag(draft.spoofOS)
+                        }
                     } label: {
                         EngineSettingLabel(spec: Self.specs["oc.os"], value: draft.spoofOS)
                     }
+                }
+                if let caveat = SubprocessTunnelConfig.spoofOSProblem(draft.spoofOS) {
+                    SettingCaveat(caveat)
                 }
                 toggleRow("oc.no-dtls", isOn: $draft.disableDTLS)
                 // A wrapper below WINS over this toggle in the argv — say so
@@ -1154,6 +1200,19 @@ struct SubprocessTunnelView: View {
         }
     }
 
+    /// Why Save is unavailable, in the user's language, or nil when it can go.
+    ///
+    /// The SOCKS port is here because `normalized()` no longer rewrites it: a
+    /// stored port is something other software points at, so the choice is
+    /// "block the save with the reason" or "silently move it to 1080 and break
+    /// them". This is the block.
+    private var saveDisabledReason: String? {
+        if draft.name.trimmingCharacters(in: .whitespaces).isEmpty { return "Give this tunnel a name first." }
+        if draft.server.isEmpty { return "Enter the server address first." }
+        if usesSOCKSPort, let reason = socksPortError { return reason }
+        return nil
+    }
+
     /// Why Connect is disabled right now, or nil when it can go.
     private var connectBlockedReason: String? {
         if draft.kind == .ssh, draft.sshMode == .netTunnel {
@@ -1176,8 +1235,7 @@ struct SubprocessTunnelView: View {
            let bad = SubprocessTunnelManager.invalidForwardLine(draft.forwards) {
             return "Fix the forward “\(bad)” under Traffic — one bad forward stops the whole tunnel."
         }
-        if (draft.kind == .ssh && draft.sshMode == .socks) || draft.kind.isSSLVPN,
-           let reason = socksPortError {
+        if usesSOCKSPort, let reason = socksPortError {
             return reason
         }
         // A mistyped certificate pin is refused by openconnect at startup with an

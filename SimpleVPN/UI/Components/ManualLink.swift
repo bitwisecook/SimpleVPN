@@ -129,6 +129,12 @@ struct ManualLink: View {
     /// scroll + focus + pulse + announcement.
     @ViewBuilder private func relatedLink(_ entry: GlobalSetting) -> some View {
         let here = search?.contains(entry.setting.id) == true
+        // A relation can name a row this VPN's own settings gate out of the form
+        // (`ts.exit-node` ↔ `ts.exit-node-machine` offers the link exactly when
+        // the target is hidden). Still a link — following it now explains what
+        // would bring the row back instead of doing nothing — but it says so up
+        // front, in the tooltip and to VoiceOver.
+        let hiddenWhy = here ? search?.hiddenReason(entry.setting.id) : nil
         Button {
             showing = false
             if here {
@@ -138,7 +144,8 @@ struct ManualLink: View {
             }
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: here ? "arrow.turn.down.right" : "arrow.up.forward.square")
+                Image(systemName: hiddenWhy != nil ? "eye.slash"
+                      : here ? "arrow.turn.down.right" : "arrow.up.forward.square")
                     .font(.caption)
                     .accessibilityHidden(true)
                 Text(entry.setting.name)
@@ -150,12 +157,15 @@ struct ManualLink: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .foregroundStyle(.tint)
-        .help(entry.setting.summary)
-        // The glyph distinguishes "in this editor" from "elsewhere" visually;
-        // VoiceOver needs it in words, and needs the destination for the second.
+        .foregroundStyle(hiddenWhy != nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tint))
+        .help(hiddenWhy ?? entry.setting.summary)
+        // The glyph distinguishes "in this editor" from "elsewhere" (and now "not
+        // shown right now") visually; VoiceOver needs it in words, and needs the
+        // destination for the second.
         .accessibilityLabel(here ? entry.setting.name : "\(entry.setting.name), in \(entry.breadcrumb)")
-        .accessibilityHint(here ? "Jump to this setting"
-                                : "Opens the editor that has it and jumps to it")
+        .accessibilityValue(hiddenWhy.map { "not shown for this VPN. \($0)" } ?? "")
+        .accessibilityHint(hiddenWhy != nil ? "Explains what would show it"
+                           : here ? "Jump to this setting"
+                                  : "Opens the editor that has it and jumps to it")
     }
 }

@@ -433,3 +433,38 @@ struct VPNAuthConfigResolutionTests {
         #expect(out.encodedBlob() == nil)
     }
 }
+
+// MARK: - The caller side: `resolved` is fed a FRESH evaluation, never a stale one
+//
+// The audit suspected `EditVPNView.save()` of resolving the auth shape against the
+// PERSISTED `.ovpn` while `updateOVPN` wrote the new text afterwards — which would
+// mean pasting a config that stops being autologin (or starts declaring a static
+// challenge) needed two saves. It doesn't: `isAutologin`/`staticChallenge` read
+// `evaluation`, a computed property over the `@State ovpn` the Configuration tab's
+// TextEditor edits, and `ProfileEvaluator` keys its cache on the TEXT's content
+// hash. So the resolution sees exactly the text being saved.
+//
+// That is only true while the cache stays content-addressed, so that is what is
+// pinned here — a cache keyed on anything else (the profile id, "the last one
+// asked for") is precisely the stale read the audit described.
+
+@MainActor
+struct ProfileEvaluationFreshnessTests {
+
+    @Test func theEvaluatorIsContentAddressedSoADraftIsNeverAnsweredStale() {
+        let plain = "client\nremote vpn.example.com 1194 udp\nauth-user-pass\n"
+        let challenged = plain + "static-challenge \"Verification code\" 1\n"
+        #expect(ProfileEvaluation.contentHash(of: plain)
+                != ProfileEvaluation.contentHash(of: challenged))
+        #expect(ProfileEvaluation.contentHash(of: plain) == ProfileEvaluation.contentHash(of: plain))
+
+        let evaluator = ProfileEvaluator()
+        // Ask in one order…
+        #expect(evaluator.evaluation(for: plain).staticChallenge.isEmpty)
+        #expect(!evaluator.evaluation(for: challenged).staticChallenge.isEmpty)
+        // …and the other. A cache that answered "whatever I was last asked" — the
+        // stale read — would fail one of these four.
+        #expect(evaluator.evaluation(for: challenged).staticChallenge.isEmpty == false)
+        #expect(evaluator.evaluation(for: plain).staticChallenge.isEmpty)
+    }
+}

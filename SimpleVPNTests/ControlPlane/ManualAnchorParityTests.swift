@@ -365,7 +365,10 @@ struct SharedMTUFieldTests {
     /// One control, three engines — and each engine's own range, so the shared
     /// field can never offer a value that engine would refuse.
     @Test func everyEngineMTURangeIsTheEnginesOwn() {
-        #expect(WireGuardConfig.mtuRange == 1280...1500)
+        // Both floors are IPv4's minimum reassembly buffer: sub-1280 MTUs are
+        // legal and shipped by real providers, so refusing them threw away a
+        // working configuration (below 1280 is a caveat — no IPv6 — not a bound).
+        #expect(WireGuardConfig.mtuRange == 576...1500)
         #expect(SubprocessTunnelConfig.ocMTURange == 576...1500)
         #expect(ProxyTunnelConfig.mtuRange.contains(ProxyTunnelStartConfig.defaultMTU))
         // The base MTU describes the path under the tunnel, which may be jumbo.
@@ -378,8 +381,11 @@ struct SharedMTUFieldTests {
         #expect(WireGuardConfig.isValidTable("auto"))
         #expect(WireGuardConfig.isValidTable("OFF"))
         #expect(WireGuardConfig.isValidTable("51820"))
-        #expect(!WireGuardConfig.isValidTable("main"))
-        #expect(!WireGuardConfig.isValidTable("-1"))
+        // A NAME is valid wg-quick: anything that isn't auto/off goes to
+        // `ip route … table <value>`, which resolves it out of rt_tables.
+        #expect(WireGuardConfig.isValidTable("main"))
+        #expect(!WireGuardConfig.isValidTable("-1"))     // not a name, not a uint32
+        #expect(!WireGuardConfig.isValidTable("two words"))
 
         #expect(WireGuardConfig.isValidFwMark("off"))
         #expect(WireGuardConfig.isValidFwMark("0x1234"))
@@ -387,19 +393,20 @@ struct SharedMTUFieldTests {
         #expect(!WireGuardConfig.isValidFwMark("0xZZ"))
         #expect(!WireGuardConfig.isValidFwMark("nope"))
 
-        // An illegal value collapses to "not set" on save, the same way an
-        // out-of-range number does — it never round-trips into an exported .conf.
+        // An illegal value collapses to "not set" as an import/CLI/MDM BACKSTOP —
+        // the editor blocks Save with the reason rather than rewriting what was
+        // typed. A legal one round-trips into the exported .conf untouched.
         var c = WireGuardConfig()
-        c.table = "main"
+        c.table = "two words"
         c.fwMark = "nope"
         let n = c.normalized()
         #expect(n.table.isEmpty)
         #expect(n.fwMark.isEmpty)
 
-        c.table = "off"
+        c.table = "main"
         c.fwMark = "0xff"
         let ok = c.normalized()
-        #expect(ok.table == "off")
+        #expect(ok.table == "main")
         #expect(ok.fwMark == "0xff")
     }
 }

@@ -134,6 +134,11 @@ nonisolated enum NativeVPNSecrets {
     enum Action: Equatable, Sendable {
         case write(String)
         case delete
+        /// Don't touch this row at all. The kind being saved doesn't OWN it, so
+        /// the editor has no field for it and the save has nothing to say about
+        /// it. `.delete` here is how switching Protocol to look at a config and
+        /// back destroyed the other kind's secret.
+        case leave
     }
 
     /// The rows a native config can own: the base secret (the IKEv2 password or
@@ -145,7 +150,19 @@ nonisolated enum NativeVPNSecrets {
         /// L2TP only: the PPP password the exported `.mobileconfig` carries as
         /// `PPP.AuthPassword`. Its own row because L2TP needs it AND the IPSec
         /// shared secret at once, exactly like IPsec's pair.
-        var pppPassword: Action = .delete
+        var pppPassword: Action = .leave
+        /// Drop the PERSISTENT-REFERENCE copy of the base secret (the one
+        /// `connect()` hands NEVPNManager) while KEEPING the credential row.
+        ///
+        /// This is IPsec-with-XAuth-off: the group PSK is the whole sign-in, so
+        /// nothing username/password-shaped may be referenced — but the password
+        /// the user typed is still theirs. It used to be `.delete`d outright, with
+        /// the row still on screen showing dots, so turning a toggle off
+        /// unrecoverably destroyed a password. `CustomRoutingTabView`'s
+        /// `syncCustomRoutingProxyAuth` already made the other choice for exactly
+        /// this situation ("a mode flip shouldn't lose what was typed") — this
+        /// follows that precedent.
+        var dropBaseReference = false
     }
 
     /// Credential-row ids (the persistent-reference accounts `connect()` writes
@@ -154,19 +171,28 @@ nonisolated enum NativeVPNSecrets {
     static func groupPSKProfile(_ id: String) -> String { "native.\(id).secret" }
     static func pppPasswordProfile(_ id: String) -> String { "native.\(id).ppp" }
 
-    /// An empty field means "no such secret" — hence `.delete`, never "leave
-    /// whatever was there". Only IPsec has a group PSK and only L2TP has a PPP
-    /// password, so switching a VPN's kind removes the rows the new kind can't
-    /// use. `xauth` is IPsec's explicit "sign in with a username and password as
-    /// well" answer: with it off the group PSK is the entire sign-in, so keeping
-    /// the old XAuth password would leave a secret behind for a mode that no
-    /// longer sends it.
+    /// An EMPTIED field means "no such secret" — hence `.delete`, never "leave
+    /// whatever was there". Two rules bound that, and both were missing:
+    ///
+    ///  • A row the saved kind DOESN'T OWN is `.leave`, not `.delete`. Only IPsec
+    ///    has a group PSK and only L2TP has a PPP password, and the editor has no
+    ///    field for either under another kind — so "empty" there means "not
+    ///    loaded", not "removed". Deleting on a kind change is how switching
+    ///    Protocol to look at a config and switching back (or pressing Export,
+    ///    which saves first) wiped the group PSK / PPP password out of the
+    ///    keychain with no warning and no way back.
+    ///
+    ///  • Turning XAuth off does not destroy the XAuth password. With XAuth off
+    ///    the group PSK is the entire sign-in, so nothing username/password-shaped
+    ///    may be SENT — which `connect()` already guarantees (no
+    ///    `useExtendedAuthentication`, no `passwordReference`). The row stays, and
+    ///    only the persistent-reference copy goes (`dropBaseReference`).
     static func plan(kind: VPNKind, secret: String, sharedSecret: String = "",
                      pppPassword: String = "", xauth: Bool = true) -> Plan {
-        let baseSecret = (kind == .ipsec && !xauth) ? "" : secret
-        return Plan(base: baseSecret.isEmpty ? .delete : .write(baseSecret),
-                    groupPSK: kind == .ipsec && !sharedSecret.isEmpty ? .write(sharedSecret) : .delete,
-                    pppPassword: kind == .l2tp && !pppPassword.isEmpty ? .write(pppPassword) : .delete)
+        Plan(base: secret.isEmpty ? .delete : .write(secret),
+             groupPSK: kind == .ipsec ? (sharedSecret.isEmpty ? .delete : .write(sharedSecret)) : .leave,
+             pppPassword: kind == .l2tp ? (pppPassword.isEmpty ? .delete : .write(pppPassword)) : .leave,
+             dropBaseReference: kind == .ipsec && !xauth)
     }
 
     /// Perform a plan. A delete removes BOTH the credential row and the
@@ -181,6 +207,13 @@ nonisolated enum NativeVPNSecrets {
         case .delete:
             KeychainCredentialStore.deleteCredentials(profile: baseProfile(id))
             KeychainCredentialStore.deleteNativeSecret(account: "native.\(id)")
+        case .leave:
+            break
+        }
+        // XAuth off: the password stays where the user put it, but nothing may
+        // reference it. Only the persistent-reference copy goes.
+        if plan.dropBaseReference {
+            KeychainCredentialStore.deleteNativeSecret(account: "native.\(id)")
         }
         switch plan.groupPSK {
         case .write(let psk):
@@ -189,6 +222,8 @@ nonisolated enum NativeVPNSecrets {
         case .delete:
             KeychainCredentialStore.deleteCredentials(profile: groupPSKProfile(id))
             KeychainCredentialStore.deleteNativeSecret(account: "native.\(id).psk")
+        case .leave:
+            break
         }
         // L2TP's PPP password never reaches NEVPNManager (there is no L2TP API),
         // so it has no persistent-reference copy to clean up — only the row the
@@ -199,6 +234,8 @@ nonisolated enum NativeVPNSecrets {
                 profile: pppPasswordProfile(id), .init(username: username, password: pw))
         case .delete:
             KeychainCredentialStore.deleteCredentials(profile: pppPasswordProfile(id))
+        case .leave:
+            break
         }
     }
 }

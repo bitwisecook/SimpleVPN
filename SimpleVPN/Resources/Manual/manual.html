@@ -574,7 +574,7 @@
 
 <h2 id="wg-mtu">MTU</h2>
 <p class="default">Default: auto-detected (usually 1420).</p>
-<p>The largest packet size the tunnel carries. WireGuard picks a sensible value automatically; set it lower (e.g. 1380 or 1280) only if some websites or transfers stall — a classic sign of MTU problems on the path.</p>
+<p>The largest packet size the tunnel carries. WireGuard picks a sensible value automatically; set it lower (e.g. 1380 or 1280) only if some websites or transfers stall — a classic sign of MTU problems on the path. Anything from 576 to 1500 is accepted, because providers on PPPoE or behind double NAT do hand out 1200 or 1240 and those configurations work. Below 1280 the tunnel can carry IPv4 only: no IPv6 link may have a smaller MTU than that.</p>
 
 <h2 id="wg-listen-port">Listen Port</h2>
 <p class="default">Default: chosen automatically.</p>
@@ -582,7 +582,7 @@
 
 <h2 id="wg-table">Routing Table</h2>
 <p class="default">Default: auto.</p>
-<p><strong>auto</strong> installs routes for the Allowed IPs so matching traffic goes through the tunnel (and, for a full tunnel, adds a rule to protect the tunnel's own packets). <strong>off</strong> installs no routes at all — only choose this if you're managing routing yourself.</p>
+<p><strong>auto</strong> installs routes for the Allowed IPs so matching traffic goes through the tunnel (and, for a full tunnel, adds a rule to protect the tunnel's own packets). <strong>off</strong> installs no routes at all — only choose this if you're managing routing yourself. <strong>Custom</strong> takes a routing-table name (such as <code>main</code>) or a number: wg-quick passes it straight to <code>ip route … table</code>, which resolves names out of <code>rt_tables</code>. Only configurations you export use it — SimpleVPN's own engine ignores it.</p>
 
 <h2 id="wg-fwmark">Firewall Mark</h2>
 <p class="default">Default: off.</p>

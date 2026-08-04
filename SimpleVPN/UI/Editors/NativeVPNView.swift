@@ -218,6 +218,12 @@ struct NativeVPNView: View {
             .tag(SettingsTab.customRouting)
             .tabItem { Label("Custom Routing", systemImage: "arrow.triangle.branch") }
         }
+        // Which rows this draft gates OUT (most of the surface swaps on the
+        // Protocol picker), so a search hit or a related link naming one says so
+        // instead of jumping nowhere (SettingVisibility). Inner, so the shell's
+        // route consumption can't read a stale table.
+        .onAppear { search.visibility = SettingVisibility.native(draft) }
+        .onChange(of: SettingVisibility.native(draft)) { _, new in search.visibility = new }
         .settingsEditor(search: search, tab: $tab,
                         surfaces: [.native, .customRouting], profileID: draft.id)
         .onChange(of: draft.kind) { search.kind = draft.kind }
@@ -605,18 +611,21 @@ struct NativeVPNView: View {
         loaded = true
         search.kind = draft.kind
         if draft.kind == .ipsec { draft.usesSharedSecret = true }   // no cert path — always PSK
+        // ALL THREE ROWS, whatever the kind. The Protocol picker changes which
+        // fields are on screen but not which secrets this profile owns, and
+        // `save()` writes what these variables hold — so loading only the current
+        // kind's secret meant switching Protocol and saving wrote an empty value
+        // over the other kind's. (`NativeVPNSecrets.plan` no longer deletes a row
+        // the saved kind doesn't own either; both halves of that bug are fixed.)
         let base = KeychainCredentialStore.loadCredentials(profile: NativeVPNSecrets.baseProfile(draft.id))
         secret = base?.password ?? ""
-        if draft.kind == .l2tp {
-            pppPassword = KeychainCredentialStore.loadCredentials(
-                profile: NativeVPNSecrets.pppPasswordProfile(draft.id))?.password ?? ""
-        }
+        pppPassword = KeychainCredentialStore.loadCredentials(
+            profile: NativeVPNSecrets.pppPasswordProfile(draft.id))?.password ?? ""
         customRouting = vpn.customRouting(for: draft.id)
         (crProxyAuthUsername, crProxyAuthPassword) = loadCustomRoutingProxyAuthFields(profileID: draft.id)
-        guard draft.kind == .ipsec else { return }
         if let group = KeychainCredentialStore.loadCredentials(profile: NativeVPNSecrets.groupPSKProfile(draft.id)) {
             sharedSecret = group.password
-        } else if !secret.isEmpty {
+        } else if draft.kind == .ipsec, !secret.isEmpty {
             // Backward compat: earlier builds (and the Cisco .pcf importer,
             // ManageVPNsView.importCiscoText) stored the IPsec group PSK in
             // this same base slot, with no separate XAuth password field to
