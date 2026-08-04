@@ -241,6 +241,37 @@ struct ManualAnchorParityTests {
         // underneath the tunnel and stays in Advanced (AGENTS.md records the split).
         #expect(SubprocessTunnelView.specs["oc.mtu"].group == .traffic)
         #expect(SubprocessTunnelView.specs["oc.base-mtu"].group == .advanced)
+        // Verifying the SERVER (as opposed to identifying yourself) is Security —
+        // and on these seven kinds the pin is the ONLY control that does it.
+        #expect(SubprocessTunnelView.specs["oc.pinned-server-cert"].group == .security)
+        #expect(SubprocessTunnelView.specs["oc.pfs"].group == .security)
+        // The local proxy and "point the whole Mac at it" are routing decisions,
+        // the same group their ssh.* twins are in.
+        #expect(SubprocessTunnelView.specs["oc.socks-port"].group == .traffic)
+        #expect(SubprocessTunnelView.specs["oc.system-proxy"].group == .traffic)
+        // What the gateway is TOLD this client is: escape hatches, not Security.
+        for id in ["oc.local-hostname", "oc.user-agent", "oc.version-string",
+                   "oc.usergroup", "oc.prefer-in-process", "oc.csd-wrapper"] {
+            #expect(SubprocessTunnelView.specs[id].group == .advanced, "\(id) isn't in Advanced")
+        }
+    }
+
+    /// ONE CONCEPT, ONE NAME (AGENTS.md's naming glossary). The SSH and SSL-VPN
+    /// surfaces expose the same two SOCKS concepts off the same two model fields,
+    /// and this editor renders both — so the words have to be identical. Two kinds
+    /// describing one concept two ways is how a user who learned one editor stops
+    /// trusting the other, and it is the exact drift the glossary rule exists for.
+    @Test func theSOCKSPairIsWordedIdenticallyOnBothSurfaces() {
+        for (sshID, ocID) in [("ssh.socks-port", "oc.socks-port"),
+                              ("ssh.system-proxy", "oc.system-proxy")] {
+            let a = SSHSettings.catalog[sshID], b = OpenConnectSettings.catalog[ocID]
+            #expect(a.name == b.name, "\(sshID) and \(ocID) have different names")
+            #expect(a.summary == b.summary, "\(sshID) and \(ocID) have different summaries")
+            #expect(a.group == b.group, "\(sshID) and \(ocID) are in different groups")
+        }
+        // Perfect forward secrecy is the same concept the native surface names.
+        #expect(OpenConnectSettings.catalog["oc.pfs"].name
+                == NativeVPNSettings.catalog["native.pfs"].name)
     }
 
     /// Ids are the CLI/MDM/manual contract: they may be ADDED to, never renamed.
@@ -259,6 +290,12 @@ struct ManualAnchorParityTests {
             "cr.ignore-pushed-search", "cr.ignore-pushed-match",
             "cr.add-search-domains", "cr.match-domains",
             "cr.proxy-mode", "cr.proxy-manual-url", "cr.proxy-pac-url", "cr.proxy-auth",
+            // The OpenConnect surface's last unspec'd controls — the SSL-VPN half
+            // of this editor was hand-rolled below Traffic and invisible to search.
+            "oc.socks-port", "oc.system-proxy", "oc.pinned-server-cert", "oc.pfs",
+            "oc.prefer-in-process", "oc.csd-wrapper", "oc.usergroup", "oc.compression",
+            "oc.disable-ipv6", "oc.no-http-keepalive", "oc.local-hostname",
+            "oc.user-agent", "oc.version-string",
         ]
         #expect(shipped.isSubset(of: ids))
     }

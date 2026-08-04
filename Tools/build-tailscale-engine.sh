@@ -120,6 +120,25 @@ done
 # Tailscale stack plus gVisor's netstack. Dead-code stripping at link time cuts
 # what actually lands in the extension binary to a fraction of it, but the
 # number is worth watching — a jump means a new dependency got pulled in.
+# Notices for the TRANSITIVE Go dependencies — this archive's module graph is by
+# far the largest body of third-party code SimpleVPN ships (the whole Tailscale
+# stack, gVisor, wireguard-go and everything under them). About ▸ Open-Source
+# Components names the ones a reader would recognise; this file enumerates the
+# rest, whose MIT/BSD/Apache notices we convey too. SOFT-FAILS by design, like
+# Tools/fetch-geoip.sh: a fresh clone must build without another tool first.
+#   go install github.com/google/go-licenses@latest
+NOTICES="$OUT/THIRD-PARTY-LICENSES.csv"
+if command -v go-licenses >/dev/null 2>&1; then
+  if go-licenses csv . > "$NOTICES" 2>/dev/null; then
+    echo "notices: $NOTICES ($(wc -l < "$NOTICES" | tr -d ' ') modules)"
+  else
+    echo "note: go-licenses failed; $NOTICES may be missing or incomplete"
+  fi
+else
+  echo "note: go-licenses not installed — skipping $NOTICES"
+  echo "      (go install github.com/google/go-licenses@latest)"
+fi
+
 echo "tailscale.com: $TS_VERSION (BSD-3-Clause)"
 echo "archive: $OUT/libtsengine.a ($(du -h "$OUT/libtsengine.a" | cut -f1 | tr -d ' '))"
 shasum -a 256 "$OUT/libtsengine.a"

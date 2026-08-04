@@ -118,6 +118,21 @@ nonisolated enum SettingRelations {
         ["oc.mtu", "oc.base-mtu"],
         // Both answer "how fast is a dropped tunnel noticed and retried".
         ["oc.reconnect-timeout", "oc.force-dpd"],
+        // The two ways to verify the SERVER — the only two these seven kinds have.
+        // A private-CA gateway is covered by the CA file; a self-signed one only
+        // by the pin, and a user who found the wrong one needs the other.
+        ["oc.pinned-server-cert", "oc.cafile"],
+        // "Overridden by the host-checker wrapper below, which runs instead.
+        // Clear that wrapper to skip the check." — the disabledReason on the skip
+        // toggle already named the wrapper; now it links to it.
+        ["oc.disable-csd", "oc.csd-wrapper"],
+        // The SOCKS pair, exactly as the SSH surface declares it — and the
+        // in-process engine, which replaces both with a full system tunnel.
+        ["oc.socks-port", "oc.system-proxy", "oc.prefer-in-process"],
+        // What this client claims to BE. Four fields answering one question
+        // ("what does the gateway think is connecting?"), so someone who found
+        // one has found them all.
+        ["oc.os", "oc.local-hostname", "oc.user-agent", "oc.version-string"],
 
         // MARK: Native (IKEv2 / IPsec / L2TP)
 

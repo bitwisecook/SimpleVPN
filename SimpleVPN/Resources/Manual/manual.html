@@ -209,11 +209,24 @@
   <a href="#oc-sso-browser">Sign-In Browser</a>
   <a href="#oc-token-mode">Verification-Code Token</a>
   <a href="#oc-token-secret">Token Secret</a>
+  <a href="#oc-pinned-server-cert">Pinned Server Certificate</a>
   <a href="#oc-cafile">CA Certificate File</a>
+  <a href="#oc-pfs">Perfect Forward Secrecy</a>
   <a href="#oc-os">Reported OS</a>
   <a href="#oc-no-dtls">Disable DTLS</a>
   <a href="#oc-disable-csd">Skip Host Checker</a>
+  <a href="#oc-prefer-in-process">Run In-Process</a>
+  <a href="#oc-csd-wrapper">Host-Checker Wrapper</a>
+  <a href="#oc-usergroup">User Group / Path</a>
+  <a href="#oc-compression">Compression</a>
+  <a href="#oc-disable-ipv6">Disable IPv6 in the Tunnel</a>
+  <a href="#oc-no-http-keepalive">Disable HTTP Keepalive</a>
+  <a href="#oc-local-hostname">Reported Hostname</a>
+  <a href="#oc-user-agent">User Agent</a>
+  <a href="#oc-version-string">Client Version String</a>
   <a href="#oc-reconnect-timeout">Reconnect Timeout</a>
+  <a href="#oc-socks-port">Local SOCKS Port</a>
+  <a href="#oc-system-proxy">Route Mac Traffic</a>
   <a href="#oc-mtu">MTU</a>
   <a href="#oc-base-mtu">Base MTU</a>
   <a href="#oc-force-dpd">Dead-Peer Detection</a>
@@ -749,9 +762,26 @@
 <p class="default">Required when a token mode is set.</p>
 <p>The seed your codes are generated from (the string or QR contents your administrator issued). It is stored in your login keychain and handed to OpenConnect in a private, short-lived <code>0600</code> file — never on the command line, where any local process could read it. Without it the connection fails before it starts.</p>
 
+<h2 id="oc-pinned-server-cert">Pinned Server Certificate</h2>
+<p class="default">Optional — but it is the only server-identity check these VPNs have.</p>
+<p>Accept exactly one gateway: the one whose certificate matches this fingerprint, and nothing else. Everything else on the Sign-In screen proves who <em>you</em> are; this is the single control that proves the machine answering is the machine you meant to reach. Set it for any gateway with a self-signed or otherwise untrusted certificate — without it, such a gateway is refused outright rather than accepted blindly.</p>
+<p>Two forms are accepted, the two OpenConnect itself prints:</p>
+<ul>
+  <li><code>pin-sha256:</code> followed by 44 characters of base64 ending in <code>=</code> — the hash of the server's public key. The prefix is optional; a bare 44-character pin means this.</li>
+  <li><code>sha256:</code> followed by 64 hex characters — the certificate's own fingerprint.</li>
+</ul>
+<p>Anything else is refused as you type, with the reason under the field, and <strong>Connect</strong> stays disabled until it is fixed. That is deliberate: a mistyped pin doesn't warn, it fails the connection every time, and it does so complaining about the server's certificate — a very long way from the character that was actually wrong.</p>
+<p>A gateway whose certificate comes from a private authority is usually better served by a <a href="#oc-cafile">CA certificate file</a>, which keeps working when the server's certificate is renewed. A pin has to be updated by hand each time.</p>
+
 <h2 id="oc-cafile">CA Certificate File</h2>
 <p class="default">Optional.</p>
 <p>A PEM file of certificate authorities to trust for the VPN server, for organisations that issue their server certificate from a private CA. Not needed when the server uses a normal public certificate.</p>
+<p>Unlike a <a href="#oc-pinned-server-cert">pinned certificate</a>, this keeps working when the gateway renews its certificate — the authority stays the same. Prefer it when you were given a CA file.</p>
+
+<h2 id="oc-pfs">Perfect Forward Secrecy</h2>
+<p class="default">Default: off.</p>
+<p>Refuses any cipher that doesn't give this session a key of its own, so traffic recorded today can't be decrypted later by someone who obtains the server's long-term key. Every current gateway can do this; the setting exists to <em>require</em> it.</p>
+<div class="warn">A gateway that can't offer forward secrecy is refused rather than downgraded — that is the point of the setting, but it does mean the connection stops working instead of connecting less safely.</div>
 
 <h2 id="oc-os">Reported OS</h2>
 <p class="default">Default: the real OS.</p>
@@ -767,9 +797,57 @@
 <p>A <strong>host-checker wrapper</strong> (under Advanced) takes precedence: when one is set, that script runs and this toggle does nothing, so the toggle is shown as unavailable and names the wrapper instead of pretending to apply.</p>
 <div class="warn">Bypassing posture checks may violate your organisation's access policy. Some servers also refuse to connect without it — it cuts both ways.</div>
 
+<h2 id="oc-prefer-in-process">Run In-Process</h2>
+<p class="default">Default: off — the <code>openconnect</code> command-line tool runs the VPN.</p>
+<p>Carries this VPN with SimpleVPN's own built-in OpenConnect engine, as a full system tunnel, instead of launching the <code>openconnect</code> tool. As a system tunnel it routes the whole Mac by itself, so no <a href="#oc-socks-port">SOCKS proxy</a> is opened and <a href="#oc-system-proxy">Route Mac Traffic Through This Proxy</a> has nothing to do.</p>
+<p>The built-in engine deliberately carries only what it can carry exactly: the server, the realm, a pinned certificate, the sign-in browser and your credentials. Any other setting on this screen — a port, a <a href="#oc-cafile">CA file</a>, a <a href="#oc-client-cert">client certificate</a>, a <a href="#oc-token-mode">verification-code token</a>, a <a href="#oc-csd-wrapper">host-checker wrapper</a>, a connection proxy, <a href="#oc-compression">compression</a>, <a href="#oc-pfs">PFS</a>, an <a href="#oc-mtu">MTU</a>, a <a href="#oc-reconnect-timeout">timeout</a> or <a href="#oc-extra-args">extra arguments</a> — sends the connection back to the tool, and the editor says so rather than letting the toggle look effective. Silently dropping one of those would connect with weaker settings than you configured.</p>
+<div class="warn">Newer than the subprocess path. Check it against your own gateway before relying on it.</div>
+
+<h2 id="oc-csd-wrapper">Host-Checker Wrapper</h2>
+<p class="default">Optional.</p>
+<p>A script that answers the gateway's endpoint-posture challenge (Cisco's CSD, F5's EPA, GlobalProtect's HIP) so an unmanaged Mac is admitted. Whoever runs the VPN usually supplies it.</p>
+<p>It takes precedence over <a href="#oc-disable-csd">Skip Host Checker</a>: with a wrapper set the script runs and the skip does nothing, so that toggle is shown as unavailable and names this file instead of pretending to apply. Clear this field to go back to skipping the check. If there is no file at the path you typed, the row says so — that is a warning, not a block, because the file may be created before the next connect.</p>
+
+<h2 id="oc-usergroup">User Group / Path</h2>
+<p class="default">Optional.</p>
+<p>The portal or gateway this sign-in goes to, given as the path part of the address. GlobalProtect uses it to choose between the <em>portal</em> and a specific <em>gateway</em>; Juniper and Pulse expect the URL path of the sign-in realm. Set it only if you were given a path — an address alone reaches the default.</p>
+
+<h2 id="oc-compression">Compression</h2>
+<p class="default">Default: whatever the gateway proposes.</p>
+<p>Whether traffic inside the tunnel may be compressed. <strong>Stateful</strong> and <strong>All</strong> ask for it, <strong>None</strong> refuses it. Leave it on Default unless an administrator names a setting: modern traffic is mostly already compressed, so there is usually nothing to gain, and refusing compression is occasionally a workaround for a gateway that implements it badly.</p>
+
+<h2 id="oc-disable-ipv6">Disable IPv6 in the Tunnel</h2>
+<p class="default">Default: off (IPv6 used when the gateway offers it).</p>
+<p>Asks the gateway for an IPv4-only tunnel. Worth trying when connections inside the tunnel hang rather than fail — the classic symptom of a gateway that advertises IPv6 it can't actually route. See also <a href="#problem-ipv6-leak">IPv6 Leak</a>, which is the opposite problem.</p>
+
+<h2 id="oc-no-http-keepalive">Disable HTTP Keepalive</h2>
+<p class="default">Default: off (connections are reused).</p>
+<p>Opens a fresh connection for each request to the gateway instead of reusing one. A workaround for old proxies and gateways that mishandle a reused connection and stall during sign-in; it costs a little speed and nothing else.</p>
+
+<h2 id="oc-local-hostname">Reported Hostname</h2>
+<p class="default">Default: this Mac's real computer name.</p>
+<p>The computer name reported to the gateway. Some gateways record it, show it to administrators, or policy-check it against a list of known machines — set it when yours expects a particular name.</p>
+
+<h2 id="oc-user-agent">User Agent</h2>
+<p class="default">Default: OpenConnect's own.</p>
+<p>The client identity sent with every request to the gateway. A few gateways admit only clients whose identity they recognise; setting this to the vendor's own client string is the standard way past that. Together with <a href="#oc-os">Reported OS</a> and the <a href="#oc-version-string">version string</a> it is what the gateway thinks is connecting.</p>
+
+<h2 id="oc-version-string">Client Version String</h2>
+<p class="default">Default: OpenConnect's own version.</p>
+<p>The client version reported to the gateway, e.g. <code>4.10.05085</code>. Some gateways refuse a version they don't know, or a version below a minimum they enforce. Only set it if you were told which value to use.</p>
+
 <h2 id="oc-reconnect-timeout">Reconnect Timeout</h2>
 <p class="default">Default: 300 seconds.</p>
 <p>After the tunnel drops, how long OpenConnect keeps trying to re-establish it before giving up.</p>
+
+<h2 id="oc-socks-port">Local SOCKS Port</h2>
+<p class="default">Default: 1080.</p>
+<p>Where on this Mac the tunnel offers its proxy: OpenConnect hands the tunnel to <code>ocproxy</code>, which listens on <code>127.0.0.1</code> and this port. That is what makes these VPNs work without administrator rights — nothing touches the system's network configuration. Point apps at the proxy, or turn on <a href="#oc-system-proxy">Route Mac Traffic Through This Proxy</a> to point the whole Mac at it. Two tunnels can't share a port, so give each its own.</p>
+<p>With <a href="#oc-prefer-in-process">Run In-Process</a> in effect there is no proxy at all — the tunnel carries the whole Mac directly — and this setting doesn't apply.</p>
+
+<h2 id="oc-system-proxy">Route Mac Traffic Through This Proxy</h2>
+<p class="default">Default: off.</p>
+<p>Points the active network service's SOCKS proxy at the tunnel while it's connected (macOS asks for your admin password), and restores the old setting on disconnect. Flipping it while connected applies immediately. Off, only apps you point at the <a href="#oc-socks-port">proxy</a> yourself use the tunnel.</p>
 
 <h2 id="oc-mtu">MTU</h2>
 <p class="default">Default: auto-detected.</p>
@@ -1051,7 +1129,7 @@
 <p>The pair is kept in your login keychain; the VPN&rsquo;s settings only ever carry a reference to it. Clearing both fields deletes the stored secret. Choosing &ldquo;Ignore (direct)&rdquo; keeps what you typed but drops the reference, so an unreferenced secret can never reach a connection.</p>
 
 <hr style="border: none; border-top: 1px solid var(--border); margin-top: 48px">
-<p class="muted" style="font-size: 13px">SimpleVPN uses the OpenVPN 3, OpenConnect, libssh and Tailscale engines. <a href="https://db-ip.com">IP Geolocation by DB-IP</a>, licensed CC BY 4.0.</p>
+<p class="muted" style="font-size: 13px">SimpleVPN uses the OpenVPN 3, OpenConnect, libssh and Tailscale engines, the gVisor network stack, Sparkle for app updates, and the 1Password Go SDK for item lookup. <a href="https://db-ip.com">IP Geolocation by DB-IP</a>, licensed CC BY 4.0. Coastlines from Natural Earth. Every component and its licence is listed in <strong>SimpleVPN &#9656; About SimpleVPN</strong>.</p>
 </main>
 </body>
 </html>

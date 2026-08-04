@@ -31,8 +31,25 @@ enum Acknowledgements {
               url: "https://github.com/tailscale/tailscale"),
         .init(name: "wireguard-go", license: "MIT", role: "WireGuard data plane inside the Tailscale engine",
               url: "https://github.com/tailscale/wireguard-go"),
-        .init(name: "gVisor", license: "Apache-2.0", role: "Userspace network stack inside the Tailscale engine",
+        // gVisor's netstack is the userspace TCP/IP stack in BOTH Go engines: the
+        // Tailscale client embeds it, and the Proxy Tunnel engine is built on it
+        // directly (Vendor/proxy-engine pins the same version).
+        .init(name: "gVisor", license: "Apache-2.0", role: "Userspace network stack in the Tailscale and Proxy Tunnel engines",
               url: "https://gvisor.dev"),
+        // Statically linked into `opnative-helper`, the one-shot tool that reads
+        // items out of 1Password (Vendor/onepassword-native, Tools/build-onepassword-sdk.sh).
+        .init(name: "1Password Go SDK", license: "MIT", role: "1Password item lookup (opnative-helper)",
+              url: "https://github.com/1Password/onepassword-sdk-go"),
+        // The Go toolchain's own runtime and standard-library extensions are
+        // compiled into every Go c-archive we ship — the packet-tunnel extension
+        // (Tailscale + Proxy Tunnel) and opnative-helper. BSD-3-Clause, and it is
+        // the licence covering the largest volume of third-party code in the app.
+        .init(name: "Go runtime & golang.org/x libraries", license: "BSD-3-Clause",
+              role: "Statically compiled into the packet-tunnel extension and opnative-helper",
+              url: "https://go.dev"),
+        // A bundled framework, signed and shipped inside the app (Tools/resign-sparkle.sh).
+        .init(name: "Sparkle", license: "MIT", role: "App updates",
+              url: "https://sparkle-project.org"),
         .init(name: "OpenSSL 3", license: "Apache-2.0", role: "TLS / crypto for all engines",
               url: "https://www.openssl.org"),
         .init(name: "Asio", license: "BSL-1.0", role: "OpenVPN async I/O",
@@ -45,10 +62,28 @@ enum Acknowledgements {
               url: "https://github.com/Cyan4973/xxHash"),
         .init(name: "libxml2", license: "MIT", role: "OpenConnect XML (system library)",
               url: "https://gitlab.gnome.org/GNOME/libxml2"),
+        .init(name: "zlib", license: "Zlib", role: "OpenConnect / libssh compression (system library)",
+              url: "https://zlib.net"),
         .init(name: "Natural Earth", license: "Public Domain", role: "World map coastlines",
               url: "https://www.naturalearthdata.com"),
-        .init(name: "IP Geolocation by DB-IP", license: "CC BY 4.0", role: "Country-level endpoint locations (unmodified; used to derive country codes)",
-              url: "https://creativecommons.org/licenses/by/4.0/"),
+        // The URL is db-ip.com, NOT the licence text: DB-IP's CC BY terms require
+        // the attribution to LINK TO THEM ("<a href='https://db-ip.com'>IP
+        // Geolocation by DB-IP</a>"), which is exactly what this row renders. The
+        // licence itself is named and linked from the compatibility note below —
+        // pointing this link at creativecommons.org satisfied neither obligation.
+        .init(name: "IP Geolocation by DB-IP", license: "CC BY 4.0",
+              role: "Country-level server locations (unmodified; used to derive country codes) \u{2014} licensed CC BY 4.0",
+              url: "https://db-ip.com"),
+        // No KeePassXC code ships — `Credentials/KeePassXCCrypto.swift` and
+        // `KeePassXCProtocol.swift` are original implementations of their published
+        // browser protocol, so there is no licence obligation here at all. The row
+        // is a courtesy: the protocol is their work, and a reader who sees the
+        // feature should be able to find out whose idea it was. The badge names
+        // KeePassXC's OWN licence (useful, and true of the project); the role says
+        // plainly that none of that code is here.
+        .init(name: "KeePassXC", license: "GPL-3.0",
+              role: "Browser-integration protocol we implement \u{2014} no KeePassXC code is included",
+              url: "https://keepassxc.org"),
     ]
 
     /// Where the corresponding source (SimpleVPN's own code + these build scripts)
@@ -65,11 +100,23 @@ enum Acknowledgements {
     link above, which also satisfies the LGPL-2.1 relink requirement for the \
     statically-linked OpenConnect. OpenConnect is LGPL-2.1 (GPL-compatible), OpenSSL \
     is Apache-2.0 (one-way compatible with GPLv3, no linking exception needed), and \
-    DB-IP's data is CC BY 4.0 — used unmodified to derive country codes, attributed \
-    here with a link to the licence. The Tailscale client stack (with wireguard-go \
-    and gVisor, which it embeds) is statically linked into the network extension; \
-    BSD-3-Clause, MIT and Apache-2.0 are all one-way compatible with GPLv3/AGPLv3, \
-    so they impose no obligation beyond the attribution given above.
+    DB-IP's data is CC BY 4.0 (creativecommons.org/licenses/by/4.0/) — used unmodified \
+    to derive country codes, attributed above with the link to DB-IP their licence \
+    asks for. The Tailscale client stack (with wireguard-go and gVisor, which it \
+    embeds) and the gVisor-based Proxy Tunnel engine are statically linked into the \
+    network extension, and the 1Password Go SDK into the opnative-helper tool; both \
+    carry the Go runtime and golang.org/x libraries with them. Sparkle ships as a \
+    bundled framework. BSD-3-Clause, MIT, Zlib and Apache-2.0 are all one-way \
+    compatible with GPLv3/AGPLv3, so they impose no obligation beyond the attribution \
+    given above.
+
+    Two things are ours rather than borrowed, and worth saying so nobody goes looking \
+    for a library that isn't there. The NaCl crypto_box implementation the KeePassXC \
+    browser protocol needs (X25519 + XSalsa20-Poly1305) is original Swift — no \
+    libsodium is vendored — verified end to end against vectors from \
+    golang.org/x/crypto and the RFC 8439 Poly1305 vector. The KeePassXC integration \
+    itself is likewise an original implementation of their published protocol: no \
+    KeePassXC code is included, and the credit above is a courtesy, not an obligation.
     """
 }
 

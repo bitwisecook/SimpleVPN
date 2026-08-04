@@ -556,14 +556,24 @@ struct SubprocessTunnelView: View {
     }
 
     @ViewBuilder private var socksSectionBody: some View {
-        EngineSettingRow(spec: spec("ssh.socks-port"), value: draft.socksPort) {
+        socksRows(portID: "ssh.socks-port", systemProxyID: "ssh.system-proxy")
+    }
+
+    /// The SOCKS pair — the local listener's port and "route the whole Mac
+    /// through it" — rendered from whichever surface's specs. ONE builder, because
+    /// the SSH and SSL-VPN kinds expose the SAME TWO CONCEPTS off the same two
+    /// model fields (`socksPort`, `setSystemProxy`): the SSL half used to be a
+    /// bare `intField` plus a hand-written Toggle, so the two kinds described one
+    /// concept in two voices and only one of them was searchable.
+    @ViewBuilder private func socksRows(portID: String, systemProxyID: String) -> some View {
+        EngineSettingRow(spec: spec(portID), value: draft.socksPort) {
             VStack(alignment: .leading, spacing: 4) {
                 LabeledContent {
                     TextField("1080", value: $draft.socksPort, format: .number.grouping(.never))
                         .multilineTextAlignment(.trailing).frame(maxWidth: 120)
                         // Validation rides the field's value (Docs/Accessibility.md).
                         .accessibilityValue(socksPortError.map { "Problem: \($0)" } ?? "")
-                } label: { EngineSettingLabel(spec: spec("ssh.socks-port"), value: draft.socksPort) }
+                } label: { EngineSettingLabel(spec: spec(portID), value: draft.socksPort) }
                 if let error = socksPortError {
                     Text(error)
                         .font(.callout).foregroundStyle(.red)
@@ -571,9 +581,9 @@ struct SubprocessTunnelView: View {
                 }
             }
         }
-        EngineSettingRow(spec: spec("ssh.system-proxy"), value: draft.setSystemProxy) {
+        EngineSettingRow(spec: spec(systemProxyID), value: draft.setSystemProxy) {
             Toggle(isOn: $draft.setSystemProxy) {
-                EngineSettingLabel(spec: spec("ssh.system-proxy"), value: draft.setSystemProxy)
+                EngineSettingLabel(spec: spec(systemProxyID), value: draft.setSystemProxy)
             }
             // The toggle applies live to a connected tunnel — no reconnect.
             .onChange(of: draft.setSystemProxy) {
@@ -895,7 +905,10 @@ struct SubprocessTunnelView: View {
         case .fortinet: "FortiGate SSL VPN via OpenConnect (or openfortivpn). With ocproxy it needs no admin rights."
         case .f5apm: "F5 BIG-IP APM: OpenConnect performs the HTTPS sign-in then runs the PPP-over-TLS tunnel."
         case .ciscoAnyConnect: "Cisco AnyConnect / Secure Client (or an ocserv gateway) via OpenConnect. With ocproxy it needs no admin rights."
-        case .globalProtect: "Palo Alto GlobalProtect via OpenConnect. “User group / path” under Advanced selects portal vs gateway sign-in."
+        // The setting's name is quoted exactly as the row spells it (oc.usergroup) —
+        // prose that renames a control sends the reader looking for a row that
+        // isn't there, and search for a name the screen never shows.
+        case .globalProtect: "Palo Alto GlobalProtect via OpenConnect. “User Group / Path” under Advanced selects portal vs gateway sign-in."
         case .juniper: "Juniper Network Connect (oNCP) via OpenConnect. With ocproxy it needs no admin rights."
         case .pulse: "Pulse / Ivanti Connect Secure via OpenConnect. With ocproxy it needs no admin rights."
         case .arrayNetworks: "Array Networks SSL VPN via OpenConnect. With ocproxy it needs no admin rights."
@@ -908,22 +921,20 @@ struct SubprocessTunnelView: View {
     /// port would collide on bind.
     @ViewBuilder private var sslTrafficSection: some View {
         Section("Traffic") {
-            intField("Local SOCKS port", value: $draft.socksPort)
-                .accessibilityValue(socksPortError.map { "Problem: \($0)" } ?? "")
-            if let error = socksPortError {
-                Text(error)
-                    .font(.callout).foregroundStyle(.red)
-                    .accessibilityLabel("Error: \(error)")
-            }
-            Toggle("Route Mac traffic through this proxy", isOn: $draft.setSystemProxy)
-                // The toggle applies live to a connected tunnel — no reconnect.
-                .onChange(of: draft.setSystemProxy) {
-                    guard active else { return }
-                    store.save(draft)
-                    manager.setSystemProxyLive(draft, enabled: draft.setSystemProxy)
-                }
-            Text("OpenConnect exposes this tunnel as a SOCKS proxy on 127.0.0.1:\(draft.socksPort) via ocproxy — give each tunnel its own port to run two at once. “Route Mac traffic” points the active network service's SOCKS proxy at it while connected (asks for your admin password) and restores it on disconnect.")
+            // The same two rows the SSH surface shows, from the same builder and
+            // the same words (oc.socks-port / oc.system-proxy mirror the ssh.*
+            // pair per the AGENTS.md glossary).
+            socksRows(portID: "oc.socks-port", systemProxyID: "oc.system-proxy")
+            Text("OpenConnect exposes this tunnel as a SOCKS proxy on 127.0.0.1:\(draft.socksPort) via ocproxy — give each tunnel its own port to run two at once.")
                 .font(.callout).foregroundStyle(.secondary)
+            // …unless the built-in engine takes the connection, in which case
+            // there is no ocproxy and no SOCKS listener at all. Said as a caveat
+            // rather than a disabledReason because the in-process path falls back
+            // to the tool whenever a setting needs it — the rows would then be
+            // dead for no reason (`willRunInProcess` is the honesty gate).
+            if SubprocessTunnelManager.willRunInProcess(draft) {
+                SettingCaveat("With “Run In-Process” on, this VPN is carried as a full system tunnel — no SOCKS proxy is opened, so neither of the two settings above applies.")
+            }
             // The user-facing MTU, on ONE shared control (UI/Components/MTUField)
             // — it sat in Advanced beside the BASE MTU, which describes the path
             // underneath and stays there (see AGENTS.md on the split).
@@ -961,26 +972,67 @@ struct SubprocessTunnelView: View {
          draft.sshExtraOptions.contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty }].count { $0 }
     }
 
+    /// Every Advanced row now has a spec, so the badge counts through the
+    /// specs' declared defaults — one derivation, in the catalog, rather than the
+    /// nine hand-written `!draft.x.isEmpty` predicates this used to mix in beside
+    /// them (AGENTS.md: "Changed is computed, never re-derived").
     private var sslAdvancedChangedCount: Int {
         [Self.specs["oc.os"].isChanged(draft.spoofOS),
          Self.specs["oc.no-dtls"].isChanged(draft.disableDTLS),
          Self.specs["oc.disable-csd"].isChanged(draft.disableCSD),
+         Self.specs["oc.prefer-in-process"].isChanged(draft.preferInProcess),
+         Self.specs["oc.csd-wrapper"].isChanged(draft.csdWrapper),
+         Self.specs["oc.usergroup"].isChanged(draft.usergroup),
+         Self.specs["oc.compression"].isChanged(draft.ocCompression),
+         Self.specs["oc.disable-ipv6"].isChanged(draft.disableIPv6),
+         Self.specs["oc.no-http-keepalive"].isChanged(draft.noHTTPKeepalive),
+         Self.specs["oc.local-hostname"].isChanged(draft.localHostname),
+         Self.specs["oc.user-agent"].isChanged(draft.userAgent),
+         Self.specs["oc.version-string"].isChanged(draft.versionString),
          Self.specs["oc.base-mtu"].isChanged(draft.baseMTU),
          Self.specs["oc.force-dpd"].isChanged(draft.forceDPD),
-         Self.specs["oc.extra-args"].isChanged(draft.extraArgs),
-         draft.preferInProcess,
-         !draft.csdWrapper.isEmpty, !draft.usergroup.isEmpty, !draft.ocCompression.isEmpty,
-         draft.disableIPv6, draft.noHTTPKeepalive,
-         !draft.localHostname.isEmpty, !draft.userAgent.isEmpty, !draft.versionString.isEmpty].count { $0 }
+         Self.specs["oc.extra-args"].isChanged(draft.extraArgs)].count { $0 }
     }
 
     @ViewBuilder private var sslSecuritySection: some View {
         Section("Security") {
-            TextField("Pinned cert SHA-256 (optional)", text: $draft.trustedCertSHA256)
-                .font(.callout.monospaced())
+            pinnedServerCertRow
             row("oc.cafile", text: $draft.caFile, prompt: "~/vpn-ca.pem",
                 warning: SubprocessTunnelConfig.missingFileWarning(draft.caFile))
-            Toggle("Require perfect forward secrecy", isOn: $draft.enablePFS)
+            toggleRow("oc.pfs", isOn: $draft.enablePFS)
+        }
+    }
+
+    /// Why the pinned server certificate isn't a usable fingerprint, or nil when
+    /// it is (or the field is empty). The definition lives on the config so the
+    /// editor, Connect and any future importer share one answer.
+    private var pinnedServerCertError: String? {
+        SubprocessTunnelConfig.serverCertPinProblem(draft.trustedCertSHA256)
+    }
+
+    /// The ONLY control on these seven kinds that verifies the SERVER: a mono
+    /// field with format validation (inline problem + `accessibilityValue`, per
+    /// Docs/Accessibility.md), matching `pinnedHostKeyRow` on the SSH surface.
+    /// It was free text with no check at all — and a typo in it is not a warning
+    /// but a connect that always fails, blaming the certificate.
+    @ViewBuilder private var pinnedServerCertRow: some View {
+        let s = spec("oc.pinned-server-cert")
+        EngineSettingRow(spec: s, value: draft.trustedCertSHA256) {
+            VStack(alignment: .leading, spacing: 4) {
+                LabeledContent {
+                    TextField("pin-sha256:… or sha256:… (optional)", text: $draft.trustedCertSHA256)
+                        .font(.callout.monospaced())
+                        .autocorrectionDisabled()
+                        .multilineTextAlignment(.trailing)
+                        .accessibilityValue(pinnedServerCertError.map { "Problem: \($0)" }
+                                            ?? draft.trustedCertSHA256)
+                } label: { EngineSettingLabel(spec: s, value: draft.trustedCertSHA256) }
+                if let error = pinnedServerCertError {
+                    Text(error)
+                        .font(.callout).foregroundStyle(.red)
+                        .accessibilityLabel("Error: \(error)")
+                }
+            }
         }
     }
 
@@ -1008,44 +1060,40 @@ struct SubprocessTunnelView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
-                Toggle("Run in-process (no OpenConnect subprocess)", isOn: $draft.preferInProcess)
-                Text("Runs this VPN through SimpleVPN's built-in OpenConnect engine as a full system tunnel, instead of the openconnect command-line tool. Falls back to the tool automatically if it can't start. New — validate against your VPN server before relying on it.")
+                toggleRow("oc.prefer-in-process", isOn: $draft.preferInProcess)
+                Text("New — validate against your VPN server before relying on it.")
                     .font(.caption).foregroundStyle(.secondary)
+                // Asking for the built-in engine is not the same as getting it:
+                // any option the bridge can't express sends the connection back
+                // to the tool. Say which, instead of letting the toggle look
+                // effective (SubprocessTunnelManager.willRunInProcess is the gate).
+                if draft.preferInProcess, !SubprocessTunnelManager.willRunInProcess(draft) {
+                    SettingCaveat("This VPN uses settings the built-in engine can't carry (a port, CA file, client certificate, verification-code token, host checker, connection proxy, compression, PFS, IPv6/keepalive override, reported identity, MTU, timeout or extra arguments), so the openconnect tool runs it instead.")
+                }
 
                 // F5 APM / Cisco endpoint posture (host checker / EPA).
-                LabeledContent("Host-checker wrapper") {
-                    TextField("/path/to/csd-wrapper.sh", text: $draft.csdWrapper).autocorrectionDisabled()
-                        .accessibilityValue(csdWrapperWarning.map { "\(draft.csdWrapper). \($0)" } ?? draft.csdWrapper)
-                }
-                if let w = csdWrapperWarning {
-                    Label(w, systemImage: "exclamationmark.triangle.fill")
-                        .font(.callout).foregroundStyle(.orange)
-                        .accessibilityLabel("Warning: \(w)")
-                }
-                Text("F5 APM and Cisco run an endpoint (posture) check at sign-in. Provide a wrapper script to satisfy it, or turn on “skip host-checker” above to bypass it where the server allows.")
+                row("oc.csd-wrapper", text: $draft.csdWrapper, prompt: "/path/to/csd-wrapper.sh",
+                    warning: csdWrapperWarning)
+                Text("F5 APM and Cisco run an endpoint (posture) check at sign-in. Provide a wrapper script to satisfy it, or turn on “Skip Host Checker” above to bypass it where the server allows.")
                     .font(.caption).foregroundStyle(.secondary)
 
                 // Auth group / URL path (GlobalProtect portal-vs-gateway, Juniper/Pulse realm).
-                LabeledContent("User group / path") {
-                    TextField("optional", text: $draft.usergroup).autocorrectionDisabled()
+                row("oc.usergroup", text: $draft.usergroup, prompt: "optional")
+                EngineSettingRow(spec: spec("oc.compression"), value: draft.ocCompression) {
+                    Picker(selection: $draft.ocCompression) {
+                        Text("Default").tag("")
+                        Text("Stateful").tag("stateful")
+                        Text("None").tag("none")
+                        Text("All").tag("all")
+                    } label: {
+                        EngineSettingLabel(spec: spec("oc.compression"), value: draft.ocCompression)
+                    }
                 }
-                Picker("Compression", selection: $draft.ocCompression) {
-                    Text("Default").tag("")
-                    Text("Stateful").tag("stateful")
-                    Text("None").tag("none")
-                    Text("All").tag("all")
-                }
-                Toggle("Disable IPv6 in the tunnel", isOn: $draft.disableIPv6)
-                Toggle("Disable HTTP keepalive", isOn: $draft.noHTTPKeepalive)
-                LabeledContent("Reported hostname") {
-                    TextField("optional", text: $draft.localHostname).autocorrectionDisabled()
-                }
-                LabeledContent("User agent") {
-                    TextField("optional", text: $draft.userAgent).autocorrectionDisabled()
-                }
-                LabeledContent("Client version string") {
-                    TextField("spoof e.g. 4.10.05085", text: $draft.versionString).autocorrectionDisabled()
-                }
+                toggleRow("oc.disable-ipv6", isOn: $draft.disableIPv6)
+                toggleRow("oc.no-http-keepalive", isOn: $draft.noHTTPKeepalive)
+                row("oc.local-hostname", text: $draft.localHostname, prompt: "optional")
+                row("oc.user-agent", text: $draft.userAgent, prompt: "optional")
+                row("oc.version-string", text: $draft.versionString, prompt: "4.10.05085")
                 // The BASE MTU describes the path underneath the tunnel — an
                 // engine internal, and a different range (jumbo frames allowed),
                 // which is why it stays here while the user-facing MTU is up in
@@ -1131,6 +1179,12 @@ struct SubprocessTunnelView: View {
         if (draft.kind == .ssh && draft.sshMode == .socks) || draft.kind.isSSLVPN,
            let reason = socksPortError {
             return reason
+        }
+        // A mistyped certificate pin is refused by openconnect at startup with an
+        // opaque certificate error — the ONE server-identity control these kinds
+        // have, so it gets the dead-button treatment the SSH pin already had.
+        if draft.kind.isSSLVPN, pinnedServerCertError != nil {
+            return "The pinned server certificate isn't a valid SHA-256 fingerprint — fix it under Security."
         }
         if !requiredCLI.isAvailable {
             return "\(requiredCLI.rawValue) isn't installed. \(requiredCLI.installHint)"
@@ -1278,9 +1332,6 @@ struct SubprocessTunnelView: View {
             value: $draft.port,
             range: SubprocessTunnelConfig.portRange,
             invalidMessage: "Enter a port between 1 and 65535. Leave empty for the standard HTTPS port.")
-    }
-    private func intField(_ title: String, value: Binding<Int>) -> some View {
-        TextField(title, value: value, format: .number.grouping(.never)).frame(maxWidth: 160)
     }
 
     private func loadOnce() {

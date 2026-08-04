@@ -16,6 +16,13 @@ PIN=1512c16622288f3c01da09d3278ac61a86dca26d   # openvpn3 revision (core 3.12) �
 # three statically-bundled OpenSSL copies land in one binary; version skew between
 # them is a linker/ABI hazard). Bump all three together.
 OPENSSL_PIN="3.6.3"
+# The other four Homebrew inputs are compiled INTO the shipped engine too (asio,
+# fmt and xxhash header-only, lz4 as a static archive), so a `brew upgrade`
+# between two rebuilds changed the shipped binary and nothing said so. They are
+# pinned on the same policy as OpenSSL — bump deliberately, never float — but
+# separately, because unlike OpenSSL they exist in ONE engine and carry no
+# cross-engine ABI hazard: this pin is about reproducibility, not corruption.
+BREW_PINS="asio=1.38.2 fmt=12.2.0 xxhash=0.8.3 lz4=1.10.0"
 MIN=26.0                                        # macOS deployment target
 ARCH=arm64
 
@@ -34,6 +41,18 @@ if [ "$have_ssl" != "$OPENSSL_PIN" ]; then
   echo "       Align Homebrew or bump OPENSSL_PIN in ALL THREE engine scripts, then rebuild all three."
   exit 1
 fi
+
+# …and the same guard for the four formulae that are compiled into this engine.
+for spec in $BREW_PINS; do
+  f="${spec%%=*}"; want="${spec#*=}"
+  have="$(brew list --versions "$f" 2>/dev/null | awk '{print $2}')"
+  if [ "$have" != "$want" ]; then
+    echo "FATAL: $f is ${have:-not installed} but the pin is $want."
+    echo "       Align Homebrew (brew install/switch $f) or bump BREW_PINS in this script"
+    echo "       and rebuild the engine — this input is compiled into the shipped binary."
+    exit 1
+  fi
+done
 
 echo "==> openvpn3 @ $PIN"
 if [ ! -d "$WORK/.git" ]; then rm -rf "$WORK"; git clone https://github.com/OpenVPN/openvpn3.git "$WORK"; fi

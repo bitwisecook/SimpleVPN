@@ -717,9 +717,18 @@ actor ProbeStageRunner {
         let hostnameMatches = CertificateHostname.matches(host: expectedName, names: leafFacts.names)
         var pinMatches: Bool?
         if let pin = facts.pinnedServerCertificateSHA256, !pin.isEmpty {
-            let actual = ProbeCertificateInspector.sha256(of: leaf)
-            pinMatches = normaliseFingerprint(actual) == normaliseFingerprint(pin)
-            evidence.append("Pinned fingerprint check: \(pinMatches == true ? "matches" : "does not match")")
+            // Only a hex digest names the CERTIFICATE. OpenConnect's other pin
+            // form (`pin-sha256:` + base64) is the hash of the public KEY, a
+            // different value entirely — comparing it here would report a
+            // mismatch against a gateway that is in fact the pinned one, and
+            // that false alarm reads as "you are being intercepted".
+            let mine = normaliseFingerprint(pin)
+            if mine.count == 64 {
+                pinMatches = normaliseFingerprint(ProbeCertificateInspector.sha256(of: leaf)) == mine
+                evidence.append("Pinned fingerprint check: \(pinMatches == true ? "matches" : "does not match")")
+            } else {
+                evidence.append("This VPN pins the server's public key, which can't be compared against the certificate's own fingerprint here")
+            }
         }
         var chainsToProfileCA: Bool?
         if let anchors = facts.caPEM.map({ CertificateImport.certificates(inPEM: $0) }), !anchors.isEmpty {

@@ -154,6 +154,76 @@ struct OpenConnectArgvTests {
         #expect(SubprocessTunnelManager.addressCredentialReason(config { _ in }) == nil)
     }
 
+    // MARK: The pinned server certificate — the ONE server-identity control
+
+    /// A pin is refused unless it is one of the two forms OpenConnect prints. It
+    /// used to be free text, and a typo there is not a warning: it is a connect
+    /// that fails every time, complaining about the server's certificate.
+    @Test func onlyTheTwoRealFingerprintFormsAreAccepted() {
+        func problem(_ s: String) -> String? { SubprocessTunnelConfig.serverCertPinProblem(s) }
+        // Empty is fine — the pin is optional.
+        #expect(problem("") == nil)
+        #expect(problem("   ") == nil)
+        // base64 of 32 bytes, 44 characters ending "=" — with and without the prefix.
+        let b64 = Data(repeating: 0xAB, count: 32).base64EncodedString()
+        #expect(b64.count == 44)
+        #expect(problem(b64) == nil)
+        #expect(problem("pin-sha256:\(b64)") == nil)
+        // sha256: + 64 hex, either case.
+        let hex = String(repeating: "ab", count: 32)
+        #expect(problem("sha256:\(hex)") == nil)
+        #expect(problem("SHA256:\(hex.uppercased())") == nil)
+        // …and the ways a pasted pin goes wrong.
+        #expect(problem("sha256:\(hex.dropLast())") != nil)      // one character short
+        #expect(problem("sha256:\(hex.dropLast())z") != nil)     // not hex
+        #expect(problem(hex) != nil)                             // bare hex isn't a key pin
+        #expect(problem(String(b64.dropLast())) != nil)          // truncated base64
+        #expect(problem("pin-sha256:\(hex)") != nil)             // right prefix, wrong body
+        #expect(problem("md5:\(hex)") != nil)                    // unknown algorithm
+        // SHA-1 is a form openconnect accepts and this row deliberately doesn't:
+        // it is named for SHA-256, and a SHA-1 pin isn't worth pinning to.
+        #expect(problem("sha1:\(String(repeating: "a", count: 40))") != nil)
+    }
+
+    /// The argv prefix follows the pin's OWN form. Prefixing unconditionally —
+    /// which is what the builder used to do — turned a valid `sha256:<hex>` pin
+    /// into `pin-sha256:sha256:<hex>`, refused by openconnect at startup.
+    @Test func theServercertArgumentKeepsThePinsOwnForm() {
+        let b64 = Data(repeating: 0x11, count: 32).base64EncodedString()
+        let hex = String(repeating: "cd", count: 32)
+        #expect(SubprocessTunnelConfig.serverCertArgument(b64) == "pin-sha256:\(b64)")
+        #expect(SubprocessTunnelConfig.serverCertArgument("pin-sha256:\(b64)") == "pin-sha256:\(b64)")
+        #expect(SubprocessTunnelConfig.serverCertArgument("sha256:\(hex)") == "sha256:\(hex)")
+
+        #expect(args { $0.trustedCertSHA256 = "sha256:\(hex)" }.contains("--servercert=sha256:\(hex)"))
+        #expect(args { $0.trustedCertSHA256 = b64 }.contains("--servercert=pin-sha256:\(b64)"))
+        #expect(!args { _ in }.contains { $0.hasPrefix("--servercert=") })
+    }
+
+    // MARK: In-process is asked for, not assumed
+
+    /// The toggle only takes effect when the built-in engine can carry every
+    /// setting — otherwise the openconnect tool runs it and the editor says why.
+    /// The SOCKS rows' caveat hangs off this same gate.
+    @Test func inProcessIsOnlyHonouredWhenTheBridgeCanCarryTheConfig() {
+        #expect(!SubprocessTunnelManager.willRunInProcess(config { _ in }))
+        #expect(SubprocessTunnelManager.willRunInProcess(config { $0.preferInProcess = true }))
+        // Each of these is a knob the bridge can't express, so each sends it back.
+        #expect(!SubprocessTunnelManager.willRunInProcess(config {
+            $0.preferInProcess = true; $0.enablePFS = true
+        }))
+        #expect(!SubprocessTunnelManager.willRunInProcess(config {
+            $0.preferInProcess = true; $0.caFile = "~/vpn-ca.pem"
+        }))
+        #expect(!SubprocessTunnelManager.willRunInProcess(config {
+            $0.preferInProcess = true; $0.ocMTU = 1300
+        }))
+        // SSH is a different engine entirely; the SSL toggle can't claim it.
+        #expect(!SubprocessTunnelManager.willRunInProcess(config {
+            $0.kind = .ssh; $0.preferInProcess = true
+        }))
+    }
+
     // MARK: Catalog / manual contract for the SSL-VPN rows
 
     @Test func everyOpenConnectSpecIsNamedSummarizedAndDocumented() throws {

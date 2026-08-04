@@ -55,15 +55,37 @@ enum OpenConnectSettings {
 
         // MARK: Traffic
 
+        // The SSH surface already names these two concepts — `ssh.socks-port`
+        // and `ssh.system-proxy` — and THIS editor renders both surfaces, so the
+        // display names and summaries are deliberately the SAME WORDS (AGENTS.md
+        // glossary: one concept, one name). Two kinds describing one concept two
+        // ways is how a user who learned one editor stops trusting the other.
+        .init(id: "oc.socks-port", name: "Local SOCKS Port",
+              summary: "Where on this Mac the tunnel offers its proxy — point apps at 127.0.0.1 and this port. Give each tunnel its own port.",
+              group: .traffic, default: 1080),
+        .init(id: "oc.system-proxy", name: "Route Mac Traffic Through This Proxy",
+              summary: "Points the whole Mac at the tunnel's proxy while connected (asks for your admin password) and puts things back on disconnect.",
+              group: .traffic, default: false),
         .init(id: "oc.mtu", name: "MTU",
               summary: "Largest tunnel packet size, 576–1500. Leave empty to auto-detect; lower it if transfers stall.",
               group: .traffic, default: Int?.none),
 
         // MARK: Security
 
+        // The ONLY control that verifies the SERVER's identity on any of the
+        // seven SSL-VPN kinds — everything else here identifies YOU. A typo in it
+        // is a connect that fails with an opaque certificate error, which is why
+        // `SubprocessTunnelConfig.serverCertPinProblem` checks the shape and the
+        // editor blocks Connect on it.
+        .init(id: "oc.pinned-server-cert", name: "Pinned Server Certificate",
+              summary: "Accept exactly one gateway: the one whose certificate matches this SHA-256 fingerprint. The only server-identity check these VPNs have — paste it exactly as issued.",
+              group: .security, default: ""),
         .init(id: "oc.cafile", name: "CA Certificate File",
               summary: "A PEM file of extra certificate authorities to trust for the VPN server, if it uses a private CA.",
               group: .security, default: ""),
+        .init(id: "oc.pfs", name: "Perfect Forward Secrecy",
+              summary: "Refuse any cipher that doesn't give this session its own key, so a stolen key can't decrypt traffic recorded earlier. Turn on only if the gateway supports it — it refuses the connection otherwise.",
+              group: .security, default: false),
 
         // MARK: Advanced
 
@@ -76,6 +98,33 @@ enum OpenConnectSettings {
         .init(id: "oc.disable-csd", name: "Skip Host Checker",
               summary: "Bypass the server's endpoint-posture/host-checker script. May be required to connect from an unmanaged Mac; some servers refuse without it.",
               group: .advanced, default: false),
+        .init(id: "oc.prefer-in-process", name: "Run In-Process",
+              summary: "Carry this VPN with SimpleVPN's own built-in OpenConnect engine, as a full system tunnel, instead of running the openconnect command-line tool. Falls back to the tool when a setting here needs it.",
+              group: .advanced, default: false),
+        .init(id: "oc.csd-wrapper", name: "Host-Checker Wrapper",
+              summary: "A script that answers the server's endpoint-posture (host checker / EPA) challenge. It runs instead of skipping the check, and takes precedence over Skip Host Checker.",
+              group: .advanced, default: ""),
+        .init(id: "oc.usergroup", name: "User Group / Path",
+              summary: "The portal or gateway this sign-in goes to, as the path part of the address — GlobalProtect's portal-vs-gateway choice, and the URL path Juniper and Pulse expect.",
+              group: .advanced, default: ""),
+        .init(id: "oc.compression", name: "Compression",
+              summary: "Whether the gateway may compress the traffic inside the tunnel. Leave on Default unless your administrator names a setting.",
+              group: .advanced, default: ""),
+        .init(id: "oc.disable-ipv6", name: "Disable IPv6 in the Tunnel",
+              summary: "Ask the gateway for an IPv4-only tunnel. Use it when a broken IPv6 path inside the tunnel makes connections hang.",
+              group: .advanced, default: false),
+        .init(id: "oc.no-http-keepalive", name: "Disable HTTP Keepalive",
+              summary: "Open a fresh connection for each request to the gateway instead of reusing one. A workaround for proxies and gateways that mishandle reused connections.",
+              group: .advanced, default: false),
+        .init(id: "oc.local-hostname", name: "Reported Hostname",
+              summary: "The computer name this Mac reports to the gateway, instead of its real one. Some gateways policy-check or log it.",
+              group: .advanced, default: ""),
+        .init(id: "oc.user-agent", name: "User Agent",
+              summary: "The client identity sent with every request to the gateway. Set it only where a gateway admits specific clients.",
+              group: .advanced, default: ""),
+        .init(id: "oc.version-string", name: "Client Version String",
+              summary: "The client version reported to the gateway, e.g. 4.10.05085. Some gateways refuse a version they don't recognise.",
+              group: .advanced, default: ""),
         .init(id: "oc.base-mtu", name: "Base MTU",
               summary: "The MTU of the underlying network path (576–9000, allowing jumbo frames), used to size the tunnel. Leave empty to auto-detect.",
               group: .advanced, default: Int?.none),

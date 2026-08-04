@@ -60,6 +60,25 @@ for sym in _OPNativeResolve _OPNativeGetItem _OPNativeList _OPNativeLookup _OPNa
     || { echo "error: ${sym#_} not declared in include/opnative.h" >&2; exit 1; }
 done
 
+# Notices for the TRANSITIVE Go dependencies. About ▸ Open-Source Components
+# lists what a reader would recognise (the SDK, the Go runtime and x/* libraries);
+# the module graph underneath it is a dozen more MIT/BSD/Apache packages whose
+# licences we still convey, and go-licenses is the only sane way to enumerate
+# them. SOFT-FAILS by design, like Tools/fetch-geoip.sh: a fresh clone must build
+# without installing another tool first.
+#   go install github.com/google/go-licenses@latest
+NOTICES="$OUT/THIRD-PARTY-LICENSES.csv"
+if command -v go-licenses >/dev/null 2>&1; then
+  if go-licenses csv . > "$NOTICES" 2>/dev/null; then
+    echo "notices: $NOTICES ($(wc -l < "$NOTICES" | tr -d ' ') modules)"
+  else
+    echo "note: go-licenses failed; $NOTICES may be missing or incomplete"
+  fi
+else
+  echo "note: go-licenses not installed — skipping $NOTICES"
+  echo "      (go install github.com/google/go-licenses@latest)"
+fi
+
 echo "onepassword-sdk-go: $SDK_VERSION"
 echo "archive: $OUT/libopnative.a ($(du -h "$OUT/libopnative.a" | cut -f1 | tr -d ' '))"
 shasum -a 256 "$OUT/libopnative.a"

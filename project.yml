@@ -23,7 +23,10 @@ attributes:
 packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
-    exactVersion: 2.9.4
+    # 2.9.5 completes the delta-patching hardening against a symbolic link at the
+    # destination path (a more complete fix than 2.9.2's) — security-relevant to
+    # the update path itself, so it is not a bump to defer.
+    exactVersion: 2.9.5
 
 # Shared build settings. Developer ID manual signing (system extension requires it).
 settings:

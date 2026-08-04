@@ -48,6 +48,18 @@ if [ "$have_ssl" != "$OPENSSL_PIN" ]; then
   exit 1
 fi
 
+# lz4 is statically linked into this engine as well, so it is pinned on the same
+# policy as OpenSSL (see build-openvpn3-xcframework.sh's BREW_PINS block): a
+# `brew upgrade` between two rebuilds must not change the shipped binary quietly.
+LZ4_PIN="1.10.0"
+have_lz4="$(brew list --versions lz4 2>/dev/null | awk '{print $2}')"
+if [ "$have_lz4" != "$LZ4_PIN" ]; then
+  echo "FATAL: lz4 is ${have_lz4:-not installed} but the pin is $LZ4_PIN."
+  echo "       Align Homebrew or bump LZ4_PIN here and in build-openvpn3-xcframework.sh's"
+  echo "       BREW_PINS, then rebuild both engines."
+  exit 1
+fi
+
 echo "==> openconnect @ $PIN"
 if [ ! -d "$WORK/.git" ]; then rm -rf "$WORK"; git clone https://gitlab.com/openconnect/openconnect.git "$WORK"; fi
 git -C "$WORK" fetch --tags origin >/dev/null 2>&1 || true

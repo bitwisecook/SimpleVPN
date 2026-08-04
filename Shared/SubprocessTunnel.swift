@@ -248,6 +248,53 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
         return FileManager.default.fileExists(atPath: (p as NSString).expandingTildeInPath)
             ? nil : "No file at that path."
     }
+
+    // MARK: The pinned server certificate (the ONE server-identity check)
+
+    /// Why the pinned server certificate isn't a fingerprint OpenConnect would
+    /// accept, or nil when it is (or the field is empty). BLOCKING, unlike
+    /// `missingFileWarning`: a mistyped pin is not a warning but a connection
+    /// that always fails, with an opaque certificate error a long way from the
+    /// field that caused it.
+    ///
+    /// Two forms, exactly the two `--servercert` prints and documents:
+    ///  • `pin-sha256:` + base64 of a 32-byte digest (44 characters, ends "="),
+    ///    with the prefix optional — this is what OpenConnect itself echoes, so
+    ///    it is what a user pastes;
+    ///  • `sha256:` + 64 hex characters, the certificate's own digest.
+    ///
+    /// OpenConnect also accepts `sha1:`; it is deliberately refused here. A
+    /// SHA-1 pin is not a fingerprint worth pinning to, and the row is named for
+    /// SHA-256.
+    static func serverCertPinProblem(_ pin: String) -> String? {
+        let p = pin.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !p.isEmpty else { return nil }
+        let complaint = "A pinned certificate is either the 44-character key pin OpenConnect prints (ending in \u{201C}=\u{201D}, optionally prefixed \u{201C}pin-sha256:\u{201D}), or \u{201C}sha256:\u{201D} followed by 64 hex characters."
+        func isBase64Digest(_ s: String) -> Bool {
+            s.count == 44 && s.hasSuffix("=") && Data(base64Encoded: s)?.count == 32
+        }
+        func isHexDigest(_ s: String) -> Bool {
+            s.count == 64 && s.allSatisfy(\.isHexDigit)
+        }
+        guard let colon = p.lastIndex(of: ":") else { return isBase64Digest(p) ? nil : complaint }
+        let prefix = p[p.startIndex..<colon].lowercased()
+        let body = String(p[p.index(after: colon)...])
+        switch prefix {
+        case "pin-sha256": return isBase64Digest(body) ? nil : complaint
+        case "sha256":     return isHexDigest(body) ? nil : complaint
+        default:           return complaint
+        }
+    }
+
+    /// The value to hand `--servercert`. A pin that already names its own hash
+    /// form passes through untouched; a bare base64 digest gets the
+    /// `pin-sha256:` prefix it means. Prefixing unconditionally (which is what
+    /// the argv builder used to do) turned a perfectly good `sha256:<hex>` pin
+    /// into `pin-sha256:sha256:<hex>` — refused at startup.
+    static func serverCertArgument(_ pin: String) -> String {
+        let p = pin.trimmingCharacters(in: .whitespacesAndNewlines)
+        return p.contains(":") ? p : "pin-sha256:\(p)"
+    }
 }
 
 extension VPNKind {

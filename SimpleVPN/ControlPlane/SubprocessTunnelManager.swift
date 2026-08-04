@@ -140,6 +140,15 @@ final class SubprocessTunnelManager {
     /// silently dropping a CA file, client cert, proxy, posture wrapper or token
     /// would connect with weaker (or simply broken) settings than configured.
     /// Mirrors `inProcessSSHSupports`.
+    /// Whether "Run In-Process" will ACTUALLY be honoured for this config — the
+    /// single honesty gate behind the editor's caveats, in the shape
+    /// `sshPinBlockReason` established. The toggle asking for it is not the same
+    /// as getting it: any option the bridge can't express sends the connection
+    /// back to the subprocess (with its SOCKS proxy), and the editor says which.
+    static func willRunInProcess(_ c: SubprocessTunnelConfig) -> Bool {
+        c.kind.isSSLVPN && c.preferInProcess && inProcessOpenConnectSupports(c)
+    }
+
     private static func inProcessOpenConnectSupports(_ c: SubprocessTunnelConfig) -> Bool {
         if c.port != nil { return false }               // the bridge gets the bare server string only
         if !c.caFile.isEmpty || !c.usergroup.isEmpty || !c.spoofOS.isEmpty { return false }
@@ -864,7 +873,11 @@ final class SubprocessTunnelManager {
         // realm (vs a portal path / --usergroup) — needs a real gateway.
         if !c.realm.isEmpty { a += ["--authgroup=\(c.realm)"] }
         if !c.usergroup.isEmpty { a += ["--usergroup=\(c.usergroup)"] }
-        if !c.trustedCertSHA256.isEmpty { a += ["--servercert=pin-sha256:\(c.trustedCertSHA256)"] }
+        // The prefix comes from the pin's own form — a `sha256:<hex>` pin used to
+        // be turned into `pin-sha256:sha256:<hex>` here and refused at startup.
+        if !c.trustedCertSHA256.isEmpty {
+            a += ["--servercert=\(SubprocessTunnelConfig.serverCertArgument(c.trustedCertSHA256))"]
+        }
         if !c.caFile.isEmpty { a += ["--cafile=\((c.caFile as NSString).expandingTildeInPath)"] }
         if !c.spoofOS.isEmpty { a += ["--os=\(c.spoofOS)"] }
         if !c.localHostname.isEmpty { a += ["--local-hostname=\(c.localHostname)"] }
