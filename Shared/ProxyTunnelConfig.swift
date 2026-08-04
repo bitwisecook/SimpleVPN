@@ -79,6 +79,20 @@ nonisolated struct ProxyTunnelConfig: Codable, Sendable, Equatable {
             default: nil
             }
         }
+
+        /// The preset an address field IMPLIES: a pasted full URL names its own
+        /// scheme, and that scheme is what the tunnel will use — the composed
+        /// upstream keeps the URL verbatim. nil means the address carries no
+        /// usable scheme, so whatever the picker says still decides.
+        ///
+        /// The editor drives the picker from this on every edit. Without it the
+        /// picker could say "HTTP CONNECT" while the tunnel ran SOCKS5, which is
+        /// a control stating something that isn't true.
+        static func implied(byAddress raw: String) -> Preset? {
+            let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard s.contains("://"), let scheme = URLComponents(string: s)?.scheme else { return nil }
+            return from(scheme: scheme)
+        }
     }
 
     /// The upstream proxy URL. NEVER carries credentials (the editor keeps them
@@ -298,6 +312,44 @@ extension ProxyTunnelConfig {
             }
         }
         return nil
+    }
+
+    /// Non-blocking: advertised DNS servers that an EXCLUDED network carves out
+    /// of the tunnel.
+    ///
+    /// A resolver outside the included routes is NOT a problem here —
+    /// `ProxyTunnelNetworkSettings` adds a /32 (/128) route for every advertised
+    /// server on a split tunnel, and the gVisor stack re-dials whatever arrives
+    /// through the proxy, so those lookups work. An EXCLUSION is different: NE
+    /// honours excluded routes over included ones, so the resolver goes back to
+    /// the physical interface while `dnsSettings` still points every lookup at
+    /// it — the queries succeed, but direct, outside the proxy.
+    nonisolated static func dnsExcludedWarning(dnsServers: [String], excluded: [String]) -> String? {
+        for server in dnsServers where dnsServerProblem(server) == nil {
+            for e in excluded where routeProblem(e) == nil {
+                if RoutePrefixMath.overlaps(server, e) {
+                    return "\(server) is inside \(e), which you're keeping out of the tunnel — so name lookups go straight out over your normal connection instead of through the proxy."
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Non-blocking: with a split tunnel, exclusions have almost nothing left to
+    /// exclude — only the included networks enter the tunnel in the first place.
+    /// Kept as a caveat, not a disable, because an exclusion that carves a hole
+    /// INSIDE an included network is real and is exactly what `routeOverlapWarning`
+    /// reports; this covers the rest, which do nothing.
+    nonisolated static func excludedRedundantWarning(includeDefaultRoute: Bool,
+                                                     included: [String],
+                                                     excluded: [String]) -> String? {
+        guard !includeDefaultRoute else { return nil }
+        let live = excluded.filter { e in
+            routeProblem(e) == nil
+                && included.contains { i in routeProblem(i) == nil && RoutePrefixMath.overlaps(e, i) }
+        }
+        guard live.count < excluded.filter({ routeProblem($0) == nil }).count else { return nil }
+        return "\u{201C}Send all traffic\u{201D} is off, so only the networks above enter the tunnel — an exclusion changes nothing unless it carves a hole inside one of them."
     }
 
     private nonisolated static func hasHostBits(_ bytes: [UInt8], prefix: Int, byteCount: Int) -> Bool {

@@ -47,6 +47,15 @@ struct SettingsContext {
     var proxyHasUsername: Bool {
         !(draft.proxyUsername ?? "").trimmingCharacters(in: .whitespaces).isEmpty
     }
+
+    /// Whether the connection will actually run over UDP — the override when the
+    /// user set one, otherwise the protocol the profile's own `remote` line names.
+    /// Read by the proxy caveats: "Default (UDP)" is just as UDP as an explicit
+    /// choice, and a proxy can carry neither.
+    var usesUDP: Bool {
+        if let p = draft.proto { return p == .udp }
+        return evaluation?.remoteProtoDisplay == "UDP"
+    }
 }
 
 struct SettingDescriptor: Identifiable {

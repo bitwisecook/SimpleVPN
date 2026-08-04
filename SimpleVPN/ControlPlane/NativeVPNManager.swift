@@ -33,6 +33,21 @@ struct NativeVPNConfig: Codable, Sendable, Equatable, Identifiable {
     var groupOrRealm = ""           // IPsec group name / local identifier
     var onDemand = false
 
+    /// IPsec only: whether XAuth (the username/password pair alongside the group
+    /// PSK) is used at all. Cisco-style concentrators come both ways, and there
+    /// was no way to say "no XAuth" — a username left over from a `.pcf` import
+    /// meant `useExtendedAuthentication` stayed on with nothing behind it.
+    ///
+    /// OPTIONAL on purpose: this type uses the synthesized `Codable`, so a
+    /// non-optional field would make every previously-stored native VPN fail to
+    /// decode (and `load()`'s `try?` would drop the lot). nil means "not
+    /// answered yet", which `usesXAuth` reads as the old behaviour: XAuth is in
+    /// play exactly when a username was entered.
+    var xauth: Bool? = nil
+
+    /// Whether this IPsec config signs in with XAuth as well as the group PSK.
+    var usesXAuth: Bool { xauth ?? !username.isEmpty }
+
     // Comprehensive IKEv2 knobs (empty/nil = use the OS default). Crypto choices
     // map to NEVPNIKEv2* enums; "" means "let macOS negotiate its default".
     //
@@ -121,24 +136,37 @@ nonisolated enum NativeVPNSecrets {
         case delete
     }
 
-    /// The two rows a native config can own: the base secret (the IKEv2
-    /// password or PSK, or the IPsec XAuth password) and the IPsec group PSK.
+    /// The rows a native config can own: the base secret (the IKEv2 password or
+    /// PSK, or the IPsec XAuth password), the IPsec group PSK, and L2TP's PPP
+    /// (user) password.
     struct Plan: Equatable, Sendable {
         var base: Action
         var groupPSK: Action
+        /// L2TP only: the PPP password the exported `.mobileconfig` carries as
+        /// `PPP.AuthPassword`. Its own row because L2TP needs it AND the IPSec
+        /// shared secret at once, exactly like IPsec's pair.
+        var pppPassword: Action = .delete
     }
 
     /// Credential-row ids (the persistent-reference accounts `connect()` writes
     /// share the base names — see `apply`).
     static func baseProfile(_ id: String) -> String { "native.\(id)" }
     static func groupPSKProfile(_ id: String) -> String { "native.\(id).secret" }
+    static func pppPasswordProfile(_ id: String) -> String { "native.\(id).ppp" }
 
     /// An empty field means "no such secret" — hence `.delete`, never "leave
-    /// whatever was there". Only IPsec has a group PSK, so switching a VPN away
-    /// from IPsec removes it too.
-    static func plan(kind: VPNKind, secret: String, sharedSecret: String) -> Plan {
-        Plan(base: secret.isEmpty ? .delete : .write(secret),
-             groupPSK: kind == .ipsec && !sharedSecret.isEmpty ? .write(sharedSecret) : .delete)
+    /// whatever was there". Only IPsec has a group PSK and only L2TP has a PPP
+    /// password, so switching a VPN's kind removes the rows the new kind can't
+    /// use. `xauth` is IPsec's explicit "sign in with a username and password as
+    /// well" answer: with it off the group PSK is the entire sign-in, so keeping
+    /// the old XAuth password would leave a secret behind for a mode that no
+    /// longer sends it.
+    static func plan(kind: VPNKind, secret: String, sharedSecret: String = "",
+                     pppPassword: String = "", xauth: Bool = true) -> Plan {
+        let baseSecret = (kind == .ipsec && !xauth) ? "" : secret
+        return Plan(base: baseSecret.isEmpty ? .delete : .write(baseSecret),
+                    groupPSK: kind == .ipsec && !sharedSecret.isEmpty ? .write(sharedSecret) : .delete,
+                    pppPassword: kind == .l2tp && !pppPassword.isEmpty ? .write(pppPassword) : .delete)
     }
 
     /// Perform a plan. A delete removes BOTH the credential row and the
@@ -161,6 +189,16 @@ nonisolated enum NativeVPNSecrets {
         case .delete:
             KeychainCredentialStore.deleteCredentials(profile: groupPSKProfile(id))
             KeychainCredentialStore.deleteNativeSecret(account: "native.\(id).psk")
+        }
+        // L2TP's PPP password never reaches NEVPNManager (there is no L2TP API),
+        // so it has no persistent-reference copy to clean up — only the row the
+        // exporter reads.
+        switch plan.pppPassword {
+        case .write(let pw):
+            try? KeychainCredentialStore.saveCredentials(
+                profile: pppPasswordProfile(id), .init(username: username, password: pw))
+        case .delete:
+            KeychainCredentialStore.deleteCredentials(profile: pppPasswordProfile(id))
         }
     }
 }
@@ -218,6 +256,7 @@ final class NativeVPNManager {
         KeychainCredentialStore.deleteNativeSecret(account: "native.\(id).psk")
         KeychainCredentialStore.deleteCredentials(profile: "native.\(id)")
         KeychainCredentialStore.deleteCredentials(profile: "native.\(id).secret")
+        KeychainCredentialStore.deleteCredentials(profile: "native.\(id).ppp")
         // The Custom Routing proxy sign-in and the filter's fallback blob are keyed by
         // the profile id too — same stale-secret rule.
         KeychainCredentialStore.deleteCustomRoutingProxyAuth(profile: id)
@@ -294,11 +333,14 @@ final class NativeVPNManager {
             case .ipsec:
                 let p = NEVPNProtocolIPSec()
                 p.serverAddress = c.server
-                p.username = c.username
                 // XAuth is OPTIONAL here (the group PSK alone is sometimes the
-                // whole sign-in): claim extended authentication only when there
-                // is actually a username or password to send.
-                p.useExtendedAuthentication = !c.username.isEmpty || !secret.isEmpty
+                // whole sign-in), and now explicitly answered by the editor's
+                // toggle: with it off nothing username/password-shaped is sent,
+                // so a name left over from an import can't turn extended
+                // authentication back on behind the user's back.
+                let xauth = c.usesXAuth
+                p.username = xauth ? c.username : ""
+                p.useExtendedAuthentication = xauth && (!c.username.isEmpty || !secret.isEmpty)
                 p.localIdentifier = c.groupOrRealm.isEmpty ? nil : c.groupOrRealm
                 // Certificate/identity authentication isn't wired up (no
                 // identity picker or import path exists) — the only mode that
@@ -313,8 +355,8 @@ final class NativeVPNManager {
                 }
                 // An empty XAuth password must leave passwordReference NIL — a
                 // reference to "" is an empty XAuth attempt, which some
-                // concentrators refuse outright.
-                if !secret.isEmpty {
+                // concentrators refuse outright. Same for XAuth turned off.
+                if xauth, !secret.isEmpty {
                     p.passwordReference = try KeychainCredentialStore.persistentReference(forSecret: secret, account: baseAccount)
                 } else {
                     KeychainCredentialStore.deleteNativeSecret(account: baseAccount)

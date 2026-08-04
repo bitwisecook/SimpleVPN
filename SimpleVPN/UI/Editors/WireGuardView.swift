@@ -111,11 +111,20 @@ struct WireGuardView: View {
                 }
                 problemLabel(allowedIPsProblem)
                 if draft.isFullTunnel {
-                    Label("Full tunnel — all traffic routes through this peer.", systemImage: "globe")
+                    // Says what the Custom Routing section further down can then
+                    // actually act on: one default route, not a list of networks.
+                    Label("Full tunnel — all traffic routes through this peer. The Custom Routing route rules below then apply to that single default route, not to individual networks.",
+                          systemImage: "globe")
                         .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 EngineSettingRow(spec: Self.specs["wg.dns"], changed: !draft.dns.isEmpty) {
                     listField(Self.specs["wg.dns"], $draft.dns, prompt: "1.1.1.1")
+                }
+                // One caveat per resolver the peer won't carry — the split-tunnel
+                // footgun that shows up as "the VPN works but nothing resolves".
+                ForEach(uncoveredDNS, id: \.self) { server in
+                    SettingCaveat(WireGuardConfig.dnsCoverageWarning(server))
                 }
                 EngineSettingRow(spec: Self.specs["wg.mtu"], changed: draft.mtu != nil) {
                     ValidatedNumberField(
@@ -128,6 +137,12 @@ struct WireGuardView: View {
                 EngineSettingRow(spec: Self.specs["wg.table"], changed: !draft.table.isEmpty) {
                     textField(Self.specs["wg.table"], $draft.table, prompt: "auto",
                               help: Self.exportOnlyHelp)
+                }
+                // Not disabled: the value is honoured — in the EXPORTED file. What
+                // it does there is turn the Allowed IPs above into documentation,
+                // which is worth saying beside them.
+                if draft.table.trimmingCharacters(in: .whitespaces).lowercased() == "off" {
+                    SettingCaveat("In a configuration you export, \u{201C}off\u{201D} tells wg-quick to install no routes at all, so the Allowed IPs above route nothing there. SimpleVPN's own engine ignores this setting and still routes them.")
                 }
             }
 
@@ -147,12 +162,17 @@ struct WireGuardView: View {
             }
 
             Section {
+                // The reason lived in the section footer, where a keyboard or
+                // VoiceOver user reaching the button never met it. It belongs ON
+                // the control (house rule: a dead control says why).
                 Button("Export .conf…") { export() }
-                    .disabled(draft.peerPublicKey.isEmpty || !hasPrivateKey)
+                    .disabled(exportDisabledReason != nil)
+                    .help(exportDisabledReason
+                          ?? "Write a standard wg-quick file for use with other WireGuard clients.")
+                    .accessibilityValue(exportDisabledReason.map { "unavailable — \($0)" } ?? "")
             } footer: {
-                Text(hasPrivateKey
-                     ? "Export produces a standard wg-quick file for use with other WireGuard clients."
-                     : "Set a private key above before exporting — wg-quick refuses a config without one.")
+                Text(exportDisabledReason
+                     ?? "Export produces a standard wg-quick file for use with other WireGuard clients.")
             }
 
             CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
@@ -277,6 +297,22 @@ struct WireGuardView: View {
     }
     private var allowedIPsProblem: String? {
         draft.allowedIPs.isEmpty ? nil : WireGuardConfig.routesProblem(draft.allowedIPs)
+    }
+    /// Resolvers the peer's Allowed IPs don't cover — see
+    /// `WireGuardConfig.dnsOutsideAllowedIPs` for why that breaks DNS silently.
+    /// Only computed once both lists parse, so a half-typed CIDR doesn't shout.
+    private var uncoveredDNS: [String] {
+        guard allowedIPsProblem == nil else { return [] }
+        return WireGuardConfig.dnsOutsideAllowedIPs(dns: draft.dns, allowedIPs: draft.allowedIPs)
+    }
+
+    /// Why Export is unavailable, in the user's language, or nil.
+    private var exportDisabledReason: String? {
+        if !hasPrivateKey { return "Set a private key above before exporting — wg-quick refuses a config without one." }
+        if draft.peerPublicKey.trimmingCharacters(in: .whitespaces).isEmpty {
+            return "Enter the peer public key above before exporting — wg-quick needs the server's key."
+        }
+        return nil
     }
 
     /// Why Save is unavailable, in the user's language, or nil when it can go.

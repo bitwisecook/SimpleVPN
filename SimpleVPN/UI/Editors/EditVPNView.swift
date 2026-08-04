@@ -146,6 +146,37 @@ struct EditVPNView: View {
         ovpn.isEmpty ? nil : evaluator.evaluation(for: ovpn)
     }
 
+    /// The profile signs in with its certificate alone — no username, password or
+    /// code exists to collect, and none may be SAVED either (see `save()`).
+    private var isAutologin: Bool { evaluation?.autologin == true }
+
+    /// The `static-challenge` prompt this profile declares, or nil. When present
+    /// the server demands a code on every connect whatever the toggle says
+    /// (`VPNController.effectiveAuthConfig`), so the toggle is pinned on.
+    private var staticChallenge: String? {
+        guard let text = evaluation?.staticChallenge, !text.isEmpty else { return nil }
+        return text
+    }
+
+    /// Why the verification-code toggle can't be turned off, or nil.
+    private var otpPinnedReason: String? {
+        staticChallenge == nil ? nil
+            : "This VPN's configuration asks the server for a code itself (static-challenge), so a code is always required."
+    }
+
+    /// The OTP requirement IN EFFECT — the toggle, or forced on by the profile's
+    /// own static challenge. Everything that depends on "does this VPN need a
+    /// code" reads this, not the raw toggle state.
+    private var otpRequired: Bool { staticChallenge != nil || requiresOTP }
+
+    /// Why the password template can't be edited, or nil. A static challenge
+    /// sends the code as the engine's own challenge response (SCRV1 framing), so
+    /// the `{password}{otp}` assembly never runs — see `VPNController.connect`.
+    private var templateInertReason: String? {
+        guard staticChallenge != nil else { return nil }
+        return "This VPN sends the code separately from the password (SCRV1), so the password isn't assembled from a template."
+    }
+
     var body: some View {
         NavigationStack {
             TabView {
@@ -338,7 +369,7 @@ struct EditVPNView: View {
                             Toggle("Protect the sign-in with Touch ID", isOn: protectBinding)
                             Text("The saved username and password move into a fingerprint-locked keychain item; connecting asks for Touch ID (or your Apple Watch, or the account password) to release them.")
                                 .font(.callout).foregroundStyle(.secondary)
-                            if requiresOTP && vpn.authConfig(for: profileID).protectWithBiometrics {
+                            if otpRequired && vpn.authConfig(for: profileID).protectWithBiometrics {
                                 // Stays a SecureField, not an AutoFillField: a
                                 // TOTP ENROLLMENT SEED has no NSTextContentType
                                 // (.oneTimeCode means a current 6-digit code),
@@ -368,14 +399,37 @@ struct EditVPNView: View {
                 }
 
                 Section("Verification Code") {
-                    Toggle("Requires a verification code (OTP)", isOn: $requiresOTP)
+                    // Pinned ON by a profile-declared static challenge: the server
+                    // asks for the code whatever this says, so the control that
+                    // can't change anything is dead — and says why.
+                    Toggle("Requires a verification code (OTP)",
+                           isOn: otpPinnedReason == nil ? $requiresOTP : .constant(true))
+                        .disabled(otpPinnedReason != nil)
+                        .help(otpPinnedReason
+                              ?? "Ask for a fresh code from your authenticator each time this VPN connects.")
+                        .accessibilityValue(otpPinnedReason.map { "on, unavailable — \($0)" }
+                                            ?? (requiresOTP ? "on" : "off"))
                         .onChange(of: requiresOTP) { _, on in
                             if on { promptForOTPFieldIfNeeded() }
                         }
-                    Text("Each connection asks for a fresh code from your authenticator. Quick connect from the menu bar opens the window so the code can be typed.")
-                        .font(.callout).foregroundStyle(.secondary)
+                    if let reason = otpPinnedReason {
+                        Text(reason)
+                            .font(.callout).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text("Each connection asks for a fresh code from your authenticator. Quick connect from the menu bar opens the window so the code can be typed.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                    // What the server will actually put on screen — it comes from
+                    // the profile, and until now nothing showed it anywhere.
+                    if let prompt = staticChallenge {
+                        Label("The server's prompt: \u{201C}\(prompt)\u{201D}\(staticChallengeEchoNote)",
+                              systemImage: "text.bubble")
+                            .font(.callout).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
 
-                    if requiresOTP {
+                    if otpRequired {
                         managedOTPSourceRow
                         DisclosureGroup(isExpanded: $otpAdvancedExpanded) {
                             TextField("Password template", text: $passwordTemplate,
@@ -383,15 +437,25 @@ struct EditVPNView: View {
                                 .font(.body.monospaced())
                                 .autocorrectionDisabled()
                                 .padding(.top, 4)
-                                .accessibilityValue(templateValid ? passwordTemplate
-                                    : "\(passwordTemplate). Problem: the template must contain {otp}")
-                            Text("How the sign-in password is assembled from your password and the verification code. \u{201C}{password}{otp}\u{201D} sends them joined together — what most OTP-enabled servers (LinOTP, privacyIDEA) expect.")
-                                .font(.callout).foregroundStyle(.secondary)
-                            if !templateValid {
-                                Label("The template must contain {otp} — the default will be used instead.",
-                                      systemImage: "exclamationmark.triangle.fill")
-                                    .font(.callout).foregroundStyle(.orange)
-                                    .accessibilityLabel("Problem: the template must contain {otp} — the default will be used instead.")
+                                .disabled(templateInertReason != nil)
+                                .help(templateInertReason
+                                      ?? "How the sign-in password is assembled from your password and the code.")
+                                .accessibilityValue(templateInertReason.map { "unavailable — \($0)" }
+                                    ?? (templateValid ? passwordTemplate
+                                        : "\(passwordTemplate). Problem: the template must contain {otp}"))
+                            if let reason = templateInertReason {
+                                Text(reason)
+                                    .font(.callout).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            } else {
+                                Text("How the sign-in password is assembled from your password and the verification code. \u{201C}{password}{otp}\u{201D} sends them joined together — what most OTP-enabled servers (LinOTP, privacyIDEA) expect.")
+                                    .font(.callout).foregroundStyle(.secondary)
+                                if !templateValid {
+                                    Label("The template must contain {otp} — the default will be used instead.",
+                                          systemImage: "exclamationmark.triangle.fill")
+                                        .font(.callout).foregroundStyle(.orange)
+                                        .accessibilityLabel("Problem: the template must contain {otp} — the default will be used instead.")
+                                }
                             }
                         } label: {
                             // The whole row toggles, not just the chevron.
@@ -412,6 +476,12 @@ struct EditVPNView: View {
     private var templateValid: Bool {
         let t = passwordTemplate.trimmingCharacters(in: .whitespaces)
         return t.isEmpty || t.contains("{otp}")
+    }
+
+    /// Whether the profile asks for the code to be echoed as it's typed — worth
+    /// saying, because it changes what the connect form looks like.
+    private var staticChallengeEchoNote: String {
+        (evaluation?.staticChallengeEcho ?? false) ? " (shown as you type)" : ""
     }
 
     /// Where the code actually comes from, stated in the OTP section itself.
@@ -473,7 +543,7 @@ struct EditVPNView: View {
     /// connect time. Only auto-opens when we can genuinely populate the sheet; otherwise
     /// `managedOTPSourceRow` carries the ask until an item has been chosen.
     private func promptForOTPFieldIfNeeded() {
-        guard requiresOTP, credentialKind == .onePassword,
+        guard otpRequired, credentialKind == .onePassword,
               (fieldMap["otp"] ?? "").isEmpty,
               !sourceReference.trimmingCharacters(in: .whitespaces).isEmpty,
               opAvailable,
@@ -1003,7 +1073,7 @@ struct EditVPNView: View {
 
     /// The auth roles this VPN uses — the sheet renders exactly these.
     private var applicableRoles: [CredentialRole] {
-        CredentialRole.forOpenVPN(evaluation: evaluation, requiresOTP: requiresOTP)
+        CredentialRole.forOpenVPN(evaluation: evaluation, requiresOTP: otpRequired)
     }
 
     private func loadOPFieldsAndShowSheet() async {
@@ -1271,6 +1341,13 @@ struct EditVPNView: View {
             auth.passwordTemplate = passwordTemplate.trimmingCharacters(in: .whitespaces).isEmpty
                 ? VPNAuthConfig.defaultTemplate : passwordTemplate
             auth.rememberCredentials = remember
+            // The PROFILE has the last word on the auth shape: an autologin
+            // profile stores no OTP requirement and no template (this form
+            // replaces the whole credential UI for one, so the state written
+            // above is whatever the profile used to need), and a declared static
+            // challenge stores the requirement the server will impose anyway.
+            auth = VPNAuthConfig.resolved(auth, autologin: isAutologin,
+                                          staticChallenge: staticChallenge != nil)
             do {
                 try await vpn.updateOVPN(id: profileID, ovpn: ovpn, server: server)
                 try await vpn.setOverrides(draft, for: profileID)

@@ -293,3 +293,70 @@ struct ProxyTunnelNetworkSettingsTests {
         #expect(settings.dnsSettings == nil)
     }
 }
+
+// MARK: - Editor advisories (the picker that used to lie, and the caveats)
+
+struct ProxyTunnelEditorAdvisoryTests {
+
+    /// `composedUpstream` keeps a pasted full URL verbatim and IGNORES the Kind
+    /// picker, so the picker had to be driven from the address — otherwise it sat
+    /// there saying "HTTP CONNECT" while the tunnel ran SOCKS5.
+    @Test func aPastedURLImpliesItsOwnPreset() {
+        #expect(ProxyTunnelConfig.Preset.implied(byAddress: "socks5://p.example:1080") == .socks5)
+        #expect(ProxyTunnelConfig.Preset.implied(byAddress: "socks5h://p.example:1080") == .socks5)
+        #expect(ProxyTunnelConfig.Preset.implied(byAddress: "http://p.example:8080") == .httpConnect)
+        #expect(ProxyTunnelConfig.Preset.implied(byAddress: "HTTPS://p.example") == .httpsConnect)
+        #expect(ProxyTunnelConfig.Preset.implied(byAddress: "  socks5://p.example  ") == .socks5)
+    }
+
+    /// A bare host, or a scheme this engine can't use, leaves the picker's own
+    /// choice standing — `upstreamProblem` is what reports the bad scheme.
+    @Test func anAddressWithNoUsableSchemeLeavesThePickerAlone() {
+        #expect(ProxyTunnelConfig.Preset.implied(byAddress: "proxy.example.com:1080") == nil)
+        #expect(ProxyTunnelConfig.Preset.implied(byAddress: "") == nil)
+        #expect(ProxyTunnelConfig.Preset.implied(byAddress: "ftp://p.example") == nil)
+    }
+
+    /// Whatever the picker says, the stored upstream and the preset derived back
+    /// out of it must agree — that is the round-trip the editor relies on.
+    @Test func theImpliedPresetRoundTripsThroughTheStoredUpstream() {
+        var c = ProxyTunnelConfig()
+        c.upstream = "socks5://proxy.example.com:1080"
+        #expect(c.preset == ProxyTunnelConfig.Preset.implied(byAddress: c.upstream))
+    }
+
+    /// A resolver outside the included routes is NOT a hazard here — the settings
+    /// builder routes each one in (see `dnsServersGetTheirOwnRoutes`). An
+    /// EXCLUSION is: NE honours it over the included route, so lookups go direct.
+    @Test func anExcludedResolverIsReportedAsALeak() {
+        let w = ProxyTunnelConfig.dnsExcludedWarning(dnsServers: ["1.1.1.1"],
+                                                     excluded: ["1.0.0.0/8"])
+        #expect(w?.contains("1.1.1.1") == true)
+        #expect(w?.contains("1.0.0.0/8") == true)
+    }
+
+    @Test func anUnexcludedResolverIsNotReported() {
+        #expect(ProxyTunnelConfig.dnsExcludedWarning(dnsServers: ["1.1.1.1"],
+                                                     excluded: ["192.168.0.0/16"]) == nil)
+        // Outside the included routes is fine — that case is routed in for us.
+        #expect(ProxyTunnelConfig.dnsExcludedWarning(dnsServers: ["1.1.1.1"], excluded: []) == nil)
+    }
+
+    @Test func exclusionsAreNearRedundantOnASplitTunnel() {
+        // Nothing to exclude: only 10/8 enters the tunnel at all.
+        #expect(ProxyTunnelConfig.excludedRedundantWarning(
+            includeDefaultRoute: false, included: ["10.0.0.0/8"],
+            excluded: ["192.168.0.0/16"]) != nil)
+        // …but an exclusion INSIDE an included network really carves a hole.
+        #expect(ProxyTunnelConfig.excludedRedundantWarning(
+            includeDefaultRoute: false, included: ["10.0.0.0/8"],
+            excluded: ["10.1.0.0/16"]) == nil)
+        // Under a full tunnel every exclusion does something.
+        #expect(ProxyTunnelConfig.excludedRedundantWarning(
+            includeDefaultRoute: true, included: [],
+            excluded: ["192.168.0.0/16"]) == nil)
+        // Nothing typed, nothing to say.
+        #expect(ProxyTunnelConfig.excludedRedundantWarning(
+            includeDefaultRoute: false, included: ["10.0.0.0/8"], excluded: []) == nil)
+    }
+}

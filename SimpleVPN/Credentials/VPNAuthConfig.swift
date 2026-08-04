@@ -57,6 +57,33 @@ struct VPNAuthConfig: Codable, Sendable, Equatable {
 
     var isDefault: Bool { self == VPNAuthConfig() }
 
+    /// The auth shape an editor must SAVE, given what the PROFILE itself declares.
+    /// Two profile facts override whatever the form's state holds, because that
+    /// state outlives the profile it was entered against:
+    ///
+    ///  • `autologin` — there is no password and no code to collect, so an OTP
+    ///    requirement and a password template are dead state. Without this, a
+    ///    profile that was OTP-enabled and later became autologin kept
+    ///    `requiresOTP: true` and went on prompting at every connect, even though
+    ///    the Sign-In tab had correctly replaced the whole credential UI.
+    ///
+    ///  • `staticChallenge` — the server will demand the code regardless of the
+    ///    toggle, so the stored shape must agree with `effectiveAuthConfig` (which
+    ///    the connect flow reads) rather than contradict it. The template is left
+    ///    alone: it is inert under a static challenge (the code travels as the
+    ///    engine's challenge response, never concatenated into the password) but
+    ///    becomes live again if the directive leaves the configuration.
+    static func resolved(_ raw: VPNAuthConfig, autologin: Bool, staticChallenge: Bool) -> VPNAuthConfig {
+        var out = raw
+        if autologin {
+            out.requiresOTP = false
+            out.passwordTemplate = defaultTemplate
+        } else if staticChallenge {
+            out.requiresOTP = true
+        }
+        return out
+    }
+
     func encodedBlob() -> Data? {
         guard !isDefault else { return nil }
         return try? JSONEncoder().encode(self)

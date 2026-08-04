@@ -383,6 +383,101 @@ struct CustomRoutingTests {
         #expect(f.ruleStatus(rule(.replace, match: "192.168.0.0/16", target: "10.1.0.0/16"), against: pushed) == .orphaned)
     }
 
+    /// An allow-list already drops everything no rule accepts, so an explicit
+    /// Ignore inside one can't change the outcome — the badge existed, the model
+    /// just never computed this case.
+    @Test func ignoreIsRedundantUnderAnIgnoreAllDisposition() {
+        var f = RouteFilter()
+        f.defaultDisposition = .ignore
+        let pushed = PushedIntentSnapshot.Routes(advertisedPrefixes: ["10.0.0.0/8"], wantsDefault: false)
+        // True whether or not the prefix is currently pushed: the rule can never bite.
+        #expect(f.ruleStatus(rule(.ignore, match: "10.0.0.0/8"), against: pushed) == .redundant)
+        #expect(f.ruleStatus(rule(.ignore, match: "172.16.0.0/12"), against: pushed) == .redundant)
+        // The other verbs are untouched — an Accept is what an allow-list is FOR.
+        #expect(f.ruleStatus(rule(.accept, match: "10.0.0.0/8"), against: pushed) == .active)
+        #expect(f.ruleStatus(rule(.add, target: "203.0.113.0/24"), against: pushed) == .active)
+        // …and with the default disposition it stays exactly as before.
+        var accepting = RouteFilter()
+        accepting.defaultDisposition = .accept
+        #expect(accepting.ruleStatus(rule(.ignore, match: "10.0.0.0/8"), against: pushed) == .active)
+    }
+
+    @Test func dnsIgnoreIsRedundantUnderAnIgnoreAllDisposition() {
+        var c = DNSCustomization()
+        c.defaultDisposition = .ignore
+        let pushed = PushedIntentSnapshot.DNS(resolvers: ["1.1.1.1"], searchDomains: [], matchDomains: [])
+        #expect(c.ruleStatus(dnsRule(.ignore, match: "1.1.1.1"), against: pushed) == .redundant)
+        #expect(c.ruleStatus(dnsRule(.ignore, match: "8.8.8.8"), against: pushed) == .redundant)
+        #expect(c.ruleStatus(dnsRule(.accept, match: "1.1.1.1"), against: pushed) == .active)
+    }
+
+    // MARK: - Verb changes clear the fields the new verb hides
+    //
+    // The editor hides the control a verb doesn't use, but the filter still READS
+    // it (`dispositionForPrefix` consults a Replace's target; `apply` injects an
+    // Add's). A hidden field the tunnel obeys is state the user can't see.
+
+    @Test func switchingToAcceptOrIgnoreDropsTheTarget() {
+        var r = RouteFilter.RouteRule(verb: .replace, match: RoutePrefix("10.0.0.0/8"),
+                                      target: RoutePrefix("10.1.0.0/16"))
+        r.verb = .accept
+        #expect(r.clearingUnusedFields().target == nil)
+        #expect(r.clearingUnusedFields().match == RoutePrefix("10.0.0.0/8"))
+        r.verb = .ignore
+        #expect(r.clearingUnusedFields().target == nil)
+    }
+
+    @Test func switchingToAddDropsTheMatch() {
+        var r = RouteFilter.RouteRule(verb: .replace, match: RoutePrefix("10.0.0.0/8"),
+                                      target: RoutePrefix("10.1.0.0/16"))
+        r.verb = .add
+        let cleared = r.clearingUnusedFields()
+        #expect(cleared.match == nil)
+        #expect(cleared.target == RoutePrefix("10.1.0.0/16"))
+    }
+
+    @Test func replaceKeepsBothAndTheIdNeverMoves() {
+        let r = RouteFilter.RouteRule(verb: .replace, match: RoutePrefix("10.0.0.0/8"),
+                                      target: RoutePrefix("10.1.0.0/16"))
+        #expect(r.clearingUnusedFields() == r)
+        #expect(r.clearingUnusedFields().id == r.id)
+    }
+
+    @Test func dnsRulesClearTheSameWay() {
+        var r = DNSCustomization.ResolverRule(verb: .replace, match: "1.1.1.1", target: "10.0.0.1")
+        r.verb = .ignore
+        #expect(r.clearingUnusedFields().target == nil)
+        #expect(r.clearingUnusedFields().match == "1.1.1.1")
+        r.verb = .add
+        #expect(r.clearingUnusedFields().match == nil)
+        #expect(r.clearingUnusedFields().target == "10.0.0.1")
+    }
+
+    /// Rules stored before the editor cleared them (or written by MDM/the CLI)
+    /// are cleaned on the way to the mediators, so the stale value can't act.
+    @Test func theSanitizerClearsStaleHiddenFields() {
+        var p = CustomRoutingProfile()
+        p.routes.rules = [.init(verb: .accept, match: RoutePrefix("10.0.0.0/8"),
+                                target: RoutePrefix("192.168.0.0/16")),
+                          .init(verb: .add, match: RoutePrefix("10.0.0.0/8"),
+                                target: RoutePrefix("203.0.113.0/24"))]
+        p.dns.resolverRules = [.init(verb: .ignore, match: "1.1.1.1", target: "8.8.8.8")]
+        let out = sanitizedCustomRoutingProfile(p)
+        #expect(out.routes.rules[0].target == nil)
+        #expect(out.routes.rules[1].match == nil)
+        #expect(out.dns.resolverRules[0].target == nil)
+    }
+
+    /// The whole point: a stale target on an Accept must not reach the transform.
+    @Test func aStaleTargetCannotChangeTheAppliedIntent() {
+        var p = CustomRoutingProfile()
+        p.routes.rules = [.init(verb: .accept, match: RoutePrefix("10.0.0.0/8"),
+                                target: RoutePrefix("192.168.0.0/16"))]
+        let captured = routeIntent("wg", prefixes: ["10.0.0.0/8"])
+        let out = sanitizedCustomRoutingProfile(p).routes.apply(to: captured)
+        #expect(out.advertisedPrefixes == ["10.0.0.0/8"])
+    }
+
     @Test func dnsStatusOrphanedAndRedundant() {
         let c = DNSCustomization()
         let pushed = PushedIntentSnapshot.DNS(resolvers: ["1.1.1.1"], searchDomains: [], matchDomains: [])

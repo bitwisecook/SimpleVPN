@@ -42,11 +42,140 @@ struct NativeVPNSecretsTests {
         }
     }
 
+    /// IPsec with XAuth turned OFF sends no username/password at all, so keeping
+    /// the old XAuth password would leave a secret behind for a mode that no
+    /// longer uses it — the same clear-deletes rule, reached by a toggle instead
+    /// of an emptied field.
+    @Test func turningXAuthOffRemovesTheStoredXAuthPassword() {
+        #expect(NativeVPNSecrets.plan(kind: .ipsec, secret: "xauth", sharedSecret: "psk", xauth: false)
+                == .init(base: .delete, groupPSK: .write("psk")))
+        // …and turning it back on stores it again.
+        #expect(NativeVPNSecrets.plan(kind: .ipsec, secret: "xauth", sharedSecret: "psk", xauth: true)
+                == .init(base: .write("xauth"), groupPSK: .write("psk")))
+        // The flag is IPsec's alone — IKEv2's one secret is never an XAuth password.
+        #expect(NativeVPNSecrets.plan(kind: .ikev2, secret: "pw", sharedSecret: "", xauth: false)
+                == .init(base: .write("pw"), groupPSK: .delete))
+    }
+
+    /// Only L2TP has a PPP (user) password, and clearing it must really clear —
+    /// otherwise the next export writes a password the user thought they removed.
+    @Test func onlyL2TPKeepsAPPPPassword() {
+        #expect(NativeVPNSecrets.plan(kind: .l2tp, secret: "psk", pppPassword: "userpw")
+                == .init(base: .write("psk"), groupPSK: .delete, pppPassword: .write("userpw")))
+        #expect(NativeVPNSecrets.plan(kind: .l2tp, secret: "psk", pppPassword: "").pppPassword == .delete)
+        for kind in [VPNKind.ikev2, .ipsec] {
+            #expect(NativeVPNSecrets.plan(kind: kind, secret: "s", sharedSecret: "psk",
+                                          pppPassword: "userpw").pppPassword == .delete,
+                    "\(kind) must not retain a PPP password")
+        }
+    }
+
     /// The row ids are a storage contract (the migration in NativeVPNView and
     /// the cleanup in NativeVPNManager.remove(_:) both key on them).
     @Test func rowIdsAreStable() {
         #expect(NativeVPNSecrets.baseProfile("abc") == "native.abc")
         #expect(NativeVPNSecrets.groupPSKProfile("abc") == "native.abc.secret")
+        #expect(NativeVPNSecrets.pppPasswordProfile("abc") == "native.abc.ppp")
+    }
+}
+
+// MARK: - L2TP configuration profile
+//
+// The generator wrote `PPP.AuthName` with no password at all, so every exported
+// profile prompted at connect — which reads as a broken export, not a design.
+
+@MainActor
+struct L2TPMobileconfigTests {
+
+    private func config() -> NativeVPNConfig {
+        var c = NativeVPNConfig()
+        c.kind = .l2tp
+        c.name = "Work"
+        c.server = "vpn.example.com"
+        c.username = "alex"
+        return c
+    }
+
+    @Test func thePasswordIsEmittedAsAuthPassword() {
+        let xml = NativeVPNProfile.l2tpMobileconfig(config(), secret: "psk", pppPassword: "s3cret")
+        #expect(xml.contains("<key>AuthName</key><string>alex</string>"))
+        #expect(xml.contains("<key>AuthPassword</key><string>s3cret</string>"))
+    }
+
+    /// An empty `AuthPassword` element is an empty-password attempt, not "ask me"
+    /// — so with nothing entered the key is left out entirely.
+    @Test func noPasswordMeansNoAuthPasswordKey() {
+        let xml = NativeVPNProfile.l2tpMobileconfig(config(), secret: "psk")
+        #expect(!xml.contains("AuthPassword"))
+        #expect(xml.contains("<key>AuthName</key><string>alex</string>"))
+    }
+
+    /// The password is user-controlled text, so it must go through the same XML
+    /// escaping as every other interpolation — unescaped, `</string>` in a
+    /// password breaks out of its element and corrupts the plist.
+    @Test func thePasswordIsXMLEscaped() {
+        let xml = NativeVPNProfile.l2tpMobileconfig(
+            config(), secret: "psk", pppPassword: "a</string><key>Bad</key><string>b&c\"'<>")
+        #expect(!xml.contains("a</string><key>Bad"))
+        #expect(xml.contains("&lt;/string&gt;"))
+        #expect(xml.contains("&amp;c&quot;&apos;&lt;&gt;"))
+        // Still a well-formed plist after all that.
+        #expect((try? PropertyListSerialization.propertyList(
+            from: Data(xml.utf8), options: [], format: nil)) != nil)
+    }
+
+    @Test func theSharedSecretStaysBase64AndSeparate() throws {
+        let xml = NativeVPNProfile.l2tpMobileconfig(config(), secret: "psk", pppPassword: "s3cret")
+        #expect(xml.contains("<key>SharedSecret</key><data>\(Data("psk".utf8).base64EncodedString())</data>"))
+        let plist = try #require(try PropertyListSerialization.propertyList(
+            from: Data(xml.utf8), options: [], format: nil) as? [String: Any])
+        let payloads = try #require(plist["PayloadContent"] as? [[String: Any]])
+        let ppp = try #require(payloads.first?["PPP"] as? [String: Any])
+        #expect(ppp["AuthPassword"] as? String == "s3cret")
+        #expect(ppp["AuthName"] as? String == "alex")
+    }
+}
+
+// MARK: - IPsec XAuth
+
+struct NativeVPNXAuthTests {
+
+    /// `nil` means "never answered", which must read as the old behaviour — XAuth
+    /// is in play exactly when a username exists — so no stored config changes
+    /// meaning just because the field appeared.
+    @Test func anUnansweredXAuthFlagFollowsTheUsername() {
+        var c = NativeVPNConfig()
+        c.kind = .ipsec
+        #expect(!c.usesXAuth)
+        c.username = "alex"
+        #expect(c.usesXAuth)
+    }
+
+    @Test func anExplicitAnswerWinsOverTheUsername() {
+        var c = NativeVPNConfig()
+        c.kind = .ipsec
+        c.username = "alex"
+        c.xauth = false
+        #expect(!c.usesXAuth)
+        c.username = ""
+        c.xauth = true
+        #expect(c.usesXAuth)
+    }
+
+    /// Adding the field must not stop previously-stored configs decoding — this
+    /// type uses the synthesized Codable, and `NativeVPNManager.load()` drops the
+    /// WHOLE list on a decode failure.
+    @Test func aStoredConfigWithoutTheFieldStillDecodes() throws {
+        let json = Data("""
+        {"id":"abc","name":"Work","kind":"ipsec","server":"vpn.example.com","remoteID":"",
+         "username":"alex","usesSharedSecret":true,"groupOrRealm":"","onDemand":false,
+         "ikeEncryption":"","ikeIntegrity":"","ikeDHGroup":"","deadPeerDetection":"",
+         "disableMOBIKE":false,"enablePFS":false,"disconnectOnSleep":false,
+         "includeAllNetworks":false,"excludeLocalNetworks":true}
+        """.utf8)
+        let c = try JSONDecoder().decode(NativeVPNConfig.self, from: json)
+        #expect(c.xauth == nil)
+        #expect(c.usesXAuth)          // a username was stored ⇒ XAuth as before
     }
 }
 

@@ -289,6 +289,64 @@ struct WireGuardStartConfigTests {
     }
 }
 
+// MARK: - DNS coverage (the split-tunnel footgun)
+//
+// `WireGuardNetworkSettings` routes each advertised resolver's /32 into the utun,
+// so the query gets there — but wireguard-go then has no peer claiming that
+// address (its `allowed_ip` set is the Allowed IPs) and drops it. The tunnel
+// connects, carries its own networks, and every name lookup times out.
+
+struct WireGuardDNSCoverageTests {
+
+    @Test func aResolverOutsideTheAllowedIPsIsReported() {
+        #expect(WireGuardConfig.dnsOutsideAllowedIPs(dns: ["1.1.1.1"],
+                                                     allowedIPs: ["10.0.0.0/8"]) == ["1.1.1.1"])
+    }
+
+    @Test func aResolverInsideAnAllowedNetworkIsFine() {
+        #expect(WireGuardConfig.dnsOutsideAllowedIPs(dns: ["10.0.0.1"],
+                                                     allowedIPs: ["10.0.0.0/8"]).isEmpty)
+        // Exact host prefixes count as coverage too.
+        #expect(WireGuardConfig.dnsOutsideAllowedIPs(dns: ["1.1.1.1"],
+                                                     allowedIPs: ["10.0.0.0/8", "1.1.1.1/32"]).isEmpty)
+    }
+
+    @Test func aFullTunnelCoversEverythingSoNothingIsReported() {
+        #expect(WireGuardConfig.dnsOutsideAllowedIPs(dns: ["1.1.1.1", "2606:4700:4700::1111"],
+                                                     allowedIPs: ["0.0.0.0/0", "::/0"]).isEmpty)
+        // A v4 default alone does NOT cover a v6 resolver.
+        #expect(WireGuardConfig.dnsOutsideAllowedIPs(dns: ["2606:4700:4700::1111"],
+                                                     allowedIPs: ["0.0.0.0/0"])
+                == ["2606:4700:4700::1111"])
+    }
+
+    @Test func familiesDoNotCoverEachOther() {
+        #expect(WireGuardConfig.dnsOutsideAllowedIPs(dns: ["fd00:7::1"],
+                                                     allowedIPs: ["10.0.0.0/8"]) == ["fd00:7::1"])
+        #expect(WireGuardConfig.dnsOutsideAllowedIPs(dns: ["fd00:7::1"],
+                                                     allowedIPs: ["fd00:7::/64"]).isEmpty)
+    }
+
+    @Test func everyUncoveredResolverIsReportedInOrder() {
+        #expect(WireGuardConfig.dnsOutsideAllowedIPs(dns: ["10.0.0.1", "1.1.1.1", "8.8.8.8"],
+                                                     allowedIPs: ["10.0.0.0/8"])
+                == ["1.1.1.1", "8.8.8.8"])
+    }
+
+    /// No Allowed IPs at all is a different, blocking problem (`connectProblem`
+    /// refuses it) — this non-blocking check must not pile on.
+    @Test func noAllowedIPsReportsNothing() {
+        #expect(WireGuardConfig.dnsOutsideAllowedIPs(dns: ["1.1.1.1"], allowedIPs: []).isEmpty)
+    }
+
+    @Test func theWarningNamesTheServerAndTheFix() {
+        let w = WireGuardConfig.dnsCoverageWarning("1.1.1.1")
+        #expect(w.contains("1.1.1.1"))
+        #expect(w.contains("1.1.1.1/32"))
+        #expect(WireGuardConfig.dnsCoverageWarning("fd00:7::1").contains("fd00:7::1/128"))
+    }
+}
+
 // MARK: - Config → NEPacketTunnelNetworkSettings
 
 @MainActor

@@ -391,6 +391,41 @@ nonisolated extension WireGuardConfig {
         if let p = Self.keyProblem(presharedKey) { return p }
         return nil
     }
+
+    /// DNS servers no Allowed IPs prefix covers — the classic split-tunnel
+    /// footgun, and NON-blocking (the config is legal and everything else works).
+    ///
+    /// `WireGuardNetworkSettings` does install a /32 (/128) route for each
+    /// advertised resolver, so the query DOES reach the utun. What stops it is
+    /// the layer after: wireguard-go routes outbound packets by the peer's
+    /// `allowed_ip` set (see `renderWGUAPI` in the Go shim), and a destination
+    /// no peer claims has nowhere to go, so the packet is dropped. The tunnel
+    /// connects, carries its networks fine, and every name lookup times out.
+    ///
+    /// A full tunnel covers everything, so there is nothing to report then.
+    nonisolated static func dnsOutsideAllowedIPs(dns: [String], allowedIPs: [String]) -> [String] {
+        let prefixes = allowedIPs
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !prefixes.isEmpty else { return [] }
+        // A default route in either family covers that family entirely.
+        let coversV4 = prefixes.contains("0.0.0.0/0")
+        let coversV6 = prefixes.contains("::/0")
+        return dns.compactMap { raw in
+            let server = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !server.isEmpty else { return nil }
+            if server.contains(":") ? coversV6 : coversV4 { return nil }
+            // No prefix of the same family overlaps this address ⇒ uncovered.
+            // A bare address parses as a host prefix, so `overlaps` compares it
+            // against each allowed network at that network's own length.
+            return prefixes.contains { RoutePrefixMath.overlaps(server, $0) } ? nil : server
+        }
+    }
+
+    /// The caveat text for one uncovered resolver.
+    nonisolated static func dnsCoverageWarning(_ server: String) -> String {
+        "\(server) isn't inside any of the Allowed IPs above, so this peer won't carry lookups to it and DNS will simply stop. Add \(server)/\(server.contains(":") ? "128" : "32") to Allowed IPs, or use a resolver inside a network that is listed."
+    }
 }
 
 // MARK: - Start payload (the WGStart contract)

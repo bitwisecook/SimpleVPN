@@ -52,12 +52,16 @@ import SwiftUI
 /// captured intent when `.custom` doesn't parse.
 func sanitizedCustomRoutingProfile(_ profile: CustomRoutingProfile) -> CustomRoutingProfile {
     var out = profile
-    out.routes.rules = profile.routes.rules.filter {
-        !CustomRoutingValidator.validate($0).contains(where: \.isError)
-    }
-    out.dns.resolverRules = profile.dns.resolverRules.filter {
-        !CustomRoutingValidator.validate($0).contains(where: \.isError)
-    }
+    // …and blank the fields each verb doesn't use. The editor clears them as the
+    // verb changes, but a profile stored before that did (or one written by MDM
+    // or the CLI) can still carry a hidden target on an Accept — see
+    // `RouteRule.clearingUnusedFields()`.
+    out.routes.rules = profile.routes.rules
+        .filter { !CustomRoutingValidator.validate($0).contains(where: \.isError) }
+        .map { $0.clearingUnusedFields() }
+    out.dns.resolverRules = profile.dns.resolverRules
+        .filter { !CustomRoutingValidator.validate($0).contains(where: \.isError) }
+        .map { $0.clearingUnusedFields() }
     out.dns.addSearchDomains = profile.dns.addSearchDomains.filter(CustomRoutingValidator.isValidDomain)
     out.dns.addMatchDomains = profile.dns.addMatchDomains.filter(CustomRoutingValidator.isValidDomain)
     out.dns.ignoreSearchDomains = profile.dns.ignoreSearchDomains.filter(CustomRoutingValidator.isValidDomain)
@@ -144,7 +148,10 @@ private struct RuleStatusBadge: View {
         case .redundant:
             Image(systemName: "arrow.triangle.merge")
                 .foregroundStyle(.secondary)
-                .help("This rule's result already matches what's pushed — it has no effect.")
+                // Covers both redundancies the model reports: a Replace/Add whose
+                // target already matches a pushed item, and an Ignore in a section
+                // that already ignores everything unmatched.
+                .help("This rule can't change anything — the outcome is the same without it.")
                 .accessibilityLabel("Redundant rule")
         case .overlapping:
             Image(systemName: "exclamationmark.triangle.fill")
@@ -273,7 +280,9 @@ struct CustomRoutingTabView: View {
             HStack(spacing: 8) {
                 // The verb is the row's grammatical subject — an unnamed popup
                 // ("pop up button, Replace") strands the reader mid-sentence.
-                Picker("Rule action", selection: rule.verb) {
+                // Writing through `verbBinding` clears the field the new verb
+                // hides, so nothing invisible survives the change.
+                Picker("Rule action", selection: Self.verbBinding(rule)) {
                     Text("Accept").tag(FilterVerb.accept)
                     Text("Ignore").tag(FilterVerb.ignore)
                     Text("Replace").tag(FilterVerb.replace)
@@ -353,11 +362,35 @@ struct CustomRoutingTabView: View {
         switch status {
         case .active: break
         case .orphaned: out += ", matches nothing this VPN pushes"
-        case .redundant: out += ", already what's pushed"
+        case .redundant: out += ", no effect — the outcome is the same without it"
         case .overlapping: out += ", overlaps a pushed route"
         }
         if overlapping, status != .overlapping { out += ", overlaps another rule or route" }
         return out
+    }
+
+    /// The verb, written back through `clearingUnusedFields()`: changing a rule's
+    /// verb hides a field, and a hidden field the filter still reads is state the
+    /// user cannot see but the tunnel obeys.
+    private static func verbBinding(_ rule: Binding<RouteFilter.RouteRule>) -> Binding<FilterVerb> {
+        Binding(
+            get: { rule.wrappedValue.verb },
+            set: { newVerb in
+                var next = rule.wrappedValue
+                next.verb = newVerb
+                rule.wrappedValue = next.clearingUnusedFields()
+            })
+    }
+
+    /// The DNS rows' equivalent.
+    private static func verbBinding(_ rule: Binding<DNSCustomization.ResolverRule>) -> Binding<FilterVerb> {
+        Binding(
+            get: { rule.wrappedValue.verb },
+            set: { newVerb in
+                var next = rule.wrappedValue
+                next.verb = newVerb
+                rule.wrappedValue = next.clearingUnusedFields()
+            })
     }
 
     /// `RoutePrefix?` field ↔ plain text, blank = nil (the model treats a blank
@@ -547,9 +580,18 @@ struct CustomRoutingTabView: View {
             Toggle("Ignore all pushed search domains", isOn: $profile.dns.ignorePushedSearchDomains)
             Toggle("Ignore all pushed match domains", isOn: $profile.dns.ignorePushedMatchDomains)
             domainListField("Add search domains", $profile.dns.addSearchDomains)
-            domainListField("Ignore search domains", $profile.dns.ignoreSearchDomains)
+            // Ignoring ALL of them subsumes any list: `editDomains` starts from an
+            // empty set under ignore-all and never consults the subtraction list,
+            // so the field is genuinely inert — disabled, with the reason.
+            domainListField("Ignore search domains", $profile.dns.ignoreSearchDomains,
+                            disabledReason: profile.dns.ignorePushedSearchDomains
+                                ? "\u{201C}Ignore all pushed search domains\u{201D} is on, which already drops every one."
+                                : nil)
             domainListField("Add match domains", $profile.dns.addMatchDomains)
-            domainListField("Ignore match domains", $profile.dns.ignoreMatchDomains)
+            domainListField("Ignore match domains", $profile.dns.ignoreMatchDomains,
+                            disabledReason: profile.dns.ignorePushedMatchDomains
+                                ? "\u{201C}Ignore all pushed match domains\u{201D} is on, which already drops every one."
+                                : nil)
 
             if !pushed.dns.resolvers.isEmpty || !pushed.dns.searchDomains.isEmpty || !pushed.dns.matchDomains.isEmpty {
                 Divider()
@@ -565,7 +607,7 @@ struct CustomRoutingTabView: View {
         let sentence = Self.dnsRuleSentence(r, status: status)
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 8) {
-                Picker("Rule action", selection: rule.verb) {
+                Picker("Rule action", selection: Self.verbBinding(rule)) {
                     Text("Accept").tag(FilterVerb.accept)
                     Text("Ignore").tag(FilterVerb.ignore)
                     Text("Replace").tag(FilterVerb.replace)
@@ -621,14 +663,16 @@ struct CustomRoutingTabView: View {
         switch status {
         case .active: break
         case .orphaned: out += ", matches nothing this VPN pushes"
-        case .redundant: out += ", already what's pushed"
+        case .redundant: out += ", no effect — the outcome is the same without it"
         case .overlapping: out += ", overlaps a pushed resolver"
         }
         return out
     }
 
-    private func domainListField(_ title: String, _ binding: Binding<[String]>) -> some View {
-        let bad = binding.wrappedValue.filter { !CustomRoutingValidator.isValidDomain($0) }
+    private func domainListField(_ title: String, _ binding: Binding<[String]>,
+                                 disabledReason: String? = nil) -> some View {
+        let bad = disabledReason == nil
+            ? binding.wrappedValue.filter { !CustomRoutingValidator.isValidDomain($0) } : []
         return VStack(alignment: .leading, spacing: 2) {
             LabeledContent(title) {
                 TextField("example.com, other.example", text: Binding(
@@ -636,9 +680,18 @@ struct CustomRoutingTabView: View {
                     set: { binding.wrappedValue = $0.split(separator: ",")
                         .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } }))
                     .textFieldStyle(.roundedBorder)
-                    .accessibilityValue(bad.isEmpty
-                        ? binding.wrappedValue.joined(separator: ", ")
-                        : "\(binding.wrappedValue.joined(separator: ", ")). Problem: not a valid domain: \(bad.joined(separator: ", "))")
+                    // A dead field says why, in the tooltip AND to VoiceOver.
+                    .disabled(disabledReason != nil)
+                    .help(disabledReason ?? title)
+                    .accessibilityValue(disabledReason.map { "unavailable — \($0)" }
+                        ?? (bad.isEmpty
+                            ? binding.wrappedValue.joined(separator: ", ")
+                            : "\(binding.wrappedValue.joined(separator: ", ")). Problem: not a valid domain: \(bad.joined(separator: ", "))"))
+            }
+            if let disabledReason {
+                Text(disabledReason)
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if !bad.isEmpty {
                 Label("Not a valid domain: \(bad.joined(separator: ", "))", systemImage: "xmark.octagon.fill")
@@ -678,6 +731,12 @@ struct CustomRoutingTabView: View {
         effectiveKind.map { ProxyParticipation.classify($0) == .limited } ?? false
     }
 
+    /// Whether a PAC URL is set — the value `ProxyCustomization.apply` prefers,
+    /// which makes the manual proxy address inert.
+    private var pacURLSet: Bool {
+        !(profile.proxy.pacURL ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     @ViewBuilder private var proxySection: some View {
         Section("Custom Routing — Proxy") {
             Picker("Mode", selection: $profile.proxy.mode) {
@@ -693,12 +752,31 @@ struct CustomRoutingTabView: View {
 
             if profile.proxy.mode == .custom {
                 let issues = CustomRoutingValidator.validate(profile.proxy)
+                // `ProxyCustomization.apply` returns the PAC intent and never
+                // looks at `manualURL` when a PAC URL is set, so the manual field
+                // is inert — the PAC field's placeholder said so while the manual
+                // field stayed live and editable.
+                let manualDead: String? = pacURLSet
+                    ? "The PAC URL below is set, and it wins — this address isn't used. Clear the PAC URL to use a manual proxy."
+                    : nil
                 TextField("Manual proxy: http(s)://host:port or socks5://host:port", text: Binding(
                     get: { profile.proxy.manualURL ?? "" },
                     set: { profile.proxy.manualURL = $0.isEmpty ? nil : $0 }))
                     .textFieldStyle(.roundedBorder)
-                IssueCaption(issues: issues.filter { $0.field == "manualURL" })
-                if isObserveOnlyKind, profile.proxy.customIsSOCKS {
+                    .disabled(manualDead != nil)
+                    .accessibilityLabel("Manual proxy address")
+                    .help(manualDead ?? "The proxy this VPN should use, as http(s)://host:port or socks5://host:port.")
+                    .accessibilityValue(manualDead.map { "unavailable — \($0)" }
+                                        ?? (profile.proxy.manualURL ?? ""))
+                if let manualDead {
+                    Text(manualDead)
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if manualDead == nil {
+                    IssueCaption(issues: issues.filter { $0.field == "manualURL" })
+                }
+                if manualDead == nil, isObserveOnlyKind, profile.proxy.customIsSOCKS {
                     Label("The native VPN configuration has no SOCKS slot — use an http:// or https:// proxy (or a PAC URL).",
                           systemImage: "exclamationmark.triangle.fill")
                         .font(.caption2).foregroundStyle(.orange)

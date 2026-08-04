@@ -357,3 +357,79 @@ struct ConnectReadinessTests {
         #expect(i.readiness == .ready)
     }
 }
+
+// MARK: - Auth shape: the profile has the last word
+//
+// The Sign-In tab's state outlives the profile it was entered against. Two
+// profile facts must therefore override it on SAVE, or the stored shape
+// contradicts what `VPNController.effectiveAuthConfig` reads at connect:
+// autologin (no credentials exist at all) and a declared `static-challenge`
+// (the server demands the code whatever the toggle says).
+
+struct VPNAuthConfigResolutionTests {
+
+    private func otpEnabled(template: String = "{password}-{otp}") -> VPNAuthConfig {
+        var a = VPNAuthConfig()
+        a.requiresOTP = true
+        a.passwordTemplate = template
+        return a
+    }
+
+    /// The bug: a profile that was OTP-enabled and later became autologin kept
+    /// `requiresOTP: true`, so the connect flow went on prompting for a code for
+    /// a VPN that signs in with its certificate alone.
+    @Test func autologinZeroesTheOTPRequirementAndTheTemplate() {
+        let out = VPNAuthConfig.resolved(otpEnabled(), autologin: true, staticChallenge: false)
+        #expect(!out.requiresOTP)
+        #expect(out.passwordTemplate == VPNAuthConfig.defaultTemplate)
+    }
+
+    /// Autologin wins even when the profile ALSO declares a static challenge —
+    /// there is no password for a challenge to sit beside.
+    @Test func autologinWinsOverAStaticChallenge() {
+        let out = VPNAuthConfig.resolved(otpEnabled(), autologin: true, staticChallenge: true)
+        #expect(!out.requiresOTP)
+    }
+
+    /// Fields this form doesn't edit are untouched (the `setAuthConfig` rule:
+    /// start from the current config, never a fresh one).
+    @Test func autologinLeavesUnrelatedFieldsAlone() {
+        var a = otpEnabled()
+        a.rememberCredentials = false
+        a.protectWithBiometrics = true
+        let out = VPNAuthConfig.resolved(a, autologin: true, staticChallenge: false)
+        #expect(!out.rememberCredentials)
+        #expect(out.protectWithBiometrics)
+    }
+
+    /// A declared static challenge pins the requirement ON, so the stored shape
+    /// agrees with `effectiveAuthConfig` instead of contradicting it.
+    @Test func aStaticChallengeForcesTheOTPRequirementOn() {
+        let out = VPNAuthConfig.resolved(VPNAuthConfig(), autologin: false, staticChallenge: true)
+        #expect(out.requiresOTP)
+    }
+
+    /// The template is INERT under a static challenge (the code rides the
+    /// engine's challenge response, never the password), but it is kept — remove
+    /// the directive from the .ovpn and the user's template is still there.
+    @Test func aStaticChallengeKeepsTheTemplateForLater() {
+        let out = VPNAuthConfig.resolved(otpEnabled(template: "{otp}{password}"),
+                                         autologin: false, staticChallenge: true)
+        #expect(out.passwordTemplate == "{otp}{password}")
+    }
+
+    @Test func anOrdinaryProfileIsPassedThroughUnchanged() {
+        let a = otpEnabled()
+        #expect(VPNAuthConfig.resolved(a, autologin: false, staticChallenge: false) == a)
+        let plain = VPNAuthConfig()
+        #expect(VPNAuthConfig.resolved(plain, autologin: false, staticChallenge: false) == plain)
+    }
+
+    /// An autologin profile's resolved config must be the DEFAULT one, so the
+    /// blob is dropped entirely rather than persisting dead state.
+    @Test func autologinResolvesToADroppableBlob() {
+        let out = VPNAuthConfig.resolved(otpEnabled(), autologin: true, staticChallenge: false)
+        #expect(out.isDefault)
+        #expect(out.encodedBlob() == nil)
+    }
+}

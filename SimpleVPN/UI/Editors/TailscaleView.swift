@@ -88,6 +88,16 @@ struct TailscaleView: View {
                 }
                 // Non-blocking: Headscale's keys legitimately look different.
                 if let w = authKeyWarning { SettingCaveat(w) }
+                if !authKey.isEmpty {
+                    // The converse of the browser story below, which is correctly
+                    // hidden here — but hiding it said nothing about WHY, and a
+                    // key that turns out to be wrong then fails with no hint that
+                    // no sign-in page was ever going to appear.
+                    Label("This Mac signs in with the key — no sign-in page opens, and no browser is involved. Clear the key to sign in with a browser instead.",
+                          systemImage: "key.fill")
+                        .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if authKey.isEmpty {
                     Label("SimpleVPN will open a sign-in page the first time you connect. After that this Mac stays signed in.",
                           systemImage: "safari")
@@ -105,8 +115,16 @@ struct TailscaleView: View {
                 EngineSettingRow(spec: Self.specs["ts.accept-routes"], changed: !draft.acceptRoutes) {
                     Toggle(isOn: $draft.acceptRoutes) { Text("Use networks other machines share").bold(!draft.acceptRoutes) }
                 }
+                // Both toggles reach the engine and do exactly what they say — but
+                // paired with an exit machine each leaves a hole worth naming.
+                if !draft.acceptRoutes && draft.useExitNode {
+                    SettingCaveat("With shared networks off, only your internet traffic goes through the other machine. The office or home networks other machines share stay unreachable.")
+                }
                 EngineSettingRow(spec: Self.specs["ts.accept-dns"], changed: !draft.acceptDNS) {
                     Toggle(isOn: $draft.acceptDNS) { Text("Use this network's DNS").bold(!draft.acceptDNS) }
+                }
+                if !draft.acceptDNS && draft.useExitNode {
+                    SettingCaveat("Your traffic goes through the other machine but your name lookups don't — they keep using this Mac's own DNS servers, which reveals every site you visit to whoever runs them. Turn this network's DNS on to send lookups through the machine carrying your traffic.")
                 }
                 EngineSettingRow(spec: Self.specs["ts.exit-node"], changed: draft.useExitNode) {
                     Toggle(isOn: $draft.useExitNode) { Text("Send all internet traffic through another machine").bold(draft.useExitNode) }
@@ -314,10 +332,13 @@ struct TailscaleView: View {
             // A running session shouldn't need a reconnect just to change which
             // machine carries the traffic — push what the engine can take live.
             if vpn.profiles.first(where: { $0.id == profileID })?.status == .connected {
+                // Same symmetry the start payload keeps (TailscaleStartConfig):
+                // no exit machine ⇒ no exit node id and no LAN carve-out.
                 let patch = TailscalePrefsPatch(
                     acceptRoutes: draft.acceptRoutes, acceptDNS: draft.acceptDNS,
-                    useExitNode: draft.useExitNode, exitNode: draft.exitNode,
-                    exitNodeAllowLANAccess: draft.exitNodeAllowLANAccess,
+                    useExitNode: draft.useExitNode,
+                    exitNode: draft.useExitNode ? draft.exitNode : "",
+                    exitNodeAllowLANAccess: draft.useExitNode && draft.exitNodeAllowLANAccess,
                     advertiseRoutes: draft.advertiseRoutes)
                 prefsError = await vpn.pushTailscalePrefs(patch, id: profileID)
             } else {

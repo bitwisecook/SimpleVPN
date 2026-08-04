@@ -161,7 +161,9 @@ struct OpenVPNOptionsForm: View {
             SettingRow(id: "openvpn.protocol", draft: $draft, context: context) {
                 protocolPicker
             } caveat: {
-                if draft.proto == .udp && context.proxyConfigured {
+                // `usesUDP`, not `draft.proto == .udp`: "Default (UDP)" is the
+                // commonest way to be on UDP and a proxy can't carry that either.
+                if context.usesUDP && context.proxyConfigured {
                     SettingCaveat("Proxies only carry TCP. UDP won't work while a proxy is configured.")
                 }
             }
@@ -262,6 +264,13 @@ struct OpenVPNOptionsForm: View {
             SettingRow(id: "openvpn.google-dns-fallback", draft: $draft, context: context) {
                 settingToggle("openvpn.google-dns-fallback", \.googleDnsFallback,
                               default: OpenVPNOverrides.EngineDefaults.googleDnsFallback)
+            } caveat: {
+                // It reaches the engine, but the engine only reads it under two
+                // conditions at once — so on its own, on a split tunnel or with a
+                // server that pushes DNS, turning it on does nothing at all.
+                if draft.googleDnsFallback == true {
+                    SettingCaveat("Only used when BOTH are true: this VPN carries all your traffic, and the server sends no DNS servers of its own. Otherwise this does nothing.")
+                }
             }
         }
     }
@@ -288,6 +297,16 @@ struct OpenVPNOptionsForm: View {
             SettingRow(id: "openvpn.compression", draft: $draft, context: context) {
                 Picker(selection: $draft.compression) {
                     Text("Off — recommended (default)").tag(OpenVPNOverrides.Compression?.none)
+                    // The engine's own "no" is the SAME state as leaving this
+                    // unset (ovpncli.cpp only calls parse_compression_mode for a
+                    // non-empty mode, and ProtoContextCompressionOptions starts at
+                    // COMPRESS_NO), so it isn't offered as a second way to say
+                    // "off". It stays LISTED while stored, though — a value that
+                    // arrived from MDM, the CLI or an older blob must never leave
+                    // the picker blank (the Protocol row's rule).
+                    if draft.compression == .no {
+                        Text("Off — never compress").tag(OpenVPNOverrides.Compression?.some(.no))
+                    }
                     Text("Downloads only").tag(OpenVPNOverrides.Compression?.some(.asym))
                     Text("Full").tag(OpenVPNOverrides.Compression?.some(.yes))
                 } label: { SettingLabel(id: "openvpn.compression", draft: draft) }
@@ -295,9 +314,15 @@ struct OpenVPNOptionsForm: View {
                 if draft.compression == .yes {
                     SettingCaveat("Compression can let attackers steal secrets sent through the VPN (VORACLE attack).")
                 }
+                // "…asks for compression itself" used to stop there, which read as
+                // a warning the user had to act on. The engine refuses to compress
+                // unless this row says otherwise, so say what actually happens.
                 if evaluation?.requestsCompression == true {
-                    Text("This VPN's configuration file asks for compression itself.")
+                    Text(draft.compression == nil || draft.compression == .no
+                         ? "This VPN's configuration file asks for compression itself. It is still not used: the engine only accepts the framing, and compresses nothing, unless you choose otherwise here."
+                         : "This VPN's configuration file asks for compression itself, and your choice above is what the engine uses.")
                         .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
@@ -316,11 +341,27 @@ struct OpenVPNOptionsForm: View {
             }
 
             DisclosureGroup(isExpanded: $cipherStringsExpanded) {
+                // The two strings govern DIFFERENT halves of TLS and neither can
+                // do the other's job: OpenSSL takes this one through
+                // SSL_CTX_set_cipher_list, which only names TLS 1.2-and-below
+                // suites, so with a 1.3 minimum it is applied and then never
+                // matters. It still reaches the engine, so this is a caveat, not
+                // a dead control — drop the minimum back to TLS 1.2 and it bites.
                 SettingRow(id: "openvpn.tls-cipher-list", draft: $draft, context: context) {
                     cipherField("openvpn.tls-cipher-list", \.tlsCipherList)
+                } caveat: {
+                    if draft.tlsVersionMin == .tls1_3, (draft.tlsCipherList ?? "").isEmpty == false {
+                        SettingCaveat("This list only names TLS 1.2-and-below ciphers, and Minimum TLS Version is TLS 1.3 — so nothing here can be chosen. Use \u{201C}TLS 1.3 ciphersuites\u{201D} below instead.")
+                    }
                 }
                 SettingRow(id: "openvpn.tls-ciphersuites", draft: $draft, context: context) {
                     cipherField("openvpn.tls-ciphersuites", \.tlsCiphersuitesList)
+                } caveat: {
+                    if (draft.tlsCiphersuitesList ?? "").isEmpty == false {
+                        Text("Applies to TLS 1.3 only — TLS 1.2 and below take their suites from the list above.")
+                            .font(.callout).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 Text("Leave empty unless a server administrator gave you an exact string to paste.")
                     .font(.callout).foregroundStyle(.secondary)
@@ -411,6 +452,14 @@ struct OpenVPNOptionsForm: View {
                             .multilineTextAlignment(.trailing)
                             .frame(maxWidth: 260).frame(maxWidth: .infinity, alignment: .trailing)
                     } label: { SettingLabel(id: "openvpn.proxy-host", draft: draft) }
+                } caveat: {
+                    // The other half of the Protocol row's caveat: a proxy is set
+                    // AND the connection is on UDP, so the proxy will never be
+                    // used. Said on both rows, because either one is where the
+                    // user is looking when they make the pair impossible.
+                    if context.usesUDP {
+                        SettingCaveat("This VPN connects over UDP, which a proxy can't carry — set Protocol above to TCP (or Adaptive) or the proxy is never used.")
+                    }
                 }
                 SettingRow(id: "openvpn.proxy-port", draft: $draft, context: context) {
                     ValidatedNumberField(
@@ -708,9 +757,18 @@ private struct SettingRow<Control: View, Caveat: View>: View {
             // Control and the help button share the top line, so every "?" lines up
             // in one column with each row's value/control.
             HStack(alignment: .center, spacing: 8) {
-                control
-                    .disabled(disabledReason != nil)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                // A dead control says why in all three channels, exactly like
+                // EngineSettingRow: the visible summary, the tooltip, and the
+                // control's own accessibilityValue.
+                if let reason = disabledReason {
+                    control
+                        .disabled(true)
+                        .accessibilityValue("unavailable — \(reason)")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    control
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 ManualLink(anchor: descriptor.manualAnchor, settingName: descriptor.name)
             }
             Text(disabledReason ?? descriptor.summary)
@@ -721,7 +779,7 @@ private struct SettingRow<Control: View, Caveat: View>: View {
             caveat
         }
         .padding(.vertical, 6)   // grouped-form rows with stacked summary need extra air
-        .help(descriptor.summary)
+        .help(disabledReason ?? descriptor.summary)
         .id(id)
         .listRowBackground(highlighted ? Color.accentColor.opacity(0.16) : nil)
         .contextMenu {

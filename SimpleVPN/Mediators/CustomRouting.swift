@@ -101,6 +101,26 @@ nonisolated struct RouteFilter: Codable, Sendable, Equatable {
         init(id: UUID = UUID(), verb: FilterVerb, match: RoutePrefix? = nil, target: RoutePrefix? = nil) {
             self.id = id; self.verb = verb; self.match = match; self.target = target
         }
+
+        /// Blank the fields this verb doesn't use.
+        ///
+        /// The editor HIDES the control a verb doesn't need, but hiding is not
+        /// clearing: `dispositionForPrefix` still reads `target` for a Replace,
+        /// and `apply` still injects an Add's target — so switching a rule from
+        /// Replace to Accept left a target nobody could see, and switching to Add
+        /// left a match that changed nothing but sat there. Invisible state that
+        /// changes behaviour is a bug however sound the transform is, so the verb
+        /// change clears it, and `sanitizedCustomRoutingProfile` clears it again
+        /// on the way out for rules already stored that way.
+        func clearingUnusedFields() -> RouteRule {
+            var out = self
+            switch verb {
+            case .accept, .ignore: out.target = nil     // nothing to substitute or inject
+            case .add:             out.match = nil      // an Add matches nothing; it injects
+            case .replace:         break                // uses both
+            }
+            return out
+        }
     }
 
     var defaultDisposition: UnmatchedDisposition = .accept
@@ -212,6 +232,19 @@ nonisolated struct DNSCustomization: Codable, Sendable, Equatable {
 
         init(id: UUID = UUID(), verb: FilterVerb, match: String? = nil, target: String? = nil) {
             self.id = id; self.verb = verb; self.match = match; self.target = target
+        }
+
+        /// Blank the fields this verb doesn't use — see
+        /// `RouteFilter.RouteRule.clearingUnusedFields()` for why hiding isn't
+        /// enough (`dispositionForResolver` and `applyResolverVerbs` read them).
+        func clearingUnusedFields() -> ResolverRule {
+            var out = self
+            switch verb {
+            case .accept, .ignore: out.target = nil
+            case .add:             out.match = nil
+            case .replace:         break
+            }
+            return out
         }
     }
 
@@ -605,8 +638,10 @@ nonisolated enum RuleStatus: String, Sendable, Equatable, CaseIterable {
     /// The matched route/resolver is no longer present — nothing to act on (an Ignore /
     /// Accept, or a Replace whose match vanished; an Accept-proxy with no pushed proxy).
     case orphaned
-    /// The replacement/addition is a no-op — a Replace/Add whose target EXACTLY equals a
-    /// pushed item.
+    /// The rule can't change the outcome — a Replace/Add whose target EXACTLY equals a
+    /// pushed item, or an Ignore in a section whose unmatched disposition already
+    /// ignores everything (an allow-list drops what no rule accepts, so spelling out
+    /// one more thing to drop adds nothing).
     case redundant
     /// An Add whose target OVERLAPS a pushed route (CIDR intersection/containment, not
     /// exact) — the injected prefix already partly covered.
@@ -625,7 +660,15 @@ extension RouteFilter {
             p.isDefault ? pushed.wantsDefault : pushedSet.contains(p.normalized)
         }
         switch rule.verb {
-        case .accept, .ignore:
+        case .ignore:
+            // An allow-list already drops everything no rule accepts, so an
+            // explicit Ignore inside one can never change the outcome — that
+            // holds whether or not the prefix is currently pushed, which is why
+            // it is decided before the presence check.
+            if defaultDisposition == .ignore { return .redundant }
+            guard let m = rule.match else { return .active }
+            return present(m) ? .active : .orphaned
+        case .accept:
             guard let m = rule.match else { return .active }
             return present(m) ? .active : .orphaned
         case .replace:
@@ -655,7 +698,13 @@ extension DNSCustomization {
             return set.contains(ip)
         }
         switch rule.verb {
-        case .accept, .ignore:
+        case .ignore:
+            // Same rule as the route filter: an allow-list already drops what no
+            // rule accepts, so an explicit Ignore inside one adds nothing.
+            if defaultDisposition == .ignore { return .redundant }
+            guard rule.match != nil else { return .active }
+            return present(rule.match) ? .active : .orphaned
+        case .accept:
             guard rule.match != nil else { return .active }
             return present(rule.match) ? .active : .orphaned
         case .replace:

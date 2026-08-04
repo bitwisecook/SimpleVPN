@@ -369,7 +369,11 @@ nonisolated struct TailscaleStartConfig: Codable, Sendable, Equatable {
         acceptDNS = config.acceptDNS
         useExitNode = config.useExitNode
         exitNode = config.useExitNode ? config.exitNode.trimmingCharacters(in: .whitespaces) : ""
-        exitNodeAllowLANAccess = config.exitNodeAllowLANAccess
+        // Symmetric with `exitNode` above: the LAN carve-out only exists to poke a
+        // hole in an exit machine's default route, so with no exit machine there is
+        // nothing for it to describe. Sending it anyway put a live-looking value in
+        // the engine's prefs for a feature that isn't running.
+        exitNodeAllowLANAccess = config.useExitNode && config.exitNodeAllowLANAccess
         advertiseRoutes = config.advertiseRoutes
         self.mtu = mtu
     }

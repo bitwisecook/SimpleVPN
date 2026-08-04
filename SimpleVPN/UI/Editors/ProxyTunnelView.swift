@@ -59,6 +59,15 @@ struct ProxyTunnelView: View {
                         // The title is an EXAMPLE address — the spec name is the name.
                         .accessibilityLabel(Self.specs["px.address"].name)
                         .accessibilityValue(upstreamProblem.map { "\(address). Problem: \($0)" } ?? address)
+                        // A pasted full URL wins over the Kind picker in
+                        // `composedUpstream`, so it must DRIVE the picker too —
+                        // otherwise the picker sits there naming a scheme the
+                        // tunnel isn't using.
+                        .onChange(of: address) { _, new in
+                            if let implied = ProxyTunnelConfig.Preset.implied(byAddress: new) {
+                                preset = implied
+                            }
+                        }
                 }
                 if let problem = upstreamProblem {
                     Label(problem, systemImage: "exclamationmark.triangle.fill")
@@ -129,6 +138,11 @@ struct ProxyTunnelView: View {
                 if let w = overlapWarning {
                     SettingCaveat(w)
                 }
+                // …and with a split tunnel, an exclusion outside every included
+                // network has nothing to take out.
+                if let w = excludedRedundantWarning {
+                    SettingCaveat(w)
+                }
                 EngineSettingRow(spec: Self.specs["px.dns"], changed: !dnsText.isEmpty) {
                     TextField("1.1.1.1, 8.8.8.8", text: $dnsText)
                         .textFieldStyle(.roundedBorder)
@@ -142,6 +156,13 @@ struct ProxyTunnelView: View {
                     Label(p, systemImage: "exclamationmark.triangle.fill")
                         .font(.callout).foregroundStyle(.orange)
                         .accessibilityLabel("Problem: \(p)")
+                }
+                // A resolver an exclusion carves out still gets used — just
+                // directly, outside the proxy. The one DNS hazard this tunnel
+                // really has (a resolver outside the included routes is already
+                // handled: ProxyTunnelNetworkSettings routes each one in).
+                if let w = dnsExcludedWarning {
+                    SettingCaveat(w)
                 }
                 EngineSettingRow(spec: Self.specs["px.mtu"], changed: draft.mtu != ProxyTunnelStartConfig.defaultMTU) {
                     Stepper("MTU: \(draft.mtu)", value: $draft.mtu,
@@ -228,6 +249,21 @@ struct ProxyTunnelView: View {
         guard includedProblem == nil, excludedProblem == nil else { return nil }
         return ProxyTunnelConfig.routeOverlapWarning(
             included: ProxyTunnelConfig.splitRoutes(includedText),
+            excluded: ProxyTunnelConfig.splitRoutes(excludedText))
+    }
+    /// Non-blocking: exclusions with nothing to exclude under a split tunnel.
+    private var excludedRedundantWarning: String? {
+        guard includedProblem == nil, excludedProblem == nil else { return nil }
+        return ProxyTunnelConfig.excludedRedundantWarning(
+            includeDefaultRoute: draft.includeDefaultRoute,
+            included: ProxyTunnelConfig.splitRoutes(includedText),
+            excluded: ProxyTunnelConfig.splitRoutes(excludedText))
+    }
+    /// Non-blocking: an advertised resolver an exclusion sends back out direct.
+    private var dnsExcludedWarning: String? {
+        guard dnsProblem == nil, excludedProblem == nil else { return nil }
+        return ProxyTunnelConfig.dnsExcludedWarning(
+            dnsServers: ProxyTunnelConfig.splitRoutes(dnsText),
             excluded: ProxyTunnelConfig.splitRoutes(excludedText))
     }
 
