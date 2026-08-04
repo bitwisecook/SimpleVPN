@@ -369,6 +369,9 @@ final class VPNController {
                 if kind == .wireGuard {
                     wireGuardConfigs[id] = WireGuardConfig.decode(from: proto?.providerConfiguration?["wireguard"] as? Data)
                 }
+                if kind == .sshNetworkTunnel {
+                    sshNetworkTunnelConfigs[id] = SSHNetworkTunnelConfig.decode(from: proto?.providerConfiguration?["sshnet"] as? Data)
+                }
                 list.append(Profile(id: id,
                                     name: mgr.localizedDescription ?? id,
                                     server: proto?.serverAddress ?? "",
@@ -466,6 +469,15 @@ final class VPNController {
     var proxyTunnelConfigs: [String: ProxyTunnelConfig] = [:]   // was private(set) — internal for the +File split
     /// Latest engine status per profile, refreshed while connected.
     var proxyTunnelStatuses: [String: ProxyTunnelStatus] = [:]   // was private(set) — internal for the +File split
+
+    /// Observable mirror of the persisted SSH Network Tunnel settings. No secrets
+    /// in it: the password/key/certificate live in the keychain under
+    /// "sshnet.<id>" (see VPNController+SSHNetworkTunnel).
+    var sshNetworkTunnelConfigs: [String: SSHNetworkTunnelConfig] = [:]
+    /// Latest engine status per profile, refreshed while connected — `sessionUp`
+    /// is THE health signal here, because the tunnel's routes stay in place while
+    /// the session reconnects (traffic is refused, never leaked).
+    var sshNetworkTunnelStatuses: [String: SSHNetworkTunnelStatus] = [:]
 
     /// Observable mirror of the persisted (REDACTED — keys live in the
     /// keychain) WireGuard settings.

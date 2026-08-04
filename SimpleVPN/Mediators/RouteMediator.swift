@@ -253,8 +253,13 @@ final class RouteMediator {
     nonisolated static func participation(for kind: VPNKind, connected: Bool = true,
                                           tailscaleHasExitNode: Bool = false) -> RouteParticipation {
         switch kind {
-        case .openVPN, .proxyTunnel, .tailscale, .wireGuard,
+        case .openVPN, .proxyTunnel, .tailscale, .wireGuard, .sshNetworkTunnel,
              .fortinet, .f5apm, .ciscoAnyConnect, .globalProtect, .juniper, .pulse, .arrayNetworks:
+            // .sshNetworkTunnel is `.full` and `.ssh` is `.proxyOnly` — the same
+            // transport, opposite buckets, because the BUCKET is about routes, not
+            // protocols: this kind presents a utun, can carry 0.0.0.0/0 and demotes
+            // live (its engine rebuilds and re-applies the settings, like the proxy
+            // tunnel), while `.ssh` has no interface to give a route to at all.
             return .full
         case .ikev2, .ipsec, .l2tp:
             return .limited

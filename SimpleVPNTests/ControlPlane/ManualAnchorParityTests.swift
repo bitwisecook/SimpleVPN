@@ -34,6 +34,7 @@ struct ManualAnchorParityTests {
         ("native.", NativeVPNSettings.all),
         ("ts.", TailscaleSettings.all),
         ("px.", ProxyTunnelSettings.all),
+        ("sshnet.", SSHNetSettings.all),
         ("cr.", CustomRoutingSettings.all),
     ]
 
@@ -73,7 +74,7 @@ struct ManualAnchorParityTests {
         "problem-udp-blocked", "problem-otp-reneg", "problem-cipher", "problem-cert",
         "problem-idle", "problem-captive",
         // Per-engine introductions
-        "ts-what-is-it", "cr-what-is-it",
+        "ts-what-is-it", "cr-what-is-it", "sshnet-what-is-it",
     ]
 
     private func manualHTML() throws -> String {

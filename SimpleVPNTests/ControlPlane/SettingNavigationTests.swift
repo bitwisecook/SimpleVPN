@@ -193,6 +193,7 @@ struct SettingsSearchTests {
             (.proxyTunnel, "proxy address", "px.address"),
             (.native, "diffie", "native.dh-group"),
             (.ssh, "jump host", "ssh.proxy-jump"),
+            (.sshNetworkTunnel, "resolve names at the server", "sshnet.far-side-dns"),
             (.openConnect, "host checker", "oc.disable-csd"),
             (.customRouting, "pac url", "cr.proxy-pac-url"),
         ]
@@ -278,6 +279,9 @@ struct SettingsRouteTests {
             ("px.included", .proxyTunnel, .settings),
             ("native.pfs", .native, .settings),
             ("ssh.auth-method", .ssh, .settings),
+            // "sshnet." also has the "ssh." prefix, so this case is the regression
+            // guard for SettingSurface.owning's longest-prefix rule.
+            ("sshnet.host-key-policy", .sshNetworkTunnel, .settings),
             ("oc.base-mtu", .openConnect, .settings),
             ("cr.route-rule", .customRouting, .customRouting),
         ]

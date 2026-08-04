@@ -140,7 +140,14 @@ nonisolated extension VPNKind {
     ///   route-carrying interface we configure.
     var canAcceptRoutedInTraffic: Bool {
         switch self {
-        case .openVPN, .wireGuard, .proxyTunnel: true
+        // .sshNetworkTunnel CAN: we build its NEPacketTunnelNetworkSettings, and
+        // anything the routes deliver is re-dialled as a fresh direct-tcpip
+        // channel — so a destination routed in is genuinely carryable, with no
+        // per-destination server-side configuration. The one caveat is protocol,
+        // not routing: only TCP (and DNS) actually crosses, so a UDP-only
+        // destination routed in is refused per flow. That is what
+        // SSHNetworkTunnelConfig.udpCaveat says at the point of the action.
+        case .openVPN, .wireGuard, .proxyTunnel, .sshNetworkTunnel: true
         case _ where isSSLVPN: true
         default: false
         }
@@ -155,7 +162,7 @@ nonisolated extension VPNKind {
         case .ikev2, .ipsec, .l2tp:
             return "macOS owns the routes for this kind of VPN, so extra destinations can't be sent into it."
         case .ssh:
-            return "An SSH tunnel carries the forwards and SOCKS port you configure, not arbitrary destinations."
+            return "An SSH tunnel carries the forwards and SOCKS port you configure, not arbitrary destinations. An SSH Network Tunnel can carry arbitrary destinations \u{2014} use that kind instead."
         default:
             return "This kind of VPN can't take traffic routed in from another VPN."
         }
@@ -166,7 +173,10 @@ nonisolated extension VPNKind {
     /// build can carve a destination out.
     var canDivertOutside: Bool {
         switch self {
-        case .openVPN, .wireGuard, .proxyTunnel, .tailscale: true
+        // .sshNetworkTunnel CAN: its excluded routes are ours to write, and the
+        // provider already threads connect-time carve-outs through every re-apply
+        // path (it must — the SSH server's own address is one of them).
+        case .openVPN, .wireGuard, .proxyTunnel, .tailscale, .sshNetworkTunnel: true
         case _ where isSSLVPN: true
         default: false
         }

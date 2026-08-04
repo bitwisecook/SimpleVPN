@@ -33,11 +33,11 @@ const maxDNSMessage = 4096
 // dnsOverTCP sends one DNS query to resolverHost:resolverPort through the proxy
 // as DNS-over-TCP and returns the response message (without the length prefix).
 // It is a single request/response exchange — the guest's UDP socket semantics.
-func dnsOverTCP(ctx context.Context, up *upstream, base *net.Dialer, resolverHost string, resolverPort int, query []byte) ([]byte, error) {
+func dnsOverTCP(ctx context.Context, up flowDialer, base *net.Dialer, resolverHost string, resolverPort int, query []byte) ([]byte, error) {
 	if len(query) == 0 || len(query) > maxDNSMessage {
 		return nil, fmt.Errorf("dns: query length %d out of range", len(query))
 	}
-	conn, err := up.dialThrough(ctx, base, resolverHost, resolverPort)
+	conn, err := up.dial(ctx, base, resolverHost, resolverPort)
 	if err != nil {
 		return nil, err
 	}
@@ -73,4 +73,40 @@ func dnsOverTCP(ctx context.Context, up *upstream, base *net.Dialer, resolverHos
 // resolverAddress renders a resolver host:port for logging/errors.
 func resolverAddress(host string, port int) string {
 	return net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+// resolveDNSTarget applies the far-side-resolver substitution: a query addressed
+// to the configured SENTINEL address is re-aimed at the resolver the sentinel
+// stands for, which is then dialled through the upstream — i.e. resolved AT THE
+// SERVER. Everything else is passed through untouched.
+//
+// Why a sentinel at all: a tunnel must advertise a resolver ADDRESS on the utun
+// (there is no "ask the other end" in NEDNSSettings), and over SSH the resolver
+// you actually want is usually one only the server can see — `127.0.0.1:53` on
+// the server, or an internal resolver on an RFC 1918 address the client has no
+// route to. So the app advertises an address it owns inside the tunnel's own
+// benchmarking range, and this function turns queries to it into a direct-tcpip
+// forward to the real thing.
+//
+// A sentinel whose upstream is unparseable is IGNORED rather than failed: the
+// query still goes to the address the guest asked for, which is the pre-sentinel
+// behaviour, and PXStart already refuses an empty upstream. Silently sending
+// every lookup somewhere unintended would be worse than doing nothing.
+func (st *engineState) resolveDNSTarget(host string, port int) (string, int) {
+	if st.dnsSentinel == "" || host != st.dnsSentinel {
+		return host, port
+	}
+	upHost, upPort, err := net.SplitHostPort(st.dnsUpstream)
+	if err != nil {
+		// No port given: the whole string is the host, keep the guest's port.
+		if st.dnsUpstream == "" {
+			return host, port
+		}
+		return st.dnsUpstream, port
+	}
+	n, err := strconv.Atoi(upPort)
+	if err != nil || n <= 0 || n > 65535 {
+		return upHost, port
+	}
+	return upHost, n
 }

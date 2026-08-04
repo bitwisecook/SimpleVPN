@@ -297,7 +297,7 @@ nonisolated enum ProxyParticipation: Sendable, Equatable {
     case egressItself
     /// Coarse OS-managed proxy (native NEVPNManager kinds via `NEProxySettings`).
     case limited
-    /// No proxy of its own (Tailscale, WireGuard).
+    /// No proxy of its own (Tailscale, WireGuard, the SSH network tunnel).
     case none
     /// Engine not built — no kind lands here today; kept so the next
     /// engine-less kind gets the honest bucket rather than a lie.
@@ -315,9 +315,19 @@ nonisolated enum ProxyParticipation: Sendable, Equatable {
             return .egressItself
         case .ikev2, .ipsec, .l2tp:
             return .limited
-        case .tailscale, .wireGuard:
+        case .tailscale, .wireGuard, .sshNetworkTunnel:
             // Neither pushes nor sets a proxy — WireGuard's config format has
             // no proxy directive at all.
+            //
+            // .sshNetworkTunnel is `.none`, NOT `.egressItself`. It looks like the
+            // proxy tunnel and is `.egressItself`'s obvious neighbour, but the two
+            // buckets mean different things: `.egressItself` says "this VPN IS the
+            // proxy the system would otherwise be pointed at", which is what makes
+            // the arbiter refuse to nominate the proxy tunnel as system-proxy owner.
+            // An SSH network tunnel exposes no proxy endpoint at all — nothing on
+            // this Mac could be pointed at it, there is no port to name — so it has
+            // no proxy opinion to arbitrate. `.ssh` is `.provider` precisely because
+            // it DOES publish a local SOCKS port; this kind publishes none.
             return .none
         }
     }

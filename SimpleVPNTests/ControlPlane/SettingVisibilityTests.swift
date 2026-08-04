@@ -38,6 +38,7 @@ struct SettingVisibilityTests {
             ("native/ipsec", .native(Self.native(.ipsec)), [.native]),
             ("native/l2tp", .native(Self.native(.l2tp)), [.native]),
             ("proxyTunnel", .proxyTunnel(ProxyTunnelConfig()), [.proxyTunnel]),
+            ("sshNetworkTunnel", .sshNetworkTunnel(SSHNetworkTunnelConfig()), [.sshNetworkTunnel]),
             ("subprocess/ssh", .subprocess(Self.subprocess(.ssh)), [.ssh, .openConnect]),
             ("subprocess/ssl", .subprocess(Self.subprocess(.fortinet)), [.ssh, .openConnect]),
         ]
@@ -257,7 +258,7 @@ struct SettingRenderingTests {
         // …and the check is only meaningful if it found the hosts at all.
         let hosts = sources.filter { $0.value.contains("CustomRoutingTabView(")
                                      && !$0.value.contains("struct CustomRoutingTabView") }
-        #expect(hosts.count == 6, "expected six Custom Routing hosts, found \(hosts.count)")
+        #expect(hosts.count == 7, "expected seven Custom Routing hosts, found \(hosts.count)")
     }
 
     /// MDM `LockConfiguration` must reach the Custom Routing tab in EVERY editor —
@@ -282,6 +283,6 @@ struct SettingRenderingTests {
                     "\(name)'s Custom Routing tab isn't disabled under a managed lock")
             checked += 1
         }
-        #expect(checked == 6, "expected six Custom Routing hosts, checked \(checked)")
+        #expect(checked == 7, "expected seven Custom Routing hosts, checked \(checked)")
     }
 }

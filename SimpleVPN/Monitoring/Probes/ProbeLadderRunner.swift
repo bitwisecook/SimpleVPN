@@ -262,6 +262,30 @@ extension ProbeTargetFacts {
                             transport: VPNProbe.Transport(hint: target.proto),
                             ovpn: ovpn,
                             requiresOTP: vpn.authConfig(for: profile.id).requiresOTP)
+        case .sshNetworkTunnel:
+            // The SSH ladder needs the SSH facts: which login name to ask the
+            // server about, what to compare the host key against, and how strict to
+            // be. Without this branch the generic facts below left the host-key and
+            // sign-in-method rungs with nothing to check.
+            let c = vpn.sshNetworkTunnelConfig(for: profile.id)
+            var facts = ProbeTargetFacts()
+            facts.kind = profile.kind
+            facts.profileID = profile.id
+            facts.profileName = profile.name
+            facts.host = c.server.isEmpty ? target.host : c.server
+            facts.port = c.effectivePort
+            facts.transport = .tcp
+            facts.username = c.username
+            facts.usesAccountSignIn = true
+            facts.knownHostsPath = ("~/.ssh/known_hosts" as NSString).expandingTildeInPath
+            facts.pinnedHostKeySHA256 = c.normalizedPin.isEmpty ? nil : c.normalizedPin
+            // The app-side policies map onto OpenSSH's strictness vocabulary, which
+            // is what the probe's classifier speaks.
+            switch c.hostKeyPolicy {
+            case .pinned, .knownHostsOnly: facts.strictHostKey = "yes"
+            case .trustOnFirstUse: facts.strictHostKey = "accept-new"
+            }
+            return facts
         default:
             var facts = ProbeTargetFacts()
             facts.kind = profile.kind

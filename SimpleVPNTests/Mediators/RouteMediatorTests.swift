@@ -103,7 +103,8 @@ struct RouteMediatorTests {
 
     @Test func participationBucketsEveryKind() {
         // Route-participants (get a live gateway role + ≤1-owner arbitration).
-        for kind: VPNKind in [.openVPN, .proxyTunnel, .tailscale, .wireGuard, .fortinet, .f5apm,
+        for kind: VPNKind in [.openVPN, .proxyTunnel, .tailscale, .wireGuard, .sshNetworkTunnel,
+                              .fortinet, .f5apm,
                               .ciscoAnyConnect, .globalProtect, .juniper, .pulse, .arrayNetworks] {
             #expect(RouteMediator.participation(for: kind) == .full, "\(kind) should be .full")
             #expect(RouteMediator.participation(for: kind).appliesGatewayRole)
@@ -118,6 +119,10 @@ struct RouteMediatorTests {
         // Proxy-only (SOCKS egress, no default route) — the Proxy mediator's turf.
         #expect(RouteMediator.participation(for: .ssh) == .proxyOnly)
         #expect(!RouteMediator.participation(for: .ssh).appliesGatewayRole)
+        // The two SSH kinds land in OPPOSITE buckets, and that is the point: the
+        // bucket is about routes, not protocols. `.ssh` has no interface to give a
+        // route to; `.sshNetworkTunnel` presents a utun and demotes live.
+        #expect(RouteMediator.participation(for: .sshNetworkTunnel) == .full)
     }
 
     /// Tailscale participates in role application regardless of exit node (ownership is

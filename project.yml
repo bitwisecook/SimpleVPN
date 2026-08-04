@@ -208,6 +208,12 @@ targets:
           # libtsengine.a (two Go c-archives cannot co-link), so there is no
           # extra library to search for — only this header to find.
           - "$(SRCROOT)/Vendor/proxy-engine/include"
+          # libssh, for the SSH Network Tunnel kind's in-process session
+          # (SSHNetworkTunnelEngine + Shared/SSHBridge.m). Shared/ is on the
+          # search path too because the bridging header below imports
+          # SSHBridge.h, which now lives there (one copy, two targets).
+          - "$(SRCROOT)/Vendor/libssh-include"
+          - "$(SRCROOT)/Shared"
         # Tailscale / Headscale engine: the tailscale.com stack as a Go
         # c-archive (Tools/build-tailscale-engine.sh). Unlike the 1Password Go
         # archive it is linked DIRECTLY into this binary and needs no
@@ -250,6 +256,23 @@ targets:
       - sdk: libxml2.tbd
       - sdk: libz.tbd
       - sdk: libiconv.tbd
+      # In-process SSH engine for the SSH Network Tunnel kind (one direct-tcpip
+      # channel per netstack flow). Same artifact the app links, so the THIRD
+      # OpenSSL-bearing static archive now co-links here: all three pin the same
+      # OpenSSL (OPENSSL_PIN=3.6.3 in every build script) so their object files
+      # are byte-identical and ld64's lazy archive loading pulls exactly one copy —
+      # verified by linking all three together before this landed. If a pin ever
+      # diverges, THIS is where the duplicate-symbol failure appears.
+      - framework: Vendor/SSHEngine.xcframework
+        embed: false
+        link: true
+      # libssh is built WITH_GSSAPI, so the gss_* symbols must resolve even though
+      # this target can never USE Kerberos (no ticket cache in the system context).
+      - sdk: libgssapi_krb5.tbd
+      # …and WITH_FIDO2: libfido2's macOS USB HID transport needs IOKit +
+      # CoreFoundation to LINK, regardless of whether a security key is ever used.
+      - sdk: IOKit.framework
+      - sdk: CoreFoundation.framework
 
   # ---- 1Password SDK helper (the ONLY binary with the library-validation
   # relaxation — AMFI forbids it on the sysext-embedding app; see

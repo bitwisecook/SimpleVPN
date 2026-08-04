@@ -43,10 +43,35 @@ void PXSetCallbacks(PXPacketCallback packetOut,
                     PXStringCallback stateChanged,
                     PXStringCallback logLine);
 
-/// Bring the userspace stack up and point it at the upstream proxy. Synchronous:
+/// Engine → Swift per-flow dial, for the SSH Network Tunnel kind: the transport
+/// is an SSH session Swift owns, so Swift opens each flow and hands back a
+/// SOCKET FILE DESCRIPTOR the engine adopts (and closes when the flow ends).
+/// `host` is borrowed for the duration of the call only.
+///
+/// A NEGATIVE return is a refusal and the code says why — the guest gets an
+/// immediate RST rather than a black hole:
+///   -1 generic · -2 no session · -3 session down (reconnecting) ·
+///   -4 the server refused the forward · -5 timed out
+/// Flows are never queued: while the session is down every dial refuses with -3.
+typedef int (*PXFlowDialCallback)(const char *host, int port);
+
+/// Register the flow dialler. REQUIRED before PXStart when the upstream URL is
+/// `ssh://…` (PXStart refuses that scheme without one, rather than leaving every
+/// flow to fail with -2). Fires on arbitrary Go goroutines, one per flow: the
+/// Swift implementation must be thread-safe and must return promptly — its own
+/// budget has to be under the engine's 30 s dial timeout so the RST is ours.
+/// NULL clears it.
+void PXSetFlowDialCallback(PXFlowDialCallback dial);
+
+/// Bring the userspace stack up and point it at the upstream. Synchronous:
 /// there is no control-plane handshake, so it returns once the stack is composed
 /// (the routes/DNS the app advertises are then immediately live). `configJSON`
-/// carries the upstream URL, credentials (in memory only) and MTU.
+/// carries the upstream URL, credentials (in memory only), MTU and — for the SSH
+/// kind — the far-side DNS sentinel pair ("dnsSentinel"/"dnsUpstream": every DNS
+/// query addressed to the sentinel is re-aimed at the resolver it stands for,
+/// resolved AT THE SERVER over the same session).
+/// The upstream scheme decides who dials each flow: socks5/http/https are dialled
+/// in-process (proxy.go); `ssh://` is dialled by PXSetFlowDialCallback.
 /// response: {"ok":true} or {"error":{"kind","message"}}
 /// kinds: badRequest | alreadyRunning | engine | other
 char *PXStart(const char *configJSON);

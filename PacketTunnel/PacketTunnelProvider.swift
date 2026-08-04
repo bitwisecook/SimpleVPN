@@ -9,7 +9,7 @@
 import NetworkExtension
 import os
 
-final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate, OpenConnectBridgeDelegate, TailscaleEngineDelegate, ProxyTunnelEngineDelegate, WireGuardEngineDelegate, @unchecked Sendable {
+final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate, OpenConnectBridgeDelegate, TailscaleEngineDelegate, ProxyTunnelEngineDelegate, WireGuardEngineDelegate, SSHNetworkTunnelEngineDelegate, @unchecked Sendable {
 
     private static let log = Logger(subsystem: "com.bragi0.SimpleVPN.PacketTunnel", category: "tunnel")
 
@@ -28,6 +28,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
     nonisolated(unsafe) private var wgConfig: WireGuardConfig?        // kept (redacted) for live settings re-apply
     nonisolated(unsafe) private var wgSuppressDefault = false         // gateway demotion state for WireGuard
     nonisolated(unsafe) private var wgProxySettings: NEProxySettings? // app-arbitrated system proxy for WireGuard
+    nonisolated(unsafe) private var snEngine: SSHNetworkTunnelEngine?   // SSH network tunnel (netstack + libssh)
+    nonisolated(unsafe) private var snConfig: SSHNetworkTunnelConfig?   // kept for live settings re-apply
+    nonisolated(unsafe) private var snSuppressDefault = false           // gateway demotion state
+    nonisolated(unsafe) private var snProxySettings: NEProxySettings?   // app-arbitrated system proxy
+    nonisolated(unsafe) private var snExtraExcluded: [String] = []      // connect-time carve-outs: the SSH SERVER's own /32(/128) + .outside diverts
     nonisolated(unsafe) private var startCompletion: ((Error?) -> Void)?
     private let lock = NSLock()
 
@@ -103,6 +108,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         if kind == .proxyTunnel {
             startProxyTunnel(conf: conf, options: options, profile: profile,
                              divert: divert, completionHandler: completionHandler)
+            return
+        }
+
+        // SSH Network Tunnel: the same Go netstack, dialling each flow over an SSH
+        // session this process owns (libssh). TCP only — SSH has no UDP channel.
+        if kind == .sshNetworkTunnel {
+            startSSHNetworkTunnel(conf: conf, options: options, profile: profile,
+                                  divert: divert, completionHandler: completionHandler)
             return
         }
 
@@ -493,6 +506,135 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         }
     }
 
+    /// Bring up an SSH Network Tunnel in-process: open the SSH session, compose
+    /// the same gVisor netstack the Proxy Tunnel uses with the session as its
+    /// per-flow dialler, then apply the utun's routes and start pumping.
+    ///
+    /// Credentials AND the expected host-key fingerprint ride startTunnel options
+    /// in memory. The fingerprint is not optional: this process is PIN-ONLY (no
+    /// UI to prompt with, and root+sandbox means no known_hosts to read), so an
+    /// absent pin is a refusal to connect rather than a permissive default.
+    private func startSSHNetworkTunnel(conf: [String: Any]?, options: [String: NSObject]?,
+                                       profile: String, divert: DivertPlan,
+                                       completionHandler: @escaping (Error?) -> Void) {
+        var config = SSHNetworkTunnelConfig.decode(from: conf?["sshnet"] as? Data)
+        if let problem = config.connectProblem {
+            let error = SSHNetworkTunnelEngineError.engine(kind: "badRequest", message: problem)
+            writeSNIncident(profile: profile, error: error)
+            completionHandler(error)
+            return
+        }
+        // The app resolved trust and passes the ONE fingerprint we accept.
+        let pin = (options?["sshExpectedHostKeySHA256"] as? String) ?? ""
+        let username = (options?["sshUsername"] as? String) ?? config.username
+        let password = (options?["sshPassword"] as? String) ?? ""
+        let keyPEM = (options?["sshPrivateKeyPEM"] as? String) ?? ""
+        let certPEM = (options?["sshCertificatePEM"] as? String) ?? ""
+        if !username.isEmpty { config.username = username }
+
+        let ownedAtEstablish = (options?["gatewayOwned"] as? NSNumber)?.boolValue ?? true
+
+        // Divert: destinations another VPN routes INTO this tunnel become included
+        // routes. Every destination is carryable here (each flow becomes its own
+        // forward), so this is a real capability rather than a black hole — see
+        // VPNKind.canAcceptRoutedInTraffic. Merged into the config so the
+        // split-tunnel route list stays one list.
+        if !divert.inbound.isEmpty {
+            config.includedRoutes += divert.inboundCIDRs
+            Self.log.log("route-in (sshnet): \(divert.inbound.count) destination(s) routed into this VPN")
+        }
+        // Carve-outs applied on EVERY settings build for this session. The SSH
+        // server's own address is the important one and it is not belt-and-braces
+        // here: it is the tunnel's own CARRIER, so routing it into the utun is a
+        // loop that hangs the session rather than misrouting one connection.
+        // Resolved ONCE, here, because getaddrinfo must not run on the live
+        // re-apply paths.
+        let serverCarveOuts = SSHNetworkTunnelNetworkSettings.serverExclusions(host: config.server)
+        if serverCarveOuts.isEmpty, !config.server.isEmpty {
+            Self.log.error("ssh server exclusion: \(config.server, privacy: .public) did not resolve — relying on NE's own exemption of this process's sockets")
+        } else if !serverCarveOuts.isEmpty {
+            Self.log.log("ssh server exclusion: \(serverCarveOuts.joined(separator: ","), privacy: .public) kept out of the tunnel")
+        }
+        if !divert.outside.isEmpty {
+            Self.log.log("divert (sshnet): \(divert.outside.count) destination(s) routed around the VPN")
+        }
+        let carveOuts = serverCarveOuts + divert.outsideCIDRs
+
+        let engine = SSHNetworkTunnelEngine(provider: self, delegate: self)
+        lock.lock(); snEngine = engine; snConfig = config
+        snSuppressDefault = !ownedAtEstablish
+        snExtraExcluded = carveOuts
+        startCompletion = completionHandler; lock.unlock()
+
+        let start = SSHNetworkTunnelStartConfig(config: config, password: password,
+                                                privateKeyPEM: keyPEM, certificatePEM: certPEM,
+                                                expectedHostKeySHA256: pin)
+        if let error = engine.start(config: start) {
+            Self.log.error("ssh network tunnel start failed: \(error.localizedDescription, privacy: .public)")
+            writeSNIncident(profile: profile, error: error)
+            engine.stop()
+            finishStart(with: error)
+            return
+        }
+
+        let px = lock.withLock { snProxySettings }
+        let settings = SSHNetworkTunnelNetworkSettings.settings(for: config,
+                                                               suppressDefaultRoute: !ownedAtEstablish,
+                                                               proxySettings: px,
+                                                               extraExcludedRoutes: carveOuts)
+        setTunnelNetworkSettings(settings) { [weak self] error in
+            guard let self else { return }
+            if let error {
+                Self.log.error("ssh network tunnel settings failed: \(error.localizedDescription, privacy: .public)")
+                self.writeSNIncident(profile: profile, error: error)
+                engine.stop()
+                self.finishStart(with: error)
+                return
+            }
+            self.lock.lock()
+            if self.connectedSince == 0 { self.connectedSince = Date().timeIntervalSince1970 }
+            self.lock.unlock()
+            TunnelIncidentStore.clear(profile: profile)
+            engine.startPacketPump()
+            Self.log.log("ssh network tunnel up: routes applied, pump started")
+            self.finishStart(with: nil)
+        }
+    }
+
+    private func writeSNIncident(profile: String, error: Error) {
+        let event: String
+        let category: IncidentCategory
+        if let se = error as? SSHNetworkTunnelEngineError {
+            event = se.incidentEvent
+            category = se.incidentCategory
+        } else {
+            event = "SSHNET_ERROR"
+            category = .unknown
+        }
+        TunnelIncidentStore.write(TunnelIncident(profile: profile, category: category,
+                                                 event: event, info: error.localizedDescription,
+                                                 fatal: true))
+    }
+
+    // MARK: SSHNetworkTunnelEngineDelegate (called on the engine's own queues)
+
+    func sshNetworkTunnelEngine(_ engine: SSHNetworkTunnelEngine, didFailWithError error: Error) {
+        Self.log.error("ssh network tunnel error: \(error.localizedDescription, privacy: .public)")
+        lock.lock(); let p = profileID; lock.unlock()
+        writeSNIncident(profile: p, error: error)
+        finishStart(with: error)
+        // Only PERMANENT failures reach here (a refused sign-in, a host key that
+        // doesn't match). A transport drop reconnects with the tunnel's routes
+        // still in place, so it must NOT cancel — cancelling would hand the
+        // traffic back to the physical path, which is the leak this kind of
+        // tunnel exists to prevent.
+        cancelTunnelWithError(error)
+    }
+
+    func sshNetworkTunnelEngine(_ engine: SSHNetworkTunnelEngine, didLog line: String) {
+        Self.log.log("sshnet: \(line, privacy: .public)")
+    }
+
     private func writeWGIncident(profile: String, error: Error) {
         let event: String
         let category: IncidentCategory
@@ -687,7 +829,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
                              completionHandler: @escaping () -> Void) {
         Self.log.log("stopTunnel reason=\(reason.rawValue)")
         lock.lock(); let b = bridge; let oc = ocBridge; let ts = tsEngine; let px = pxEngine
-        let wg = wgEngine; let p = profileID; lock.unlock()
+        let wg = wgEngine; let sn = snEngine; let p = profileID; lock.unlock()
         // System-initiated stops the user didn't ask for become incidents too —
         // notably .superceded: another VPN configuration took over.
         switch reason {
@@ -707,6 +849,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         ts?.stop()
         px?.stop()
         wg?.stop()
+        sn?.stop()
         completionHandler()
     }
 
@@ -769,6 +912,21 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
                     s.suppressDefaultRoute = suppress
                     s.effectiveDefaultOwned = (cfg?.isFullTunnel ?? false) && !suppress
                     reply.encode(s)
+                }
+                return
+            }
+            if let sn = lock.withLock({ snEngine }) {
+                lock.lock(); let p = profileID; let since = connectedSince; let rc = reconnects
+                let cfg = snConfig; let suppress = snSuppressDefault; lock.unlock()
+                statsQueue.async {
+                    var st = sn.stats(profile: p, connectedSince: since, reconnects: rc,
+                                      config: cfg ?? SSHNetworkTunnelConfig())
+                    // Same ground-truth report as the proxy tunnel (RC4): this
+                    // tunnel owns the default when its config carries it AND it
+                    // isn't demoted.
+                    st.suppressDefaultRoute = suppress
+                    st.effectiveDefaultOwned = (cfg?.includeDefaultRoute ?? false) && !suppress
+                    reply.encode(st)
                 }
                 return
             }
@@ -863,6 +1021,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
                     Self.log.log("gateway \(owned ? "full" : "split", privacy: .public) (wireguard) ok=\(error == nil)")
                     reply(error == nil ? "ok" : "error: settings apply failed")
                 }
+            } else if lock.withLock({ snEngine }) != nil {         // ssh network tunnel
+                // Live re-apply, same as the proxy tunnel: the session keeps
+                // running; only the utun's routes (and catch-all DNS) change. The
+                // connect-time carve-outs MUST be re-passed — one of them is the
+                // SSH server's own address, and dropping it here would install the
+                // routing loop that hangs the tunnel's own carrier.
+                lock.lock(); snSuppressDefault = !owned; let cfg = snConfig
+                let proxy = snProxySettings; let carveOuts = snExtraExcluded; lock.unlock()
+                guard let cfg else { reply("error: not connected"); return }
+                let settings = SSHNetworkTunnelNetworkSettings.settings(
+                    for: cfg, suppressDefaultRoute: !owned, proxySettings: proxy,
+                    extraExcludedRoutes: carveOuts)
+                setTunnelNetworkSettings(settings) { error in
+                    Self.log.log("gateway \(owned ? "full" : "split", privacy: .public) (sshnet) ok=\(error == nil)")
+                    reply(error == nil ? "ok" : "error: settings apply failed")
+                }
             } else if lock.withLock({ tsEngine }) != nil {         // tailscale
                 // Tailscale ownership is exit-node state, driven app-side through
                 // the existing "tsprefs:" path — nothing to do here.
@@ -890,6 +1064,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
             // DNS queries, the last per-flow error. No secrets in it.
             guard let px = lock.withLock({ pxEngine }) else { reply(nil); return }
             statsQueue.async { reply.encode(px.status()) }
+
+        case "sshnetstatus":
+            // SSH-network-tunnel status for the connection panel: the SESSION's own
+            // health (which is the thing to watch — while it reconnects the routes
+            // stay and traffic is refused, not leaked) plus the netstack's flow,
+            // DNS and refused-UDP counters. No secrets in it.
+            guard let sn = lock.withLock({ snEngine }) else { reply(nil); return }
+            statsQueue.async { reply.encode(sn.status()) }
 
         case "wgstatus":
             // WireGuard engine status for the connection panel — the
@@ -1018,6 +1200,25 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
             }
             return
         }
+        if lock.withLock({ snEngine }) != nil {                       // ssh network tunnel
+            statsQueue.async { [weak self] in
+                guard let self else { reply("error: not connected"); return }
+                let proxy = request?.makeNEProxySettings()
+                self.lock.lock()
+                self.snProxySettings = proxy
+                let cfg = self.snConfig; let suppress = self.snSuppressDefault
+                let carveOuts = self.snExtraExcluded
+                self.lock.unlock()
+                guard let cfg else { reply("error: not connected"); return }
+                let settings = SSHNetworkTunnelNetworkSettings.settings(
+                    for: cfg, suppressDefaultRoute: suppress, proxySettings: proxy,
+                    extraExcludedRoutes: carveOuts)
+                self.setTunnelNetworkSettings(settings) { error in
+                    reply(error == nil ? "ok" : "error: settings apply failed")
+                }
+            }
+            return
+        }
         if let ts = lock.withLock({ tsEngine }) {                    // tailscale
             statsQueue.async {
                 reply(ts.applyProxySettings(request?.makeNEProxySettings()) ? "ok" : "error: settings apply failed")
@@ -1068,7 +1269,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
             }
             return
         }
-        if lock.withLock({ pxEngine != nil || tsEngine != nil || wgEngine != nil }) {   // no live DNS applier
+        if lock.withLock({ pxEngine != nil || tsEngine != nil || wgEngine != nil || snEngine != nil }) {   // no live DNS applier
             reply(nil as Data?)   // → app reconnects this engine to re-push its DNS
             return
         }

@@ -75,7 +75,7 @@ CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
   go build -trimpath -buildmode=c-archive -o "$OUT/libpxengine.a" ./carchive
 
 # The stable header must declare exactly what the archive exports.
-for sym in _PXSetCallbacks _PXStart _PXStop _PXStatus _PXPacketIn _PXFree; do
+for sym in _PXSetCallbacks _PXSetFlowDialCallback _PXStart _PXStop _PXStatus _PXPacketIn _PXFree; do
   nm -gU "$OUT/libpxengine.a" 2>/dev/null | grep -q " T $sym\$" \
     || { echo "error: $sym missing from libpxengine.a" >&2; exit 1; }
   grep -q "${sym#_}" "$INCLUDE/pxengine.h" \

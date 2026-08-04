@@ -26,7 +26,12 @@ nonisolated enum ProbeLadderPlan {
         switch facts.kind {
         case .openVPN: openVPN(facts)
         case .wireGuard: wireGuard(facts)
-        case .ssh: ssh(facts)
+        // Both SSH kinds take the SSH ladder: the transport being probed is the
+        // same handshake (banner, kex, host key, offered sign-in methods) whatever
+        // the tunnel does with the session afterwards. Without this the network
+        // tunnel fell into `default:` and was probed as an SSL VPN — TLS and
+        // certificate rungs against a port that speaks neither.
+        case .ssh, .sshNetworkTunnel: ssh(facts)
         case .ikev2, .ipsec, .l2tp: ike(facts)
         case .tailscale: tailscale(facts)
         default: sslVPN(facts)      // the OpenConnect-driven SSL-VPN kinds

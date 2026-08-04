@@ -153,6 +153,8 @@ extension VPNController {
             return c.useExitNode && !c.exitNode.isEmpty
         case .wireGuard:
             return wireGuardConfig(for: id).isFullTunnel
+        case .sshNetworkTunnel:
+            return sshNetworkTunnelConfig(for: id).includeDefaultRoute
         case .openVPN:
             return (ovpnText(id: id) ?? "").range(of: "redirect-gateway", options: .caseInsensitive) != nil
         default:
@@ -175,6 +177,9 @@ extension VPNController {
         case .wireGuard:
             // The peer's allowed IPs besides the default routes.
             return wireGuardConfig(for: id).allowedIPs.filter { $0 != "0.0.0.0/0" && $0 != "::/0" }
+        case .sshNetworkTunnel:
+            let c = sshNetworkTunnelConfig(for: id)
+            return c.includeDefaultRoute ? [] : c.includedRoutes
         default:
             return []
         }
@@ -344,6 +349,16 @@ extension VPNController: DNSMediatorHost {
                 let c = wireGuardConfig(for: p.id)
                 resolvers = c.dns
                 wantsCatchAll = !c.dns.isEmpty
+                matchDomains = wantsCatchAll ? [""] : []
+            }
+            if p.kind == .sshNetworkTunnel {
+                // Same shape as the proxy tunnel, plus the far-side sentinel when
+                // it is on — that address IS one of this tunnel's resolvers as far
+                // as the arbiter is concerned, and omitting it would understate
+                // what this VPN is asserting.
+                let c = sshNetworkTunnelConfig(for: p.id)
+                resolvers = SSHNetworkTunnelNetworkSettings.resolvers(for: c)
+                wantsCatchAll = c.includeDefaultRoute && !resolvers.isEmpty
                 matchDomains = wantsCatchAll ? [""] : []
             }
             return DNSProfileInfo(

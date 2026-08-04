@@ -63,7 +63,7 @@ extension EngineSettingSpec: @MainActor SearchableSetting {
 /// catalog nobody registered is a catalog search can't find.
 @MainActor
 enum SettingSurface: String, CaseIterable, Identifiable {
-    case openVPN, wireGuard, tailscale, proxyTunnel, native, ssh, openConnect, customRouting
+    case openVPN, wireGuard, tailscale, proxyTunnel, native, ssh, sshNetworkTunnel, openConnect, customRouting
 
     nonisolated var id: String { rawValue }
 
@@ -76,6 +76,9 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         case .proxyTunnel: "px."
         case .native: "native."
         case .ssh: "ssh."
+        // A namespace of its own, NOT a reuse of "ssh.": ids are global and bound
+        // 1:1 to a surface and a manual anchor, so one id cannot mean two things.
+        case .sshNetworkTunnel: "sshnet."
         case .openConnect: "oc."
         case .customRouting: "cr."
         }
@@ -91,6 +94,7 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         case .proxyTunnel: "Proxy Tunnel"
         case .native: "IKEv2 / IPsec / L2TP"
         case .ssh: "SSH"
+        case .sshNetworkTunnel: "SSH Network Tunnel"
         case .openConnect: "SSL VPN (AnyConnect, FortiGate, GlobalProtect…)"
         case .customRouting: "Custom Routing"
         }
@@ -106,6 +110,7 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         case .proxyTunnel: [.proxyTunnel]
         case .native: [.ikev2, .ipsec, .l2tp]
         case .ssh: [.ssh]
+        case .sshNetworkTunnel: [.sshNetworkTunnel]
         case .openConnect: [.fortinet, .f5apm, .ciscoAnyConnect, .globalProtect,
                             .juniper, .pulse, .arrayNetworks]
         case .customRouting: VPNKind.allCases
@@ -131,14 +136,23 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         case .proxyTunnel: ProxyTunnelSettings.all
         case .native: NativeVPNSettings.all
         case .ssh: SSHSettings.all
+        case .sshNetworkTunnel: SSHNetSettings.all
         case .openConnect: OpenConnectSettings.all
         case .customRouting: CustomRoutingSettings.all
         }
     }
 
     /// The surface an id belongs to, from its namespace alone.
+    ///
+    /// LONGEST prefix wins, and that is load-bearing rather than tidy: "sshnet."
+    /// also starts with "ssh.", so a first-match walk resolved every SSH Network
+    /// Tunnel id to the SSH surface — sending its help buttons and every
+    /// `SettingsRoute` to the wrong editor, with nothing to see but a tab that
+    /// didn't contain the setting.
     static func owning(_ settingID: String) -> SettingSurface? {
-        allCases.first { settingID.hasPrefix($0.namespace) }
+        allCases
+            .filter { settingID.hasPrefix($0.namespace) }
+            .max { $0.namespace.count < $1.namespace.count }
     }
 }
 

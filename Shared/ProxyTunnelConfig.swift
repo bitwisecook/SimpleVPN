@@ -457,6 +457,11 @@ nonisolated struct ProxyTunnelStatus: Codable, Sendable, Equatable {
     var totalFlows: Int64 = 0
     var failedFlows: Int64 = 0
     var udpFlows: Int64 = 0
+    /// UDP flows this upstream cannot carry at all (everything except DNS on a
+    /// TCP-only upstream — QUIC above all). Cumulative on purpose: a black-holed
+    /// UDP flow used to set only `lastError`, which the next flow overwrote, so
+    /// the single most likely "why is this slow" cause vanished after one packet.
+    var udpRefused: Int64 = 0
     var dnsQueries: Int64 = 0
     var bytesUp: Int64 = 0
     var bytesDown: Int64 = 0
@@ -475,6 +480,7 @@ nonisolated struct ProxyTunnelStatus: Codable, Sendable, Equatable {
         totalFlows = (try? c.decodeIfPresent(Int64.self, forKey: .totalFlows)) ?? 0
         failedFlows = (try? c.decodeIfPresent(Int64.self, forKey: .failedFlows)) ?? 0
         udpFlows = (try? c.decodeIfPresent(Int64.self, forKey: .udpFlows)) ?? 0
+        udpRefused = (try? c.decodeIfPresent(Int64.self, forKey: .udpRefused)) ?? 0
         dnsQueries = (try? c.decodeIfPresent(Int64.self, forKey: .dnsQueries)) ?? 0
         bytesUp = (try? c.decodeIfPresent(Int64.self, forKey: .bytesUp)) ?? 0
         bytesDown = (try? c.decodeIfPresent(Int64.self, forKey: .bytesDown)) ?? 0

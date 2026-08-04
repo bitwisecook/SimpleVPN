@@ -123,6 +123,24 @@ type startConfig struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 	MTU      int    `json:"mtu"`
+
+	// DNSSentinel / DNSUpstream: the far-side-resolver substitution, and the one
+	// thing SSH can express that a SOCKS proxy cannot.
+	//
+	// A tunnel has to advertise SOME resolver address on the utun or the guest
+	// never sends us its queries. With a proxy that address must be a resolver
+	// the PROXY can reach. Over SSH the interesting answer is usually
+	// "127.0.0.1:53 as seen by the server" — the server's own stub resolver,
+	// which is exactly what `ssh -L` is used for and what no SOCKS request can
+	// name. So the app advertises a sentinel address it owns (an address inside
+	// the tunnel's own benchmarking range, routed to the utun), and every DNS
+	// flow addressed to that sentinel is re-aimed at DNSUpstream — resolved AT
+	// THE SERVER, by the SSH server, over the same session.
+	//
+	// Empty ⇒ no substitution: DNS goes to whatever resolver the guest addressed
+	// (the proxy-tunnel behaviour, unchanged).
+	DNSSentinel string `json:"dnsSentinel,omitempty"`
+	DNSUpstream string `json:"dnsUpstream,omitempty"`
 }
 
 type shimError struct {
@@ -139,17 +157,23 @@ type okResponse struct {
 // address (only the scheme, which is not sensitive) — the credentials and the
 // exact proxy host stay inside the engine.
 type statusPayload struct {
-	State         string `json:"state"`
-	Scheme        string `json:"scheme"`
-	LastError     string `json:"lastError,omitempty"`
-	ActiveFlows   int64  `json:"activeFlows"`
-	TotalFlows    int64  `json:"totalFlows"`
-	FailedFlows   int64  `json:"failedFlows"`
-	UDPFlows      int64  `json:"udpFlows"`
-	DNSQueries    int64  `json:"dnsQueries"`
-	BytesUp       int64  `json:"bytesUp"`
-	BytesDown     int64  `json:"bytesDown"`
-	PacketsInDrop int64  `json:"packetsInDropped"`
+	State       string `json:"state"`
+	Scheme      string `json:"scheme"`
+	LastError   string `json:"lastError,omitempty"`
+	ActiveFlows int64  `json:"activeFlows"`
+	TotalFlows  int64  `json:"totalFlows"`
+	FailedFlows int64  `json:"failedFlows"`
+	UDPFlows    int64  `json:"udpFlows"`
+	// UDPRefused counts UDP flows this upstream cannot carry at all (everything
+	// except DNS on a TCP-only upstream — QUIC above all). Before this existed a
+	// black-holed UDP flow only set lastError, which the NEXT flow overwrote:
+	// the single most likely "why is this site slow" cause was invisible after
+	// one more packet. A counter is cumulative, so it survives.
+	UDPRefused    int64 `json:"udpRefused"`
+	DNSQueries    int64 `json:"dnsQueries"`
+	BytesUp       int64 `json:"bytesUp"`
+	BytesDown     int64 `json:"bytesDown"`
+	PacketsInDrop int64 `json:"packetsInDropped"`
 }
 
 // ---- Callback registry ------------------------------------------------------
@@ -205,19 +229,30 @@ func PXSetCallbacks(packetOut C.PXPacketCallback, stateChanged C.PXStringCallbac
 // ---- Engine state -----------------------------------------------------------
 
 type engineState struct {
-	stack  *stack.Stack
-	ep     *channel.Endpoint
-	up     *upstream
-	dialer *net.Dialer
-	ctx    context.Context
-	cancel context.CancelFunc
-	pumpWG sync.WaitGroup
+	stack *stack.Stack
+	ep    *channel.Endpoint
+	// up is the CONCRETE in-process proxy upstream, and is NIL when the flows are
+	// dialled by the extension (ssh://). Everything that needs the proxy itself
+	// — the SOCKS UDP-ASSOCIATE relay above all — must nil-check it.
+	up *upstream
+	// flowDial is what every TCP flow (and DNS-over-TCP) goes through. Either the
+	// upstream above or the extension dialler; the flow handlers never care which.
+	flowDial flowDialer
+	// scheme names the upstream family for PXStatus without holding `up`.
+	scheme      string
+	dnsSentinel string
+	dnsUpstream string
+	dialer      *net.Dialer
+	ctx         context.Context
+	cancel      context.CancelFunc
+	pumpWG      sync.WaitGroup
 
 	// Counters (atomics: read by PXStatus off the data path).
 	activeFlows   atomic.Int64
 	totalFlows    atomic.Int64
 	failedFlows   atomic.Int64
 	udpFlows      atomic.Int64
+	udpRefused    atomic.Int64
 	dnsQueries    atomic.Int64
 	bytesUp       atomic.Int64 // guest -> proxy
 	bytesDown     atomic.Int64 // proxy -> guest
@@ -284,8 +319,20 @@ func PXStart(cfgJSON *C.char) *C.char {
 	if mtu <= 0 {
 		mtu = defaultMTU
 	}
+	// An ssh:// upstream is dialled by the extension, so a missing callback means
+	// EVERY flow would refuse with -2. Say so once, here, instead of once per
+	// connection attempt in a log nobody reads.
+	if up.kind == proxySSHExtension && !hasFlowDialCallback() {
+		return fail("badRequest", "this tunnel's SSH session was not registered with the engine")
+	}
+	if cfg.DNSSentinel != "" && cfg.DNSUpstream == "" {
+		return fail("badRequest", "a DNS sentinel address needs the resolver it stands for")
+	}
 
-	st, err := buildEngine(up, mtu)
+	st, err := buildEngineWithOptions(engineOptions{
+		up: up, mtu: mtu,
+		dnsSentinel: cfg.DNSSentinel, dnsUpstream: cfg.DNSUpstream,
+	})
 	if err != nil {
 		return fail("engine", "%v", err)
 	}
@@ -295,7 +342,24 @@ func PXStart(cfgJSON *C.char) *C.char {
 	return cJSON(okResponse{OK: true})
 }
 
+// engineOptions is everything buildEngine needs that is not derivable from the
+// upstream itself. A struct (rather than a growing parameter list) so a new
+// field cannot silently take an existing argument's position.
+type engineOptions struct {
+	up          *upstream
+	mtu         int
+	dnsSentinel string
+	dnsUpstream string
+}
+
+// buildEngine is the two-argument form the tests use; the options form is what
+// PXStart calls.
 func buildEngine(up *upstream, mtu int) (*engineState, error) {
+	return buildEngineWithOptions(engineOptions{up: up, mtu: mtu})
+}
+
+func buildEngineWithOptions(opts engineOptions) (*engineState, error) {
+	up, mtu := opts.up, opts.mtu
 	s := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
 			ipv4.NewProtocol, ipv6.NewProtocol,
@@ -351,15 +415,27 @@ func buildEngine(up *upstream, mtu int) (*engineState, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	st := &engineState{
-		stack:  s,
-		ep:     ep,
-		up:     up,
-		ctx:    ctx,
-		cancel: cancel,
+		stack:       s,
+		ep:          ep,
+		scheme:      schemeName(up.kind),
+		dnsSentinel: opts.dnsSentinel,
+		dnsUpstream: opts.dnsUpstream,
+		ctx:         ctx,
+		cancel:      cancel,
 		// The real OS dialer for reaching the proxy. KeepAlive keeps a busy
 		// proxy connection healthy; the timeout is per-dial (also bounded by the
 		// per-flow context).
 		dialer: &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second},
+	}
+	// Who dials a flow. For an extension-dialled upstream `st.up` stays NIL on
+	// purpose: there is no proxy in this process to reach, and leaving a
+	// half-meaningful struct there is how the SOCKS UDP path would one day try to
+	// negotiate with a host it must never touch.
+	if up.kind.dialledInProcess() {
+		st.up = up
+		st.flowDial = up
+	} else {
+		st.flowDial = extensionDialer{}
 	}
 
 	// Forwarders: one per transport. Each inbound flow becomes a handler call.
@@ -412,22 +488,57 @@ func PXPacketIn(bytes unsafe.Pointer, length C.int) C.int {
 	}
 	// C.GoBytes copies — the Swift buffer is not ours to keep.
 	raw := C.GoBytes(bytes, length)
-	var proto tcpip.NetworkProtocolNumber
-	switch raw[0] >> 4 {
-	case 4:
-		proto = header.IPv4ProtocolNumber
-	case 6:
-		proto = header.IPv6ProtocolNumber
-	default:
+	proto, ok := ipProtocolOf(raw)
+	if !ok {
 		st.packetsInDrop.Add(1)
 		return 0
 	}
-	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: buffer.MakeWithData(raw),
-	})
+	pkt := newInboundPacket(raw)
 	st.ep.InjectInbound(proto, pkt)
 	pkt.DecRef()
 	return 1
+}
+
+// ipProtocolOf reads the IP version nibble. Factored out of PXPacketIn so the
+// ingress decision is testable without cgo (the exported function is a wrapper
+// around this and newInboundPacket, and nothing else).
+func ipProtocolOf(raw []byte) (tcpip.NetworkProtocolNumber, bool) {
+	if len(raw) == 0 {
+		return 0, false
+	}
+	switch raw[0] >> 4 {
+	case 4:
+		return header.IPv4ProtocolNumber, true
+	case 6:
+		return header.IPv6ProtocolNumber, true
+	default:
+		return 0, false
+	}
+}
+
+// newInboundPacket wraps raw bytes as a packet buffer for InjectInbound. The
+// caller owns the reference and must DecRef it.
+func newInboundPacket(raw []byte) *stack.PacketBuffer {
+	return stack.NewPacketBuffer(stack.PacketBufferOptions{
+		Payload: buffer.MakeWithData(raw),
+	})
+}
+
+// decodeStartConfig / statusJSON are the pure halves of the C entry points, so
+// the wire contract with Swift can be tested without cgo. PXStart and PXStatus
+// call them; there is no second copy of either format.
+func decodeStartConfig(raw string) (startConfig, error) {
+	var cfg startConfig
+	err := json.Unmarshal([]byte(raw), &cfg)
+	return cfg, err
+}
+
+func marshalStatus(sp statusPayload) string {
+	b, err := json.Marshal(sp)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // ---- TCP forwarding ---------------------------------------------------------
@@ -478,6 +589,8 @@ func schemeName(k proxyKind) string {
 		return "http"
 	case proxyHTTPSConnect:
 		return "https"
+	case proxySSHExtension:
+		return "ssh"
 	default:
 		return "unknown"
 	}
@@ -496,12 +609,13 @@ func PXStatus() *C.char {
 	st.lastErrMu.Unlock()
 	return cJSON(statusPayload{
 		State:         "running",
-		Scheme:        schemeName(st.up.kind),
+		Scheme:        st.scheme,
 		LastError:     lastErr,
 		ActiveFlows:   st.activeFlows.Load(),
 		TotalFlows:    st.totalFlows.Load(),
 		FailedFlows:   st.failedFlows.Load(),
 		UDPFlows:      st.udpFlows.Load(),
+		UDPRefused:    st.udpRefused.Load(),
 		DNSQueries:    st.dnsQueries.Load(),
 		BytesUp:       st.bytesUp.Load(),
 		BytesDown:     st.bytesDown.Load(),

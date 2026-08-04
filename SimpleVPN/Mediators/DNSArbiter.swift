@@ -231,8 +231,12 @@ nonisolated enum DNSParticipation: Sendable, Equatable {
 
     nonisolated static func classify(_ kind: VPNKind) -> DNSParticipation {
         switch kind {
-        case .openVPN, .proxyTunnel, .tailscale, .wireGuard,
+        case .openVPN, .proxyTunnel, .tailscale, .wireGuard, .sshNetworkTunnel,
              .fortinet, .f5apm, .ciscoAnyConnect, .globalProtect, .juniper, .pulse, .arrayNetworks:
+            // .sshNetworkTunnel advertises real resolvers on its utun and carries
+            // every query as DNS-over-TCP through the session, so it contributes a
+            // genuine split-DNS intent — unlike `.ssh`, which has no interface to
+            // advertise one on.
             return .full
         case .ikev2, .ipsec, .l2tp:
             return .limited

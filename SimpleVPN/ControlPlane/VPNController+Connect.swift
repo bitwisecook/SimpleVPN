@@ -364,6 +364,7 @@ extension VPNController {
         if isTailscale(id) { try await connectTailscale(id: id); return }
         if isProxyTunnel(id) { try await connectProxyTunnel(id: id); return }
         if isWireGuard(id) { try await connectWireGuard(id: id); return }
+        if isSSHNetworkTunnel(id) { try await connectSSHNetworkTunnel(id: id); return }
         let c = transientCredentials(for: id)
         let auth = effectiveAuthConfig(for: id)
         let provider = ManualCredentialProvider(username: c.username, password: c.password, otp: c.otp)
@@ -441,6 +442,15 @@ extension VPNController {
             inputs.wireGuardHasKey = wireGuardHasPrivateKey(id)
             return inputs
         }
+        if inputs.kind == .sshNetworkTunnel {
+            let config = sshNetworkTunnelConfig(for: id)
+            inputs.sshNetHasProblem = config.connectProblem != nil
+            let secrets = sshNetworkTunnelSecrets(for: id)
+            inputs.sshNetHasCredential = config.needsPrivateKey
+                ? !secrets.privateKeyPEM.isEmpty && (!config.needsCertificate || !secrets.certificatePEM.isEmpty)
+                : !secrets.password.isEmpty
+            return inputs
+        }
 
         inputs.autologin = isAutologin(id)
         inputs.managerKind = credentialSource(for: id).kind
@@ -482,6 +492,15 @@ extension VPNController {
         if isWireGuard(id) {
             // The keys are stored, so a WireGuard connect never needs typing.
             do { try await connectWireGuard(id: id); return true }
+            catch { report(error, profile: id); return false }
+        }
+        if isSSHNetworkTunnel(id) {
+            // Everything is stored (password / key / certificate, plus the pinned
+            // host key), so this connects unattended — EXCEPT the first connect to
+            // a server whose key nobody has looked at yet, which throws with the
+            // fingerprint and sends the user to "Check and Trust". Trust on first
+            // use must never happen while the user is looking elsewhere.
+            do { try await connectSSHNetworkTunnel(id: id); return true }
             catch { report(error, profile: id); return false }
         }
         // Autologin: nothing to look up — the profile's certificate IS the sign-in.
@@ -534,6 +553,7 @@ extension VPNController {
         if isTailscale(id) { try await connectTailscale(id: id); return }
         if isProxyTunnel(id) { try await connectProxyTunnel(id: id); return }
         if isWireGuard(id) { try await connectWireGuard(id: id); return }
+        if isSSHNetworkTunnel(id) { try await connectSSHNetworkTunnel(id: id); return }
         let auth = effectiveAuthConfig(for: id)
         guard let provider = managerProvider(for: id) else {
             try await connectWithTransientCredentials(id: id)

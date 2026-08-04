@@ -11,7 +11,18 @@
 #import <libssh/callbacks.h>
 #import <os/log.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <string.h>
 #include <unistd.h>
+
+/// Drains the wake pipe registered in the session's poll set. Its whole job is to
+/// make `ssh_event_dopoll` return; the bytes carry no meaning.
+static int ssh_bridge_drain_wake(socket_t fd, int revents, void *userdata) {
+    (void)revents; (void)userdata;
+    char scratch[64];
+    while (read(fd, scratch, sizeof scratch) > 0) { /* drain */ }
+    return SSH_OK;
+}
 
 // tun@openssh.com channel open — compiled into the vendored library by
 // Tools/build-libssh-xcframework.sh (libssh's own channel_open is static, so
@@ -118,6 +129,8 @@ static NSString *hexTail(NSString *s) {
 @implementation SSHSession {
     ssh_session _session;
     ssh_key _hostKey;       // the server's public key, held for type/length/TOFU
+    ssh_event _event;       // lazily created, session-lifetime poll set (see waitForActivity)
+    int _wakePipe[2];       // self-pipe in that poll set, so the wait is interruptible
     NSString *_fp;
     NSString *_host;
     int _port;
@@ -133,6 +146,16 @@ static NSString *hexTail(NSString *s) {
         ssh_set_log_callback(ssh_trace);
         ssh_set_log_level(SSH_LOG_PROTOCOL);
     }
+}
+
+- (instancetype)init {
+    if ((self = [super init])) {
+        // MUST be explicit: ivars zero-initialise, and fd 0 is stdin — a
+        // `_wakePipe[1] >= 0` guard would then happily write to it.
+        _wakePipe[0] = -1;
+        _wakePipe[1] = -1;
+    }
+    return self;
 }
 
 - (BOOL)connectToHost:(NSString *)host port:(int)port timeout:(int)seconds error:(NSError **)error {
@@ -434,6 +457,69 @@ static NSString *hexTail(NSString *s) {
     return YES;
 }
 
+- (BOOL)authKeyForUser:(NSString *)user
+         privateKeyPEM:(NSString *)privateKeyPEM
+        certificatePEM:(NSString *)certificatePEM
+            passphrase:(NSString *)passphrase
+                 error:(NSError **)error {
+    if (!_session) { if (error) *error = sshErr(@"No SSH session to sign in to."); return NO; }
+    if (privateKeyPEM.length == 0) {
+        if (error) *error = sshErr(@"No SSH private key was provided.");
+        return NO;
+    }
+    // A MUTABLE C copy, so the key text can be wiped before this returns. An
+    // NSString's own bytes are not ours to scrub, and this is the one credential
+    // whose lifetime is worth spending five lines on.
+    NSMutableData *pem = [NSMutableData dataWithBytes:privateKeyPEM.UTF8String
+                                              length:strlen(privateKeyPEM.UTF8String) + 1];
+    ssh_key key = NULL;
+    int rc = ssh_pki_import_privkey_base64((const char *)pem.mutableBytes,
+                                           passphrase.length ? passphrase.UTF8String : NULL,
+                                           NULL, NULL, &key);
+    memset(pem.mutableBytes, 0, pem.length);
+    if (rc != SSH_OK || !key) {
+        if (error) *error = sshErr(@"Couldn't read the SSH private key (wrong passphrase, or an unsupported format).");
+        return NO;
+    }
+    // OpenSSH certificate sign-in from the certificate's own text, same graft as
+    // the file-based path. Unlike the FILE call, ssh_pki_import_cert_base64 wants
+    // the blob and its type SEPARATELY, so the …-cert.pub line has to be split
+    // here: "<type> <base64> [comment]".
+    if (certificatePEM.length) {
+        NSArray<NSString *> *fields = [[certificatePEM stringByTrimmingCharactersInSet:
+                                        NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                                       componentsSeparatedByCharactersInSet:
+                                        NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        NSMutableArray<NSString *> *parts = [NSMutableArray array];
+        for (NSString *f in fields) { if (f.length) [parts addObject:f]; }
+        enum ssh_keytypes_e certType = parts.count >= 2
+            ? ssh_key_type_from_name(parts[0].UTF8String) : SSH_KEYTYPE_UNKNOWN;
+        ssh_key cert = NULL;
+        if (certType == SSH_KEYTYPE_UNKNOWN ||
+            ssh_pki_import_cert_base64(parts[1].UTF8String, certType, &cert) != SSH_OK || !cert) {
+            ssh_key_free(key);
+            if (error) *error = sshErr(@"Couldn't read the SSH certificate (expected the contents of an OpenSSH …-cert.pub line).");
+            return NO;
+        }
+        int copied = ssh_pki_copy_cert_to_privkey(cert, key);
+        ssh_key_free(cert);
+        if (copied != SSH_OK) {
+            ssh_key_free(key);
+            if (error) *error = sshErr(@"The SSH certificate doesn't go with that private key.");
+            return NO;
+        }
+    }
+    int auth = ssh_userauth_publickey(_session, user.UTF8String, key);
+    ssh_key_free(key);
+    if (auth != SSH_AUTH_SUCCESS) {
+        if (error) *error = sshErr(certificatePEM.length
+            ? @"SSH certificate authentication was rejected."
+            : @"SSH key authentication was rejected.");
+        return NO;
+    }
+    return YES;
+}
+
 - (BOOL)authAgentForUser:(NSString *)user error:(NSError **)error {
     // libssh speaks to the agent at SSH_AUTH_SOCK itself, trying each identity.
     if (ssh_userauth_agent(_session, user.UTF8String) != SSH_AUTH_SUCCESS) {
@@ -488,6 +574,64 @@ static NSString *hexTail(NSString *s) {
     } failure:@"The server refused a network tunnel (PermitTunnel?)." error:error];
 }
 
+- (int)waitForActivityWithTimeoutMs:(int)ms {
+    if (!_session) return -1;
+    // The ssh_event is created lazily and kept for the session's life: creating
+    // one per wait would re-register the socket fifty times a second, and
+    // ssh_event_add_session is not free.
+    if (!_event) {
+        _event = ssh_event_new();
+        if (!_event) return -1;
+        if (ssh_event_add_session(_event, _session) != SSH_OK) {
+            ssh_event_free(_event);
+            _event = NULL;
+            return -1;
+        }
+        // The wake pipe joins the SAME poll set, which is what makes this wait
+        // interruptible without a timer. Non-blocking on both ends: the writer
+        // must never block behind a full pipe (one pending byte already means
+        // "wake up", so a dropped extra byte changes nothing), and the reader
+        // drains without stalling the poll.
+        if (pipe(_wakePipe) == 0) {
+            fcntl(_wakePipe[0], F_SETFL, O_NONBLOCK);
+            fcntl(_wakePipe[1], F_SETFL, O_NONBLOCK);
+            if (ssh_event_add_fd(_event, _wakePipe[0], POLLIN,
+                                 ssh_bridge_drain_wake, NULL) != SSH_OK) {
+                close(_wakePipe[0]); close(_wakePipe[1]);
+                _wakePipe[0] = _wakePipe[1] = -1;
+            }
+        } else {
+            _wakePipe[0] = _wakePipe[1] = -1;
+        }
+    }
+    // dopoll processes whatever arrived — which is what fills the per-channel
+    // read buffers the caller then drains with ssh_channel_read_nonblocking.
+    int rc = ssh_event_dopoll(_event, ms);
+    switch (rc) {
+        case SSH_OK:
+            return 1;
+        case SSH_AGAIN:
+            return 0;   // the timeout expired with nothing to do
+        default:
+            // SSH_ERROR. A disconnected session reports it here, and it is the
+            // only signal this loop gets — libssh has no "is the transport up"
+            // predicate. Distinguish a genuinely-closed session from a transient
+            // error so the caller only reconnects when it must.
+            if (ssh_is_connected(_session)) return 0;
+            return -1;
+    }
+}
+
+- (void)wakeActivityWait {
+    // The ONE method here that is safe off the session queue: a single-byte write
+    // to a pipe. EAGAIN (pipe already full of pending wakes) is success — the poll
+    // is already going to return.
+    int fd = _wakePipe[1];
+    if (fd < 0) return;
+    const char b = 1;
+    (void)write(fd, &b, 1);
+}
+
 - (BOOL)sendKeepalive {
     if (!_session) return NO;
     return libsshx_send_keepalive(_session) == SSH_OK;
@@ -495,6 +639,17 @@ static NSString *hexTail(NSString *s) {
 
 - (void)disconnect {
     if (_hostKey) { ssh_key_free(_hostKey); _hostKey = NULL; }
+    // Remove the session from the poll set BEFORE freeing either: ssh_event holds
+    // the session's socket, and freeing the session first leaves the event with a
+    // dangling registration.
+    if (_event) {
+        if (_wakePipe[0] >= 0) ssh_event_remove_fd(_event, _wakePipe[0]);
+        if (_session) ssh_event_remove_session(_event, _session);
+        ssh_event_free(_event);
+        _event = NULL;
+    }
+    if (_wakePipe[0] >= 0) { close(_wakePipe[0]); _wakePipe[0] = -1; }
+    if (_wakePipe[1] >= 0) { close(_wakePipe[1]); _wakePipe[1] = -1; }
     if (_session) {
         ssh_disconnect(_session);
         ssh_free(_session);

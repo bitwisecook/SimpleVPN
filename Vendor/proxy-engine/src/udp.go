@@ -64,29 +64,43 @@ func (st *engineState) serveUDP(guest *gonet.UDPConn, dstHost string, dstPort in
 	defer st.activeFlows.Add(-1)
 	defer guest.Close()
 
-	if st.up.kind == proxySOCKS5 {
+	// st.up is NIL when the flows are dialled by the extension (an SSH session):
+	// there is no SOCKS proxy in this process to ask for a UDP association, and
+	// SSH has no UDP channel type at all. Without this guard that read is a nil
+	// dereference on the first UDP packet of every SSH tunnel.
+	if st.up != nil && st.up.kind == proxySOCKS5 {
 		if err := st.serveUDPviaSOCKS(guest, dstHost, dstPort); err != nil {
 			// SOCKS UDP unavailable: DNS still deserves to work.
 			if dstPort == dnsPort {
 				st.serveDNSoverTCP(guest, dstHost, dstPort)
 				return
 			}
+			st.udpRefused.Add(1)
 			st.setLastError("udp %s:%d dropped: %v", dstHost, dstPort, err)
 		}
 		return
 	}
-	// CONNECT proxy: DNS only.
+	// TCP-only upstream (a CONNECT proxy, or an SSH session): DNS only.
 	if dstPort == dnsPort {
 		st.serveDNSoverTCP(guest, dstHost, dstPort)
 		return
 	}
-	st.setLastError("udp %s:%d dropped: this proxy carries only TCP (and DNS)", dstHost, dstPort)
+	// Refused, not black-holed, and COUNTED — see statusPayload.UDPRefused. This
+	// is where QUIC (UDP/443) lands: an app that can fall back to TCP does so
+	// after its own timeout, and one that cannot simply does not work through
+	// this tunnel. The count is what makes that visible.
+	st.udpRefused.Add(1)
+	st.setLastError("udp %s:%d refused: this tunnel carries only TCP (and DNS)", dstHost, dstPort)
 }
 
 // serveDNSoverTCP answers the guest's DNS queries by tunnelling each as
 // DNS-over-TCP to the resolver the guest addressed. One flow may carry several
 // queries (a stub resolver reusing the socket), so it loops until idle.
 func (st *engineState) serveDNSoverTCP(guest *gonet.UDPConn, resolverHost string, resolverPort int) {
+	// ONE substitution, at the head: a query addressed to the configured sentinel
+	// is re-aimed at the resolver that sentinel stands for, resolved at the far
+	// end of the session. Everything below is unchanged by it.
+	resolverHost, resolverPort = st.resolveDNSTarget(resolverHost, resolverPort)
 	buf := make([]byte, maxDNSMessage)
 	for {
 		_ = guest.SetReadDeadline(time.Now().Add(udpIdleTimeout))

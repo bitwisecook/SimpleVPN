@@ -101,7 +101,7 @@ for sym in _TSSetCallbacks _TSStart _TSStop _TSStatus _TSUpdatePrefs _TSPacketIn
     || { echo "error: ${sym#_} not declared in include/tsengine.h" >&2; exit 1; }
 done
 PXHEADER="$REPO/Vendor/proxy-engine/include/pxengine.h"
-for sym in _PXSetCallbacks _PXStart _PXStop _PXStatus _PXPacketIn _PXFree; do
+for sym in _PXSetCallbacks _PXSetFlowDialCallback _PXStart _PXStop _PXStatus _PXPacketIn _PXFree; do
   nm -gU "$OUT/libtsengine.a" 2>/dev/null | grep -q " T $sym\$" \
     || { echo "error: folded-in $sym missing from libtsengine.a" >&2; exit 1; }
   grep -q "${sym#_}" "$PXHEADER" \

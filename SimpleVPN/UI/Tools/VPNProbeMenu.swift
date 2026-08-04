@@ -27,7 +27,7 @@ struct VPNProbeTarget: Sendable, Equatable {
         case .openVPN: 1194
         case .wireGuard: VPNProbe.wireGuardDefaultPort
         case .ikev2, .ipsec, .l2tp: VPNProbe.ikeDefaultPort
-        case .ssh: 22
+        case .ssh, .sshNetworkTunnel: 22
         default: 443            // the OpenConnect SSL-VPN kinds
         }
     }

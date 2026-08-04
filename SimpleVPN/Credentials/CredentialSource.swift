@@ -163,6 +163,11 @@ nonisolated struct ConnectInputs: Equatable, Sendable {
     var typedUsername = false
     var typedPassword = false
     var typedOTP = false
+    /// SSH Network Tunnel: an unusable config (no server, no login name, a
+    /// truncated pin) blocks; a missing credential is a SIGN-IN prompt, because
+    /// that is a thing the user can supply from the connect panel.
+    var sshNetHasProblem = false
+    var sshNetHasCredential = false
 
     var readiness: ConnectReadiness {
         // Tailscale/Headscale sign themselves in — a stored setup key registers
@@ -182,6 +187,14 @@ nonisolated struct ConnectInputs: Equatable, Sendable {
         // credential prompt, so it blocks rather than asks.
         if kind == .wireGuard {
             return (wireGuardHasProblem || !wireGuardHasKey) ? .blocked : .ready
+        }
+
+        // An SSH Network Tunnel signs in with what is stored. An unusable config
+        // blocks (an editor problem, not something to type); a missing password or
+        // key is a sign-in prompt.
+        if kind == .sshNetworkTunnel {
+            if sshNetHasProblem { return .blocked }
+            return sshNetHasCredential ? .ready : .needsSignIn
         }
 
         // Autologin: the profile's certificate IS the sign-in.

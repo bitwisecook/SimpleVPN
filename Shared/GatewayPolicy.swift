@@ -33,8 +33,8 @@ nonisolated enum GatewayPolicy {
 
     /// Can this kind carry 0.0.0.0/0 as the default gateway when connected?
     ///   - packet-egress full-tunnel kinds (openvpn3, the OpenConnect SSL-VPNs,
-    ///     the proxy tunnel, WireGuard — its engine re-applies the demotion
-    ///     live like the proxy tunnel) can, once connected.
+    ///     the proxy tunnel, WireGuard, the SSH network tunnel — each of whose
+    ///     engines re-applies the demotion live) can, once connected.
     ///   - tailscale can *only* when an exit node is configured or available —
     ///     without one it has no way to carry everything, so it stays split.
     ///   - anything that cannot advertise a default route at all (SSH, the native
@@ -43,7 +43,7 @@ nonisolated enum GatewayPolicy {
                                     tailscaleHasExitNode: Bool) -> Bool {
         guard connected else { return false }
         switch kind {
-        case .openVPN, .proxyTunnel, .wireGuard,
+        case .openVPN, .proxyTunnel, .wireGuard, .sshNetworkTunnel,
              .fortinet, .f5apm, .ciscoAnyConnect, .globalProtect, .juniper, .pulse, .arrayNetworks:
             return true
         case .tailscale:

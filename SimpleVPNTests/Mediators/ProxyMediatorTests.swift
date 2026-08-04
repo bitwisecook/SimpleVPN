@@ -255,6 +255,11 @@ struct ProxyMediatorTests {
         // Neither Tailscale nor WireGuard pushes/sets a proxy of its own.
         #expect(ProxyParticipation.classify(.tailscale) == .none)
         #expect(ProxyParticipation.classify(.wireGuard) == .none)
+        // NOT .egressItself, despite looking like the proxy tunnel: that bucket
+        // means "this VPN IS the proxy the system would be pointed at", and an SSH
+        // network tunnel publishes no proxy endpoint for anything to be pointed at.
+        #expect(ProxyParticipation.classify(.sshNetworkTunnel) == .none)
+        #expect(!ProxyParticipation.classify(.sshNetworkTunnel).participates)
     }
 
     // MARK: - Drift → re-assert decision (stage 4)

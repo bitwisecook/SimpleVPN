@@ -4,7 +4,26 @@
 //  SSHBridge.h
 //  Thin Objective-C surface over libssh for the in-process SSH engine. One
 //  SSHSession owns a connected libssh session; it opens channels for the two
-//  transports we support in-process:
+//  transports we support in-process.
+//
+//  WHY THIS LIVES IN Shared/ AND NOT IN THE APP: two targets drive libssh now —
+//  the app (SSHTunnelEngine: SOCKS, port forwards, the staged probe) and the
+//  packet-tunnel system extension (SSHNetworkTunnelEngine: one direct-tcpip
+//  channel per netstack flow). Shared/ is a whole-directory source on BOTH
+//  targets, so there is no per-target file list to drift. Do NOT leave a copy
+//  behind in the app: the same .m compiled twice is duplicate Objective-C
+//  symbols at link time.
+//
+//  THREE SANDBOX FACTS ARE LOAD-BEARING IN THE EXTENSION and none of them is
+//  true in the app, so the two callers use different halves of this API:
+//    • no key FILE — the extension runs as root in the system context and
+//      cannot read the user's ~/.ssh, so it uses the PEM-blob auth below;
+//    • no known_hosts — for the same reason, plus it must never WRITE one, so
+//      it is pin-only (the app resolves trust and passes the fingerprint);
+//    • no agent and no Kerberos — SSH_AUTH_SOCK and the ticket cache belong to
+//      the user's session, which the extension is not in.
+//
+//  The channel types:
 //    • direct-tcpip  — SOCKS (-D) and port-forwards (-L)
 //    • tun@openssh.com — the net-tunnel (-w) mode (libssh has no public API for
 //      that channel type, so the build script compiles a tiny wrapper into the
@@ -129,11 +148,58 @@ typedef NS_ENUM(NSInteger, SSHHostKeyStatus) {
        certificatePath:(nullable NSString *)certificatePath
             passphrase:(nullable NSString *)passphrase
                  error:(NSError * _Nullable * _Nullable)error;
+/// Key auth from an IN-MEMORY PEM blob rather than a file — the only key auth
+/// the packet-tunnel extension can do. It runs as root in the system context and
+/// cannot read the user's ~/.ssh, so the app reads the key, keeps it in memory,
+/// and hands it over in `startTunnel(options:)`. `certificatePEM` is an optional
+/// OpenSSH certificate (the …-cert.pub text) grafted onto the key, same as the
+/// file-based call. `passphrase` unlocks an encrypted key.
+///
+/// The blob is zeroed before this returns: it is the one credential that would
+/// otherwise sit in a released NSString's freed pages.
+- (BOOL)authKeyForUser:(NSString *)user
+         privateKeyPEM:(NSString *)privateKeyPEM
+        certificatePEM:(nullable NSString *)certificatePEM
+            passphrase:(nullable NSString *)passphrase
+                 error:(NSError * _Nullable * _Nullable)error;
+
 - (BOOL)authAgentForUser:(NSString *)user error:(NSError * _Nullable * _Nullable)error;
 /// Kerberos single sign-on (gssapi-with-mic) using the user's existing ticket —
 /// a libssh capability libssh2 never had. Needs a ticket (kinit / AD login);
 /// fails cleanly without one.
 - (BOOL)authGSSAPIForUser:(NSString *)user error:(NSError * _Nullable * _Nullable)error;
+
+/// Block until the session's socket has something to say, then let libssh
+/// process it — the ONE call that lets a multi-channel reader loop be event
+/// driven instead of polled.
+///
+/// This exists because the alternative is a timer. A session carrying N netstack
+/// flows has to notice incoming data on any of them, and `ssh_channel_read_nonblocking`
+/// only reports what libssh has ALREADY parsed off the socket; something must
+/// pump the transport. The subprocess-era engine did that with a 3ms/20ms
+/// dispatch timer, which on this path would mean waking the session queue fifty
+/// times a second forever and adding up to 20 ms of latency to every packet.
+/// `ssh_event_dopoll` waits on the real fd instead: idle costs nothing, and a
+/// packet is processed the moment it lands.
+///
+/// Returns:  1  the poll processed something (or the timeout expired cleanly —
+///              the caller must sweep its channels either way);
+///           0  the timeout expired with nothing to do;
+///          -1  the session is gone or libssh reported a hard error — the
+///              caller must treat it as session loss and reconnect.
+///
+/// MUST be called on the session's serial queue like every other call here, and
+/// it BLOCKS that queue for up to `ms`. That would starve every other caller on
+/// that queue — a flow with bytes to send, a channel waiting to open — which is
+/// what `wakeActivityWait` is for: call it from any thread first and the wait in
+/// progress returns at once, releasing the queue.
+- (int)waitForActivityWithTimeoutMs:(int)ms;
+
+/// Interrupt a `waitForActivityWithTimeoutMs:` in progress so the session queue
+/// becomes free. Thread-safe and callable from ANY thread (it is a one-byte write
+/// to a pipe the poll set watches) — unlike every other method here. Cheap enough
+/// to call before each queued libssh call; harmless when nothing is waiting.
+- (void)wakeActivityWait;
 
 /// Send a session keepalive ("keepalive@openssh.com", reply requested) — the
 /// in-process equivalent of `ssh -o ServerAliveInterval`. MUST be called on the

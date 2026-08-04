@@ -50,15 +50,17 @@ func (st *engineState) handleTCP(r *tcp.ForwarderRequest) {
 
 	st.totalFlows.Add(1)
 
-	// Dial the proxy FIRST, before accepting the guest endpoint. If the proxy
-	// dial fails we reset the guest connection (sendReset=true) so the app sees
-	// a refused connection immediately rather than a black hole.
+	// Dial the upstream FIRST, before accepting the guest endpoint. If the dial
+	// fails we reset the guest connection (sendReset=true) so the app sees a
+	// refused connection immediately rather than a black hole. This is also what
+	// makes "the SSH session is down" a fast failure rather than a queue: the
+	// extension dialler refuses (-3) and the guest gets its RST here.
 	ctx, cancel := context.WithTimeout(st.ctx, dialTimeout)
-	proxyConn, err := st.up.dialThrough(ctx, st.dialer, targetHost, targetPort)
+	proxyConn, err := st.flowDial.dial(ctx, st.dialer, targetHost, targetPort)
 	cancel()
 	if err != nil {
 		st.failedFlows.Add(1)
-		st.setLastError("tcp %s:%d via proxy failed: %v", targetHost, targetPort, err)
+		st.setLastError("tcp %s:%d upstream failed: %v", targetHost, targetPort, err)
 		r.Complete(true) // send RST
 		return
 	}

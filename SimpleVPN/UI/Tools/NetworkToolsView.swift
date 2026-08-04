@@ -679,7 +679,7 @@ struct NetworkToolsView: View {
         case .openVPN: 1194
         case .wireGuard: VPNProbe.wireGuardDefaultPort
         case .ikev2, .ipsec, .l2tp: VPNProbe.ikeDefaultPort
-        case .ssh: 22
+        case .ssh, .sshNetworkTunnel: 22
         case .some(let k) where k.isSSLVPN: 443
         default: 443
         }

@@ -48,9 +48,20 @@ const (
 	proxySOCKS5 proxyKind = iota
 	proxyHTTPConnect
 	proxyHTTPSConnect
+	// proxySSHExtension is not a proxy this file dials at all: the transport is
+	// an SSH session owned by the Swift extension, and each flow is opened by a
+	// callback into it (flowdial.go). It appears here only so ONE parser
+	// validates every upstream URL the engine accepts, and so schemeName() has
+	// an honest answer for PXStatus.
+	proxySSHExtension
 )
 
 func (k proxyKind) tcpOnly() bool { return k != proxySOCKS5 }
+
+// dialledInProcess is false for the upstream families this file does NOT dial.
+// Everything keyed off it (the concrete st.up, the SOCKS UDP-ASSOCIATE path)
+// must tolerate its absence.
+func (k proxyKind) dialledInProcess() bool { return k != proxySSHExtension }
 
 // upstream is the parsed, credentialled description of the proxy every flow is
 // dialled through. Credentials live only here in memory; they are never logged
@@ -86,8 +97,17 @@ func parseUpstream(raw, username, password string) (*upstream, error) {
 		kind = proxyHTTPConnect
 	case "https":
 		kind = proxyHTTPSConnect
+	case "ssh":
+		// SimpleVPN's SSH Network Tunnel: the session is Swift's, so nothing in
+		// this file will dial it. Userinfo IS accepted here (unlike the proxy
+		// schemes, which refuse it) because an SSH URL's userinfo is the LOGIN
+		// NAME, not a secret — `ssh://alice@gateway.example` is how everyone
+		// writes it, and refusing it would be refusing the ordinary spelling.
+		// A password in the userinfo would still be a secret, so parseUpstream
+		// takes only the username half below and drops any password component.
+		kind = proxySSHExtension
 	default:
-		return nil, fmt.Errorf("unsupported proxy scheme %q (use socks5://, http:// or https://)", u.Scheme)
+		return nil, fmt.Errorf("unsupported proxy scheme %q (use socks5://, http://, https:// or ssh://)", u.Scheme)
 	}
 	host := u.Hostname()
 	if host == "" {
@@ -104,6 +124,8 @@ func parseUpstream(raw, username, password string) (*upstream, error) {
 			port = "8080"
 		case proxyHTTPSConnect:
 			port = "443"
+		case proxySSHExtension:
+			port = "22"
 		}
 	}
 	up := &upstream{
@@ -117,7 +139,10 @@ func parseUpstream(raw, username, password string) (*upstream, error) {
 	if up.username == "" {
 		if ui := u.User; ui != nil {
 			up.username = ui.Username()
-			if p, ok := ui.Password(); ok && up.password == "" {
+			// An ssh:// URL never yields a password: SSH secrets arrive through
+			// startTunnel options, and honouring one here would mean a password
+			// could reach the engine from the SAVED upstream string.
+			if p, ok := ui.Password(); ok && up.password == "" && kind != proxySSHExtension {
 				up.password = p
 			}
 		}

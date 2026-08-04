@@ -33,6 +33,15 @@ nonisolated enum VPNKind: String, Codable, Sendable, CaseIterable {
     // distinguishes SOCKS from CONNECT — a preset in the editor, NOT a kind
     // (the "Headscale rule").
     case proxyTunnel = "proxytunnel" // tun2socks: utun+routes, every flow dialled through a SOCKS5/HTTP(S) proxy, in-process
+    // A SECOND SSH kind, and deliberately not a mode of `.ssh`: that kind is
+    // `.subprocess`/`.proxyOnly` — a local SOCKS port or named forwards, no utun,
+    // no routes. This one is a packet tunnel with routes and a userspace TCP/IP
+    // stack, so it is a different transport, a different mediator classification
+    // and a different editor. Nor is it a Proxy Tunnel preset (the "Headscale
+    // rule" does not apply): the px engine rejects `@` in its URL, has no sign-in
+    // or host-key surface at all, and ProxyArbiter classifies px as
+    // `.egressItself`, which is the wrong answer for an SSH session.
+    case sshNetworkTunnel = "sshnet" // utun+routes, one SSH direct-tcpip channel per flow, in-process (TCP only)
 
     var displayName: String {
         switch self {
@@ -51,6 +60,7 @@ nonisolated enum VPNKind: String, Codable, Sendable, CaseIterable {
         case .arrayNetworks: "Array Networks SSL VPN"
         case .tailscale: "Tailscale / Headscale"
         case .proxyTunnel: "Proxy Tunnel"
+        case .sshNetworkTunnel: "SSH Network Tunnel"
         }
     }
 
@@ -62,6 +72,9 @@ nonisolated enum VPNKind: String, Codable, Sendable, CaseIterable {
         case .fortinet, .f5apm, .ciscoAnyConnect, .globalProtect, .juniper, .pulse, .arrayNetworks: "building.2"
         case .tailscale: "point.3.connected.trianglepath.dotted"   // a mesh, not a hub-and-spoke
         case .proxyTunnel: "arrow.triangle.branch"                  // flows fanned out through a proxy
+        // A terminal (SSH) inside a tunnel: the same transport as `.ssh`, but
+        // carrying a network rather than a port.
+        case .sshNetworkTunnel: "point.topleft.down.to.point.bottomright.curvepath"
         }
     }
 
@@ -88,10 +101,15 @@ nonisolated enum VPNKind: String, Codable, Sendable, CaseIterable {
     enum Transport { case packetTunnel, nativePersonalVPN, subprocess }
     var transport: Transport {
         switch self {
-        case .openVPN, .wireGuard, .tailscale, .proxyTunnel: .packetTunnel
+        case .openVPN, .wireGuard, .tailscale, .proxyTunnel, .sshNetworkTunnel: .packetTunnel
         case .ikev2, .ipsec, .l2tp: .nativePersonalVPN
         case .ssh: .subprocess
-        default: .subprocess   // the OpenConnect SSL-VPN kinds
+        // The OpenConnect SSL-VPN kinds. NOTE for the next kind added: this
+        // `default` is a trap — a new packet-tunnel kind that is not named on the
+        // first line silently becomes a subprocess, with no compiler error, and
+        // every engine-dispatch seam then looks for a CLI that was never meant to
+        // run it. Name it explicitly above.
+        default: .subprocess
         }
     }
 

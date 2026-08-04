@@ -138,6 +138,32 @@ extension SettingVisibility {
     }
 }
 
+// MARK: - SSH Network Tunnel
+
+extension SettingVisibility {
+
+    static func sshNetworkTunnel(_ c: SSHNetworkTunnelConfig) -> SettingVisibility {
+        var hidden: [String: String] = [:]
+        if !c.needsPrivateKey {
+            hidden["sshnet.private-key"] =
+                "Set Sign-In Method to Private Key or Certificate to paste a key."
+        }
+        if !c.needsCertificate {
+            hidden["sshnet.certificate"] =
+                "Set Sign-In Method to Certificate to paste one."
+        }
+        if c.includeDefaultRoute {
+            hidden["sshnet.routes"] =
+                "It only applies to a split tunnel \u{2014} turn off \u{201C}Send All Traffic\u{201D} to choose which networks go through the tunnel."
+        }
+        if !c.useFarSideResolver {
+            hidden["sshnet.far-side-resolver"] =
+                "Turn on \u{201C}Resolve Names at the Server\u{201D} to choose which resolver it uses."
+        }
+        return .init(hidden)
+    }
+}
+
 // MARK: - SSH and the SSL VPNs (one editor, eight kinds)
 
 extension SettingVisibility {

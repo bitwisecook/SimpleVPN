@@ -543,6 +543,7 @@ struct ManageVPNsView: View {
         Button("IPsec (IKEv1)") { newNative(.ipsec) }
         Button("L2TP / IPsec") { newNative(.l2tp) }
         Button("SSH (SOCKS, forwards, tunnel)") { newTunnel(.ssh) }
+        Button("SSH Network Tunnel (routes over SSH)") { Task { await newSSHNetworkTunnel() } }
         Button("FortiGate SSL VPN") { newTunnel(.fortinet) }
         Button("F5 BIG-IP APM") { newTunnel(.f5apm) }
         Button("Cisco AnyConnect") { newTunnel(.ciscoAnyConnect) }
@@ -572,6 +573,8 @@ struct ManageVPNsView: View {
             TailscaleView(vpn: vpn, profileID: id).id(id)
         } else if let id = selection, vpn.isProxyTunnel(id) {
             ProxyTunnelView(vpn: vpn, profileID: id).id(id)
+        } else if let id = selection, vpn.isSSHNetworkTunnel(id) {
+            SSHNetworkTunnelView(vpn: vpn, profileID: id).id(id)
         } else if let id = selection, vpn.profiles.contains(where: { $0.id == id }) {
             EditVPNView(vpn: vpn, labels: labels, profileID: id, embedded: true,
                         onSaved: { if totalVPNCount <= 1 { dismissWindow() } })
@@ -580,6 +583,11 @@ struct ManageVPNsView: View {
             ContentUnavailableView("No VPN Selected", systemImage: "network",
                                    description: Text("Select a VPN, or use + to import or create one."))
         }
+    }
+
+    private func newSSHNetworkTunnel() async {
+        do { selection = try await vpn.createSSHNetworkTunnel() }
+        catch { vpn.lastError = error.localizedDescription }
     }
 
     private func newTailscale() async {

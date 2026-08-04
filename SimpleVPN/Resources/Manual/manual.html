@@ -280,6 +280,27 @@
   <a href="#px-dns">DNS Servers</a>
   <a href="#px-mtu">MTU</a>
 
+  <h2>SSH Network Tunnel</h2>
+  <a href="#sshnet-what-is-it">What This Is</a>
+  <a href="#sshnet-server">Server Address</a>
+  <a href="#sshnet-port">Port</a>
+  <a href="#sshnet-username">Username</a>
+  <a href="#sshnet-auth-method">Sign-In Method</a>
+  <a href="#sshnet-password">Password</a>
+  <a href="#sshnet-private-key">Private Key</a>
+  <a href="#sshnet-certificate">Certificate</a>
+  <a href="#sshnet-send-all-traffic">Send All Traffic</a>
+  <a href="#sshnet-routes">Networks Through the Tunnel</a>
+  <a href="#sshnet-excluded-routes">Networks Kept Out</a>
+  <a href="#sshnet-dns">DNS Servers</a>
+  <a href="#sshnet-far-side-dns">Resolve Names at the Server</a>
+  <a href="#sshnet-far-side-resolver">Server-Side Resolver</a>
+  <a href="#sshnet-mtu">MTU</a>
+  <a href="#sshnet-host-key-policy">Host Key Checking</a>
+  <a href="#sshnet-pinned-host-key">Pinned Host Key</a>
+  <a href="#sshnet-key-exchange">Key Exchange</a>
+  <a href="#sshnet-keepalive">Keepalive</a>
+
   <h2>Custom Routing</h2>
   <a href="#cr-what-is-it">What This Is</a>
   <a href="#cr-routes-default">Unmatched Routes</a>
@@ -1059,6 +1080,121 @@
 <h2 id="px-mtu">MTU</h2>
 <p class="default">Default: 1500.</p>
 <p>The largest packet the tunnel carries. 1500 suits almost everything; lower it only if a network in the path needs smaller packets, which shows up as large transfers or particular websites stalling. Type the number or nudge it with the stepper.</p>
+
+<!-- ══════════════════ SSH Network Tunnel ══════════════════
+     Anchors are generated from the SSHNetSettings descriptor ids
+     (SSHNetSettingDescriptors.swift, "sshnet.server" → id="sshnet-server");
+     ManualAnchorParityTests asserts every one exists here, and that every
+     section states its default.
+     Order mirrors the editor: Connection → Sign-In → Traffic → Security → Advanced. -->
+
+<h2 id="sshnet-what-is-it">What This Is</h2>
+<p>An <strong>SSH Network Tunnel</strong> turns one SSH connection into a whole VPN. SimpleVPN creates a network interface, sends the traffic you choose into it, and carries each connection over the SSH server as an ordinary forward — the same thing <code>ssh -L</code> does, but set up automatically for every connection instead of one at a time.</p>
+<p>Nothing has to be configured on the server. You do not need root there, and you do not need <code>PermitTunnel</code>: if you can log in with SSH and open a forward, this works.</p>
+<p>Two things to know before you rely on it:</p>
+<ul>
+  <li><strong>Only TCP travels.</strong> SSH has no way to carry UDP, so it cannot be added later — it isn't a missing feature, it's the protocol. Name lookups still work (they are sent over TCP), but <strong>QUIC</strong> — which Chrome, Safari and many video apps try first — is refused, and those apps fall back to TCP after a short pause. Anything UDP-only (some games, plain WireGuard, most voice and video calling) will not work at all.</li>
+  <li><strong>Speed is one connection's worth.</strong> Everything shares a single encrypted SSH connection, encrypted by a single processor core, so the total throughput is roughly what one download would get. It is excellent for reaching things; it is not a way to make many large transfers fast at once.</li>
+</ul>
+<p>If you want a local proxy port instead of a whole network interface, use the plain <a href="#ssh-mode">SSH</a> kind — that is the same connection put to a different use.</p>
+
+<h2 id="sshnet-server">Server Address</h2>
+<p class="default">Required.</p>
+<p>The SSH server this tunnel connects to — a name like <code>gateway.example.com</code>, or an IP address. Just the address: SimpleVPN adds the <code>ssh://</code> part, and the login name goes in <a href="#sshnet-username">Username</a>.</p>
+<p>Whatever you put here is automatically kept <em>out</em> of the tunnel. It has to be: the tunnel is carried over this connection, so sending it into itself would be a loop.</p>
+
+<h2 id="sshnet-port">Port</h2>
+<p class="default">Default: 22.</p>
+<p>The port the server's SSH service answers on. Almost every server uses 22; only change it if whoever runs the server told you a different number.</p>
+
+<h2 id="sshnet-username">Username</h2>
+<p class="default">Default: your Mac account name.</p>
+<p>The login name to use on the server. This is saved with the VPN — a login name is not a secret.</p>
+
+<h2 id="sshnet-auth-method">Sign-In Method</h2>
+<p class="default">Default: Password.</p>
+<p>How you prove who you are:</p>
+<ul>
+  <li><strong>Password</strong> — the account password on the server.</li>
+  <li><strong>Private Key</strong> — a private key you paste in, which SimpleVPN keeps in your Keychain (see <a href="#sshnet-private-key">Private Key</a>).</li>
+  <li><strong>Certificate</strong> — a key plus the certificate your organisation signed it with (see <a href="#sshnet-certificate">Certificate</a>).</li>
+</ul>
+<div class="warn">There is no <strong>SSH agent</strong> and no <strong>Kerberos</strong> option here, and there cannot be. This tunnel runs as a system service, outside your login session, so it can reach neither your agent's socket nor your Kerberos ticket. Paste the key instead — SimpleVPN holds it for you. (The plain <a href="#ssh-auth-method">SSH</a> kind runs in your own session and does offer both.)</div>
+
+<h2 id="sshnet-password">Password</h2>
+<p class="default">Optional — required by password sign-in.</p>
+<p>Used when the server asks for a password, and to unlock a protected private key. Kept in your Keychain and handed to the tunnel only in memory; it is never written into the VPN's saved settings and is never shown again once saved.</p>
+
+<h2 id="sshnet-private-key">Private Key</h2>
+<p class="default">Optional — required by key and certificate sign-in.</p>
+<p>The private key itself, pasted in (the whole thing, including the <code>-----BEGIN…</code> and <code>-----END…</code> lines). If the key has a passphrase, put that in <a href="#sshnet-password">Password</a>.</p>
+<p>Why pasted rather than a file path: the tunnel runs as a system service and cannot read files in your home folder, so a path to <code>~/.ssh/id_ed25519</code> would be a path to nothing. SimpleVPN reads the key once, keeps it in your Keychain, and hands it over in memory at connect.</p>
+
+<h2 id="sshnet-certificate">Certificate</h2>
+<p class="default">Optional — required by certificate sign-in.</p>
+<p>The OpenSSH certificate that goes with the key: the contents of your <code>…-cert.pub</code> file, one line beginning with something like <code>ssh-ed25519-cert-v01@openssh.com</code>. Used when your organisation signs SSH keys with its own authority instead of listing them individually.</p>
+
+<h2 id="sshnet-send-all-traffic">Send All Traffic</h2>
+<p class="default">Default: on.</p>
+<p>Route everything through the SSH server. Turn it off to send only the networks you list in <a href="#sshnet-routes">Networks Through the Tunnel</a> and leave the rest on your normal connection.</p>
+<p>Remember that UDP is refused either way. With this on, a UDP-only app stops working while the tunnel is connected; with it off, only the networks you listed are affected.</p>
+
+<h2 id="sshnet-routes">Networks Through the Tunnel</h2>
+<p class="default">Optional — required when “Send All Traffic” is off.</p>
+<p>The networks to send through the SSH server, like <code>10.0.0.0/8</code> or <code>192.168.1.0/24</code>. Separate several with commas.</p>
+<p>Give the <em>start</em> of each network: <code>10.0.0.5/8</code> is not a network, and macOS would quietly widen it to all of <code>10.0.0.0/8</code>, so SimpleVPN asks you to correct it rather than routing something you didn't ask for.</p>
+
+<h2 id="sshnet-excluded-routes">Networks Kept Out</h2>
+<p class="default">Optional.</p>
+<p>Destinations that stay on your normal connection even when everything else goes through the tunnel — a local printer, a service that refuses connections from elsewhere.</p>
+<p>The SSH server's own address is always kept out, whether you list it or not.</p>
+
+<h2 id="sshnet-dns">DNS Servers</h2>
+<p class="default">Optional.</p>
+<p>Resolvers to use while connected, like <code>1.1.1.1</code>. Lookups are carried over the SSH connection (as DNS over TCP), so they don't leak onto the local network.</p>
+<p>Enter just the address — a resolver is a single machine, not a network, so <code>1.1.1.1/32</code> is not valid here.</p>
+<p>Whatever you list has to be reachable <em>from the SSH server</em>. If it isn't, turn on <a href="#sshnet-far-side-dns">Resolve Names at the Server</a> instead. Leaving this empty keeps your Mac's current resolvers, which is fine when the server can reach them and a leak when it can't.</p>
+
+<h2 id="sshnet-far-side-dns">Resolve Names at the Server</h2>
+<p class="default">Default: off.</p>
+<p>Look names up as the SSH server sees them. This is the thing SSH is uniquely good at: the server resolves the name using its own DNS, so internal names that only exist on its network — and resolvers you have no route to at all — just work.</p>
+<p>SimpleVPN advertises an address of its own for this and forwards every lookup sent to it over the SSH connection to <a href="#sshnet-far-side-resolver">Server-Side Resolver</a>. You can leave <a href="#sshnet-dns">DNS Servers</a> filled in as well; the server-side resolver is tried first.</p>
+
+<h2 id="sshnet-far-side-resolver">Server-Side Resolver</h2>
+<p class="default">Default: 127.0.0.1:53.</p>
+<p>The resolver to use at the far end, <em>as the SSH server sees it</em>. <code>127.0.0.1:53</code> means "whatever that server itself uses", which is right most of the time. An internal address like <code>10.0.0.53</code> works too, as long as the server can reach it.</p>
+
+<h2 id="sshnet-mtu">MTU</h2>
+<p class="default">Default: 1500.</p>
+<p>The size of the largest packet the tunnel interface will carry.</p>
+<p>Unlike most VPNs, lowering this almost never fixes anything here. Other tunnels wrap your packets inside their own, so they need room for an extra header; this one doesn't wrap anything — it ends each connection at your Mac and starts a fresh one at the server. There is no outer header to make room for, so if transfers stall the cause is somewhere else.</p>
+
+<h2 id="sshnet-host-key-policy">Host Key Checking</h2>
+<p class="default">Default: Trust on first use.</p>
+<p>How SimpleVPN treats the server's identity key:</p>
+<ul>
+  <li><strong>Trust on first use</strong> — a server you haven't met is shown to you once, and remembered after you press <strong>Check and Trust This Server</strong>. The safe default.</li>
+  <li><strong>Only known hosts</strong> — the key must already be in your <code>~/.ssh/known_hosts</code>. A server that isn't there is refused.</li>
+  <li><strong>Only the pinned key</strong> — nothing but the fingerprint in <a href="#sshnet-pinned-host-key">Pinned Host Key</a> is accepted, not even <code>known_hosts</code>. The strictest setting.</li>
+</ul>
+<p>A key that has <em>changed</em> is always refused, whichever of these you choose. That is the signature of someone intercepting the connection, and no setting waves it through.</p>
+<div class="warn">There is no "never check" option, and there will not be one. The tunnel itself runs as a system service with no way to ask you anything, so it accepts exactly one fingerprint and refuses everything else. Deciding which fingerprint that is happens here, in the app, where you can see it.</div>
+
+<h2 id="sshnet-pinned-host-key">Pinned Host Key</h2>
+<p class="default">Optional — required by “Only the pinned key”.</p>
+<p>The one server identity this tunnel will accept: the SHA-256 fingerprint of its host key, as 64 hexadecimal characters. A leading <code>SHA256:</code> and colons between bytes are both fine — SimpleVPN reads either.</p>
+<p><strong>Check and Trust This Server</strong> fills this in for you: it connects, reads the key, and records it. Whoever runs the server can also give you the fingerprint to paste, which is the stronger option because it never depends on the first connection being genuine.</p>
+<p>A partial fingerprint is refused rather than accepted loosely. Comparing only the first few characters would let a key that merely <em>starts</em> the same pass, which is no check at all.</p>
+
+<h2 id="sshnet-key-exchange">Key Exchange</h2>
+<p class="default">Default: empty — the engine's built-in preference.</p>
+<p>Which key-exchange algorithms to offer, in OpenSSH's <code>KexAlgorithms</code> syntax (comma-separated). Leave it empty unless you have been given a specific list: the built-in preference already favours the post-quantum hybrids, which is what you want.</p>
+<p>A list the engine can't parse or agree on fails the connection with a clear message rather than quietly using something else.</p>
+
+<h2 id="sshnet-keepalive">Keepalive</h2>
+<p class="default">Default: 30 seconds.</p>
+<p>How often to nudge the server so a quiet tunnel isn't dropped by a router or firewall in between. 0 turns it off.</p>
+<p>If the connection does drop, SimpleVPN reconnects on its own and keeps trying. While it is reconnecting the tunnel's routes stay in place, so traffic that would have gone through it is <em>refused</em> rather than sent out over your normal connection — a stall you can see, instead of a leak you can't.</p>
 
 <!-- ══════════════════ Custom Routing ══════════════════ -->
 
