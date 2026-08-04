@@ -51,6 +51,7 @@ final class SubprocessTunnelManager {
     private var tasks: [String: TunnelProcess] = [:]
     private var sshEngines: [String: SSHTunnelEngine] = [:]   // in-process libssh2 (SOCKS)
     private var inProcessNE: Set<String> = []                 // SSL VPNs running via the NE OpenConnect engine
+    private var authTasks: [String: Task<Void, Never>] = [:]  // in-flight ocauth-helper sign-ins (SSO)
     private var proxiedIDs: Set<String> = []                  // ids whose SOCKS proxy we pointed the system at
     private var controlSockets: [String: String] = [:]       // ssh ControlMaster socket per tunnel (live -O ops)
     private static let log = Logger(subsystem: "com.bragi0.SimpleVPN", category: "subprocess")
@@ -70,7 +71,7 @@ final class SubprocessTunnelManager {
     /// start, we fall back to the subprocess so nothing regresses.
     func connect(_ config: SubprocessTunnelConfig, password: String?) {
         guard tasks[config.id] == nil, sshEngines[config.id] == nil,
-              !inProcessNE.contains(config.id) else { return }
+              !inProcessNE.contains(config.id), authTasks[config.id] == nil else { return }
         // Token mode without a stored seed would just let openconnect die under
         // --non-inter — fail fast with the actual fix instead.
         if config.kind.isSSLVPN, !config.tokenMode.isEmpty,
@@ -83,10 +84,16 @@ final class SubprocessTunnelManager {
             connectInProcessSSH(config, password: password)
             return
         }
-        // SSO needs a browser, which only the user-context subprocess can open (the
-        // system extension runs as root and can't launch a GUI browser) — so SSO
-        // SSL-VPNs skip the in-process engine and use the subprocess path. Configs
-        // using settings the in-process bridge doesn't carry route there too.
+        // SSO signs in through the bundled ocauth-helper (libopenconnect in user
+        // context — the browser needs the user session, which the root extension
+        // doesn't have). The helper's cookie then rides to the connect path; the
+        // old `openconnect --external-browser` subprocess sign-in is retired.
+        if config.kind.isSSLVPN, config.authMode == "sso", config.kind.supportsExternalBrowserSSO {
+            connectSSO(config, password: password)
+            return
+        }
+        // Configs using settings the in-process bridge doesn't carry route to the
+        // subprocess path (see inProcessOpenConnectSupports).
         if config.preferInProcess, config.authMode != "sso",
            [.fortinet, .f5apm, .ciscoAnyConnect].contains(config.kind),
            Self.inProcessOpenConnectSupports(config) {
@@ -153,6 +160,123 @@ final class SubprocessTunnelManager {
         live[id] = l
     }
 
+    // MARK: SSO sign-in via ocauth-helper
+
+    /// Sign in through the bundled `ocauth-helper` (conversational libopenconnect
+    /// in user context), then connect with the returned cookie. Stored
+    /// credentials answer gateway forms silently where they match; the SSO URL
+    /// opens in the profile's chosen browser; an unverifiable server certificate
+    /// is refused (never auto-accepted) with pinning guidance in the failure.
+    private func connectSSO(_ config: SubprocessTunnelConfig, password: String?) {
+        guard OpenConnectAuthClient.helperURL != nil else {
+            live[config.id] = Live(status: .failed(OpenConnectAuthError.helperMissing.localizedDescription))
+            return
+        }
+        live[config.id] = Live(status: .connecting)
+        let storedPassword = password
+            ?? KeychainCredentialStore.loadCredentials(profile: "tunnel.\(config.id)")?.password
+        let username = config.username
+        let browser = BrowserDefaults.resolve(config.browser)
+        let handlers = OpenConnectAuthClient.Handlers(
+            answerForm: { form in
+                let filled = OCAuthFormAutofill.fill(form, username: username, password: storedPassword)
+                guard filled.unanswered.isEmpty else {
+                    return .cancel(unanswered: filled.unanswered.map(\.label))
+                }
+                return .answers(filled.answers)
+            },
+            openURL: { url in
+                await MainActor.run {
+                    guard let target = URL(string: url) else { return }
+                    BrowserCatalog.open(target, using: browser)
+                }
+            },
+            // decideCert keeps its default: REFUSE. authenticate() turns the
+            // refusal into a certUntrusted failure naming the pin to configure.
+            progress: { [weak self] line in
+                Task { @MainActor [weak self] in self?.appendLog(config.id, line) }
+            })
+        let task = Task { [weak self] in
+            do {
+                let done = try await OpenConnectAuthClient.authenticate(
+                    start: Self.authStart(for: config), handlers: handlers)
+                guard let self, !Task.isCancelled, self.authTasks[config.id] != nil else { return }
+                self.authTasks[config.id] = nil
+                self.connectWithCookie(config, auth: done)
+            } catch {
+                guard let self, !Task.isCancelled, self.authTasks[config.id] != nil else { return }
+                self.authTasks[config.id] = nil
+                var l = self.live[config.id] ?? Live()
+                l.status = .failed(error.localizedDescription)
+                self.live[config.id] = l
+            }
+        }
+        authTasks[config.id] = task
+    }
+
+    private func appendLog(_ id: String, _ line: String) {
+        guard var l = live[id] else { return }
+        l.log.append(line)
+        if l.log.count > 300 { l.log.removeFirst(l.log.count - 300) }
+        live[id] = l
+    }
+
+    /// The helper's start request for a config — the same auth-time knobs the
+    /// retired `openconnect --external-browser` argv carried, now over the
+    /// helper's private stdin (so even the proxy URL's credentials stay off argv).
+    static func authStart(for c: SubprocessTunnelConfig) -> OCAuthStart {
+        var p = OCAuthParams()
+        func set(_ keyPath: WritableKeyPath<OCAuthParams, String?>, _ value: String) {
+            if !value.isEmpty { p[keyPath: keyPath] = value }
+        }
+        set(\.username, c.username)
+        set(\.realm, c.realm)
+        set(\.usergroup, c.usergroup)
+        set(\.servercert, c.trustedCertSHA256)
+        set(\.cafile, (c.caFile as NSString).expandingTildeInPath)
+        set(\.useragent, c.userAgent)
+        set(\.reportedOS, c.spoofOS)
+        set(\.versionString, c.versionString)
+        set(\.localHostname, c.localHostname)
+        if let proxy = proxyArgument(for: c) { p.proxy = proxy }
+        if !c.clientCertFile.isEmpty || !c.clientKeyFile.isEmpty {
+            set(\.certFile, (c.clientCertFile as NSString).expandingTildeInPath)
+            set(\.keyFile, (c.clientKeyFile as NSString).expandingTildeInPath)
+            set(\.keyPassword,
+                KeychainCredentialStore.loadCredentials(profile: "tunnel.\(c.id).privateKey")?.password ?? "")
+        }
+        return OCAuthStart(server: serverURL(c),
+                           vpnProtocol: c.kind.openconnectProtocol ?? "anyconnect",
+                           params: p)
+    }
+
+    /// Carry a signed-in session (cookie + exact cert + connect URL) to a
+    /// transport: the in-process NE engine when the config opted in and the
+    /// bridge covers its settings, otherwise the openconnect subprocess with
+    /// `--cookie-on-stdin` (no sign-in left to do — and no sysext required,
+    /// preserving the no-root SOCKS path SSO configs had before).
+    private func connectWithCookie(_ config: SubprocessTunnelConfig, auth: OCAuthDone) {
+        if config.preferInProcess, Self.inProcessOpenConnectSupports(config) {
+            inProcessNE.insert(config.id)
+            var l = live[config.id] ?? Live()
+            l.status = .connecting
+            live[config.id] = l
+            Task { [weak self] in
+                let ok = await OpenConnectProfileStore.start(config, password: nil, auth: auth) { [weak self] event in
+                    self?.handleInProcessEvent(config.id, event)
+                }
+                guard let self else { return }
+                if !ok {
+                    Self.log.error("in-process OpenConnect (cookie) failed, falling back to subprocess")
+                    self.inProcessNE.remove(config.id)
+                    self.connectSubprocess(config, password: nil, command: Self.cookieCommand(for: config, auth: auth))
+                }
+            }
+            return
+        }
+        connectSubprocess(config, password: nil, command: Self.cookieCommand(for: config, auth: auth))
+    }
+
     /// The in-process libssh2 engine speaks plain host + auth + SOCKS only. Any
     /// knob it can't express must route to /usr/bin/ssh instead — silently
     /// dropping a jump host would dial the target directly and bypass the
@@ -207,7 +331,11 @@ final class SubprocessTunnelManager {
         }
     }
 
-    private func connectSubprocess(_ config: SubprocessTunnelConfig, password: String?) {
+    /// `command` overrides the built argv — the cookie transport
+    /// (`cookieCommand(for:auth:)`) supplies its own; everything else (readiness
+    /// markers, log, SOCKS surfacing, exit handling) is shared.
+    private func connectSubprocess(_ config: SubprocessTunnelConfig, password: String?,
+                                   command: (String, [String], Data?)? = nil) {
         guard tasks[config.id] == nil else { return }
         if config.kind == .ssh, config.sshMode == .portForward,
            let bad = Self.invalidForwardLine(config.forwards) {
@@ -215,7 +343,7 @@ final class SubprocessTunnelManager {
                 "Invalid forward “\(bad)” — use “L localPort:host:port”, “R remotePort:host:port” or “D port”."))
             return
         }
-        guard let (path, baseArgs, stdin) = Self.command(for: config, password: password) else {
+        guard let (path, baseArgs, stdin) = command ?? Self.command(for: config, password: password) else {
             live[config.id] = Live(status: .failed("The required command-line tool isn't installed."))
             return
         }
@@ -236,8 +364,8 @@ final class SubprocessTunnelManager {
         }
         // Visible note when a stale SSO config lands here — the builder already
         // fell back to password (see command(for:)), say so instead of failing.
-        var initialLog: [String] = []
-        if config.authMode == "sso", !config.kind.supportsExternalBrowserSSO {
+        var initialLog: [String] = live[config.id]?.log ?? []   // keep the sign-in conversation's log
+        if command == nil, config.authMode == "sso", !config.kind.supportsExternalBrowserSSO {
             initialLog.append("Single sign-on isn't available for \(config.kind.displayName) — signing in with the saved password instead.")
         }
         live[config.id] = Live(status: .connecting,
@@ -301,6 +429,10 @@ final class SubprocessTunnelManager {
     }
 
     func disconnect(_ id: String) {
+        // A sign-in still in flight: cancelling the task kills the helper
+        // (OpenConnectAuthClient's cancellation handler), which also abandons
+        // any browser page still waiting on the gateway.
+        if let auth = authTasks.removeValue(forKey: id) { auth.cancel() }
         // Restore the system SOCKS proxy first: TunnelProcess.stop() clears the
         // termination handler, so onExit never runs for a manual disconnect —
         // this is the only restore on that path (and the in-process engine has
@@ -537,13 +669,12 @@ final class SubprocessTunnelManager {
             // the Fortinet-only fallback (needs root).
             if let oc = TunnelCLI.openconnect.resolvedPath {
                 let proto = c.kind.openconnectProtocol ?? "anyconnect"
-                // SSO only where openconnect's --external-browser flow exists
-                // (anyconnect/gp/pulse). A stale "sso" on any other kind falls
-                // back to password — connectSubprocess logs the switch visibly.
-                let sso = c.authMode == "sso" && c.kind.supportsExternalBrowserSSO
-                var a = ["--protocol=\(proto)", "--non-inter"]
+                // SSO never reaches this builder: connect() routes it through the
+                // bundled ocauth-helper (connectSSO), and the cookie transport has
+                // its own argv (cookieCommand). A stale "sso" on a kind with no
+                // browser flow falls back to password — connectSubprocess logs it.
+                var a = ["--protocol=\(proto)", "--non-inter", "--passwd-on-stdin"]
                 if !c.username.isEmpty { a += ["--user=\(c.username)"] }
-                if !sso { a += ["--passwd-on-stdin"] }   // SSO: the browser signs in, no password on stdin
                 // TODO(fortinet): verify --authgroup actually carries the Fortinet
                 // realm (vs a portal path / --usergroup) — needs a real gateway.
                 if !c.realm.isEmpty { a += ["--authgroup=\(c.realm)"] }
@@ -577,19 +708,6 @@ final class SubprocessTunnelManager {
                     a += ["--token-mode=\(c.tokenMode)"]
                     if let ref = Self.tokenSecretFileArgument(for: c) { a += ["--token-secret=\(ref)"] }
                 }
-                // SAML/SSO webview browser (GP / AnyConnect / Pulse — the kinds
-                // whose openconnect protocol has the --external-browser flow).
-                // SSO browser: per-VPN choice → app default → OS default. A chosen
-                // browser+profile gets a generated launcher for --external-browser;
-                // OS default emits no flag (OpenConnect opens the default browser).
-                if c.kind.supportsExternalBrowserSSO {
-                    let browser = BrowserDefaults.resolve(c.browser)
-                    if let script = BrowserCatalog.externalBrowserScript(for: browser, id: c.id) {
-                        a += ["--external-browser=\(script)"]
-                    } else if !c.samlBrowser.isEmpty {   // legacy custom command
-                        a += ["--external-browser=\((c.samlBrowser as NSString).expandingTildeInPath)"]
-                    }
-                }
                 // Host-checker / endpoint posture (F5 EPA, Cisco CSD, GP/NC trojan):
                 // a real wrapper wins over the skip; otherwise "disable" stubs it out.
                 if !c.csdWrapper.isEmpty { a += ["--csd-wrapper=\((c.csdWrapper as NSString).expandingTildeInPath)"] }
@@ -604,7 +722,7 @@ final class SubprocessTunnelManager {
                 }
                 a += c.extraArgs
                 a.append(serverURL(c))
-                return (oc, a, sso ? nil : password.map { Data(($0 + "\n").utf8) })
+                return (oc, a, password.map { Data(($0 + "\n").utf8) })
             }
             if c.kind == .fortinet, let ofv = TunnelCLI.openfortivpn.resolvedPath {
                 var a = [serverURL(c), "--username=\(c.username)"]
@@ -617,6 +735,39 @@ final class SubprocessTunnelManager {
         default:
             return nil
         }
+    }
+
+    /// Transport argv for a session ocauth-helper already signed in: connect to
+    /// the exact URL and certificate the sign-in produced (`--resolve` defeats
+    /// round-robin DNS), with the cookie on stdin — never argv. Auth-time flags
+    /// (user, authgroup, token, CSD) are gone; only transport knobs remain.
+    static func cookieCommand(for c: SubprocessTunnelConfig, auth: OCAuthDone)
+        -> (String, [String], Data?)? {
+        guard let oc = TunnelCLI.openconnect.resolvedPath else { return nil }
+        let proto = c.kind.openconnectProtocol ?? "anyconnect"
+        var a = ["--protocol=\(proto)", "--non-inter", "--cookie-on-stdin"]
+        if !auth.servercert.isEmpty { a += ["--servercert=\(auth.servercert)"] }
+        if let r = auth.resolve { a += ["--resolve=\(r.host):\(r.ip)"] }
+        if !c.spoofOS.isEmpty { a += ["--os=\(c.spoofOS)"] }
+        if !c.localHostname.isEmpty { a += ["--local-hostname=\(c.localHostname)"] }
+        if !c.userAgent.isEmpty { a += ["--useragent=\(c.userAgent)"] }
+        if !c.versionString.isEmpty { a += ["--version-string=\(c.versionString)"] }
+        if !c.ocCompression.isEmpty { a += ["--compression=\(c.ocCompression)"] }
+        if c.enablePFS { a.append("--pfs") }
+        if c.disableIPv6 { a.append("--disable-ipv6") }
+        if c.noHTTPKeepalive { a.append("--no-http-keepalive") }
+        if c.disableDTLS { a.append("--no-dtls") }
+        if let t = c.reconnectTimeout { a += ["--reconnect-timeout=\(t)"] }
+        if let d = c.forceDPD { a += ["--force-dpd=\(d)"] }
+        if let m = c.ocMTU { a += ["--mtu=\(m)"] }
+        if let bm = c.baseMTU { a += ["--base-mtu=\(bm)"] }
+        if let proxy = proxyArgument(for: c) { a += ["--proxy=\(proxy)"] }
+        if let ocproxy = TunnelCLI.ocproxy.resolvedPath {
+            a += ["--script-tun", "--script", "\(ocproxy) -D \(c.socksPort)"]
+        }
+        a += c.extraArgs
+        a.append(auth.connectURL.isEmpty ? serverURL(c) : auth.connectURL)
+        return (oc, a, Data((auth.cookie + "\n").utf8))
     }
 
     /// Shell-quote a value for safe interpolation into a `/bin/sh -c` command

@@ -33,7 +33,13 @@ enum OpenConnectProfileStore {
     /// Returns false if NE setup fails (caller falls back to the subprocess).
     /// Connection progress arrives via `onEvent` (NEVPNStatusDidChange) — a true
     /// return means "started", NOT "connected".
+    ///
+    /// `auth` carries a session ocauth-helper already signed in (SSO): its
+    /// cookie + exact certificate + connect URL ride startTunnel options in
+    /// memory — same invariant as every credential, NEVER providerConfiguration
+    /// (which persists) — and the extension skips its own sign-in.
     static func start(_ config: SubprocessTunnelConfig, password: String?,
+                      auth: OCAuthDone? = nil,
                       onEvent: @escaping @MainActor (Event) -> Void) async -> Bool {
         guard config.kind.isSSLVPN else { return false }
         let type = config.kind.rawValue   // provider resolves it via VPNKind.openconnectProtocol
@@ -59,10 +65,15 @@ enum OpenConnectProfileStore {
             try await mgr.saveToPreferences()
             try await mgr.loadFromPreferences()
 
-            let options: [String: NSObject] = [
+            var options: [String: NSObject] = [
                 "username": config.username as NSString,
                 "password": (password ?? "") as NSString,
             ]
+            if let auth {
+                options["cookie"] = auth.cookie as NSString
+                options["servercert"] = auth.servercert as NSString
+                if !auth.connectURL.isEmpty { options["connectURL"] = auth.connectURL as NSString }
+            }
             try (mgr.connection as? NETunnelProviderSession)?.startTunnel(options: options)
             observe(mgr.connection, id: config.id, onEvent: onEvent)
             log.log("started in-process OpenConnect for \(config.id, privacy: .public) (\(type, privacy: .public))")

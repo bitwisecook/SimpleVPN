@@ -31,6 +31,11 @@ typedef NS_ENUM(NSInteger, OCStatus) {
 @property (copy) NSString *protocol;        // "fortinet" | "f5" | "gp" | "anyconnect"
 @property (copy) NSString *username;
 @property (nullable, copy) NSString *password;
+/// A session cookie obtained OUT of process (the app's ocauth-helper SSO
+/// sign-in). When set, the bridge skips openconnect_obtain_cookie entirely —
+/// no forms, no credentials — and connects with this cookie. In-memory only
+/// (startTunnel options); never persisted, never logged.
+@property (nullable, copy) NSString *cookie;
 @property (nullable, copy) NSString *realm;             // authgroup
 @property (nullable, copy) NSString *serverCertSHA256;  // pin (accept only this)
 @property (nullable, copy) NSString *caFile;            // extra CA bundle path

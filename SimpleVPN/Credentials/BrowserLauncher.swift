@@ -5,8 +5,9 @@
 //  Detects installed browsers and their profiles, and opens a URL in a chosen
 //  browser+profile — for SAML/SSO sign-in and for the app's own links. Everything
 //  here runs in the APP (user context): the system extension runs as root and
-//  cannot launch a GUI browser, so SSO that needs a browser uses the user-context
-//  subprocess path (see SubprocessTunnelManager) and this launcher.
+//  cannot launch a GUI browser, so SSO sign-in runs in user context (the
+//  ocauth-helper conversation — OpenConnectAuthClient hands its open-url events
+//  here) and Tailscale sign-in opens its control URL the same way.
 //
 //  Chromium picks a profile with `--profile-directory=<dir>`, Firefox with
 //  `-P <name>`, Safari has no CLI-selectable profile. We shell out to `/usr/bin/
@@ -158,40 +159,6 @@ enum BrowserCatalog {
         }
     }
 
-    /// A tiny launcher script for OpenConnect's `--external-browser` (which runs
-    /// `CMD <url>`), so SSO opens in the chosen browser+profile. Returns nil for the
-    /// OS default (let OpenConnect open the default browser itself).
-    static func externalBrowserScript(for sel: BrowserSelection, id: String) -> String? {
-        if sel.isInApp { return inAppBrowserScript(id: id) }
-        guard let b = browser(sel.bundleID) else { return nil }
-        // Build the `open` argv with a sentinel for the URL, then emit a shell line
-        // where the sentinel becomes "$1" and every other token is single-quoted.
-        let sentinel = "\u{1}URL\u{1}"
-        let line = openArguments(for: b, profile: sel.profile, url: sentinel).map { tok in
-            tok == sentinel ? "\"$1\"" : "'" + tok.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        }.joined(separator: " ")
-        return writeScript("#!/bin/sh\nexec /usr/bin/open \(line)\n", id: id)
-    }
-
-    /// Launcher that hands the sign-in URL to the app's in-app WKWebView window via
-    /// the simplevpn-sso:// scheme (base64url, so +/ =-quoting can't corrupt it).
-    private static func inAppBrowserScript(id: String) -> String? {
-        let body = """
-        #!/bin/sh
-        u=$(printf '%s' "$1" | /usr/bin/base64 | /usr/bin/tr '+/' '-_' | /usr/bin/tr -d '=\\n')
-        exec /usr/bin/open "simplevpn-sso://auth?u=$u"
-        """
-        return writeScript(body + "\n", id: id)
-    }
-
-    private static func writeScript(_ body: String, id: String) -> String? {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("svpn-browser-\(id).sh")
-        do {
-            try Data(body.utf8).write(to: url)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
-        } catch { return nil }
-        return url.path
-    }
 }
 
 /// The app-wide default browser for SSO / links, and per-VPN resolution.

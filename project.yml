@@ -112,6 +112,16 @@ targets:
           - "$(BUILT_PRODUCTS_DIR)/opnative-helper"
         outputFiles:
           - "$(TARGET_BUILD_DIR)/$(EXECUTABLE_FOLDER_PATH)/opnative-helper"
+      # The OpenConnect sign-in helper (conversational SSO — see OCAuthHelper/
+      # main.swift) rides in Contents/MacOS beside opnative-helper. Unlike that
+      # one it carries NO entitlements at all (statically linked C, no dlopen).
+      - name: Embed ocauth-helper
+        script: |
+          cp -f "${BUILT_PRODUCTS_DIR}/ocauth-helper" "${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/ocauth-helper"
+        inputFiles:
+          - "$(BUILT_PRODUCTS_DIR)/ocauth-helper"
+        outputFiles:
+          - "$(TARGET_BUILD_DIR)/$(EXECUTABLE_FOLDER_PATH)/ocauth-helper"
       # The CLI ships inside the bundle so it is signed/notarized/updated with
       # the app (no separate distribution). It lives in Contents/Helpers, NOT
       # Contents/MacOS: "simplevpn" and the app binary "SimpleVPN" differ only
@@ -130,6 +140,8 @@ targets:
       - target: PacketTunnel
         embed: true
       - target: OPNativeHelper
+        embed: false
+      - target: OCAuthHelper
         embed: false
       # Built before the app so the embed script above finds it; copied by the
       # script (not embed:) because tools land in Contents/MacOS, not Frameworks.
@@ -254,6 +266,43 @@ targets:
           - "-framework"
           - "Security"
         SKIP_INSTALL: YES
+
+  # ---- OpenConnect sign-in helper (conversational SSO over stdin/stdout,
+  # retiring the user-context `openconnect --external-browser` subprocess; see
+  # OCAuthHelper/main.swift). libopenconnect is STATICALLY linked (same
+  # xcframework as PacketTunnel) and dlopens nothing, so — HARD POLICY — this
+  # helper carries NO entitlements: no CODE_SIGN_ENTITLEMENTS, and none may be
+  # added. Hardened runtime stays on from the shared settings. ----
+  OCAuthHelper:
+    type: tool
+    platform: macOS
+    sources:
+      - OCAuthHelper
+      # The wire protocol is compiled into both sides (the ControlSurface.swift
+      # pattern) so app and helper can never disagree about the format.
+      - path: SimpleVPN/Credentials/OpenConnectAuthWire.swift
+    settings:
+      base:
+        PRODUCT_NAME: ocauth-helper
+        # A synchronous line-oriented tool: plain nonisolated code, no UI actor.
+        SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
+        SWIFT_OBJC_BRIDGING_HEADER: "OCAuthHelper/OCAuthHelper-Bridging-Header.h"
+        # No provisioning profile and NO entitlements (see the target comment).
+        PROVISIONING_PROFILE_SPECIFIER: ""
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/Vendor/openconnect-include"
+        SKIP_INSTALL: YES
+    dependencies:
+      # Same artifact PacketTunnel links: libopenconnect + OpenSSL + lz4 merged
+      # static; system libxml2/z/iconv linked here (openconnect needs them).
+      - framework: Vendor/OpenConnectEngine.xcframework
+        embed: false
+        link: true
+      - sdk: libxml2.tbd
+      - sdk: libz.tbd
+      - sdk: libiconv.tbd
+      - sdk: Security.framework
+      - sdk: libresolv.tbd
 
   # ---- Tests ----
   SimpleVPNTests:

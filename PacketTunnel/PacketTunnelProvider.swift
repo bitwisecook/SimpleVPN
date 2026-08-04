@@ -201,6 +201,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         s.serverCertSHA256 = conf?["serverCert"] as? String
         s.externalBrowser = conf?["samlBrowser"] as? String
         s.userAgent = "SimpleVPN"
+        // SSO cookie handoff (ocauth-helper → app → here, all in memory): the
+        // sign-in already happened in user context; connect to the exact URL it
+        // authenticated against, accepting only the certificate it saw.
+        if let cookie = options?["cookie"] as? String, !cookie.isEmpty {
+            s.cookie = cookie
+            if let cert = options?["servercert"] as? String, !cert.isEmpty { s.serverCertSHA256 = cert }
+            if let url = options?["connectURL"] as? String, !url.isEmpty { s.server = url }
+        }
 
         let b = OpenConnectBridge(provider: self, delegate: self)
         lock.lock(); ocBridge = b; startCompletion = completionHandler; lock.unlock()

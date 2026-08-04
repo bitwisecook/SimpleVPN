@@ -473,9 +473,9 @@ struct SubprocessTunnelView: View {
 
     @ViewBuilder private var sslSignInSection: some View {
         Section("Sign-In") {
-            // SSO is only offered where openconnect's --external-browser flow
-            // exists (AnyConnect / GlobalProtect / Pulse); elsewhere it would
-            // just drop the password and fail under --non-inter.
+            // SSO is only offered where libopenconnect has the external-browser
+            // flow (AnyConnect / GlobalProtect / Pulse) — sign-in runs through
+            // the bundled ocauth-helper (SubprocessTunnelManager.connectSSO).
             Picker("Sign-in method", selection: $draft.authMode) {
                 Text("Password").tag("password")
                 Text("Client certificate").tag("certificate")

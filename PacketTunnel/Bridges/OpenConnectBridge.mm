@@ -140,7 +140,13 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
         [self fail:@"That server address couldn't be parsed."]; return;
     }
 
-    if (openconnect_obtain_cookie(_vpninfo) != 0) {
+    // Cookie auth: the app already signed in (ocauth-helper SSO) and handed us
+    // the session cookie — skip obtain_cookie (no forms, no credentials here).
+    if (_cfg.cookie.length) {
+        if (openconnect_set_cookie(_vpninfo, _cfg.cookie.UTF8String) != 0) {
+            [self fail:@"The sign-in session couldn't be applied."]; return;
+        }
+    } else if (openconnect_obtain_cookie(_vpninfo) != 0) {
         [self fail:@"Sign-in failed (check your username, password or one-time code)."]; return;
     }
     if (openconnect_make_cstp_connection(_vpninfo) != 0) {
