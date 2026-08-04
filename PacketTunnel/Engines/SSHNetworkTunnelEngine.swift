@@ -158,6 +158,10 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
         /// reader loop stops reading this channel until it drains, which is the
         /// server→guest direction's backpressure.
         var pending = Data()
+        /// The guest has finished sending and the channel's EOF still has to go out
+        /// (the first attempt would have blocked). Retried by the reader sweep.
+        /// Touched only on sshQueue, like `pending`.
+        var needsEOF = false
         private let closed = NSLock()
         private var isClosed = false
 
@@ -401,6 +405,9 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
                 finish(flow, reason: "channel closed")
                 continue
             }
+            // A half-close whose EOF wouldn't fit earlier: retry it here rather than
+            // leaving the server waiting for a request end that never arrives.
+            if flow.needsEOF, flow.channel.sendEOF() { flow.needsEOF = false }
             var readAnything = false
             while true {
                 let n = buf.withUnsafeMutableBytes { raw -> Int in
@@ -642,14 +649,21 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
                 }
                 if !self.writeAll(flow: flow, bytes: buf, count: n) { break }
             }
-            // Half-close: tell the server this direction is done, then let the
-            // reader loop drain the other one. Retiring the flow outright here
-            // would discard a response already in flight.
+            // HALF-CLOSE, NOT CLOSE. `sendEOF` says "this direction is done" and
+            // leaves the other one readable, so the reader loop can still deliver a
+            // response — including one the server only STARTS writing once it sees
+            // the request end (every request/response protocol that ends its request
+            // with a FIN). Retiring the flow here, which is what this code used to
+            // do, truncated exactly those flows: the comment said half-close and the
+            // call said close. The flow is retired by the reader sweep when the
+            // SERVER's EOF arrives, or immediately if Go has closed its end (the
+            // socketpair write then fails and `flush` finishes the flow).
             self.session?.wakeActivityWait()
             self.sshQueue.async { [weak self] in
                 guard let self else { return }
                 self.lock.lock(); let stillLive = self.flows[flow.id] != nil; self.lock.unlock()
-                if stillLive { self.finish(flow, reason: "the app finished sending") }
+                guard stillLive else { return }
+                if !flow.channel.sendEOF() { flow.needsEOF = true }
             }
         }
     }

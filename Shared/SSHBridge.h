@@ -48,6 +48,15 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSInteger)write:(const void *)buffer length:(NSInteger)len;
 - (BOOL)isEOF;
 - (BOOL)isClosed;
+/// Send channel EOF — "I have nothing more to send" — WITHOUT closing the channel,
+/// so the other direction stays readable. This is the half-close every
+/// request/response protocol that ends its request with a FIN depends on: close the
+/// channel outright instead and the answer already on its way is discarded.
+/// (`isEOF` is the mirror image: the SERVER's half-close arriving here.)
+///
+/// MUST be called on the session's serial queue. NO when the request couldn't be
+/// written — including a would-block, which is not fatal: call it again.
+- (BOOL)sendEOF;
 /// MUST be called on the session's serial queue (frees libssh channel state).
 - (void)close;
 @end
@@ -182,8 +191,16 @@ typedef NS_ENUM(NSInteger, SSHHostKeyStatus) {
 /// pump the transport. The subprocess-era engine did that with a 3ms/20ms
 /// dispatch timer, which on this path would mean waking the session queue fifty
 /// times a second forever and adding up to 20 ms of latency to every packet.
-/// `ssh_event_dopoll` waits on the real fd instead: idle costs nothing, and a
-/// packet is processed the moment it lands.
+/// This waits on the real fd instead: idle costs nothing, and a packet is
+/// processed the moment it lands.
+///
+/// It is NOT `ssh_event_dopoll(event, ms)`, which was the obvious implementation
+/// and does not work: libssh re-arms POLLOUT on the session socket after every
+/// write, so dopoll on a connected (therefore always-writable) socket returns
+/// immediately, forever — a 100% CPU spin that also starves everything else
+/// queued behind it. Measured, not theorised; see the long comment on the
+/// implementation. dopoll is used with a ZERO timeout for its packet processing,
+/// and the waiting is a plain `poll()`.
 ///
 /// Returns:  1  the poll processed something (or the timeout expired cleanly —
 ///              the caller must sweep its channels either way);

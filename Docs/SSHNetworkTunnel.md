@@ -40,7 +40,7 @@ and `Shared/SSHNetworkTunnelNetworkSettings.swift`.
 - Isolation: target is `nonisolated` by default (good — the dial callback runs on a Go goroutine and must not hop). Needs `extension SSHChannel: @unchecked Sendable {}` AND `extension SSHSession: @unchecked Sendable {}` in the new engine file — NOT in Shared (retroactive-conformance clash if both targets ever merge).
 - Entitlements: NO change (`network.client` covers it). But three sandbox facts are load-bearing: no key file, no known_hosts, no agent/Kerberos.
 - New `PacketTunnel/Engines/SSHNetworkTunnelEngine.swift`: two queues (serial `ssh` for every libssh call, concurrent `pumps`); static `@convention(c)` dial callback; `dialFlow` = socketpair (256 KiB bufs, `SO_NOSIGPIPE`) → channel open on `ssh` with a **15 s budget** (under Go's 30 s so the RST is ours) → start pump → return the far fd. **Late-completion rule: a timed-out dial that later succeeds MUST close its channel and both fds** (else a leaked server-side socket per timeout).
-- **Pump must not poll** — done, and the prototype found a wrinkle the plan did not anticipate: `ssh_event_dopoll` alone *starves writers*, so the shipped bridge pairs the session's `ssh_event` poll set with a **self-pipe wake** (`SSHBridge.m` `_wakePipe`, drained by `ssh_bridge_drain_wake`, poked by `interruptActivityWait`) so the session queue can break into the wait to service a write. `waitForActivityWithTimeoutMs:` + `sendKeepalive` exist as planned; one reader loop per session driven by readiness, per-flow blocking `read(2)` on the socketpair for real backpressure.
+- **Pump must not poll** — done, but only after a live server proved the first two attempts wrong (see R4): `waitForActivityWithTimeoutMs:` waits in a plain `poll()` on the session socket (`POLLIN`, plus `POLLOUT` only while libssh really has output queued) **and the self-pipe** (`SSHBridge.m` `_wakePipe`, poked by `wakeActivityWait`), and uses `ssh_event_dopoll(event, 0)` purely to turn readiness into parsed packets. `sendKeepalive` as planned; one reader loop per session driven by readiness, per-flow blocking `read(2)` on the socketpair for real backpressure.
 - Reconnect: 1,2,4,8,15,30 s cap, ±20% jitter, indefinite; close all channels+socketpairs so in-flight flows get EOF (reset, not hang). **Do NOT drop the tunnel settings on session loss** — keep the utun so traffic is refused rather than leaking to the physical path (kill-switch-shaped, must be commented).
 - Flows fail fast (−3 while reconnecting), never queue.
 
@@ -68,12 +68,26 @@ Three shapes, each honest: explicit servers → DNS-over-TCP through SSH; **sent
 - **R1 three static archives each bundling OpenSSL — RESOLVED before landing.** All three scripts pin `OPENSSL_PIN=3.6.3` identically, so the object files are byte-identical and ld64's lazy archive loading pulls exactly one copy; verified by linking all three together. `project.yml`'s `SSHEngine.xcframework` dependency on `PacketTunnel` records the finding and names this as the place a future pin divergence would surface as duplicate symbols.
 - **R2 window mismatch** — netstack default receive buffer vs libssh's ~64 KiB channel window; set explicit `TCPReceiveBufferSizeRangeOption`/send equivalent when the extension dialer is in use. Needs measurement. Do NOT touch `LinkEPCapabilities`/`SupportedGSOKind` (kernel-panic comment in `buildEngine`).
 - **R3** one session, one serial queue, single-threaded crypto ⇒ few hundred Mbit/s aggregate ≈ single-stream. Don't overpromise. v2: N sessions hashed by destination.
-- **R4 `ssh_event_dopoll` with many channels — RESOLVED, differently than expected.** Not a scaling problem: dopoll alone starves *writers*. Shipped fix is the self-pipe wake in the session's poll set (see "Extension work"), not the `ssh_channel_select` fallback and not a 20 ms poll.
+- **R4 `ssh_event_dopoll` with many channels — RESOLVED, and the first two answers were both wrong.** Not a scaling problem, and not the `ssh_channel_select` fallback either. The reasoned-about answer was "dopoll starves writers, add a self-pipe wake to its poll set". The first run against a real sshd (`SSHLiveIntegrationTests`) showed that was inert: **`ssh_event_dopoll` never blocks at all on a connected session**, because libssh re-arms `POLLOUT` on the session socket after every write (`ssh_socket_unbuffered_write`) and a connected socket is always writable. A 300 ms "event wait" returned in <3 ms every time — a 100% CPU spin that owned the session's serial queue, so writes waited **p50 202 ms / max 204 ms** (24 channels, n=960) *with* the wake pipe in place. libssh's own `ssh_channel_select` has the same problem and papers over it by looping dopoll to a deadline. Shipped fix: wait in a plain `poll()` (session socket + self-pipe) and use `dopoll(…, 0)` only for packet processing → **p50 1.0 ms / p99 1.8 ms / max 2.0 ms**, with the wake suppressed as a control at **p50 148 ms / max 151 ms** (so the self-pipe is genuinely load-bearing, it just had nothing to interrupt before).
 - **R5** every dial waits on the shared serial queue — bounded budget + mandatory late-completion cleanup.
 
 ## Tests — DONE
-`Vendor/proxy-engine/src/{flowdial_test.go,sshflow_test.go}` and
+Contracts: `Vendor/proxy-engine/src/{flowdial_test.go,sshflow_test.go}` and
 `SimpleVPNTests/ControlPlane/SSHNetworkTunnelTests.swift`.
+
+Against a REAL SSH server: `SimpleVPNTests/ControlPlane/SSHLiveIntegrationTests.swift`
+— host-key pin (match, wrong, truncated, at every strictness), key-file *and*
+in-memory-PEM sign-in, direct-tcpip round trip + half-close, 24 concurrent channels
+with write-latency percentiles (and the wake-suppressed control), keepalive,
+compression, session-loss detection and reconnect, plus the app engine's SOCKS path
+end to end. Each test starts its own `/usr/sbin/sshd` on a free loopback port from the
+fixture `./Tools/ssh-live-test-fixture.sh` lays down, and **skips cleanly when the
+fixture is absent** — `liveSSHFixtureMode` always runs and prints which mode it was.
+
+The flow-dial C boundary itself: `Vendor/proxy-engine/src/flowdial_live_test.go` with
+a real `PXFlowDialCallback` (cgo is not allowed in `_test.go`, so the callback lives in
+`flowdial_cgotest.go` behind the `pxcgotest` tag; `Tools/build-proxy-engine.sh` runs
+that pass).
 
 Go: `TestParseUpstreamSSH`, `TestExtensionDialerAdoptsSocketpair` (incl. fd-leak check), `TestFlowDialRefusalCodes`, `TestServeUDPRefusesNonDNSWithoutSOCKS`, `TestDNSSentinelRewrite`, extend `TestStartConfigKeys`/`TestStatusOmitsSecrets`.
 Swift: start-payload key parity with the Go struct, `connectProblem` gates, network-settings (server `/32` excluded, resolver `/32`s split-only, sentinel), `SSHHostKeyDecision` all four branches + truncated-pin, descriptor/anchor parity, mediator classification.

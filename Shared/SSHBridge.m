@@ -10,19 +10,11 @@
 #import <libssh/libssh.h>
 #import <libssh/callbacks.h>
 #import <os/log.h>
+#import <os/lock.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <string.h>
 #include <unistd.h>
-
-/// Drains the wake pipe registered in the session's poll set. Its whole job is to
-/// make `ssh_event_dopoll` return; the bytes carry no meaning.
-static int ssh_bridge_drain_wake(socket_t fd, int revents, void *userdata) {
-    (void)revents; (void)userdata;
-    char scratch[64];
-    while (read(fd, scratch, sizeof scratch) > 0) { /* drain */ }
-    return SSH_OK;
-}
 
 // tun@openssh.com channel open — compiled into the vendored library by
 // Tools/build-libssh-xcframework.sh (libssh's own channel_open is static, so
@@ -113,6 +105,14 @@ static NSString *hexTail(NSString *s) {
 }
 - (BOOL)isEOF { return _chan ? (ssh_channel_is_eof(_chan) != 0) : YES; }
 - (BOOL)isClosed { return _chan == NULL; }
+- (BOOL)sendEOF {
+    if (!_chan) return NO;
+    // SSH_AGAIN is possible in the session's non-blocking data mode: the EOF
+    // message didn't fit in the outgoing buffer yet. Reported as NO (retryable)
+    // rather than swallowed, because a channel that silently never sends EOF is a
+    // flow that hangs waiting for an answer the server will not start writing.
+    return ssh_channel_send_eof(_chan) == SSH_OK;
+}
 - (void)close {
     if (_chan) { ssh_channel_close(_chan); ssh_channel_free(_chan); _chan = NULL; }
 }
@@ -131,6 +131,12 @@ static NSString *hexTail(NSString *s) {
     ssh_key _hostKey;       // the server's public key, held for type/length/TOFU
     ssh_event _event;       // lazily created, session-lifetime poll set (see waitForActivity)
     int _wakePipe[2];       // self-pipe in that poll set, so the wait is interruptible
+    // Guards the WRITE end of that pipe only. `wakeActivityWait` is the one method
+    // callable off the session queue, and `disconnect` closes the fd from the
+    // queue: without this, a wake racing a teardown writes its byte into whatever
+    // fd number the kernel has since handed out — silently injecting a byte into
+    // an unrelated socket, which is far worse than a missed wake.
+    os_unfair_lock _wakeLock;
     NSString *_fp;
     NSString *_host;
     int _port;
@@ -154,6 +160,7 @@ static NSString *hexTail(NSString *s) {
         // `_wakePipe[1] >= 0` guard would then happily write to it.
         _wakePipe[0] = -1;
         _wakePipe[1] = -1;
+        _wakeLock = OS_UNFAIR_LOCK_INIT;
     }
     return self;
 }
@@ -574,62 +581,140 @@ static NSString *hexTail(NSString *s) {
     } failure:@"The server refused a network tunnel (PermitTunnel?)." error:error];
 }
 
+/// Lazily build the poll set and the wake pipe. NO on a failure that makes waiting
+/// impossible.
+///
+/// The ssh_event is created once and kept for the session's life: creating one per
+/// wait would move the socket handle in and out of the session's default poll
+/// context several times a second.
+- (BOOL)prepareEventAndWakePipe {
+    if (_event) return YES;
+    _event = ssh_event_new();
+    if (!_event) return NO;
+    if (ssh_event_add_session(_event, _session) != SSH_OK) {
+        ssh_event_free(_event);
+        _event = NULL;
+        return NO;
+    }
+    // The wake pipe is OURS, not libssh's (see waitForActivityWithTimeoutMs: for
+    // why the wait isn't ssh_event's). Non-blocking on both ends: the writer must
+    // never block behind a full pipe (one pending byte already means "wake up", so a
+    // dropped extra byte changes nothing) and the drain must not stall the poll.
+    int wake[2] = { -1, -1 };
+    if (pipe(wake) != 0) {
+        os_log_error(gSSHLog(),
+                     "SSH session wake pipe could not be created (%{darwin.errno}d) — "
+                     "queued work will wait for the poll ceiling instead of being woken",
+                     errno);
+        wake[0] = wake[1] = -1;
+    } else {
+        fcntl(wake[0], F_SETFL, O_NONBLOCK);
+        fcntl(wake[1], F_SETFL, O_NONBLOCK);
+    }
+    // The write end is published LAST and under the lock, so no concurrent wake can
+    // see a half-built pipe.
+    _wakePipe[0] = wake[0];
+    os_unfair_lock_lock(&_wakeLock);
+    _wakePipe[1] = wake[1];
+    os_unfair_lock_unlock(&_wakeLock);
+    return YES;
+}
+
+/// Let libssh process whatever is ready RIGHT NOW — parse inbound packets into the
+/// per-channel buffers, flush queued output — without waiting for anything.
+/// Returns -1 only when the session is genuinely gone.
+- (int)pumpWithoutWaiting {
+    int rc = ssh_event_dopoll(_event, 0);
+    if (rc == SSH_OK || rc == SSH_AGAIN) return 0;
+    // SSH_ERROR: a disconnected session reports it here, and it is the only signal
+    // this loop gets — libssh has no "is the transport up" predicate. Distinguish a
+    // genuinely-closed session from a transient error so the caller only reconnects
+    // when it must.
+    return ssh_is_connected(_session) ? 0 : -1;
+}
+
+/// Drain the wake pipe. The bytes carry no meaning; their arrival is the message.
+- (void)drainWakePipe {
+    int fd = _wakePipe[0];
+    if (fd < 0) return;
+    char scratch[64];
+    while (read(fd, scratch, sizeof scratch) > 0) { /* drain */ }
+}
+
 - (int)waitForActivityWithTimeoutMs:(int)ms {
     if (!_session) return -1;
-    // The ssh_event is created lazily and kept for the session's life: creating
-    // one per wait would re-register the socket fifty times a second, and
-    // ssh_event_add_session is not free.
-    if (!_event) {
-        _event = ssh_event_new();
-        if (!_event) return -1;
-        if (ssh_event_add_session(_event, _session) != SSH_OK) {
-            ssh_event_free(_event);
-            _event = NULL;
-            return -1;
-        }
-        // The wake pipe joins the SAME poll set, which is what makes this wait
-        // interruptible without a timer. Non-blocking on both ends: the writer
-        // must never block behind a full pipe (one pending byte already means
-        // "wake up", so a dropped extra byte changes nothing), and the reader
-        // drains without stalling the poll.
-        if (pipe(_wakePipe) == 0) {
-            fcntl(_wakePipe[0], F_SETFL, O_NONBLOCK);
-            fcntl(_wakePipe[1], F_SETFL, O_NONBLOCK);
-            if (ssh_event_add_fd(_event, _wakePipe[0], POLLIN,
-                                 ssh_bridge_drain_wake, NULL) != SSH_OK) {
-                close(_wakePipe[0]); close(_wakePipe[1]);
-                _wakePipe[0] = _wakePipe[1] = -1;
-            }
-        } else {
-            _wakePipe[0] = _wakePipe[1] = -1;
-        }
+    if (![self prepareEventAndWakePipe]) return -1;
+
+    // ── WHY THIS IS NOT `ssh_event_dopoll(_event, ms)` ──
+    // Because that does not wait. libssh RE-ARMS POLLOUT on the session socket after
+    // every single write (ssh_socket_unbuffered_write: "Reactive the POLLOUT detector
+    // in the poll multiplexer system"), and a connected TCP socket is essentially
+    // always writable — so dopoll returns instantly, forever. Measured against a real
+    // sshd: an "event wait" with a 300 ms ceiling returned in under 3 ms every time,
+    // which made the reader loop a 100%-CPU spin AND (because the spin owns the
+    // session's serial queue) delayed every queued write by up to the ceiling
+    // regardless of the wake pipe. libssh's own ssh_channel_select() has the same
+    // problem and works around it by looping dopoll until its deadline; a loop is not
+    // enough here, because spinning is exactly what must not happen.
+    //
+    // So: dopoll is used only for its packet processing (timeout 0), and the WAIT is
+    // an honest poll() on the two things that actually mean something — inbound data
+    // on the session socket, and the wake pipe. POLLOUT is asked for only when libssh
+    // really has output queued, which is what keeps a blocked write from waiting out
+    // the ceiling without reintroducing the spin.
+    if ([self pumpWithoutWaiting] < 0) return -1;
+
+    socket_t sfd = ssh_get_fd(_session);
+    if (sfd < 0) return -1;
+
+    struct pollfd fds[2];
+    nfds_t count = 0;
+    fds[count].fd = sfd;
+    fds[count].events = POLLIN;
+    fds[count].revents = 0;
+    // Only when there is genuinely something to flush: libssh's own re-arming makes
+    // SSH_WRITE_PENDING sticky right after a write, but the pump above has just
+    // dispatched (and therefore cleared) it, so what remains is real.
+    if (ssh_get_poll_flags(_session) & SSH_WRITE_PENDING) {
+        fds[count].events |= POLLOUT;
     }
-    // dopoll processes whatever arrived — which is what fills the per-channel
-    // read buffers the caller then drains with ssh_channel_read_nonblocking.
-    int rc = ssh_event_dopoll(_event, ms);
-    switch (rc) {
-        case SSH_OK:
-            return 1;
-        case SSH_AGAIN:
-            return 0;   // the timeout expired with nothing to do
-        default:
-            // SSH_ERROR. A disconnected session reports it here, and it is the
-            // only signal this loop gets — libssh has no "is the transport up"
-            // predicate. Distinguish a genuinely-closed session from a transient
-            // error so the caller only reconnects when it must.
-            if (ssh_is_connected(_session)) return 0;
-            return -1;
+    count++;
+    if (_wakePipe[0] >= 0) {
+        fds[count].fd = _wakePipe[0];
+        fds[count].events = POLLIN;
+        fds[count].revents = 0;
+        count++;
     }
+
+    int pr;
+    do { pr = poll(fds, count, ms); } while (pr < 0 && errno == EINTR);
+    if (pr < 0) {
+        return ssh_is_connected(_session) ? 0 : -1;
+    }
+    if (count == 2 && (fds[1].revents & POLLIN)) [self drainWakePipe];
+    if (pr == 0) return 0;                  // the ceiling expired with nothing to do
+    if (fds[0].revents == 0) return 1;      // only the wake fired — release the queue
+
+    // Data (or a hang-up) on the session socket: let libssh turn it into packets.
+    // POLLHUP/POLLERR arrive whether or not they were asked for, and the pump is
+    // what notices the resulting EOF.
+    if ([self pumpWithoutWaiting] < 0) return -1;
+    return 1;
 }
 
 - (void)wakeActivityWait {
     // The ONE method here that is safe off the session queue: a single-byte write
     // to a pipe. EAGAIN (pipe already full of pending wakes) is success — the poll
-    // is already going to return.
+    // is already going to return. The lock is held only across that one write, and
+    // exists so the fd cannot be closed and RECYCLED between the read and the write
+    // (see _wakeLock's declaration).
+    os_unfair_lock_lock(&_wakeLock);
     int fd = _wakePipe[1];
-    if (fd < 0) return;
-    const char b = 1;
-    (void)write(fd, &b, 1);
+    if (fd >= 0) {
+        const char b = 1;
+        (void)write(fd, &b, 1);
+    }
+    os_unfair_lock_unlock(&_wakeLock);
 }
 
 - (BOOL)sendKeepalive {
@@ -641,15 +726,19 @@ static NSString *hexTail(NSString *s) {
     if (_hostKey) { ssh_key_free(_hostKey); _hostKey = NULL; }
     // Remove the session from the poll set BEFORE freeing either: ssh_event holds
     // the session's socket, and freeing the session first leaves the event with a
-    // dangling registration.
+    // dangling registration. (The wake pipe is not in the event — it is polled
+    // directly by waitForActivityWithTimeoutMs: — so there is nothing to remove.)
     if (_event) {
-        if (_wakePipe[0] >= 0) ssh_event_remove_fd(_event, _wakePipe[0]);
         if (_session) ssh_event_remove_session(_event, _session);
         ssh_event_free(_event);
         _event = NULL;
     }
     if (_wakePipe[0] >= 0) { close(_wakePipe[0]); _wakePipe[0] = -1; }
+    // Under the lock: a wake in flight on another thread must either write to the
+    // live fd or see -1 — never to a number that has already been recycled.
+    os_unfair_lock_lock(&_wakeLock);
     if (_wakePipe[1] >= 0) { close(_wakePipe[1]); _wakePipe[1] = -1; }
+    os_unfair_lock_unlock(&_wakeLock);
     if (_session) {
         ssh_disconnect(_session);
         ssh_free(_session);

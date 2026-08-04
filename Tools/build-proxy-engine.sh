@@ -62,6 +62,13 @@ go vet ./...
 # The loopback handshake suite (SOCKS5 / CONNECT / DNS-over-TCP / SOCKS-UDP
 # framing) — no network, no real proxy. A wire-format regression fails HERE.
 go test ./...
+# The flow-dial C boundary (the SSH Network Tunnel's per-flow descriptor handoff)
+# needs a real PXFlowDialCallback function pointer, and the go command refuses cgo
+# in _test.go files — so the callback lives in flowdial_cgotest.go behind the
+# `pxcgotest` tag and gets its own pass. Tagged rather than always-on so no test
+# scaffolding can reach the shipped c-archive; run here so it cannot rot unnoticed.
+go vet -tags pxcgotest ./...
+go test -tags pxcgotest ./...
 
 # c-archive: Go runtime + gVisor netstack + the proxy dialers + the shim in one
 # .a, built from the thin carchive/ main that blank-imports pxengine. No cgo
