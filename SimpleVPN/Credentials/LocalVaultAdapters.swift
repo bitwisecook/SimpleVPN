@@ -26,14 +26,17 @@
 //  the unlock in its own process — is the channel that works without SimpleVPN ever
 //  handling a vault key.
 //
-//  Not built, but each is a small additive adapter when it is wanted:
+//  ALSO BUILT ELSEWHERE: Dashlane — see DashlaneProvider.swift. Its one channel is
+//  `dcli`, and the design question that file exists to answer is where `dcli` sends
+//  what it reads: by default, to the pasteboard. It is asked for `--output json`
+//  instead, which both keeps the password off the clipboard and avoids the
+//  interactive picker `--output console` runs into when a filter matches twice.
+//
+//  Not built, but a small additive adapter when it is wanted:
 //   • LastPass — `lpass` CLI. `lpass status` for liveness, `lpass show --json
 //     <name>`; `lpass login` is interactive, so it is the "needs a one-time
-//     sign-in" state.
-//   • Dashlane — `dcli` CLI. `dcli sync` / `dcli password <filter> --output
-//     console`; device registration is the one-time step.
-//  Both would be `.blocked(.notSignedIn)` until their CLI has a session, exactly
-//  like Keeper.
+//     sign-in" state. It would be `.blocked(.notSignedIn)` until its CLI has a
+//     session, exactly like Keeper.
 //
 
 import Foundation
@@ -250,6 +253,10 @@ enum LocalVaultRegistry {
         // one vendor is one file plus this one line, so several vendors landing at
         // once do not collide in the same switch.
         BitwardenVaultAdapter(),
+        // Dashlane's adapter lives in DashlaneProvider.swift, for the same reason
+        // Bitwarden's lives with its channels: one vendor is one file plus this one
+        // line.
+        DashlaneVaultAdapter(),
         // The `.file` transport — one adapter for KeePassXC-as-a-file, Strongbox and
         // KeePassium, because all three store the same `.kdbx`. LAST on purpose: a
         // running app that owns its own unlock (the KeePassXC row above) is a better

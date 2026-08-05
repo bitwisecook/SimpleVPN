@@ -346,6 +346,8 @@
   <a href="#creds-bitwarden-enabled">Use Bitwarden</a>
   <a href="#creds-bitwarden-tool-path">Bitwarden CLI Location</a>
   <a href="#creds-bitwarden-daemon-endpoint">Bitwarden Local Service Address</a>
+  <a href="#creds-dashlane-enabled">Use Dashlane</a>
+  <a href="#creds-dashlane-tool-path">Dashlane CLI Location</a>
   <a href="#creds-keepassfile-enabled">Use a KeePass Database File</a>
   <a href="#creds-keepassfile-databases">Your KeePass Databases</a>
   <a href="#creds-keepassfile-database">KeePass Database File</a>
@@ -1573,6 +1575,24 @@ the device's protection intact at the cost of typing four to eight digits per co
 <p>Where Bitwarden&rsquo;s local service is listening, as an address and a port. Set it only if you start the service on a different port (<code>bw serve --port 9000</code>).</p>
 <p><strong>It must be an address on this Mac.</strong> SimpleVPN refuses anything else and says so, rather than using it: the service asks nothing of whoever connects to it, so a request sent across a network would be a request for your password sent to whatever happened to answer. <code>127.0.0.1</code> and <code>localhost</code> are accepted; a machine on your network is not, even if it really is running <code>bw serve</code>.</p>
 <p>If nothing is listening there, SimpleVPN falls back to Bitwarden&rsquo;s command-line tool &mdash; which can tell you whether you are signed in and whether your vault is locked, but cannot read an item without the key from your unlock.</p>
+
+<h2 id="creds-dashlane-enabled">Use Dashlane</h2>
+<p class="default">Default: on.</p>
+<p>Offers Dashlane as a way to sign in. SimpleVPN reads one entry using <code>dcli</code>, Dashlane&rsquo;s own command-line tool &mdash; the Dashlane app on its own has nothing SimpleVPN can talk to, and there is no other local way in.</p>
+<p><strong>Your password is printed to SimpleVPN, never copied to your clipboard.</strong> This is worth knowing because it is the opposite of what that tool does by default: run <code>dcli p</code> yourself and it puts the password on the pasteboard, where every program on this Mac can read it. SimpleVPN asks for <code>--output json</code> instead, which prints the entry straight to SimpleVPN and never touches the pasteboard at all. Nothing is left behind for anything else to pick up.</p>
+<p><strong>Dashlane does the unlocking, not SimpleVPN.</strong> Your Dashlane password goes to Dashlane&rsquo;s own tool, which keeps the key it needs in this Mac&rsquo;s keychain where macOS protects it. SimpleVPN never sees your Dashlane password and never changes Dashlane&rsquo;s own setup.</p>
+<p><strong>One-time setup, in Terminal.</strong> Run <code>dcli sync</code>. Dashlane asks for your email address, then for a token &mdash; by email, or from your authenticator app if you use one &mdash; and then for your Dashlane password. That registers this Mac with your Dashlane account once. After that, connecting needs nothing typed.</p>
+<p><strong>If you would rather be asked for a fingerprint,</strong> run <code>dcli configure user-presence --method biometrics</code>. Dashlane then asks for Touch ID itself, in its own words, before it hands anything over &mdash; SimpleVPN only waits for the answer. Turn it off again with <code>--method none</code>.</p>
+<p><strong>Two things that can surprise you.</strong> Dashlane refreshes its own copy of your vault about once an hour, so a connect now and then takes a moment longer and needs the internet; <code>dcli configure disable-auto-sync true</code> stops that, and you then run <code>dcli sync</code> when you want fresh data. And if you have turned off <code>dcli configure save-master-password</code>, Dashlane asks for your password every single time &mdash; which SimpleVPN cannot answer, so it will say Dashlane is locked instead of guessing.</p>
+<p>Verification codes: SimpleVPN works one out from the entry when the entry carries one, but it does not promise to &mdash; you may still be asked to type a code. That promise has never been watched working against a real Dashlane vault, and SimpleVPN does not make promises it hasn&rsquo;t seen kept.</p>
+<p>Off means SimpleVPN neither offers Dashlane nor mentions it, even if it is installed.</p>
+
+<h2 id="creds-dashlane-tool-path">Dashlane CLI Location</h2>
+<p class="default">Optional. Empty means SimpleVPN uses the one it found.</p>
+<p>Where <code>dcli</code> is on this Mac. Leave it empty and SimpleVPN uses whichever copy it found in a folder it will run from. Set it when your copy is somewhere else.</p>
+<p>Dashlane documents three ways to install it, and they land in different places. <code>brew install dashlane/tap/dashlane-cli</code> puts it somewhere SimpleVPN already looks. The standalone download is moved to <code>/usr/local/bin/dcli</code> by Dashlane&rsquo;s own instructions, which SimpleVPN also looks in. Installing it with Yarn puts it wherever Yarn&rsquo;s global folder is &mdash; SimpleVPN will find it there and tell you where it is, but will not run it until you name it here.</p>
+<p>This field follows the same rules as the other tool paths: a complete path starting with a slash, and never a program in a folder everyone using this Mac can write to &mdash; that one is refused even if you ask for it by name, because in such a folder anyone could replace the program between you setting the path and SimpleVPN running it.</p>
+
 <h2 id="creds-keepassfile-enabled">Use a KeePass Database File</h2>
 <p class="default">Default: on.</p>
 <p>Offers a KeePass database file as a way to sign in. SimpleVPN opens the <code>.kdbx</code> file you point it at and reads the entry you name. This is the choice for <strong>Strongbox</strong> and <strong>KeePassium</strong> as well as KeePassXC: all three keep their entries in the same kind of database, and none of them has to be running.</p>

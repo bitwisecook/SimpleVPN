@@ -118,12 +118,23 @@ nonisolated extension LocalVaultVendor {
     ///    config revokes sessions). So there is one Commander to talk to.
     ///  • `.bitwarden` — SINGLE. `bw` has one signed-in account and one data
     ///    directory at a time, and `bw serve` is one loopback address (level 1).
+    ///  • `.dashlane` — SINGLE, and this one is settled by reading `dcli` rather than
+    ///    by preference. It keeps ONE SQLite database, at a path with no variable in
+    ///    it (`~/Library/Application Support/dashlane-cli/userdata.db`, built from
+    ///    `HOME` in `src/modules/database/connect.ts`); `dcli status` reads its device
+    ///    row as `SELECT * FROM device LIMIT 1`; the local key is one OS-keychain
+    ///    entry under the service name `dashlane-cli`; and no command in
+    ///    `src/commands` takes a `--config`, `--profile` or `--account` option. So
+    ///    there is exactly one signed-in Dashlane account to talk to on this Mac —
+    ///    the same shape as `bw`. Forcing an instance list on it would produce a page
+    ///    of rows with nothing in them, and Dashlane's own spaces (personal versus a
+    ///    business space) are addressed inside the vault, i.e. at level 3.
     ///  • `.keePassFile` — MULTIPLE, and it is the case that named the problem: a
     ///    `.kdbx` is a FILE, with its own key file and its own security-key slot,
     ///    and "work" and "personal" databases are entirely ordinary.
     var cardinality: SourceCardinality {
         switch self {
-        case .onePassword, .keePassXC, .keeper, .bitwarden: .single
+        case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane: .single
         // MULTIPLE, for the same reason as a .kdbx and then some: PASSWORD_STORE_DIR
         // exists precisely so one person can keep several stores, and "work" and
         // "personal" stores are entirely ordinary. Each also carries its own username
@@ -139,7 +150,7 @@ nonisolated extension LocalVaultVendor {
         switch self {
         case .keePassFile: "database"
         case .passwordStore: "store"
-        case .onePassword, .keePassXC, .keeper, .bitwarden: "vault"
+        case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane: "vault"
         }
     }
 
@@ -147,7 +158,7 @@ nonisolated extension LocalVaultVendor {
         switch self {
         case .keePassFile: "databases"
         case .passwordStore: "stores"
-        case .onePassword, .keePassXC, .keeper, .bitwarden: "vaults"
+        case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane: "vaults"
         }
     }
 
@@ -923,6 +934,13 @@ nonisolated enum SignInSourceSteps {
             // filesystem rather than from groups, and worth saying so once.
             "An entry\u{2019}s name is its path inside the store, without the .gpg "
             + "\u{2014} for example vpn/work."
+        case .dashlane:
+            // Names the two shapes Dashlane's own filters take, because "any entry
+            // whose address or title matches" is a genuinely different rule from the
+            // exact-name matching every other vendor here uses, and someone who does
+            // not know that will wonder why two entries matched.
+            "Dashlane matches an entry\u{2019}s address or its title \u{2014} for example "
+            + "vpn.example.com, or title=My VPN to be exact."
         case .onePassword, .keePassXC, .keeper, .bitwarden:
             "Which entry SimpleVPN reads this VPN\u{2019}s sign-in from."
         }

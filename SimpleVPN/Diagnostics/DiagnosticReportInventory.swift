@@ -129,6 +129,10 @@ nonisolated enum DiagnosticReportInventory {
         case .keePassXC: ["org.keepassxc.keepassxc"]
         case .keeper: PasswordAppCatalog.entry(forBundleID: "com.callpod.KeeperDesktop")?.bundleIDs ?? []
         case .bitwarden: PasswordAppCatalog.entry(forBundleID: "com.bitwarden.desktop")?.bundleIDs ?? ["com.bitwarden.desktop"]
+        // The Dashlane app is not a read path (`dcli` is), but whether it is installed
+        // is exactly the kind of fact that explains a report: someone with the app and
+        // no tool sees a different row from someone with neither.
+        case .dashlane: PasswordAppCatalog.entry(forBundleID: "com.dashlane.Dashlane")?.bundleIDs ?? ["com.dashlane.Dashlane"]
         // A .kdbx file is not owned by one app: KeePassXC, Strongbox and
         // KeePassium all read the same format, and the source works with none of
         // them installed. So report every app that could be managing it — which

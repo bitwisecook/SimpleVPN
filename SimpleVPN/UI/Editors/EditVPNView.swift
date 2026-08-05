@@ -143,6 +143,9 @@ struct EditVPNView: View {
     /// UNLOCKED vault, which is the only state a fetch works in. Same optimistic
     /// start, same reason.
     @State private var bitwardenAvailable = true
+    /// Whether Dashlane can serve right now — `dcli` signed in AND unlocked, which
+    /// is the only state a fetch works in. Same optimistic start, same reason.
+    @State private var dashlaneAvailable = true
 
     // 1Password browsing (vault/item pickers). Every list is fetched ONLY on an
     // explicit click: the first one can raise 1Password's authorization prompt,
@@ -273,6 +276,12 @@ struct EditVPNView: View {
                 // spawns nothing unless there is a tool we may run.
                 if SignInSourceSettingsStore.shared.isEnabled(.bitwarden) {
                     bitwardenAvailable = await BitwardenLocalChannel().state() == .unlocked
+                }
+                // Dashlane: same rule, same reason, and the same "not asked when it is
+                // switched off". `dcli status` prompts nothing, syncs nothing and
+                // spawns nothing unless there is a tool we may run.
+                if SignInSourceSettingsStore.shared.isEnabled(.dashlane) {
+                    dashlaneAvailable = await DashlaneCLIClient().state() == .unlocked
                 }
                 // Prompt-free, so this much can be said without anyone asking:
                 // no 1Password on this Mac is a setup state, not a failure.
@@ -777,6 +786,26 @@ struct EditVPNView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Text("SimpleVPN reads just this item using Bitwarden\u{2019}s own command-line tool, and reads only its username and password. It works best with Bitwarden\u{2019}s local service running (\u{201C}bw serve\u{201D}): the unlock stays in Bitwarden\u{2019}s own program, and SimpleVPN never sees your master password or the key that unlocks your vault. While that service is running, any program on this Mac can read your items \u{2014} stop it when you are done. If a verification code is required, type it below.")
+                    .font(.callout).foregroundStyle(.secondary)
+                sourceTestRow
+            case .dashlane:
+                // Dashlane matches an entry by its ADDRESS or its TITLE, and it also
+                // accepts its own `<param>=<value>` form for an exact match — so the
+                // prompt is an address and the help sentence names the exact form,
+                // rather than pretending there is only one way to say it.
+                TextField("Entry address or title", text: $sourceReference,
+                          prompt: Text(verbatim: evaluation?.remoteHost ?? "vpn.example.com"))
+                    .autocorrectionDisabled()
+                TextField("Username (optional \u{2014} only needed if several entries match)",
+                          text: $sourceAccount)
+                    .autocorrectionDisabled()
+                if !dashlaneAvailable {
+                    Label("Dashlane isn\u{2019}t unlocked for SimpleVPN. In Terminal, run \u{201C}dcli sync\u{201D} and answer Dashlane\u{2019}s questions \u{2014} the first time it registers this Mac, and after that it just asks for your Dashlane password.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text("SimpleVPN reads just this entry with Dashlane\u{2019}s own command-line tool, and asks it to PRINT the entry rather than copy it \u{2014} so your password never sits on the clipboard, which is what that tool does by default. Dashlane does the unlocking and keeps what it needs in this Mac\u{2019}s keychain; SimpleVPN never sees your Dashlane password. For an exact match use Dashlane\u{2019}s own form, like \u{201C}title=GR Lab VPN\u{201D}. If a verification code is required, type it below.")
                     .font(.callout).foregroundStyle(.secondary)
                 sourceTestRow
             case .passwordStore:

@@ -472,6 +472,9 @@ struct SignInChooserPopover: View {
         case .keePassFile: "VPN/Work"
         // A path inside the store, lower-case by habit and without the `.gpg`.
         case .passwordStore: "vpn/work"
+        // An address, because that is what Dashlane matches first and what a VPN's
+        // entry almost always carries.
+        case .dashlane: "vpn.example.com"
         case .onePassword, .keePassXC, .keeper, .bitwarden: "GR Lab VPN"
         }
     }

@@ -63,6 +63,7 @@ nonisolated extension LocalVaultVendor {
         case .keePassXC: "keepassxc"
         case .keeper: "keeper"
         case .bitwarden: "bitwarden"
+        case .dashlane: "dashlane"
         // Named for the FORMAT, not for a brand — see `LocalVaultVendor
         // .keePassFile`. Fixed forever: it is the MDM, CLI and manual-anchor
         // contract, and it must not become "strongbox" the day Strongbox is
@@ -301,6 +302,26 @@ nonisolated enum SignInSourceSettings {
                 // what SimpleVPN falls back to when the field is empty.
                 example: LoopbackEndpoint.bitwardenDefault.settingValue,
                 emptyMeansDefault: LoopbackEndpoint.bitwardenDefault.settingValue)]
+        case .dashlane:
+            // ONE row, and only one, because Dashlane has exactly one thing that can
+            // be got wrong on this Mac: where `dcli` is. Everything else about
+            // reaching Dashlane — which account, whether the master password is kept
+            // in the keychain, whether a fingerprint is required, whether the vault
+            // auto-syncs — is `dcli`'s OWN configuration, set with `dcli configure`
+            // and stored in Dashlane's own database. Mirroring any of it here would
+            // create a second place for the same fact to live, and the two would fall
+            // out of step the first time somebody used Terminal.
+            //
+            // TRANSPORT LEVEL (level 1), and correctly so: it says how we reach the
+            // vendor at all, not which vault we read. Dashlane has one vault per
+            // signed-in Mac, so there is no level-2 field to declare.
+            [VendorConfigField(
+                settingID: "creds.dashlane.tool-path",
+                vendor: .dashlane,
+                ownerTitle: LocalVaultVendor.dashlane.displayTitle,
+                kind: .toolBinary(tool: "dcli"),
+                defaultsKey: toolPathKey("dcli"),
+                example: "/opt/homebrew/bin/dcli")]
         case .keePassFile:
             // Three rows, in the order somebody sets them up: the database, then
             // the two things that some databases additionally need. No tool-path row

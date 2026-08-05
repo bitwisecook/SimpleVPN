@@ -24,6 +24,10 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
     /// unlock so SimpleVPN never handles the key that unlocks the vault. Covers
     /// self-hosted Bitwarden and Vaultwarden identically. See BitwardenProvider.
     case bitwarden
+    /// Dashlane, reached through `dcli` — Dashlane's own command-line tool, asked to
+    /// PRINT the entry (`--output json`) rather than to copy it to the pasteboard,
+    /// which is what it does by default. See DashlaneProvider.
+    case dashlane
     /// A KeePass `.kdbx` FILE, read directly — no vendor app involved, which is why
     /// one case serves KeePassXC-as-a-file, Strongbox and KeePassium alike. See
     /// KeePassFileProvider. Distinct from `.keePassXC`, which is the running app's
@@ -44,6 +48,7 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
         case .keePassXC: "KeePassXC"
         case .keeper: "Keeper"
         case .bitwarden: "Bitwarden"
+        case .dashlane: "Dashlane"
         case .keePassFile: "KeePass database file"
         case .passwordStore: "pass / gopass"
         }
@@ -56,6 +61,7 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
         case .keePassXC: "key.horizontal.fill"
         case .keeper: "key.viewfinder"
         case .bitwarden: "shield.lefthalf.filled"
+        case .dashlane: "key.radiowaves.forward"
         case .keePassFile: "doc.badge.gearshape"
         case .passwordStore: "terminal.fill"
         }
@@ -94,7 +100,16 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
         // would turn every ordinary entry's fetch into a failed sign-in. This flag
         // is a PROMISE — true means "Connect works with nothing typed" — so it
         // stays false and the code is typed. See KeePassFileProvider's header.
-        case .manual, .applePasswords, .keeper, .bitwarden, .keePassFile, .passwordStore: false
+        // `.dashlane` is deliberately `false`, and again NOT because it cannot: an
+        // entry's `otpSecret` / `otpUrl` arrives in the same JSON as its password, and
+        // the code is computed locally from it when it is there. But this flag is a
+        // PROMISE — true means "Connect works with nothing typed" — and no real
+        // Dashlane vault has ever answered from this machine. There is a second reason
+        // too: whether a given entry carries a seed at all is unknowable until the
+        // fetch has already happened, so "Dashlane supplies codes" would be a claim
+        // about the user's data rather than about Dashlane.
+        case .manual, .applePasswords, .keeper, .bitwarden, .dashlane,
+             .keePassFile, .passwordStore: false
         case .onePassword, .keePassXC: true
         }
     }
