@@ -19,18 +19,21 @@
 //  connect path and the copy all go through this seam, and adding a vendor is:
 //  one adapter here, one `LocalVaultCopy` entry, one `CredentialSourceKind` case.
 //
+//  BUILT ELSEWHERE: Bitwarden — see BitwardenProvider.swift, which carries its
+//  adapter as well as its channels (its local `bw serve` service first, then the
+//  `bw` CLI). The session key turned out to be the whole design rather than a
+//  detail: the CLI cannot read anything without one, so the service — which holds
+//  the unlock in its own process — is the channel that works without SimpleVPN ever
+//  handling a vault key.
+//
 //  Not built, but each is a small additive adapter when it is wanted:
-//   • Bitwarden — `bw` CLI. Needs `bw status` for session liveness, a
-//     BW_SESSION key (Bitwarden's own unlock model: `bw unlock --raw` prints one)
-//     which we must NOT persist, and `bw get item <id> --session …`. The session
-//     key is the hard part, not the fetch.
 //   • LastPass — `lpass` CLI. `lpass status` for liveness, `lpass show --json
 //     <name>`; `lpass login` is interactive, so it is the "needs a one-time
 //     sign-in" state.
 //   • Dashlane — `dcli` CLI. `dcli sync` / `dcli password <filter> --output
 //     console`; device registration is the one-time step.
-//  All three would be `.blocked(.notSignedIn)` until their CLI has a session,
-//  exactly like Keeper.
+//  Both would be `.blocked(.notSignedIn)` until their CLI has a session, exactly
+//  like Keeper.
 //
 
 import Foundation
@@ -229,6 +232,10 @@ enum LocalVaultRegistry {
         OnePasswordVaultAdapter(),
         KeePassXCVaultAdapter(),
         KeeperVaultAdapter(),
+        // Bitwarden's adapter lives in BitwardenProvider.swift with its channels:
+        // one vendor is one file plus this one line, so several vendors landing at
+        // once do not collide in the same switch.
+        BitwardenVaultAdapter(),
     ]
 
     static func adapter(for vendor: LocalVaultVendor) -> (any LocalVaultAdapter)? {

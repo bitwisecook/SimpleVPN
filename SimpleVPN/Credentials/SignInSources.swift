@@ -55,6 +55,7 @@ nonisolated enum LocalVaultVendor: String, CaseIterable, Sendable, Hashable {
     case onePassword
     case keePassXC
     case keeper
+    case bitwarden
 }
 
 /// HOW a vendor is reached. Deliberately separate from the vendor, and named in
@@ -104,6 +105,13 @@ nonisolated enum LocalVaultBlock: String, Sendable, Equatable {
     case toolMissing
     /// The tool is here but nobody has signed in to it (no live session).
     case notSignedIn
+    /// SIGNED IN, BUT LOCKED. Deliberately not folded into `notSignedIn`: the fix is
+    /// a different command and the sentence is a different sentence, and telling
+    /// someone who is signed in that they are not is how a person concludes the app
+    /// cannot see their vault at all. Bitwarden is the case that names it — its
+    /// command-line tool reports `locked` for a signed-in user whenever the caller
+    /// holds no session key, which SimpleVPN deliberately never keeps.
+    case vaultLocked
     /// THE TOOL IS INSTALLED — we can see it — but not in a location SimpleVPN
     /// will execute from, and the user hasn't pointed at it explicitly.
     ///
@@ -125,7 +133,7 @@ nonisolated enum LocalVaultBlock: String, Sendable, Equatable {
     /// (not a setup problem) or "it's too old" (an update, not an enablement).
     var wantsEnablementBanner: Bool {
         self == .toolMissing || self == .integrationOff || self == .notSignedIn
-            || self == .toolOutsideAllowList
+            || self == .toolOutsideAllowList || self == .vaultLocked
     }
 }
 
@@ -201,9 +209,15 @@ nonisolated enum VendorDocs {
     // KeePassXC.
     static let keePassXC = page("KeePassXC documentation", "https://keepassxc.org/docs/")
 
+    // Bitwarden. The CLI page is the authority for installing `bw`, signing in,
+    // unlocking and `bw serve`; the Vault Management API page is what documents the
+    // local service's own requests. Both measured at a bare 200, no redirect.
+    static let bitwardenCLI = page("Bitwarden CLI", "https://bitwarden.com/help/cli/")
+    static let bitwardenVaultAPI = page("Bitwarden Vault Management API",
+                                        "https://bitwarden.com/help/vault-management-api/")
+
     // Vendors on the seam but not yet implemented — listed here so the next
     // adapter's author has the same auditable table rather than a fresh guess.
-    static let bitwardenCLI = page("Bitwarden CLI", "https://bitwarden.com/help/cli/")
     static let dashlaneCLI = page("Dashlane CLI", "https://cli.dashlane.com/")
     static let protonPassCLI = page("Proton Pass CLI", "https://protonpass.github.io/pass-cli/")
     static let passboltCLI = page("Passbolt CLI", "https://github.com/passbolt/go-passbolt-cli")
@@ -218,7 +232,8 @@ nonisolated enum VendorDocs {
         onePasswordSDKs, onePasswordCLIIntegration,
         keeperCommander, keeperCommanderLogin, keeperServiceMode,
         keePassXC,
-        bitwardenCLI, dashlaneCLI, protonPassCLI, passboltCLI,
+        bitwardenCLI, bitwardenVaultAPI,
+        dashlaneCLI, protonPassCLI, passboltCLI,
         passwordStore, gopass, lastPassCLI, hashiCorpVaultCLI,
     ]
 }
@@ -357,6 +372,7 @@ nonisolated enum LocalVaultCopyBook {
         case .onePassword: onePassword
         case .keePassXC: keePassXC
         case .keeper: keeper
+        case .bitwarden: bitwarden
         }
     }
 
@@ -473,6 +489,87 @@ nonisolated enum LocalVaultCopyBook {
                 doc: VendorDocs.keeperCommanderLogin),
         ],
         uncheckedNote: "SimpleVPN checks Keeper Commander when you pick this.")
+
+    /// Bitwarden is reached through Bitwarden's own command-line tool — and
+    /// preferably through the LOCAL SERVICE that tool can start (`bw serve`), for a
+    /// reason worth stating in the copy as well as in the code: the service holds
+    /// the unlock, so SimpleVPN reads one item without ever handling the key that
+    /// unlocks the vault. The command-line tool on its own cannot read anything
+    /// without that key, and SimpleVPN never keeps one.
+    ///
+    /// Nothing here names bitwarden.com: a self-hosted Bitwarden and a Vaultwarden
+    /// server work exactly the same way through the same tool.
+    static let bitwarden = LocalVaultCopy(
+        title: "Bitwarden",
+        summary: "SimpleVPN asks Bitwarden for this VPN\u{2019}s sign-in when you connect.",
+        explanation: "SimpleVPN reads one item from Bitwarden using Bitwarden\u{2019}s own "
+            + "command-line tool. It works best with Bitwarden\u{2019}s local service running (you "
+            + "unlock your vault once in Terminal and leave \u{201C}bw serve\u{201D} going): the "
+            + "unlock stays in Bitwarden\u{2019}s own program, and SimpleVPN never sees your master "
+            + "password or the key that unlocks your vault. Worth knowing: while that service is "
+            + "running it asks nothing of whoever connects to it, so any program on this Mac can "
+            + "read your items \u{2014} stop it when you are done. Your own server works the same "
+            + "way as Bitwarden\u{2019}s. If a verification code is required, you type that one "
+            + "yourself.",
+        symbol: "shield.lefthalf.filled",
+        storedKind: .bitwarden,
+        primaryDoc: VendorDocs.bitwardenCLI,
+        homebrewInstallCommand: "brew install bitwarden-cli",
+        blocks: [
+            .toolMissing: ("Bitwarden\u{2019}s command-line tool isn\u{2019}t installed on this Mac", []),
+            .notSignedIn: ("Bitwarden isn\u{2019}t signed in on this Mac", []),
+            .vaultLocked: ("Bitwarden is signed in, but locked", []),
+            // Deliberately NOT "isn't installed": it demonstrably is, and we can
+            // see where. Saying otherwise sends someone to install a second copy.
+            .toolOutsideAllowList: (
+                "Bitwarden\u{2019}s command-line tool is installed, but not somewhere SimpleVPN "
+                + "will run it from", []),
+        ],
+        guidance: [
+            // SimpleVPN never installs anything: the commands are shown, and the
+            // user runs them. Latest release only — Bitwarden's own page carries
+            // the rest.
+            .toolMissing: EnablementGuidance(
+                benefit: "Install Bitwarden\u{2019}s own command-line tool and SimpleVPN can get "
+                    + "this VPN\u{2019}s sign-in straight from Bitwarden when you connect.",
+                example: [
+                    .init(text: "brew install bitwarden-cli",
+                          caption: "Install Bitwarden\u{2019}s command-line tool "
+                              + "(SimpleVPN never installs it for you)"),
+                    .init(text: "bw login",
+                          caption: "Sign in to Bitwarden once, in Terminal"),
+                    .init(text: "export BW_SESSION=$(bw unlock --raw) && bw serve",
+                          caption: "Unlock it and leave Bitwarden\u{2019}s local service running "
+                              + "\u{2014} the key stays in your Terminal, never in SimpleVPN"),
+                ],
+                doc: VendorDocs.bitwardenCLI),
+            .notSignedIn: EnablementGuidance(
+                benefit: "Sign in to Bitwarden once, leave its local service running, and SimpleVPN "
+                    + "can get this VPN\u{2019}s sign-in from Bitwarden when you connect.",
+                example: [
+                    .init(text: "bw login", caption: "Sign in to Bitwarden once, in Terminal"),
+                    .init(text: "export BW_SESSION=$(bw unlock --raw)",
+                          caption: "Unlock your vault \u{2014} the key stays in your Terminal"),
+                    .init(text: "bw serve",
+                          caption: "Start Bitwarden\u{2019}s own local service, which SimpleVPN "
+                              + "reads your item from"),
+                ],
+                doc: VendorDocs.bitwardenCLI),
+            .vaultLocked: EnablementGuidance(
+                benefit: "Unlock your vault and leave Bitwarden\u{2019}s local service running, and "
+                    + "SimpleVPN can get this VPN\u{2019}s sign-in from Bitwarden with nothing to "
+                    + "type. Bitwarden asks for your master password, not SimpleVPN, and the key it "
+                    + "gives back stays in your Terminal.",
+                example: [
+                    .init(text: "export BW_SESSION=$(bw unlock --raw)",
+                          caption: "Unlock your vault in Terminal"),
+                    .init(text: "bw serve",
+                          caption: "Start Bitwarden\u{2019}s own local service, which holds the "
+                              + "unlock so SimpleVPN never needs the key"),
+                ],
+                doc: VendorDocs.bitwardenVaultAPI),
+        ],
+        uncheckedNote: "SimpleVPN checks Bitwarden when you pick this.")
 }
 
 // MARK: - Identity
@@ -688,6 +785,8 @@ nonisolated enum PasswordAppCatalog {
     /// Alphabetical: this is a "where to look" list, and ranking it would be
     /// claiming something about apps we can't even read.
     static let entries: [Entry] = [
+        // Bitwarden's own CLI (and the local service it starts) IS built — see
+        // `gatedVendor`. This entry only matters when neither is installed.
         .init(name: "Bitwarden", bundleIDs: ["com.bitwarden.desktop"], prefixes: ["com.bitwarden."],
               localReadPath: .officialCLI("bw")),
         .init(name: "Dashlane", bundleIDs: ["com.dashlane.Dashlane", "com.dashlane.dashlanephonefinal"],
@@ -737,7 +836,15 @@ nonisolated enum PasswordAppCatalog {
     /// Commander turns it into a real source, and saying so is the single most
     /// useful thing this row can do.
     static func gatedVendor(forBundleID id: String) -> LocalVaultVendor? {
-        name(forBundleID: id) == "Keeper" ? .keeper : nil
+        switch name(forBundleID: id) {
+        case "Keeper": .keeper
+        // Bitwarden is the same shape: the desktop app has nothing SimpleVPN can
+        // talk to, and `bw` (with the local service it starts) is what turns the app
+        // into a real source. So the app alone points at the way in rather than
+        // appearing as a second, dead row.
+        case "Bitwarden": .bitwarden
+        default: nil
+        }
     }
 
     static func isIntegratedApp(bundleID: String) -> Bool {
@@ -1102,6 +1209,12 @@ nonisolated enum SignInFlow {
             "KeePassXC isn\u{2019}t running (or its browser integration is off), so SimpleVPN can\u{2019}t get your sign-in from it."
         case .keeper:
             "Keeper Commander isn\u{2019}t available or isn\u{2019}t signed in, so SimpleVPN can\u{2019}t get your sign-in from Keeper."
+        case .bitwarden:
+            // Never "Bitwarden isn't available": the app may be right there. What is
+            // missing is an unlocked vault SimpleVPN may read, and the fix is the
+            // local service.
+            "Bitwarden isn\u{2019}t unlocked for SimpleVPN, so it can\u{2019}t get your sign-in "
+            + "from it. Run \u{201C}bw unlock\u{201D} and then \u{201C}bw serve\u{201D} in Terminal."
         case .applePasswords:
             // Not "Apple Passwords is unavailable" — it isn't, and SimpleVPN was never
             // reading it. What is missing is the server to match, and the way that

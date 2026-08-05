@@ -343,6 +343,9 @@
   <a href="#creds-keepassxc-socket">KeePassXC Connection Point</a>
   <a href="#creds-keeper-enabled">Use Keeper</a>
   <a href="#creds-keeper-tool-path">Keeper Commander Location</a>
+  <a href="#creds-bitwarden-enabled">Use Bitwarden</a>
+  <a href="#creds-bitwarden-tool-path">Bitwarden CLI Location</a>
+  <a href="#creds-bitwarden-daemon-endpoint">Bitwarden Local Service Address</a>
   <a href="#creds-ykman-tool-path">YubiKey Manager Location</a>
 </nav>
 
@@ -1537,6 +1540,26 @@ the device's protection intact at the cost of typing four to eight digits per co
 <p>Where Keeper Commander is on this Mac. Leave it empty and SimpleVPN uses whichever copy it found in a folder it will run from. Set it when your copy is somewhere else &mdash; a virtual environment, a version manager, or anywhere reached only through your shell&rsquo;s search path. That is what this field is for, and using it is not a workaround: an explicit path is the sanctioned way to run a tool SimpleVPN would otherwise leave alone.</p>
 <p>Two things it will not accept. A path must be complete, starting with a slash, because a bare name would be resolved by rules SimpleVPN does not control. And a program in a folder that everyone using this Mac can write to is refused even here &mdash; in that folder, anyone could replace the program between you setting the path and SimpleVPN running it.</p>
 <p>Keeper&rsquo;s own guide installs Commander with <code>pip3 install --user keepercommander</code> or into a virtual environment; Homebrew&rsquo;s <code>brew install keeper-commander</code> puts it somewhere SimpleVPN already looks.</p>
+
+<h2 id="creds-bitwarden-enabled">Use Bitwarden</h2>
+<p class="default">Default: on.</p>
+<p>Offers Bitwarden as a way to sign in. SimpleVPN reads one item using <code>bw</code>, Bitwarden&rsquo;s own command-line tool &mdash; the Bitwarden app on its own has nothing SimpleVPN can talk to. Your own self-hosted Bitwarden, and Vaultwarden, work exactly the same way.</p>
+<p><strong>The way that works best is Bitwarden&rsquo;s local service.</strong> You unlock your vault once in Terminal and leave <code>bw serve</code> running; the unlock stays inside Bitwarden&rsquo;s own program, and SimpleVPN reads your item from it over a connection that never leaves this Mac. SimpleVPN never sees your master password, and never sees the key that unlocks your vault.</p>
+<p>That is not merely tidier &mdash; it is the only way this works without something holding that key. Bitwarden&rsquo;s command-line tool cannot read your vault at all unless it is given the key from your unlock (Bitwarden calls it <code>BW_SESSION</code>), and SimpleVPN deliberately never keeps one: it is a live key to everything in your vault, so keeping it would be worse than asking. That is also why the tool reports your vault as locked to SimpleVPN even while your own Terminal has it unlocked &mdash; that unlock belongs to your Terminal, not to us.</p>
+<p><strong>One thing to know about the local service.</strong> While it is running it asks nothing of whoever connects to it, so any program on this Mac can read your items from it. That is Bitwarden&rsquo;s design. Stop it when you have finished, and prefer to start it when you need it.</p>
+<p>Off means SimpleVPN neither offers Bitwarden nor mentions it, even if it is installed.</p>
+
+<h2 id="creds-bitwarden-tool-path">Bitwarden CLI Location</h2>
+<p class="default">Optional. Empty means SimpleVPN uses the one it found.</p>
+<p>Where <code>bw</code> is on this Mac. Leave it empty and SimpleVPN uses whichever copy it found in a folder it will run from. Set it when your copy is somewhere else &mdash; <code>bw</code> arrives by npm, by Homebrew or as a standalone zip you unpack yourself, so it lands in a great many places, and a version manager (nvm, Bun, Volta, mise) puts it somewhere no fixed list can predict.</p>
+<p>This field follows the same rules as the other tool paths: a complete path starting with a slash, and never a program in a folder everyone using this Mac can write to &mdash; that one is refused even if you ask for it by name.</p>
+<p><code>brew install bitwarden-cli</code> puts it somewhere SimpleVPN already looks. <code>npm install -g @bitwarden/cli</code> puts it wherever npm&rsquo;s global folder is, which SimpleVPN searches for but cannot promise to run from.</p>
+
+<h2 id="creds-bitwarden-daemon-endpoint">Bitwarden Local Service Address</h2>
+<p class="default">Optional. Empty means 127.0.0.1:8087, which is where <code>bw serve</code> listens unless you tell it otherwise.</p>
+<p>Where Bitwarden&rsquo;s local service is listening, as an address and a port. Set it only if you start the service on a different port (<code>bw serve --port 9000</code>).</p>
+<p><strong>It must be an address on this Mac.</strong> SimpleVPN refuses anything else and says so, rather than using it: the service asks nothing of whoever connects to it, so a request sent across a network would be a request for your password sent to whatever happened to answer. <code>127.0.0.1</code> and <code>localhost</code> are accepted; a machine on your network is not, even if it really is running <code>bw serve</code>.</p>
+<p>If nothing is listening there, SimpleVPN falls back to Bitwarden&rsquo;s command-line tool &mdash; which can tell you whether you are signed in and whether your vault is locked, but cannot read an item without the key from your unlock.</p>
 
 <h2 id="creds-ykman-tool-path">YubiKey Manager Location</h2>
 <p class="default">Optional. Empty means SimpleVPN uses the one it found.</p>

@@ -164,6 +164,22 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                 Text("SimpleVPN asks Keeper Commander for just this record. It never changes Commander\u{2019}s own setup.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            case .bitwarden:
+                // Bitwarden names an ITEM: its own ID, or anything its search matches.
+                HStack {
+                    TextField("Bitwarden item name or ID", text: $apServer)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        .onSubmit(saveBitwarden)
+                    Button("Use") { saveBitwarden() }.buttonStyle(.glass)
+                        .disabled(apServer.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                .onAppear {
+                    apServer = source.reference.isEmpty ? profile.name : source.reference
+                }
+                Text("SimpleVPN reads just this item. Leave \u{201C}bw serve\u{201D} running and Bitwarden keeps the unlock \u{2014} SimpleVPN never sees the key that unlocks your vault.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(14)
@@ -356,6 +372,13 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
     private func saveKeeper() {
         var s = source
         s.kind = .keeper
+        s.reference = apServer.trimmingCharacters(in: .whitespaces)
+        Task { try? await vpn.setCredentialSource(s, for: profile.id) }
+    }
+
+    private func saveBitwarden() {
+        var s = source
+        s.kind = .bitwarden
         s.reference = apServer.trimmingCharacters(in: .whitespaces)
         Task { try? await vpn.setCredentialSource(s, for: profile.id) }
     }

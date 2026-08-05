@@ -124,9 +124,12 @@ final class SignInSourceAvailability {
     private static func deepWins(quick: LocalVaultAvailability?, deep: LocalVaultAvailability) -> Bool {
         guard let quick, quick != .notInstalled, deep != .notInstalled else { return false }
         // The cheap pass owns "the app isn't running" / "the socket is gone";
-        // the deep pass owns "too old" and "not signed in".
+        // the deep pass owns "too old", "not signed in" and "signed in but locked"
+        // — the three a file check cannot see. Without `vaultLocked` here, a
+        // Bitwarden row would flip back to "we haven't checked" on the next 2-second
+        // poll and its unlock instructions would blink in and out.
         switch deep {
-        case .blocked(.needsUpdate), .blocked(.notSignedIn), .ready:
+        case .blocked(.needsUpdate), .blocked(.notSignedIn), .blocked(.vaultLocked), .ready:
             return quick != .blocked(.appNotRunning) && quick != .blocked(.integrationOff)
         default:
             return false

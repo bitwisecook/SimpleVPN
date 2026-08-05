@@ -381,12 +381,18 @@ nonisolated enum ToolCatalog {
             name: "op", title: "1Password CLI", vendor: .onePassword,
             vendorInstallerPaths: ["/usr/local/bin/op"]),
 
+        // Bitwarden's own tool. NO vendor installer path is asserted: npm's global
+        // prefix is wherever the user's Node put it (the npm/nvm/Bun/Volta classes
+        // above find those), and Bitwarden's standalone zip documents no destination
+        // at all — "add the executable to your PATH", which is precisely the case
+        // that produces `toolOutsideAllowList`. A guessed path presented as a
+        // documented one would send people looking in the wrong place.
+        DiscoverableTool(name: "bw", title: "Bitwarden CLI", vendor: .bitwarden),
+
         // --- Vendors on the seam, no adapter yet -------------------------
-        // Reported anyway, on purpose: "we don't support Bitwarden" and
-        // "Bitwarden's own tool is right here and an adapter is the only missing
-        // piece" are very different facts, and the second is what a bug report
-        // needs.
-        DiscoverableTool(name: "bw", title: "Bitwarden CLI", vendor: nil),
+        // Reported anyway, on purpose: "we don't support Dashlane" and "Dashlane's
+        // own tool is right here and an adapter is the only missing piece" are very
+        // different facts, and the second is what a bug report needs.
         // Dashlane's manual-install instructions also name /usr/local/bin outright.
         DiscoverableTool(name: "dcli", title: "Dashlane CLI", vendor: nil,
                          vendorInstallerPaths: ["/usr/local/bin/dcli"]),
