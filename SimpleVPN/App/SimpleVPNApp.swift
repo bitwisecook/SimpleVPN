@@ -161,6 +161,26 @@ struct SimpleVPNApp: App {
                         guard let vpn, let evaluator, let text = vpn.ovpnText(id: id) else { return nil }
                         return evaluator.evaluation(for: text)
                     }
+                    // What virtual machines and containers are running, for the
+                    // connect-time "this VPN is about to cut that off" warning
+                    // (`vm.warn-on-connect`). `liveInterfaces()` rather than
+                    // `topology.topology.interfaces`: the monitor only polls while
+                    // something is watching the railroad, and a guest's subnet exists
+                    // only while the guest does, so the answer has to be read now.
+                    // `VirtualizationDiscovery` still owns the scan — the control plane
+                    // never becomes a second one. (The diagnostic report gets the same
+                    // closure from DiagnosticReportHost.)
+                    // `snapshotOffMain`: the scan reads the filesystem and another process
+                    // can stall it — on the main actor it froze the app outright.
+                    vpn.virtualizationSnapshotProvider = {
+                        // The switch is read HERE, per scan, not captured at launch:
+                        // `detectionEnabled` is nonisolated precisely so turning detection
+                        // off takes effect at once rather than at the next relaunch.
+                        await VirtualizationDiscovery.snapshotOffMain(
+                            interfaces: TopologyMonitor.liveInterfaces(),
+                            detectionEnabled: VirtualizationSettings.detectionEnabled,
+                            env: .live())
+                    }
                     // The shared import pipeline (main-window drop/Import, Finder
                     // open) sniffs a config's real kind before assuming OpenVPN;
                     // anything else routes here to the same stores ManageVPNsView's

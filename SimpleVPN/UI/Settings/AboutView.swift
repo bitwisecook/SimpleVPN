@@ -23,7 +23,12 @@ enum Acknowledgements {
     static let components: [AboutComponent] = [
         .init(name: "OpenVPN 3 Core", license: "AGPL-3.0", role: "OpenVPN engine",
               url: "https://github.com/OpenVPN/openvpn3"),
-        .init(name: "OpenConnect (libopenconnect)", license: "LGPL-2.1", role: "Fortinet / F5 / AnyConnect / GlobalProtect / Juniper / Pulse / Array engine",
+        // Both halves, because both are true: the library is statically linked into the
+        // extension, and the `openconnect` PROGRAM is additionally driven as a child
+        // process for the subprocess tunnel kinds (see TunnelCLI). Only the linked half
+        // carries the relink obligation the note below answers.
+        .init(name: "OpenConnect (libopenconnect)", license: "LGPL-2.1",
+              role: "Fortinet / F5 / AnyConnect / GlobalProtect / Juniper / Pulse / Array engine \u{2014} statically linked, and its program also invoked when installed",
               url: "https://www.infradead.org/openconnect/"),
         .init(name: "libssh", license: "LGPL-2.1-or-later", role: "SSH tunnel engine",
               url: "https://www.libssh.org"),
@@ -81,7 +86,11 @@ enum Acknowledgements {
         // feature should be able to find out whose idea it was. The badge names
         // KeePassXC's OWN licence (useful, and true of the project); the role says
         // plainly that none of that code is here.
-        .init(name: "KeePassXC", license: "GPL-3.0",
+        //
+        // That licence is a CHOICE, quoted from their COPYING: "either version 2 or
+        // (at your option) version 3 of the License". The badge read "GPL-3.0", which
+        // silently dropped the option the project gives.
+        .init(name: "KeePassXC", license: "GPL-2.0 or GPL-3.0",
               role: "Browser-integration protocol we implement, and keepassxc-cli invoked to read a .kdbx \u{2014} no KeePassXC code is included",
               url: "https://keepassxc.org"),
         // The rows below are the same courtesy as KeePassXC's, for the same reason:
@@ -98,13 +107,39 @@ enum Acknowledgements {
         .init(name: "Keeper Commander", license: "MIT",
               role: "Invoked to read a Keeper record \u{2014} user-installed, not bundled",
               url: "https://github.com/Keeper-Security/Commander"),
+        // Bitwarden's `bw` — the GPL `oss` build, which is the one Homebrew's
+        // `bitwarden-cli` formula installs (it declares GPL-3.0-only). Bitwarden's
+        // SDK is source-available under the BSL and is NOT what this reads: the
+        // path here is the CLI plus the local API that same CLI serves.
         .init(name: "Bitwarden CLI", license: "GPL-3.0",
               role: "Invoked, and its local API spoken, to read a Bitwarden item \u{2014} user-installed, not bundled",
               url: "https://bitwarden.com/help/cli/"),
+        // Dashlane's `dcli` is the WHOLE of the Dashlane read path — the desktop app
+        // exposes no socket, no daemon and no IPC (see DashlaneProvider).
+        .init(name: "Dashlane CLI (dcli)", license: "Apache-2.0",
+              role: "Invoked to read a Dashlane item \u{2014} user-installed, not bundled",
+              url: "https://github.com/Dashlane/dashlane-cli"),
+        // `lpass`, likewise the only local read path LastPass has. GPL-2.0-or-later
+        // with an OpenSSL exception, per the project's own COPYING (and Homebrew's
+        // `lastpass-cli` formula, which spells it
+        // "GPL-2.0-or-later WITH openvpn-openssl-exception").
+        .init(name: "LastPass CLI (lpass)", license: "GPL-2.0-or-later",
+              role: "Invoked to read a LastPass item \u{2014} user-installed, not bundled",
+              url: "https://github.com/lastpass/lastpass-cli"),
+        // Proton's tool is `pass-cli`, which is NOT the `pass` password store below —
+        // different product, different vault, and the two are credited separately for
+        // the same reason ToolCatalog keeps them as separate entries.
+        .init(name: "Proton Pass CLI (pass-cli)", license: "GPL-3.0",
+              role: "Invoked to read a Proton Pass item \u{2014} user-installed, not bundled",
+              url: "https://github.com/protonpass/pass-cli"),
         .init(name: "yubikey-manager (ykman)", license: "BSD-2-Clause",
               role: "Invoked for OATH codes and slot challenge-response \u{2014} user-installed, not bundled",
               url: "https://github.com/Yubico/yubikey-manager"),
-        .init(name: "GnuTLS p11tool", license: "GPL-3.0",
+        // GnuTLS is dual-licensed BY PART: the library is LGPL-2.1-or-later and the
+        // command-line tools — which is all `p11tool` is — are GPL-3.0-only. Homebrew's
+        // formula says exactly that ("LGPL-2.1-or-later AND GPL-3.0-only"). The badge
+        // names the half we actually run.
+        .init(name: "GnuTLS p11tool", license: "GPL-3.0-only",
               role: "Invoked to list certificates on a smartcard \u{2014} user-installed, not bundled",
               url: "https://gnutls.org"),
         .init(name: "OpenSC", license: "LGPL-2.1-or-later",
@@ -113,16 +148,50 @@ enum Acknowledgements {
         .init(name: "p11-kit", license: "BSD-3-Clause",
               role: "Registry that resolves PKCS#11 modules for OpenConnect \u{2014} system component, not bundled",
               url: "https://p11-glue.github.io/p11-glue/p11-kit.html"),
-        // Two more of the same courtesy, both INVOKED and neither bundled. GnuPG is
-        // listed for the `pass` / `gopass` source, whose whole read path is a `gpg
-        // --decrypt`; go-passbolt-cli for the Passbolt source, which is nothing but
-        // that program plus argument building. Neither has any code here.
+        // The other two token providers SimpleVPN offers (PKCS11Discovery.wellKnown).
+        // A module is a LIBRARY rather than a program, and the one that loads it is
+        // openconnect's process, not ours — said in the note below, because it is a
+        // different fact from "we ran their binary".
+        .init(name: "yubico-piv-tool (libykcs11)", license: "BSD-2-Clause",
+              role: "Its PKCS#11 module offered for YubiKey PIV and loaded by OpenConnect \u{2014} user-installed, not bundled",
+              url: "https://github.com/Yubico/yubico-piv-tool"),
+        .init(name: "SoftHSM", license: "BSD-2-Clause",
+              role: "Software PKCS#11 token, offered and loaded the same way \u{2014} user-installed, not bundled",
+              url: "https://github.com/opendnssec/SoftHSMv2"),
+        // The password-store family, and Passbolt. GnuPG is listed because the `pass` /
+        // `gopass` source's whole read path is a `gpg --decrypt`; `pass` and `gopass`
+        // themselves because the store layout that read walks is theirs; and
+        // go-passbolt-cli because the Passbolt source is nothing but that program plus
+        // argument building. None of them has any code here.
         .init(name: "GnuPG", license: "GPL-3.0-or-later",
-              role: "Invoked to decrypt one entry from a pass / gopass store \u{2014} user-installed, not bundled",
+              role: "Invoked to decrypt one entry from a pass / gopass store, with your pinentry asked for the passphrase \u{2014} user-installed, not bundled",
               url: "https://gnupg.org"),
+        // The two stores whose FORMAT that read depends on. Neither binary is on the
+        // read path — SimpleVPN walks the store itself and calls `gpg` — so the honest
+        // role says what is actually run: nothing but a version query, in a diagnostic.
+        // They are credited because the layout being readable at all is their design.
+        .init(name: "pass (password-store)", license: "GPL-2.0-or-later",
+              role: "Its store layout read directly; the tool itself is only ever asked its version \u{2014} user-installed, not bundled",
+              url: "https://www.passwordstore.org"),
+        .init(name: "gopass", license: "MIT",
+              role: "The same store layout, read the same way and its tool likewise only version-checked \u{2014} user-installed, not bundled",
+              url: "https://github.com/gopasspw/gopass"),
         .init(name: "go-passbolt-cli", license: "MIT",
               role: "Invoked to read one Passbolt resource \u{2014} user-installed, not bundled",
               url: "https://github.com/passbolt/go-passbolt-cli"),
+        // The subprocess tunnel engines (`TunnelCLI`), which are the same courtesy for
+        // the same reason — SimpleVPN runs the program the user installed with `brew`,
+        // and a tunnel kind simply does not appear without it. `openconnect` is the one
+        // project on BOTH lists: its library is statically linked into the extension
+        // (credited above) and its program is also driven as a child process.
+        // `ssh` is deliberately absent: /usr/bin/ssh ships with macOS, like the
+        // `netstat`/`scutil` tools the diagnostics run, and nothing here is installed.
+        .init(name: "openfortivpn", license: "GPL-3.0-or-later",
+              role: "Invoked as the Fortinet SSL-VPN engine \u{2014} user-installed, not bundled",
+              url: "https://github.com/adrienverge/openfortivpn"),
+        .init(name: "ocproxy", license: "BSD-3-Clause",
+              role: "Invoked for the no-root SOCKS path beside openconnect \u{2014} user-installed, not bundled",
+              url: "https://github.com/cernekee/ocproxy"),
     ]
 
     /// Where the corresponding source (SimpleVPN's own code + these build scripts)
@@ -157,14 +226,18 @@ enum Acknowledgements {
     itself is likewise an original implementation of their published protocol: no \
     KeePassXC code is included, and the credit above is a courtesy, not an obligation.
 
-    The same is true of every sign-in source that reaches a password manager. SimpleVPN \
-    never bundles or installs a vendor's tool: it runs a program you installed yourself, \
-    or speaks to one already running on your Mac. Nothing is statically linked, no vendor \
-    code is compiled in, and so nothing in that list imposes an obligation on this \
-    binary — the rows are there so you can see whose work a feature depends on, and \
-    what licence you get if you go and install it. Two consequences worth stating: a \
-    feature simply does not appear when its tool is absent, and the licence badge \
-    describes that project, not this one.
+    The same is true of every sign-in source that reaches a password manager or a \
+    smartcard, and of the tunnel engines driven as child processes (openconnect, \
+    openfortivpn, ocproxy). SimpleVPN never bundles or installs a vendor's tool: it \
+    runs a program you installed yourself, or speaks to one already running on your \
+    Mac. A PKCS#11 module is the one variation, and it is a weaker link rather than a \
+    stronger one — it is a library, and the process that loads it is openconnect's, \
+    never SimpleVPN's. Running a program is not linking to it and compiles none of its \
+    code in, so being credited for that reason imposes nothing on this binary beyond \
+    what the linked components above already answer: the rows are there so you can see \
+    whose work a feature depends on, and what licence you get if you go and install it. \
+    Two consequences worth stating: a feature simply does not appear when its tool is \
+    absent, and the licence badge describes that project, not this one.
 
     Where reading a format needed its constants — a KeePass database's file signatures \
     and header field ids, a YubiKey challenge's padding, a modhex alphabet — those were \
@@ -398,17 +471,24 @@ struct AboutView: View {
                                     Link(c.name, destination: URL(string: c.url)!)
                                         .font(.callout.weight(.medium))
                                     Text(c.role).font(.caption).foregroundStyle(.secondary)
+                                        // Rides the container's sentence below rather
+                                        // than being read a second time inside it.
+                                        .accessibilityHidden(true)
                                 }
                                 Spacer(minLength: 12)
                                 Text(c.license)
                                     .font(.caption.monospaced())
                                     .padding(.horizontal, 7).padding(.vertical, 2)
                                     .background(.quaternary, in: Capsule())
+                                    .accessibilityHidden(true)
                             }
                             .padding(.vertical, 6)
-                            // One sentence per component, not three fragments ×13
-                            // rows; the element keeps the link's activation.
-                            .accessibilityElement(children: .combine)
+                            // One sentence per component, not three fragments per row —
+                            // but a CONTAINER, because the row holds a link and a
+                            // row-wide `.combine` swallows it (Docs/Accessibility.md
+                            // rule 4). The link stays the one reachable child, and the
+                            // role and licence ride the sentence instead.
+                            .accessibilityElement(children: .contain)
                             .accessibilityLabel("\(c.name), \(c.role), licence \(c.license)")
                             if c.id != Acknowledgements.components.last?.id { Divider() }
                         }

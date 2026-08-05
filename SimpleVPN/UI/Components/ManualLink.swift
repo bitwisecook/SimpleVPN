@@ -118,6 +118,9 @@ struct ManualLink: View {
             .buttonStyle(.plain)
             .foregroundStyle(.tint)
             .help("Read the full section on \u{201C}\(settingName)\u{201D}")
+            // Not hover-only (rule 7): WHICH section this opens is the whole
+            // information the hover carries, and the label alone doesn't say it.
+            .accessibilityHint("Opens the manual at the full section on \(settingName).")
         }
         .padding(14)
         .frame(width: 320)

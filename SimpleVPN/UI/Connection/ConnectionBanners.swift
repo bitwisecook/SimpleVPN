@@ -105,7 +105,12 @@ struct CaptivePortalBanner: View {   // was private — internal for the file sp
         }
         .padding(12)
         .background(.indigo.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
-        .accessibilityElement(children: .combine)
+        // `.contain`, not `.combine`: this banner holds TWO buttons, and a banner-wide
+        // combine swallows both — the wave-3 bug class in Docs/Accessibility.md rule 4,
+        // and here it hid the only way out of a captive portal. The container sentence
+        // says everything the two Texts say.
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("This Wi-Fi wants you to sign in first. A sign-in page is answering instead of the internet — hotel or guest Wi-Fi usually does this. Sign in there, then connect. The VPN can't get through until you do.")
     }
 }
 
@@ -134,10 +139,13 @@ struct UnreachableHereBanner: View {   // was private — internal for the file 
             Button("Forget", action: forget)
                 .buttonStyle(.glass)
                 .help("Stop warning about this network")
+                .accessibilityLabel("Forget that \(vpnName) couldn\u{2019}t be reached from \(networkLabel)")
         }
         .padding(12)
         .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
-        .accessibilityElement(children: .combine)
+        // `.contain`: the Forget button must stay reachable (rule 4).
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(vpnName) couldn\u{2019}t be reached from this network before. Last time you tried on \(networkLabel), it never answered. You can still try to connect — if it succeeds, this warning clears itself.")
     }
 }
 
@@ -162,7 +170,10 @@ struct TailscaleSignInBanner: View {   // was private — internal for the file 
         }
         .padding(12)
         .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
-        .accessibilityElement(children: .combine)
+        // `.contain`: the sign-in button is the only way forward and must stay
+        // reachable — a combine here made this banner a dead end (rule 4).
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Sign in in your browser. A sign-in page opened in your browser. Finish signing in there and this Mac joins the network by itself. Closed the tab? Open it again.")
     }
 }
 
@@ -186,10 +197,79 @@ struct StuckConnectingBanner: View {   // was private — internal for the file 
             }
             Spacer(minLength: 8)
             Button("Cancel", action: cancel).buttonStyle(.glass)
+                .accessibilityLabel("Stop trying to reach \(vpnName)")
         }
         .padding(12)
         .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
-        .accessibilityElement(children: .combine)
+        // `.contain`: Cancel is the way out of an endless connect and must stay
+        // reachable (rule 4).
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Still trying to reach \(vpnName). No answer from \(host) yet. This usually means the network you're on can't reach it — a different Wi-Fi, a guest network, or a sign-in page in the way.")
+    }
+}
+
+/// This tunnel is about to swallow the network a running virtual machine or
+/// container is sitting on, so the guest is about to lose its connection to this
+/// Mac. Names the network, names what is on it, and offers the app's ORDINARY
+/// kept-direct rule — with the consequence spelled out, because keeping a subnet
+/// out of a tunnel is a split-tunnel decision and this feature must never make
+/// one quietly. Amber like the other "you should know this before it bites you"
+/// banners; the offer itself comes from `VirtualizationBypass`.
+struct GuestNetworkCaptureBanner: View {
+    let offers: [VirtualizationBypassOffer]
+    let keepDirect: () -> Void
+    let dismiss: () -> Void
+
+    /// "Apple Containers on bridge100 (192.168.64.0/24)", joined for the rare
+    /// machine running two guest networks at once.
+    private var what: String {
+        offers.map { "\($0.attribution) on \($0.subnet)" }
+            .formatted(.list(type: .and))
+    }
+
+    private var headline: String {
+        offers.count == 1
+            ? "This VPN will cut off \(offers[0].attribution)"
+            : "This VPN will cut off \(offers.count) guest networks"
+    }
+
+    /// One sentence per offer, each already carrying its own consequence — the
+    /// wording belongs to `VirtualizationBypassOffer` so the banner, the report and
+    /// the manual cannot describe the same trade-off three different ways.
+    private var consequences: String {
+        offers.map(\.consequence).joined(separator: " ")
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "shippingbox.and.arrow.backward")
+                .font(.title3).foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(headline).font(.callout.weight(.semibold))
+                Text("\(what) is running right now, and this VPN carries the traffic that would reach it. SimpleVPN has changed nothing.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(consequences)
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 6) {
+                Button("Keep It Reachable", action: keepDirect)
+                    .buttonStyle(.glassProminent).tint(.orange)
+                    .help("Add \(offers.map(\.subnet).formatted(.list(type: .and))) to this VPN's kept-direct routes and reconnect")
+                Button("Not Now", action: dismiss)
+                    .buttonStyle(.glass)
+                    .help("Leave routing alone \u{2014} ask again next time you connect")
+            }
+        }
+        .padding(12)
+        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+        // `.contain`, not `.combine`: this banner HOLDS BUTTONS, and a banner-wide
+        // combine swallows them (Docs/Accessibility.md rule 4). The container
+        // sentence carries everything the three Texts say, in the same order.
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(headline). \(what) is running right now, and this VPN carries the traffic that would reach it. SimpleVPN has changed nothing. \(consequences)")
     }
 }
 
@@ -217,10 +297,14 @@ struct PausedBanner: View {   // was private — internal for the file split
                 .buttonStyle(.borderedProminent)
                 .tint(.white)
                 .foregroundStyle(.red)
+                .accessibilityLabel("Resume — put traffic back through the VPN")
         }
         .padding(12)
         .background(Color.red, in: RoundedRectangle(cornerRadius: 10))
-        .accessibilityElement(children: .combine)
+        // `.contain`: this is the app's loudest safety warning AND the only place the
+        // Resume button lives. A combine hid the fix inside the warning (rule 4).
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Paused — traffic is NOT going through the VPN. Everything uses your normal connection and is visible to the local network. You're still signed in — resuming won't ask again.")
     }
 }
 

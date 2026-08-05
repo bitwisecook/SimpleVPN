@@ -110,5 +110,8 @@ struct CopyLogButton: View {
         }
         .controlSize(.small)
         .help("Copy the whole text to the clipboard (⌘A then ⌘C also works)")
+        // Not hover-only (rule 7). The keyboard alternative especially has to be
+        // spoken: it is the one route for somebody who cannot reach this button.
+        .accessibilityHint("Copies the whole text to the clipboard. Command-A then Command-C also works.")
     }
 }

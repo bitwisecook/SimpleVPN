@@ -54,16 +54,23 @@ enum VirtualizationSettings {
 
     /// Defaults keys, so the UI and the diagnostic report read one spelling of each
     /// switch rather than two.
-    static let detectDefaultsKey = "vm.detect"
-    static let warnOnConnectDefaultsKey = "vm.warn-on-connect"
+    /// `nonisolated` so the off-main scan and its gate can read them (see `isEnabled`).
+    nonisolated static let detectDefaultsKey = "vm.detect"
+    nonisolated static let warnOnConnectDefaultsKey = "vm.warn-on-connect"
 
     /// Both switches default ON, so a `UserDefaults` that has never been written
     /// must read as true — `bool(forKey:)` alone would read as false and silently
     /// disable a feature nobody turned off.
-    static func isEnabled(_ key: String, store: UserDefaults = .standard) -> Bool {
+    ///
+    /// `nonisolated`, unlike the specs above: the scan these gate runs OFF the main actor
+    /// (`VirtualizationDiscovery.snapshotOffMain`), and it must read the switch as it is
+    /// NOW. Capturing the value at wiring time instead would freeze it at launch, so
+    /// turning detection off would not take effect until the next relaunch. `UserDefaults`
+    /// is thread-safe, so there is nothing to serialise here.
+    nonisolated static func isEnabled(_ key: String, store: UserDefaults = .standard) -> Bool {
         store.object(forKey: key) as? Bool ?? true
     }
 
-    static var detectionEnabled: Bool { isEnabled(detectDefaultsKey) }
-    static var warningEnabled: Bool { isEnabled(warnOnConnectDefaultsKey) }
+    nonisolated static var detectionEnabled: Bool { isEnabled(detectDefaultsKey) }
+    nonisolated static var warningEnabled: Bool { isEnabled(warnOnConnectDefaultsKey) }
 }

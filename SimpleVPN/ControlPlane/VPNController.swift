@@ -572,6 +572,32 @@ final class VPNController {
 
     var routingRulesCache: [String: [RoutingRule]] = [:]   // was private — internal for the +File split
 
+    // MARK: Guest networks a connect would capture (see VPNController+GuestNetworks)
+
+    /// What virtualization is running on this Mac right now. A CLOSURE for the same
+    /// reason the diagnostic report's is: `VirtualizationDiscovery` owns the answer
+    /// and the control plane must not become a second scanner. Wired at launch
+    /// (SimpleVPNApp); nil — unwired, or in a test that does not care — means the
+    /// warning simply never fires, which is the safe direction.
+    ///
+    /// `async` and `@Sendable`, NOT a synchronous main-actor call. The scan is
+    /// filesystem-bound and another process can stall it — done on the main actor it
+    /// wedged the whole UI (see `VirtualizationDiscovery.snapshotOffMain`). A connect is
+    /// the very last place that may block: the banner arriving a beat later is free,
+    /// because the profile sits in `.connecting` for seconds.
+    var virtualizationSnapshotProvider: (@Sendable () async -> VirtualizationSnapshot)?
+
+    /// Per-profile guest networks THIS connect would swallow, with the divert rule
+    /// that would keep each reachable. Written by
+    /// `evaluateGuestNetworkCapture(id:)` when a connect starts and cleared when the
+    /// session ends. Observable so the banner appears and disappears on its own.
+    var guestNetworkCaptures: [String: [VirtualizationBypassOffer]] = [:]
+
+    /// Profiles whose guest-network warning the user has waved away for this
+    /// session. Not persisted: next connect is a new decision, and a permanently
+    /// silenced warning about traffic being cut off is a warning that does not work.
+    var dismissedGuestNetworkCaptures: Set<String> = []
+
     // MARK: Status observation + version IPC
 
     // MARK: Connect watchdog
@@ -707,6 +733,13 @@ final class VPNController {
         // impose its own deadline — otherwise "Connecting…" is permanent.
         if s == .connecting {
             self.startConnectWatchdog(id: id)
+            // Is a running virtual machine's network about to be swallowed by this
+            // tunnel? Asked HERE because every engine — OpenVPN, OpenConnect,
+            // WireGuard, Tailscale, the two netstack kinds — arrives at .connecting,
+            // and because a guest's subnet only exists while the guest is running, so
+            // the interface list has to be read now. Silent unless there is something
+            // to say; see VPNController+GuestNetworks.
+            self.evaluateGuestNetworkCapture(id: id)
         } else {
             self.cancelConnectWatchdog(id: id)
         }
@@ -733,6 +766,10 @@ final class VPNController {
             pushedProxyIntents[id] = nil   // pushed proxy never outlives its session
             incidents[id] = TunnelIncidentStore.read(profile: id)
             explainOTPReuseIfLikely(id: id)
+            // The session is over, so the guest-network warning has nothing to warn
+            // about — and the dismissal goes with it, because the next connect is a
+            // new decision taken against a freshly-read interface list.
+            clearGuestNetworkCapture(id: id)
         }
         // Keep the ≤1-default-owner invariant live across every up/down, and fall
         // back (with a toast) when the picked owner drops. Runs after the blocks

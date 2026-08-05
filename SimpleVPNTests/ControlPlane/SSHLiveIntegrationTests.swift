@@ -24,14 +24,29 @@
 //  target is an in-process echo listener, also on loopback. Nothing leaves the
 //  machine and nothing survives the run.
 //
-//  WITHOUT THE FIXTURE EVERY TEST HERE SKIPS. `liveSSHFixtureMode` always runs and
-//  prints which mode the run was in, so a green suite can never be mistaken for a
-//  proven one. To create it:
+//  THIS SUITE IS OPT-IN BY ENVIRONMENT VARIABLE, exactly like the PKCS#11 live suite,
+//  and that is a deliberate change from "opt in by leaving a fixture on disk".
+//
+//  WHY. Twelve tests here each start a real `sshd`, complete a real handshake and (in
+//  the writer-starvation case) MEASURE A RACE. Under load that is genuinely slow: this
+//  suite hit its 60 s ceiling during the credential programme and once burned nine
+//  minutes. That is tolerable when somebody asked for it and useless when they did not —
+//  and the old gate meant that once `./Tools/ssh-live-test-fixture.sh` had ever been run,
+//  the leftover `/tmp/simplevpn-ssh-live` silently enrolled EVERY subsequent run,
+//  including CI's and every `xcodebuild test` a contributor types. A fixture directory
+//  nobody remembers creating must not be the reason a full run is unreliable.
+//
+//  So the fixture path is now the switch: no `SIMPLEVPN_SSH_TEST_DIR`, no live tests.
+//  `liveSSHFixtureMode` always runs and prints which mode the run was in, so a green
+//  suite can never be mistaken for a proven one. To run them:
 //
 //      ./Tools/ssh-live-test-fixture.sh
 //      TEST_RUNNER_SIMPLEVPN_SSH_TEST_DIR=/tmp/simplevpn-ssh-live \
 //        xcodebuild -project SimpleVPN.xcodeproj -scheme SimpleVPN \
 //        -destination 'platform=macOS' test -only-testing:SimpleVPNTests
+//
+//  (Xcode strips the `TEST_RUNNER_` prefix when it injects the variable into the test
+//  host; both spellings are read here so the variable also works when exported by hand.)
 //
 
 import Testing
@@ -46,6 +61,9 @@ import CryptoKit
 nonisolated struct LiveSSHFixture: Sendable {
     static let sshdPath = "/usr/sbin/sshd"
     static let sshKeygenPath = "/usr/bin/ssh-keygen"
+    /// Where `Tools/ssh-live-test-fixture.sh` puts the fixture by default. NOT a
+    /// fallback for discovery — see `requestedDirectory`. Kept so the skip message and
+    /// the script agree on one path.
     static let defaultDirectory = "/tmp/simplevpn-ssh-live"
 
     let directory: URL
@@ -69,10 +87,24 @@ nonisolated struct LiveSSHFixture: Sendable {
     static let shared: LiveSSHFixture? = discover()
     static var isAvailable: Bool { shared != nil }
 
+    /// The fixture directory the RUN asked for, or nil when nobody asked. THE OPT-IN:
+    /// there is deliberately no fallback to `defaultDirectory`, so a leftover fixture
+    /// cannot enrol a run that did not want twelve real `sshd` handshakes. (Xcode strips
+    /// the `TEST_RUNNER_` prefix when injecting, so the unprefixed name is what usually
+    /// arrives; both are read so an exported variable works too.)
+    static var requestedDirectory: String? {
+        let env = ProcessInfo.processInfo.environment
+        guard let path = env["SIMPLEVPN_SSH_TEST_DIR"] ?? env["TEST_RUNNER_SIMPLEVPN_SSH_TEST_DIR"],
+              !path.isEmpty else { return nil }
+        return path
+    }
+
     /// Printed by `liveSSHFixtureMode` so a skipped run says why.
     static var status: String {
         if let f = shared { return "ENABLED — fixture \(f.directory.path), login \(f.user)" }
-        let where_ = ProcessInfo.processInfo.environment["SIMPLEVPN_SSH_TEST_DIR"] ?? defaultDirectory
+        guard let where_ = requestedDirectory else {
+            return "SKIPPED — opt-in: set SIMPLEVPN_SSH_TEST_DIR (see this file's header)"
+        }
         if !FileManager.default.isExecutableFile(atPath: sshdPath) {
             return "SKIPPED — no \(sshdPath) on this machine"
         }
@@ -81,8 +113,8 @@ nonisolated struct LiveSSHFixture: Sendable {
 
     private static func discover() -> LiveSSHFixture? {
         let fm = FileManager.default
+        guard let path = requestedDirectory else { return nil }
         guard fm.isExecutableFile(atPath: sshdPath) else { return nil }
-        let path = ProcessInfo.processInfo.environment["SIMPLEVPN_SSH_TEST_DIR"] ?? defaultDirectory
         let dir = URL(fileURLWithPath: path)
         for name in ["sshd_config", "hostkey", "hostkey.pub", "clientkey",
                      "lockedkey", "otherkey", "otherkey.pub", "authorized_keys"] {

@@ -140,12 +140,24 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         case .openConnect: [.fortinet, .f5apm, .ciscoAnyConnect, .globalProtect,
                             .juniper, .pulse, .arrayNetworks]
         case .customRouting: VPNKind.allCases
-        // Every kind whose sign-in can ask for a verification code. Not
-        // `allCases`: Tailscale, WireGuard and the Proxy Tunnel collect nothing
-        // typed at all, so a security key has nothing to contribute and offering
-        // the rows would be a promise we could not keep.
-        case .securityKey: [.openVPN, .fortinet, .f5apm, .ciscoAnyConnect, .globalProtect,
-                            .juniper, .pulse, .arrayNetworks, .ikev2, .ipsec, .l2tp]
+        // WHOSE EDITOR SHOWS THE ROWS — which is the question this property asks,
+        // and the answer today is the OpenVPN editor alone: `YubiKeySignInSection`
+        // is rendered by `EditVPNView`'s Sign-In tab and by nothing else.
+        //
+        // It listed all eleven kinds whose sign-in can ASK for a verification code,
+        // which is a true sentence about the feature and the wrong answer to this
+        // question — and it broke exactly the two things this property feeds. A
+        // related link to a `yk.` row was offered inside the SSL-VPN and native
+        // editors, where there is no such row: `SettingsRouter` produced a route,
+        // Manage VPNs kept the current selection because the kind "qualified", and
+        // no editor claimed it — a link that did nothing. And a global hit could
+        // land on a FortiGate VPN for the same reason.
+        //
+        // The day `YubiKeySignInSection` appears in SubprocessTunnelView or
+        // NativeVPNView, add those kinds back here AND `.securityKey` to that
+        // editor's `SettingsSearch`/`settingsEditor` surfaces — the two halves are
+        // one change, and the routing only works with both.
+        case .securityKey: [.openVPN]
         // App-level: it is not any VPN's editor, so it belongs to no kind. An
         // empty list (rather than "all kinds") is what stops a global hit from
         // being routed into a VPN editor that has no such row.

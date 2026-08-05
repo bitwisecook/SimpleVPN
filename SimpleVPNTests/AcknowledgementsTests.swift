@@ -72,6 +72,92 @@ struct AcknowledgementsTests {
         }
     }
 
+    /// The tools SimpleVPN RUNS (or whose PKCS#11 module it has openconnect load).
+    /// None of these is bundled and none imposes a notice obligation, so no compiler,
+    /// linker or licence scanner will ever miss one — this list is the only thing that
+    /// does. The credential programme added six vendors at once, and a seventh arriving
+    /// with its row forgotten would leave a feature whose provenance is invisible.
+    ///
+    /// Every name here is a tool the code really executes: `ToolCatalog` +
+    /// `LocalToolRunner.run` call sites (`DashlaneProvider`, `LastPassProvider`,
+    /// `ProtonPassProvider`, `BitwardenProvider`, `KeeperProvider`,
+    /// `KeePassFileProvider`, `PassboltServer`, `GPGDecrypter`, `YubiKeyManagerTool`,
+    /// `PKCS11ProcessRunner`) plus `PKCS11ModuleDiscovery.wellKnown` for the modules.
+    @Test func everyInvokedThirdPartyToolIsCredited() {
+        let names = Set(components.map(\.name))
+        for required in ["KeePassXC", "Keeper Commander", "Bitwarden CLI",
+                         "Dashlane CLI (dcli)", "LastPass CLI (lpass)",
+                         "Proton Pass CLI (pass-cli)", "go-passbolt-cli",
+                         "GnuPG", "pass (password-store)", "gopass",
+                         "yubikey-manager (ykman)", "GnuTLS p11tool", "OpenSC",
+                         "p11-kit", "yubico-piv-tool (libykcs11)", "SoftHSM",
+                         // The subprocess tunnel engines (`TunnelCLI`) are run the same
+                         // way and were missing for longer than the vault tools.
+                         // `ssh` is not here on purpose: macOS ships it.
+                         "openfortivpn", "ocproxy"] {
+            #expect(names.contains(required), "\(required) is used but isn't credited")
+        }
+    }
+
+    /// The framing is the licence argument, not decoration: these rows describe
+    /// somebody else's program that the USER installed, and a row that reads like a
+    /// bundled dependency would claim an obligation this binary does not carry — and
+    /// invite the opposite reading, that their code is in here. KeePassXC is exempt
+    /// because its row says the stronger version of the same thing ("no KeePassXC code
+    /// is included"), for the protocol we reimplemented.
+    @Test func everyInvokedToolRowSaysItIsNotBundled() {
+        for name in ["Keeper Commander", "Bitwarden CLI", "Dashlane CLI (dcli)",
+                     "LastPass CLI (lpass)", "Proton Pass CLI (pass-cli)",
+                     "go-passbolt-cli", "GnuPG", "pass (password-store)", "gopass",
+                     "yubikey-manager (ykman)", "GnuTLS p11tool", "OpenSC",
+                     "yubico-piv-tool (libykcs11)", "SoftHSM",
+                     "openfortivpn", "ocproxy"] {
+            let row = components.first { $0.name == name }
+            #expect(row?.role.contains("not bundled") == true,
+                    "\(name)'s role doesn't say it isn't bundled")
+        }
+        let keePassXC = components.first { $0.name == "KeePassXC" }
+        #expect(keePassXC?.role.contains("no KeePassXC code is included") == true)
+    }
+
+    /// Proton Pass's `pass-cli` and the unix password store's `pass` are DIFFERENT
+    /// PRODUCTS holding different vaults, and the app keeps them apart everywhere
+    /// (`ToolCatalog` has three entries for exactly this reason). Two rows, two
+    /// licences: collapsing them would credit the wrong project for a feature.
+    @Test func protonPassAndPasswordStoreAreCreditedSeparately() throws {
+        let proton = try #require(components.first { $0.name.contains("Proton Pass") })
+        let store = try #require(components.first { $0.name.contains("password-store") })
+        #expect(proton.license == "GPL-3.0")           // protonpass/pass-cli
+        #expect(store.license == "GPL-2.0-or-later")   // password-store
+        #expect(proton.url != store.url)
+    }
+
+    /// The licences that were WRONG, pinned to what each project itself states — a
+    /// badge is a claim about somebody else's terms and a plausible-looking guess is
+    /// the failure mode. Each source is named so a future edit argues with the project
+    /// rather than with this test.
+    @Test func theLicenceBadgesMatchWhatEachProjectStates() throws {
+        // KeePassXC's COPYING: "either version 2 or (at your option) version 3 of the
+        // License". It said GPL-3.0, which dropped the choice.
+        let keePassXC = try #require(components.first { $0.name == "KeePassXC" })
+        #expect(keePassXC.license.contains("GPL-2.0"))
+        #expect(keePassXC.license.contains("GPL-3.0"))
+        // GnuTLS is split BY PART — LGPL-2.1-or-later library, GPL-3.0-only tools —
+        // and p11tool is a tool. It said the bare "GPL-3.0".
+        let p11tool = try #require(components.first { $0.name == "GnuTLS p11tool" })
+        #expect(p11tool.license == "GPL-3.0-only")
+        // go-passbolt-cli's own LICENSE file is the MIT text (checked against the
+        // repository, not against how an AGPL server tends to license its clients).
+        let passbolt = try #require(components.first { $0.name == "go-passbolt-cli" })
+        #expect(passbolt.license == "MIT")
+        // lastpass-cli is GPLv2-or-later with an OpenSSL exception, not GPL-2.0-only.
+        let lastPass = try #require(components.first { $0.name.contains("LastPass") })
+        #expect(lastPass.license == "GPL-2.0-or-later")
+        // Dashlane's CLI repository is Apache-2.0.
+        let dashlane = try #require(components.first { $0.name.contains("Dashlane") })
+        #expect(dashlane.license == "Apache-2.0")
+    }
+
     /// DB-IP's CC BY terms require the attribution to LINK TO THEM. The row used
     /// to link to the CC licence text instead, which is the one thing the licence
     /// does not ask for.
@@ -99,7 +185,11 @@ struct AcknowledgementsTests {
         let note = Acknowledgements.compatibilityNote
         for claim in ["AGPL-3.0", "LGPL-2.1", "CC BY 4.0", "Sparkle",
                       "1Password Go SDK", "crypto_box", "golang.org/x/crypto",
-                      "RFC 8439", "KeePassXC"] {
+                      "RFC 8439", "KeePassXC",
+                      // A PKCS#11 module is the one credited thing that is LOADED
+                      // rather than run, and it is loaded by openconnect's process.
+                      // Different fact, different sentence.
+                      "PKCS#11", "openconnect"] {
             #expect(note.contains(claim), "the compatibility note never mentions \(claim)")
         }
         #expect(!Acknowledgements.sourceURL.isEmpty)

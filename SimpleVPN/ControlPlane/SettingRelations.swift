@@ -213,6 +213,115 @@ nonisolated enum SettingRelations {
         // similar names — linking them is how a user who found the wrong one
         // gets to the right one.
         ["openvpn.proxy-host", "cr.proxy-manual-url"],
+
+        // MARK: Security keys (a YubiKey or similar, typing the code for you)
+
+        // The switch and the two choices that decide the whole shape of the
+        // sign-in: WHAT the key supplies, and WHERE the code goes. Neither means
+        // anything alone, and each row's summary already describes the other
+        // ("the long one it types for you" / "on the end of your password in one
+        // box").
+        ["yk.enabled", "yk.mechanism", "yk.delivery"],
+        // The mechanism decides which of these two is the row that matters —
+        // "only used when the key supplies a six- or eight-digit code" and "which
+        // of the key's two slots answers the challenge" are both caveats that
+        // name it.
+        ["yk.mechanism", "yk.oath-account", "yk.slot"],
+        // Which key, when more than one is plugged in.
+        ["yk.enabled", "yk.serial"],
+        // The touch pair: how long SimpleVPN waits for you, and whether it starts
+        // waiting on its own.
+        ["yk.wait-seconds", "yk.arm-automatically"],
+        // A BLOCKING conflict, as a link: two of the four mechanisms need YubiKey
+        // Manager (`YubiKeyConflict.needsManagerTool`), and where that program is
+        // lives on the app's own Sign-In Sources pane rather than in any VPN's
+        // editor. Somebody told "install YubiKey Manager" needs the row that says
+        // where it is.
+        ["yk.mechanism", "creds.ykman.tool-path"],
+        // DELIBERATELY NOT DECLARED YET, and worth writing down so nobody adds
+        // them thinking they were forgotten: "yk.mechanism ↔ oc.token-mode" (two
+        // ways to produce one verification code) and "yk.enabled ↔
+        // oc.pkcs11-certificate" (one device, two roles — the code it types versus
+        // the certificate its PIV applet holds) are both real relations, and
+        // neither can be FOLLOWED today. The `yk.*` rows are rendered by one editor
+        // only (EditVPNView's Sign-In tab), so from an SSL-VPN editor the yk end is
+        // filtered out and from the OpenVPN editor the oc end is — a link nobody
+        // can click either way. They belong here the day `YubiKeySignInSection`
+        // appears in SubprocessTunnelView, together with `.securityKey` in that
+        // editor's surfaces and those kinds in `SettingSurface.securityKey.kinds`.
+
+        // MARK: Sign-In Sources (which password apps SimpleVPN may use)
+        //
+        // App-level rows, so a link to one from a VPN's editor is filtered out by
+        // `AllSettings.isReachable` (the surface belongs to no kind) and shown in
+        // the Settings window, where there is no kind in context. Same mechanism
+        // the `cr.*` links use, for the same reason.
+
+        // The scan and 1Password's switch: 1Password is the one vendor with no
+        // path or endpoint of its own, so "is it offered at all" is the scan's
+        // answer and nothing else's.
+        ["creds.discovery", "creds.onepassword.enabled"],
+        // The scan and the tool path that belongs to no password app: with the
+        // scan off nothing is found, which is precisely when this row has to be
+        // typed in by hand.
+        ["creds.discovery", "creds.ykman.tool-path"],
+        // Both of the app's "look at this Mac" switches. Somebody who would
+        // rather SimpleVPN didn't inspect their Mac wants both, and neither pane
+        // mentions the other.
+        ["creds.discovery", "vm.detect"],
+
+        // One clique per password app: the switch that decides whether it is
+        // offered at all, and the rows that make it work. Each was already a
+        // sentence naming the other ("Leave it empty and SimpleVPN uses the one
+        // it found").
+        ["creds.keepassxc.enabled", "creds.keepassxc.socket"],
+        ["creds.keeper.enabled", "creds.keeper.tool-path"],
+        ["creds.bitwarden.enabled", "creds.bitwarden.tool-path",
+         "creds.bitwarden.daemon-endpoint"],
+        ["creds.dashlane.enabled", "creds.dashlane.tool-path"],
+        ["creds.lastpass.enabled", "creds.lastpass.tool-path"],
+        ["creds.protonpass.enabled", "creds.protonpass.tool-path"],
+
+        // A KeePass database, split by LEVEL rather than lumped: the switch, the
+        // list of databases and the one program that opens any of them are per
+        // Mac…
+        ["creds.keepassfile.enabled", "creds.keepassfile.databases",
+         "creds.keepassfile.tool-path"],
+        // …and the list leads to the database it is a list of.
+        ["creds.keepassfile.databases", "creds.keepassfile.database"],
+        // …while these four are what opening ONE database takes: the file, the two
+        // things some databases additionally need, and the password.
+        ["creds.keepassfile.database", "creds.keepassfile.key-file",
+         "creds.keepassfile.security-key-slot", "creds.keepassfile.database-password"],
+        // The secret and whether macOS keeps it for you — the pair every "remember
+        // it" switch forms with the thing it remembers.
+        ["creds.keepassfile.database-password", "creds.keepassfile.remember-password"],
+        // THE SAME TWO SLOTS, asked about twice in two places: the slot that
+        // answers for a database is the slot that answers for a VPN, so somebody
+        // who has set one has already made the choice.
+        ["creds.keepassfile.security-key-slot", "yk.slot"],
+
+        // A password store: the switch, the list of stores and where GnuPG is are
+        // per Mac; the folder and how its entries are written belong to one store.
+        ["creds.passwordstore.enabled", "creds.passwordstore.stores",
+         "creds.passwordstore.tool-path"],
+        ["creds.passwordstore.stores", "creds.passwordstore.store-directory"],
+        ["creds.passwordstore.store-directory", "creds.passwordstore.username-field"],
+
+        // Passbolt, the same shape: the switch, the list of servers and where the
+        // program is are per Mac; the address, the file holding that server's key
+        // and the passphrase that unlocks it belong to ONE server.
+        ["creds.passbolt.enabled", "creds.passbolt.servers", "creds.passbolt.tool-path"],
+        ["creds.passbolt.servers", "creds.passbolt.server"],
+        ["creds.passbolt.server", "creds.passbolt.config-file", "creds.passbolt.passphrase"],
+        ["creds.passbolt.passphrase", "creds.passbolt.remember-passphrase"],
+
+        // MARK: Virtual machines and containers
+
+        // Noticing them and saying something about them are different consents,
+        // and the warning cannot fire with the noticing off — the sentence on both
+        // rows, as a link.
+        ["vm.detect", "vm.warn-on-connect"],
     ]
 
     /// Relations that genuinely run one way only, as (from, to). Empty, and that

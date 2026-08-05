@@ -19,7 +19,10 @@
 #   ./Tools/ssh-live-test-fixture.sh [dir]        # create/refresh (default /tmp/simplevpn-ssh-live)
 #   ./Tools/ssh-live-test-fixture.sh --clean [dir]
 #
-# The tests look in $SIMPLEVPN_SSH_TEST_DIR, falling back to the same default.
+# The live tests are OPT-IN: they look ONLY at $SIMPLEVPN_SSH_TEST_DIR and skip when it
+# is unset. Creating the fixture is therefore not enough to run them — and deliberately
+# so, because a fixture left in /tmp used to enrol every later `xcodebuild test` into
+# twelve real sshd handshakes and made full runs unreliable.
 # Under `xcodebuild test` the environment reaches the test runner prefixed:
 #   TEST_RUNNER_SIMPLEVPN_SSH_TEST_DIR=/path/to/fixture xcodebuild … test
 #

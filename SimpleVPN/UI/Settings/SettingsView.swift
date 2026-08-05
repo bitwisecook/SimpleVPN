@@ -343,11 +343,18 @@ private struct LabelsSettings: View {
             }
             .scrollContentBackground(.hidden)
             .padding(.top, 6)
+            // THE LIST ITSELF NEEDS A NAME. Every row inside it says which label it
+            // edits, but the container was an AX `Outline` with no description at all —
+            // VoiceOver announced an unnamed table and Full Keyboard Access gave no clue
+            // what had been entered. Found by the Settings audit once it started driving
+            // the Labels pane rather than whichever tab happened to be remembered.
+            .accessibilityLabel("Your labels")
             Divider()
             HStack(spacing: 10) {
                 ColorPicker("", selection: $newColor).labelsHidden()
                     .accessibilityLabel("Colour for the new label")
                 TextField("New label", text: $newName)
+                    .accessibilityLabel("Name of the new label")
                 Button("Add") {
                     labels.addLabel(name: newName, resolved: newColor.resolve(in: environment)); newName = ""
                 }

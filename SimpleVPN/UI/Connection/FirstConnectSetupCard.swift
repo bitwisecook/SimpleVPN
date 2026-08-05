@@ -342,7 +342,13 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
         }
         .padding(14)
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
+        // A container (it is full of controls), and it carries its own sentence: the
+        // card was an UNNAMED AX group, which is precisely the shape SimpleVPNUITests'
+        // audit excuses as framework chrome — so the biggest first-run surface in the
+        // app had no name and no gate could say so. Names the VPN it is about, because
+        // a listener arriving here needs to know which one is being set up.
         .accessibilityElement(children: .contain)
+        .accessibilityLabel("Before your first connect to \(profile.name)")
         // Cheap facts on appear, then the paid-for ones once. The poll is what
         // makes a 1Password someone quits (or a KeePassXC they launch) show up
         // in the list without the window being reopened.

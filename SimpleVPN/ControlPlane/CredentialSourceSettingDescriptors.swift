@@ -141,8 +141,11 @@ enum CredentialSourceSettings {
             EngineSettingSpec(
                 id: field.settingID,
                 name: "\(vendorTitle(field)) local service address",
-                summary: "The address and port of \(vendorTitle(field))\u{2019}s own local service on "
-                    + "this Mac, in the form host:port.",
+                summary: "Where \(vendorTitle(field))\u{2019}s own service on this Mac answers "
+                    + "\u{2014} an address and a port, written host:port. Leave it empty for the usual "
+                    + "one, which is where that service listens unless it was told otherwise. It has "
+                    + "to be an address on this Mac: SimpleVPN will not reach out across a network "
+                    + "for it.",
                 group: .signIn,
                 default: "")
         case .vaultFile:
@@ -173,9 +176,10 @@ enum CredentialSourceSettings {
         case .pkcs11Module:
             EngineSettingSpec(
                 id: field.settingID,
-                name: "\(vendorTitle(field)) security module",
-                summary: "The security module (PKCS#11) SimpleVPN should load for "
-                    + "\(vendorTitle(field)).",
+                name: "\(vendorTitle(field)) smartcard module",
+                summary: "The software that talks to your smartcard or security key on "
+                    + "\(vendorTitle(field))\u{2019}s behalf \u{2014} a file its maker supplies. "
+                    + "SimpleVPN reads the card through it and never runs it as a program of its own.",
                 group: .signIn,
                 default: "")
         }

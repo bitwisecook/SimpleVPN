@@ -111,6 +111,12 @@ struct ConnectionView: View {
                 .buttonStyle(.borderless).foregroundStyle(.secondary)
                 .help("Disconnect")
                 .accessibilityLabel("Disconnect \(name)")
+                // Every other Connect/Disconnect control in the app reports the live
+                // state in its value (rule 1); this one said what it was and then
+                // refused to say what the connection was doing. The words come from
+                // DotState, which is the status vocabulary — there is no NEVPNStatus
+                // behind a subprocess or native tunnel to read instead.
+                .accessibilityValue(dot.accessibilityDescription)
         }
     }
 

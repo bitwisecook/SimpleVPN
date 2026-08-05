@@ -41,11 +41,17 @@ struct DiagnosticReportContext {
     /// already holds. Left unset it yields an empty, detection-enabled snapshot,
     /// which reads as "nothing was running" rather than as a lie.
     ///
-    /// ONE-LINE WIRING: `context.virtualization = { VirtualizationDiscovery.snapshot(
-    ///     interfaces: topo.topology.interfaces,
-    ///     detectionEnabled: VirtualizationSettings.detectionEnabled,
-    ///     env: .live()) }`.
-    var virtualization: @MainActor () -> VirtualizationSnapshot = { VirtualizationSnapshot() }
+    /// `async` AND `@Sendable`, NOT `@MainActor`, and that is the whole point: taking the
+    /// snapshot is filesystem-bound and another process can stall it. On the main actor it
+    /// wedged the app — `contentsOfDirectory` on UTM's container blocked in `open` and
+    /// never returned, taking the entire UI with it. `snapshotOffMain` is the only
+    /// sanctioned way to ask. `assemble` is already `async`, so awaiting costs nothing.
+    ///
+    /// ONE-LINE WIRING: `context.virtualization = { await VirtualizationDiscovery
+    ///     .snapshotOffMain(interfaces: TopologyMonitor.liveInterfaces(),
+    ///                      detectionEnabled: VirtualizationSettings.detectionEnabled,
+    ///                      env: .live()) }`.
+    var virtualization: @Sendable () async -> VirtualizationSnapshot = { VirtualizationSnapshot() }
 
     /// How mature a VPN kind is — "tested", "untested", "partly verified".
     ///
@@ -71,6 +77,11 @@ enum DiagnosticReportAssembler {
                                      literalSecrets: literalSecrets(context: context))
         let facts = context.availability.facts
 
+        // Awaited BEFORE the array literal: the scan runs off the main actor (see
+        // `DiagnosticReportContext.virtualization`), and a `try await` inside a literal
+        // would be a suspension point in the middle of building the sections.
+        let virtualization = await context.virtualization()
+
         var sections: [DiagnosticReportSection] = [
             whatHappened(request, answers: answers),
             appAndSystem(request, context: context),
@@ -85,7 +96,7 @@ enum DiagnosticReportAssembler {
             DiagnosticReportSection(
                 id: .virtualMachines,
                 fields: DiagnosticReportInventory.virtualizationFields(
-                    snapshot: context.virtualization()),
+                    snapshot: virtualization),
                 emptyNote: "No virtual machine or container software SimpleVPN knows about was found "
                     + "on this Mac."),
             DiagnosticReportSection(
@@ -404,6 +415,18 @@ struct DiagnosticReportHost: ViewModifier {
             // Wired here rather than defaulted inside the assembler so there is
             // still exactly one table deciding what is tested (FeatureMaturity).
             context.maturity = { $0.maturity.badgeText }
+            // The virtualization section, which without this line reported an empty
+            // snapshot — i.e. said "nothing was running" whatever was running, which is
+            // the one thing the header of that section promises it will not do.
+            // `liveInterfaces()` rather than the topology monitor's cached list: it only
+            // polls while something is watching the railroad, and a guest subnet exists
+            // only while the guest does.
+            context.virtualization = {
+                await VirtualizationDiscovery.snapshotOffMain(
+                    interfaces: TopologyMonitor.liveInterfaces(),
+                    detectionEnabled: VirtualizationSettings.detectionEnabled,
+                    env: .live())
+            }
             DiagnosticReportCoordinator.shared.context = context
         }
     }

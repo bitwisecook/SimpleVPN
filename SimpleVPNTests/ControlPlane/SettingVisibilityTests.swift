@@ -41,6 +41,11 @@ struct SettingVisibilityTests {
             ("sshNetworkTunnel", .sshNetworkTunnel(SSHNetworkTunnelConfig()), [.sshNetworkTunnel]),
             ("subprocess/ssh", .subprocess(Self.subprocess(.ssh)), [.ssh, .openConnect]),
             ("subprocess/ssl", .subprocess(Self.subprocess(.fortinet)), [.ssh, .openConnect]),
+            // The security-key rows on the OpenVPN editor's Sign-In tab: with the
+            // switch off (the default) every other row is gated out, and each of
+            // them is a related-link target of the switch or the mechanism.
+            ("securityKey/off", .securityKey(YubiKeyAuthConfig()), [.securityKey]),
+            ("securityKey/on", .securityKey(Self.securityKeyOn()), [.securityKey]),
         ]
         for (label, table, surfaces) in tables {
             let allowed = Set(surfaces.flatMap { $0.settings.map(\.id) })
@@ -190,6 +195,14 @@ struct SettingVisibilityTests {
     private static func subprocess(_ kind: VPNKind) -> SubprocessTunnelConfig {
         var c = SubprocessTunnelConfig()
         c.kind = kind
+        return c
+    }
+
+    /// A security key that is switched ON: the state where only the mechanism's own
+    /// three gates are left, which is the other half of that table.
+    private static func securityKeyOn() -> YubiKeyAuthConfig {
+        var c = YubiKeyAuthConfig()
+        c.enabled = true
         return c
     }
 }

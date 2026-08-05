@@ -30,6 +30,39 @@ So be clear about what the routing exclusion in this feature is *for*: it guards
 own full-tunnel modes** (an OpenVPN/OpenConnect/WireGuard profile with a default route, or a
 `includeAllNetworks` tunnel), **not against Tailscale**, which was measured not to need it.
 
+## Where the warning actually happens
+
+`VirtualizationBypass` decides *what could be offered*; `SimpleVPN/ControlPlane/VPNController+GuestNetworks.swift`
+is the only thing that calls it, and `GuestNetworkCaptureBanner` (`UI/Connection/ConnectionBanners.swift`)
+is the only thing that shows it. Three decisions worth knowing:
+
+* **The hook is `handleStatusChange` at `.connecting`, not a connect method.** There is no single
+  connect method to hang it on — Tailscale, WireGuard, the Proxy Tunnel and the SSH Network Tunnel each
+  have their own, dispatched before `connect(id:plan:…)`. All four are `NETunnelProviderManager`
+  underneath, so all four reach `.connecting`, and that is also the only honest moment: a guest's
+  subnet exists **only while the guest is running**, so the interface list is read then
+  (`TopologyMonitor.liveInterfaces()`, not the monitor's cached list — it polls only while something is
+  displaying the railroad).
+* **The tunnel's shape gates the warning.** A full tunnel captures everything; a split tunnel only
+  warns where one of its carried prefixes overlaps the guest subnet (`RoutePrefixMath.overlaps`, the
+  same arithmetic the routing-rule editor uses). Warning about a VPN that carries `10.0.0.0/8` and
+  nothing else would teach people to ignore the banner.
+* **The scan is off the main thread and on a deadline, and it had to be.** Detection was described as
+  "local and silent — no prompts"; that was wrong. `utmGuests` enumerates
+  `~/Library/Containers/com.utmapp.UTM/Data/Documents`, which is **another application's sandbox
+  container**, and macOS gates it behind a consent check. With the check unanswered `open` does not
+  fail — it **blocks**, indefinitely. Wiring the feature for the first time froze the entire app on
+  that call, caught by the Report a Problem accessibility audit (whose "wait for the app to idle"
+  never returned). So `snapshotOffMain` runs the filesystem half off the main actor with a 2 s budget,
+  and computes the guest networks — `getifaddrs` only, which is the half the warning actually needs —
+  *before* any filesystem call, so the warning still works when the rest times out.
+* **Accepting goes through `setRoutingRules`** — the ordinary guarded path, which re-materialises every
+  profile's include-set and reconnects what is live. No new mechanism, and the extension still
+  re-applies `policyKeepInside` when it builds the `DivertPlan`, so a rule stored before an MDM policy
+  arrived cannot leak. A dismissal is **session-scoped and not persisted**: the next connect is a new
+  decision, and a permanently silenced warning about traffic being cut off is a warning that does not
+  work.
+
 ## The two classes — the distinction the whole feature turns on
 
 | | `.routedSubnet` | `.userspace` |
@@ -130,10 +163,15 @@ route.
 * `SimpleVPNTests/ControlPlane/ManualAnchorParityTests.swift` — registers `vm.` as a catalog, so both
   settings must have manual sections with a stated default, and `vm-what-is-it` is declared prose.
   A `vm.*` setting added without documentation fails here.
-* **Owed, and not yet written:** `SimpleVPNTests/Monitoring/VirtualizationDiscoveryTests.swift`.
+* `SimpleVPNTests/Monitoring/VirtualizationBypassTests.swift` — the refusals, and (in
+  `GuestNetworkCaptureTests`) the connect-time gate: a full tunnel captures everything, a split tunnel
+  carrying `10.0.0.0/8` says **nothing** about `192.168.64.0/24`, and one that overlaps the guest
+  subnet still warns. `GuestNetworkWiringTests` pins the seams themselves, because a path with no
+  caller is exactly the defect this feature shipped with once.
+* `SimpleVPNTests/Monitoring/VirtualizationDiscoveryTests.swift`.
   `VirtualizationEnvironment` injects the filesystem, Launch Services, directory listing and plist
   reads wholesale so a synthesised machine — including one with every product installed — can be
-  tested without depending on the machine running the test. The cases it owes: `bridge100` recognised
+  tested without depending on the machine running the test. The cases it covers: `bridge100` recognised
   and `bridge0` refused; the address read off the bridge while `vmenet0` (no IPv4) is reported only as
   an attached tap; VMware's `vmnet1` attributed to VMware and not mistaken for Apple's `vmenet`; a
   vmnet bridge with two vmnet products installed naming both candidates rather than guessing one;

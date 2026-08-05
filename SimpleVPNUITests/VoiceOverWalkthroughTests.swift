@@ -271,10 +271,15 @@ final class VoiceOverWalkthroughTests: XCTestCase {
                 \(describe(control)) has no value, so focusing it says what it is but never \
                 what the connection is doing
                 """)
-            XCTAssertNotNil(Self.phrase(in: value, from: Self.connectionStatusPhrases), """
-                \(describe(control)) reports \u{201C}\(value)\u{201D}, which is not in the \
-                connection vocabulary (\(Self.connectionStatusPhrases.joined(separator: ", "))) — \
-                a second status language is a regression
+            // BOTH sanctioned vocabularies, not just the NEVPNStatus one: the
+            // "Other Connections" rows stop a subprocess or native tunnel, which has
+            // no NEVPNStatus behind it at all, so their controls speak `DotState`
+            // ("working", "connection problem") — which is rule 3's own vocabulary,
+            // not a second language. Anything outside both lists still fails.
+            XCTAssertNotNil(Self.phrase(in: value, from: Self.allStatusPhrases), """
+                \(describe(control)) reports \u{201C}\(value)\u{201D}, which is in neither status \
+                vocabulary (\(Self.allStatusPhrases.joined(separator: ", "))) — \
+                a third status language is a regression
                 """)
         }
     }
@@ -420,9 +425,9 @@ final class VoiceOverWalkthroughTests: XCTestCase {
     /// Doc step 8: "Pause or disconnect and hear the announcement ('<name>
     /// disconnected') without moving focus."
     ///
-    /// Asserted here: the nearest observable proxy — that every status phrase on
-    /// screen comes from ONE vocabulary, and that the VPN ▸ Disconnect command's
-    /// enabled state agrees with what the Connect controls report. An announcement
+    /// Asserted here: the nearest observable proxy — that the VPN ▸ Disconnect
+    /// command's enabled state agrees with whether the selected VPN is showing a
+    /// stoppable connection at all (step 4 owns the vocabulary half). An announcement
     /// nobody can hear is bad; an announcement in words no other surface uses is
     /// worse, and that IS checkable.
     ///
@@ -439,14 +444,24 @@ final class VoiceOverWalkthroughTests: XCTestCase {
         let connectControls = nodes.filter {
             $0.elementType == .button && ($0.label == "Connect" || $0.label.hasPrefix("Connect "))
         }
-        try XCTSkipIf(connectControls.isEmpty, "No VPNs configured on this machine.")
 
-        var anythingActive = false
-        for control in connectControls {
-            let value = ((control.value as? String) ?? "").lowercased()
-            if value.contains("connected") && !value.contains("disconnected") { anythingActive = true }
-            if value.contains("connecting") || value.contains("reconnecting") { anythingActive = true }
+        // Whether the SELECTED VPN is worth disconnecting, read the way the menu item
+        // itself decides it (VPNCommands: `UI.isActive(vpn.selected.status)`).
+        //
+        // Deliberately NOT inferred from the Connect controls' values, which was the
+        // earlier attempt and could not work: a VPN that is up shows no Connect
+        // control AT ALL — the detail header becomes a stop button and the sidebar row
+        // a per-row one — so "active" was unobservable there and this assertion
+        // reduced to "Disconnect is always disabled", failing on any machine with a
+        // connection actually running. The detail header's trailing control is the
+        // selected VPN's own, and it is the only one named WITHOUT a VPN name after it
+        // (the sidebar's say "Disconnect Tig Lab"), which is exactly the scope the
+        // menu item has.
+        let anythingActive = nodes.contains {
+            $0.elementType == .button && ($0.label == "Disconnect" || $0.label == "Cancel connecting")
         }
+        try XCTSkipIf(connectControls.isEmpty && !anythingActive,
+                      "No VPNs configured on this machine.")
 
         // The VPN menu's Disconnect: enabled exactly when something is worth
         // disconnecting. A menu that lies about that is a menu a keyboard-only user
@@ -455,8 +470,8 @@ final class VoiceOverWalkthroughTests: XCTestCase {
         let disconnect = app.menuBarItems["VPN"].menuItems["Disconnect"]
         XCTAssertTrue(disconnect.waitForExistence(timeout: 5), "VPN ▸ Disconnect is missing")
         XCTAssertEqual(disconnect.isEnabled, anythingActive, """
-            VPN ▸ Disconnect is \(disconnect.isEnabled ? "enabled" : "disabled") while the \
-            Connect controls report \(anythingActive ? "an active" : "no active") connection
+            VPN ▸ Disconnect is \(disconnect.isEnabled ? "enabled" : "disabled") while the window \
+            shows \(anythingActive ? "a stoppable" : "no stoppable") connection for the selected VPN
             """)
         app.typeKey(.escape, modifierFlags: [])
     }
@@ -559,15 +574,23 @@ final class VoiceOverWalkthroughTests: XCTestCase {
                 there is no editor and no Custom Routing tab.
                 """)
         }
-        let settingsTab = manage.radioButtons["Settings"]
-        XCTAssertTrue(settingsTab.exists, """
-            The editor has a Custom Routing tab but no Settings tab — the two-tab shape \
-            every editor shares is broken
+        // The tab Custom Routing sits BESIDE. Two shapes, both correct: every tunnel
+        // editor (Tailscale, WireGuard, Proxy, SSH, Subprocess, Native) pairs it with
+        // "Settings", and the OpenVPN editor — the one a machine with imported .ovpn
+        // files selects by default — leads with "General" and has five more tabs
+        // besides. Demanding "Settings" alone failed on every OpenVPN selection, which
+        // is the common case, not the rare one.
+        let siblingTitle = manage.radioButtons["Settings"].exists ? "Settings" : "General"
+        let sibling = manage.radioButtons[siblingTitle]
+        XCTAssertTrue(sibling.exists, """
+            The editor has a Custom Routing tab but neither a Settings tab (tunnel editors) \
+            nor a General one (the OpenVPN editor) — the tabbed shape every editor shares \
+            is broken
             """)
         // Both tabs must be REACHABLE, not merely present: a tab that exists but
         // can't be hit is a surface a keyboard or Switch Control user cannot get to.
         XCTAssertTrue(tab.isHittable, "The Custom Routing tab is not reachable")
-        XCTAssertTrue(settingsTab.isHittable, "The Settings tab is not reachable")
+        XCTAssertTrue(sibling.isHittable, "The \(siblingTitle) tab is not reachable")
         // The tabs are NOT clicked. Switching into an editor tab fires the Custom
         // Routing draft's commit path, and these tests are read-only about the
         // tester's own VPNs by design (see this file's header).
@@ -665,8 +688,14 @@ final class VoiceOverWalkthroughTests: XCTestCase {
             ($0.elementType == .button || $0.elementType == .colorWell) && !$0.label.isEmpty
                 && !$0.identifier.hasPrefix("_XCUI")
         }
+        // "colour", not "color": the pane's own wording is British ("Colour for the
+        // Lab label"), so the American spelling matched nothing and this loop had
+        // quietly stopped covering the colour wells — half of what step 12 exists for.
+        // Both spellings are accepted so a future rewording can't silence it again.
         for action in actions
-        where action.label.lowercased().hasPrefix("delete") || action.label.lowercased().contains("color") {
+        where action.label.lowercased().hasPrefix("delete")
+            || action.label.lowercased().contains("colour")
+            || action.label.lowercased().contains("color") {
             XCTAssertGreaterThan(action.label.split(separator: " ").count, 1, """
                 \u{201C}\(action.label)\u{201D} doesn't say which label it edits — one \
                 \u{201C}Delete\u{201D} per label is indistinguishable by ear
@@ -871,8 +900,10 @@ final class VoiceOverWalkthroughTests: XCTestCase {
         let sidebar = window.outlines["Sidebar"]
         guard sidebar.waitForExistence(timeout: 10) else {
             throw XCTSkip("""
-                The window is showing the extension-activation or empty-VPNs prompt rather \
-                than a VPN list — real UI, but not this step's UI.
+                No VPN list in this window: it is showing the extension-activation or \
+                empty-VPNs prompt, or this machine has exactly ONE VPN — in which case the \
+                sidebar deliberately starts closed (ConnectionView: a list of one is noise). \
+                All real UI, but not this step's UI; the human walkthrough wants two.
                 """)
         }
         var found: [(name: String, row: XCUIElementSnapshot)] = []
@@ -882,7 +913,15 @@ final class VoiceOverWalkthroughTests: XCTestCase {
                 $0.elementType == .button && $0.label.hasPrefix("Connect ")
             }
             guard let connect else { continue }   // the "VPNs" section header
-            found.append((String(connect.label.dropFirst("Connect ".count)), row))
+            // The dimmed Play button says WHY it can't connect yet in its own name
+            // ("Connect Tig Lab — needs your sign-in first"), which is right for a
+            // listener and wrong as a handle: everything after the em dash is the
+            // reason, not the VPN. Take the name only — a VPN with manual
+            // credentials is exactly the one the doc asks the tester to use, so this
+            // is the normal shape here, not an edge case.
+            let named = String(connect.label.dropFirst("Connect ".count))
+            let name = named.components(separatedBy: " \u{2014} ").first ?? named
+            found.append((name, row))
         }
         try XCTSkipIf(found.isEmpty, """
             No VPNs are configured on this machine, so there is no row to read. The human \

@@ -43,9 +43,18 @@
 //      execution allow-list exists to prevent. No privileged call either: every
 //      fact below comes from a `stat`, a plist read, or the interface list any
 //      process may read.
-//   2. LOCAL AND SILENT. No network, no prompts, nothing written, no daemon woken.
-//      It is therefore on by default (`vm.detect`) — a detection feature that
-//      defaults to not detecting is inert.
+//   2. LOCAL. No network, nothing written, no daemon woken. It is therefore on by
+//      default (`vm.detect`) — a detection feature that defaults to not detecting is
+//      inert.
+//   3. NOT ENTIRELY SILENT, and the earlier claim that it was has been corrected here
+//      because it was wrong. `utmGuests` enumerates
+//      `~/Library/Containers/com.utmapp.UTM/Data/Documents` — ANOTHER APPLICATION'S
+//      SANDBOX CONTAINER — and macOS gates that behind a consent check. Measured
+//      consequence: with the check unanswered, `open` does not fail, it BLOCKS
+//      indefinitely, and the first time this feature was actually wired the whole app
+//      froze on it. Hence `snapshotOffMain`: off the main thread AND on a deadline, with
+//      the guest-network half (`getifaddrs` only, which is what the connect-time warning
+//      needs) computed before any filesystem call so it survives the timeout.
 //
 //  WHAT IS NOT KNOWABLE WHILE NOTHING IS RUNNING, and it is not a gap to paper
 //  over: a guest subnet is assigned when a guest BOOTS. With no VM running there
@@ -544,8 +553,87 @@ nonisolated enum VirtualizationDiscovery {
             }
     }
 
+    /// The whole answer, TAKEN OFF THE MAIN THREAD — which is the only way any caller
+    /// in the app should ask for it.
+    ///
+    /// MEASURED, NOT PRECAUTIONARY. The synchronous `snapshot(...)` below is ~40 `stat`s,
+    /// a directory enumeration of UTM's container and a plist read per virtual machine.
+    /// Called on the main actor it wedged the app outright: `contentsOfDirectory` on
+    /// `~/Library/Containers/com.utmapp.UTM/Data/Documents` blocked in `open` and never
+    /// returned, and the whole UI went with it — caught by the Report a Problem
+    /// accessibility audit, whose "wait for the app to idle" never came back. A
+    /// filesystem call another process can stall must never be on the main thread, and
+    /// "it is only forty stats" is exactly the reasoning that put it there.
+    ///
+    /// `nonisolated` + `async` rather than a cache: the answer is only true for the
+    /// instant it is taken (a guest's subnet exists only while the guest runs), so a
+    /// stale cached snapshot would be a wrong answer rather than a cheap one.
+    /// How long the filesystem half of the scan gets before the answer is given without
+    /// it. Generous for the work (tens of `stat`s and a small directory) and short enough
+    /// that nothing visible waits on it.
+    nonisolated static let scanBudget: Duration = .seconds(2)
+
+    nonisolated static func snapshotOffMain(
+        interfaces: [NetInterface],
+        detectionEnabled: Bool,
+        env: VirtualizationEnvironment) async -> VirtualizationSnapshot {
+
+        guard detectionEnabled else { return VirtualizationSnapshot(detectionEnabled: false) }
+
+        // THE LIVE NETWORKS FIRST, AND WITHOUT TOUCHING THE FILESYSTEM AT ALL. This is
+        // the half the connect-time warning actually needs, it comes from the interface
+        // list the caller already holds, and it can never stall — so the warning works
+        // even when everything below times out. Attribution by interface name
+        // (`bridge1xx`, `vmnet1`, `vnic0`, `vboxnet0`) needs no installed list; only the
+        // vmnet CANDIDATES do, and those are filled in below when they arrive.
+        let networksWithoutAttribution = guestNetworks(interfaces: interfaces, installed: [])
+
+        // AND THE FILESYSTEM HALF ON A DEADLINE, because one of its reads can block for
+        // ever. MEASURED: `utmGuests` enumerates `~/Library/Containers/com.utmapp.UTM/
+        // Data/Documents` — ANOTHER APPLICATION'S SANDBOX CONTAINER — and macOS gates
+        // that behind a consent check. With the check unanswered, `open` does not fail,
+        // it BLOCKS, and it blocked for as long as it was left to. Waiting on that from
+        // a connect or from the report is not acceptable at any duration, so the answer
+        // is bounded and the missing half is simply absent.
+        let filesystem = await answer(within: scanBudget) { () -> ([InstalledVirtualization], [UTMGuest]) in
+            (installed(env: env), utmGuests(env: env))
+        }
+        guard let (found, guests) = filesystem else {
+            return VirtualizationSnapshot(guestNetworks: networksWithoutAttribution,
+                                          detectionEnabled: true)
+        }
+        return VirtualizationSnapshot(
+            installed: found,
+            guestNetworks: guestNetworks(interfaces: interfaces, installed: found),
+            utmGuests: guests,
+            detectionEnabled: true)
+    }
+
+    /// `work`'s answer, or nil if it has not produced one inside `budget`.
+    ///
+    /// The abandoned task is NOT killed and cannot be: a thread parked in `open` is in an
+    /// uninterruptible syscall, and `Task.cancel` has nothing to deliver to. It is left to
+    /// finish and its answer dropped, which is why the budget exists at all rather than a
+    /// retry loop — one stalled read must cost one thread once, not one per connect. That
+    /// is also why the caller above never re-asks on a timeout.
+    private nonisolated static func answer<T: Sendable>(
+        within budget: Duration,
+        work: @escaping @Sendable () -> T) async -> T? {
+
+        await withTaskGroup(of: T?.self, returning: T?.self) { group in
+            group.addTask(priority: .utility) { work() }
+            group.addTask { try? await Task.sleep(for: budget); return nil }
+            defer { group.cancelAll() }
+            for await first in group { return first }
+            return nil
+        }
+    }
+
     /// The whole answer. `detectionEnabled == false` yields an empty snapshot that
     /// SAYS it is empty by choice.
+    ///
+    /// SYNCHRONOUS AND FILESYSTEM-BOUND: call it from a test, or through
+    /// `snapshotOffMain`. Never from the main actor — see above.
     static func snapshot(interfaces: [NetInterface],
                          detectionEnabled: Bool,
                          env: VirtualizationEnvironment) -> VirtualizationSnapshot {

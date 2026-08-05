@@ -282,6 +282,14 @@ final class TopologyMonitor {
 
     // MARK: getifaddrs (addresses + link byte counters)
 
+    /// The live interface list, on demand and independent of the poll.
+    ///
+    /// `TopologyMonitor` only polls while something is watching the railroad, so a
+    /// caller that needs the CURRENT interfaces — the connect-time guest-network
+    /// warning, the diagnostic report — cannot read `topology.interfaces` and trust
+    /// it. One `getifaddrs`, no spawn, no privilege.
+    nonisolated static func liveInterfaces() -> [NetInterface] { readInterfaces().interfaces }
+
     private nonisolated static func readInterfaces()
         -> (interfaces: [NetInterface], counters: [String: (in: UInt64, out: UInt64)]) {
 

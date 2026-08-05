@@ -550,6 +550,20 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                     vpn.disconnect(id: profile.id)
                 }
             }
+            // A running virtual machine or container is about to lose its network to
+            // this tunnel. Above the paused banner but below the two "we are still
+            // waiting on you" ones: it is about what the connect will DO rather than
+            // whether it will happen, and it stays up while connected because the
+            // offer is still worth taking then. Silent unless something is actually
+            // running that this VPN would capture (VPNController+GuestNetworks).
+            if let offers = vpn.guestNetworkWarning(for: profile.id) {
+                GuestNetworkCaptureBanner(offers: offers) {
+                    Task { await vpn.acceptGuestNetworkBypass(id: profile.id, offers: offers) }
+                } dismiss: {
+                    vpn.dismissGuestNetworkWarning(id: profile.id)
+                }
+                .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
+            }
             if isPaused {
                 PausedBanner { Task { await vpn.resume(id: profile.id) } }
             }

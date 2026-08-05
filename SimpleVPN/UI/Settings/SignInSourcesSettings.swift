@@ -524,6 +524,15 @@ struct SignInSourcesSettings: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(copy.title) on this Mac")
         .accessibilityValue(sentence)
+        // A ROLE, not just a label. `LabeledContent` + `.combine` produces an element
+        // with a label, a value and NO AX role — `AXUnknown`, which the audit reports as
+        // "Unknown role" and which leaves VoiceOver unable to say what kind of thing it
+        // has landed on. (A bare combined `Label` does not have this problem, which is
+        // why the identical state line in SignInInstanceEntryPicker is fine; the
+        // difference is `LabeledContent`.) Found by the Settings-window audit once it
+        // started driving the Sign-In Sources pane rather than whichever tab was
+        // remembered — the first real defect that gate caught here.
+        .accessibilityAddTraits(.isStaticText)
     }
 
     // MARK: The KeePass database's unlock — a secret, and where it may live
@@ -924,6 +933,11 @@ struct SignInSourcesSettings: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("SimpleVPN found this one on your Mac")
                 .accessibilityValue(detected)
+                // The same `LabeledContent` + `.combine` role gap as the "On this Mac"
+                // row above — a label and a value with no AX role at all. Fixed here too
+                // rather than waiting for the audit to reach it, since it is the same
+                // construct for the same reason.
+                .accessibilityAddTraits(.isStaticText)
             }
             if !shown.isLockedByPolicy {
                 HStack(spacing: 8) {
@@ -1076,7 +1090,13 @@ struct SignInSourcesSettings: View {
                     .padding(.leading, 16)
             }
         }
+        // The container gets the same sentence its button has: an unnamed AX group is
+        // the one shape SimpleVPNUITests' audit excuses as framework chrome, so
+        // leaving it nameless meant the omission could never fail the gate.
         .accessibilityElement(children: .contain)
+        .accessibilityLabel(found.isFound
+                            ? "Where SimpleVPN found \(title), \(found.paths.count) places"
+                            : "\(title) wasn\u{2019}t found")
     }
 
     /// One tool's every hit, each stating in WORDS whether SimpleVPN will run it from

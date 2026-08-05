@@ -217,6 +217,8 @@ struct UIIssueSheet: View {
                     if ScreenshotShortcuts.screenshotAppAvailable {
                         Button("Open Screenshot Tool") { ScreenshotShortcuts.openScreenshotApp() }
                             .help("Opens Apple's Screenshot app, which can capture a still or record the screen.")
+                            // Not hover-only — same sentence to VoiceOver (rule 7).
+                            .accessibilityHint("Opens Apple's Screenshot app, which can capture a still or record the screen.")
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

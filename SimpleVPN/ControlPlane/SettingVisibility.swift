@@ -230,3 +230,44 @@ extension SettingVisibility {
         return .init(hidden)
     }
 }
+
+// MARK: - Security keys (the `yk.` rows on the OpenVPN editor's Sign-In tab)
+
+extension SettingVisibility {
+
+    /// `YubiKeySignInSection` renders ONE row unconditionally — the master switch —
+    /// and the rest only once it is on, with three further gates on what the key
+    /// supplies. Every one of those rows is a clique member of the switch or of the
+    /// mechanism (SettingRelations.swift), so the help popover offers a link to them
+    /// EXACTLY when they are not on screen: the same case that made the Tailscale
+    /// exit-node links look broken. Without this table the reveal would announce
+    /// "Showing What the Key Supplies" with nothing there to show.
+    ///
+    /// Ids are written out rather than derived from `YubiKeySettings.all` to keep
+    /// this table pure and readable beside the `oc.pkcs11-*` block above; the
+    /// visibility tests hold every id here to a real spec on the surface.
+    static func securityKey(_ c: YubiKeyAuthConfig) -> SettingVisibility {
+        var hidden: [String: String] = [:]
+        guard c.enabled else {
+            let why = "Turn on \u{201C}Use a Security Key\u{201D} to reach the security key rows."
+            for id in ["yk.mechanism", "yk.delivery", "yk.serial", "yk.oath-account",
+                       "yk.slot", "yk.wait-seconds", "yk.arm-automatically"] {
+                hidden[id] = why
+            }
+            return .init(hidden)
+        }
+        if c.mechanism != .oathCode {
+            hidden["yk.oath-account"] =
+                "It only applies when the key supplies a six- or eight-digit code \u{2014} choose that under \u{201C}What the Key Supplies\u{201D}."
+        }
+        if c.mechanism != .challengeResponse {
+            hidden["yk.slot"] =
+                "It only applies when the key answers a challenge \u{2014} choose that under \u{201C}What the Key Supplies\u{201D}."
+        }
+        if c.mechanism == .staticPassword {
+            hidden["yk.delivery"] =
+                "A fixed password from the key is the whole password, so there is nothing to join it to."
+        }
+        return .init(hidden)
+    }
+}

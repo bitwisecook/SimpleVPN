@@ -388,10 +388,17 @@ struct DiagnosticReportView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack {
+                // Each `.help` sentence is repeated as an `accessibilityHint` — the
+                // house rule (Docs/Accessibility.md rule 5/7): no hover-only
+                // explanation, because a hover is invisible to VoiceOver and to
+                // anyone driving from the keyboard. "sends nothing anywhere" is
+                // exactly the reassurance this window owes, so it must be spoken.
                 Button("Copy Report") { model.copyOnly() }
                     .help("Copies the text above to the clipboard, and sends nothing anywhere.")
+                    .accessibilityHint("Copies the text above to the clipboard, and sends nothing anywhere.")
                 Button("Save to a File\u{2026}") { model.saveToFile() }
                     .help("Saves the text above so you can attach it to an issue yourself.")
+                    .accessibilityHint("Saves the text above so you can attach it to an issue yourself.")
                 Spacer()
                 Button("Close") { DiagnosticReportCoordinator.shared.close() }
                     .keyboardShortcut(.cancelAction)

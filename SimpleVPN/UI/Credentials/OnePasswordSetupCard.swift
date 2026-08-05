@@ -119,7 +119,12 @@ struct OnePasswordSetupCard: View {
         .padding(compact ? 10 : 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
+        // A container, because it holds buttons — but a container still needs its own
+        // sentence. Without one this walkthrough was an unnamed AX group, which is the
+        // exact shape SimpleVPNUITests' audit excuses as framework chrome, so the
+        // omission could never fail the gate. The headline IS the sentence.
         .accessibilityElement(children: .contain)
+        .accessibilityLabel(OnePasswordPreflight.headline(for: state))
     }
 
     private func stepRow(number: Int, step: UserFacingError.Step) -> some View {

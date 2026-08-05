@@ -59,24 +59,108 @@ final class SimpleVPNUITests: XCTestCase {
     }
 
     /// The same gate over the Settings window (wave 3: editors + settings),
-    /// opened the way a user opens it: SimpleVPN ▸ Settings… (⌘,). The window's
-    /// title is macOS-version-dependent (the selected tab's name vs
-    /// "SimpleVPN Settings"), so the wait matches either.
+    /// opened the way a user opens it: SimpleVPN ▸ Settings… (⌘,), and over EVERY
+    /// one of its panes rather than whichever one the tester left showing.
     @MainActor
     func testSettingsWindowAccessibilityAudit() throws {
         let app = try launchOrSkip()
 
         app.menuBarItems["SimpleVPN"].click()
         app.menuBarItems["SimpleVPN"].menuItems["Settings…"].click()
+        // Matched on the SwiftUI Settings scene's own IDENTIFIER as well as the
+        // title, the same way VoiceOverWalkthroughTests' step 12 matches it. The
+        // window remembers its tab between launches and macOS titles it after the
+        // selected pane, so a tester who last used "Labels" or "Sign-In Sources"
+        // leaves behind a perfectly healthy window whose title is neither
+        // "General" nor anything containing "Settings" — and this guard then
+        // failed the audit for a window that was open in front of it.
         let settings = app.windows.matching(
-            NSPredicate(format: "title == 'General' OR title CONTAINS 'Settings'")
+            NSPredicate(format: """
+                identifier == 'com_apple_SwiftUI_Settings_window' OR title == 'General' \
+                OR title CONTAINS 'Settings'
+                """)
         ).firstMatch
         guard settings.waitForExistence(timeout: 10) else {
             XCTFail("The Settings window didn't open from the app menu")
             return
         }
 
+        // A Settings tab is a whole SURFACE — Sign-In Sources alone carries the
+        // vault list, the tool-path fields, the database-password rows and their
+        // enablement banners — and only the pane on screen is in the tree the
+        // audit walks. Auditing whatever tab was remembered means the gate covers
+        // a different third of this window on every machine, so all three are
+        // driven explicitly. Tabs are AppKit toolbar items carrying a TITLE and no
+        // identifier or label, so they are matched on that title (as step 12 does).
+        // RE-RESOLVED PER PANE, and not scoped to the window. Both matter, and both were
+        // learned the hard way: a `firstMatch` held across a pane switch went stale (the
+        // window is retitled after its selected tab, and the tab strip is rebuilt), so
+        // "Labels" was reported missing on a window that was showing it. Matching on
+        // `app` rather than on the window also covers the toolbar living outside the
+        // window element on some macOS versions. `.any` because the strip renders as
+        // buttons in some releases and radio buttons in others (VoiceOverWalkthroughTests
+        // step 11 hits the radio-button form) — the TITLE is the stable handle, not the role.
+        func tab(_ title: String) -> XCUIElement {
+            app.descendants(matching: .any)
+                .matching(NSPredicate(format: "title == %@", title)).firstMatch
+        }
+        for title in ["General", "Sign-In Sources", "Labels"] {
+            let pane = tab(title)
+            guard pane.waitForExistence(timeout: 15) else {
+                // Names what WAS there, so a future break is diagnosable from the log
+                // instead of being a bare "no Labels tab" on a window showing one.
+                let seen = app.descendants(matching: .any).allElementsBoundByIndex
+                    .prefix(80).compactMap { $0.title.isEmpty ? nil : $0.title }
+                XCTFail("The Settings window has no \(title) tab. Titles seen: \(Set(seen).sorted())")
+                return
+            }
+            pane.click()
+            try runAccessibilityAudit(on: app)
+        }
+        tab("General").click()   // leave the window on its default tab
+    }
+
+    /// The same gate over the Network Tools window (mediator cards, the staged
+    /// check, the path railroad), opened via VPN ▸ Network Tools…. It is the one
+    /// window with a VoiceOver step of its own (13) that no audit ever walked.
+    @MainActor
+    func testNetworkToolsWindowAccessibilityAudit() throws {
+        let app = try launchOrSkip()
+
+        app.menuBarItems["VPN"].click()
+        app.menuBarItems["VPN"].menuItems["Network Tools…"].click()
+        // By SCENE ID, for the same reason Manage VPNs is: the window's own
+        // `.navigationTitle` is what titles it, and the id is the stable handle.
+        guard app.windows["tools"].waitForExistence(timeout: 10) else {
+            XCTFail("The Network Tools window didn't open from the VPN menu")
+            return
+        }
+
         try runAccessibilityAudit(on: app)
+    }
+
+    /// The same gate over the Report a Problem window — Help ▸ Report a Problem…,
+    /// which is also where every "Untested" banner's report link lands.
+    ///
+    /// It needs its own test because it is not a sheet on anybody else's window:
+    /// DiagnosticReportCoordinator hosts a plain NSWindow, so it is outside every
+    /// window the four audits above open. Nothing is submitted — the dialog
+    /// gathers the payload and shows it, and an audit only reads the tree.
+    @MainActor
+    func testDiagnosticReportWindowAccessibilityAudit() throws {
+        let app = try launchOrSkip()
+
+        app.menuBarItems["Help"].click()
+        app.menuBarItems["Help"].menuItems["Report a Problem…"].click()
+        guard app.windows["Report a Problem"].waitForExistence(timeout: 10) else {
+            XCTFail("The Report a Problem window didn't open from the Help menu")
+            return
+        }
+
+        try runAccessibilityAudit(on: app)
+        // Leave the machine as we found it — ESC closes it (the window's own
+        // cancelOperation), so nothing inherits an open report dialog.
+        app.typeKey(.escape, modifierFlags: [])
     }
 
     /// The same gate over the Manage VPNs window (wave 3: the management
@@ -189,6 +273,20 @@ final class SimpleVPNUITests: XCTestCase {
             //    AppKit window chrome, again untouchable.
             // Only that exact shape is excused. Real content (buttons, images,
             // text, labeled groups) stays enforced.
+            //
+            // KNOWN COST, stated so nobody rediscovers it as a mystery: an
+            // APP-OWNED container is the same shape when it has no name — an
+            // `.accessibilityElement(children: .contain)` with no
+            // `.accessibilityLabel` is an unlabeled group and lands here too. The
+            // audit therefore cannot enforce "every container says what it is",
+            // and it silently excused three real ones (the first-connect setup
+            // card, the 1Password walkthrough, and Sign-In Sources' "where it was
+            // found" disclosure) until they were labeled by hand. So: `.contain`
+            // is ALWAYS paired with a label in this app, and keeping that true is
+            // review's job, not this gate's. Narrowing the excusal by provenance
+            // the way the Touch Bar one is done needs an identity these framework
+            // groups do not have (verified: no label, no identifier, and
+            // unreachable from view code).
             if issue.auditType == .sufficientElementDescription || issue.auditType == .parentChild,
                let element = issue.element,
                element.elementType == .group,

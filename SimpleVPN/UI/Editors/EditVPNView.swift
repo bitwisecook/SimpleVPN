@@ -40,11 +40,18 @@ struct EditVPNView: View {
     /// Options ▸ Sign-In, Certificates → the private-key password, Traffic ↔
     /// Custom Routing) and app-wide search can select one.
     @State private var tab: SettingsTab = .general
-    /// The editor's search catalog — the OpenVPN engine options AND the Custom
-    /// Routing tab, so one field finds everything this editor holds and a hit on
-    /// the other tab selects it. Owned HERE rather than inside
-    /// OpenVPNOptionsForm, which is what confined search to that one form.
-    @State private var search = SettingsSearch(surfaces: [.openVPN, .customRouting],
+    /// The editor's search catalog — the OpenVPN engine options, the security-key
+    /// rows on the Sign-In tab and the Custom Routing tab, so one field finds
+    /// everything this editor holds and a hit on another tab selects it. Owned HERE
+    /// rather than inside OpenVPNOptionsForm, which is what confined search to that
+    /// one form.
+    ///
+    /// `.securityKey` is listed because this editor is the one that RENDERS those
+    /// rows (`YubiKeySignInSection`, Sign-In tab). Without it they were registered
+    /// app-wide and reachable from nowhere: the editor's own field couldn't find
+    /// them, and a global hit or a related link routed to a `SettingsRoute` no
+    /// editor claimed — so nothing selected the tab and nothing revealed the row.
+    @State private var search = SettingsSearch(surfaces: [.openVPN, .securityKey, .customRouting],
                                                kind: .openVPN)
 
     @State private var name = ""
@@ -263,8 +270,20 @@ struct EditVPNView: View {
             // Publishes `search` to every row, follows a reveal across tabs, and
             // serves incoming SettingsRoutes (UI/Components/SettingsEditorShell.swift).
             .settingsEditor(search: search, tab: $tab,
-                            surfaces: [.openVPN, .customRouting], profileID: profileID,
+                            surfaces: [.openVPN, .securityKey, .customRouting],
+                            profileID: profileID,
                             kind: .openVPN)
+            // WHICH of the security-key rows are on screen right now. They are
+            // gated on the master switch and on what the key supplies, and every
+            // one of them is a related-link target of one of those two — so
+            // without this the reveal would announce a row that isn't rendered.
+            // The OpenVPN rows themselves need no entry: they are all in the
+            // hierarchy, and the options form opens its own disclosures with
+            // `unhidesRevealTarget`.
+            .onAppear { search.visibility = SettingVisibility.securityKey(yubiKey) }
+            .onChange(of: SettingVisibility.securityKey(yubiKey)) { _, new in
+                search.visibility = new
+            }
             // Clear the toolbar's scroll-edge shadow band — without this the
             // segmented tab strip sits flush under the title bar and the edge
             // effect overlays its top pixels.
@@ -622,6 +641,12 @@ struct EditVPNView: View {
             }
         }
         .formStyle(.grouped)
+        // The security-key rows on this tab are a registered surface (`yk.*`), so a
+        // search hit or a related link can land here from another tab — and a scroll
+        // host is what turns "the row pulsed" into "the row is on screen". Without
+        // it a jump to a LOCKED row (MDM) had nothing to move the form: a disabled
+        // control takes no keyboard focus, so AppKit never scrolled it into view.
+        .revealsSettings()
     }
 
     private var templateValid: Bool {

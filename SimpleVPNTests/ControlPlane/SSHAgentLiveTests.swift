@@ -164,7 +164,9 @@ struct SSHAgentLiveTests {
     @Test func liveAgentMode() {
         let mode = Self.enabled
             ? "ENABLED — real ssh-agent + real sshd"
-            : (LiveSSHAgent.isAvailable ? "SKIPPED — \(LiveSSHFixture.status)"
+            // `LiveSSHFixture.status` already begins with ENABLED/SKIPPED, so it is
+            // passed through rather than prefixed again ("SKIPPED — SKIPPED — …").
+            : (LiveSSHAgent.isAvailable ? LiveSSHFixture.status
                                         : "SKIPPED — no /usr/bin/ssh-agent")
         print("   SSH agent live tests: \(mode)")
         #expect(true)
