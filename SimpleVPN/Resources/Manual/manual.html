@@ -334,6 +334,16 @@
   <a href="#yk-serial">Security Key Serial Number</a>
   <a href="#yk-wait-seconds">How Long to Wait for a Touch</a>
   <a href="#yk-arm-automatically">Wait for a Touch Automatically</a>
+
+  <h2>Sign-In Sources</h2>
+  <a href="#creds-what-is-it">What This Is</a>
+  <a href="#creds-discovery">Looking for Password Apps</a>
+  <a href="#creds-onepassword-enabled">Use 1Password</a>
+  <a href="#creds-keepassxc-enabled">Use KeePassXC</a>
+  <a href="#creds-keepassxc-socket">KeePassXC Connection Point</a>
+  <a href="#creds-keeper-enabled">Use Keeper</a>
+  <a href="#creds-keeper-tool-path">Keeper Commander Location</a>
+  <a href="#creds-ykman-tool-path">YubiKey Manager Location</a>
 </nav>
 
 <main>
@@ -1488,6 +1498,51 @@ the device's protection intact at the cost of typing four to eight digits per co
 <h2 id="yk-arm-automatically">Wait for a Touch Automatically</h2>
 <p class="default">Default: on.</p>
 <p>Start waiting for your key as soon as the sign-in is ready, so the cursor is already in the right box when you reach for it. Turn it off to wait until you click — worth doing if you would rather nothing started listening on its own.</p>
+
+<h2 id="creds-what-is-it">Sign-In Sources</h2>
+<p>A &ldquo;sign-in source&rdquo; is where a VPN&rsquo;s username and password come from when you connect: you type them, SimpleVPN keeps them for you in the Apple keychain, macOS fills them in from Apple Passwords, or a password app hands them over. These settings live in <strong>SimpleVPN &#9656; Settings &#9656; Sign-In Sources</strong> and apply to every VPN at once &mdash; each VPN then picks one of whatever is on offer.</p>
+<p>Two of them need a word of explanation, because they are the reason this pane exists.</p>
+<p><strong>SimpleVPN is fussy about which programs it runs.</strong> A password app&rsquo;s command-line tool is about to be asked for a password, so SimpleVPN only starts one from the folders that package managers install into &mdash; Homebrew&rsquo;s, MacPorts&rsquo;, the system ones, and the per-user folders Python installs use. It deliberately ignores your shell&rsquo;s search path, because anything that can add a folder to that path could otherwise choose which program gets handed your password. It also refuses any folder that everyone using this Mac can write to, and it refuses that even if you ask for it by name.</p>
+<p><strong>But it will still tell you where your tool is.</strong> Looking is a different question from running, so SimpleVPN searches much more widely than it will run from: every package manager and version manager it knows about, the folders vendors&rsquo; own installers use, the tools that ship inside application bundles, and your search path. That is why you may see &ldquo;found at &hellip;, but SimpleVPN won&rsquo;t run it from there&rdquo; &mdash; which is the truth, and much more use than being told a tool you can see with your own eyes is not installed. When that happens, paste the path into the tool&rsquo;s own field: pointing at a copy deliberately is exactly how it is meant to be used.</p>
+<p>A path field shows a suggestion in grey when nothing is set. Grey text is a suggestion, not a setting &mdash; the field is empty and SimpleVPN is using what it found. Type or paste something and it becomes yours. <strong>Use What SimpleVPN Found</strong> fills in the suggestion, and <strong>Clear</strong> empties the field again.</p>
+
+<h2 id="creds-discovery">Looking for Password Apps</h2>
+<p class="default">Default: on.</p>
+<p>Lets SimpleVPN find the password apps and command-line tools you already have, so it can offer them as ways to sign in and tell you where they are. It only ever reads this Mac: nothing is sent anywhere, nothing is installed, and nothing of yours is changed. No macOS permission is involved.</p>
+<p>Turn it off and SimpleVPN stops looking altogether &mdash; no password apps are offered, and none are mentioned. You can still type your sign-in, save it in the Apple keychain, or use Apple Passwords, so nothing becomes unusable. What you lose is every password-app integration, because there is nothing left to find them with.</p>
+<p>Whether any of this appears in a problem report you send us is a separate question, asked each time you send one.</p>
+
+<h2 id="creds-onepassword-enabled">Use 1Password</h2>
+<p class="default">Default: on.</p>
+<p>Offers 1Password as a way to sign in. SimpleVPN asks the 1Password app itself, which does the unlocking; your 1Password password never reaches SimpleVPN.</p>
+<p>Off means SimpleVPN neither offers 1Password nor mentions it, even if it is installed. There is no path to set: SimpleVPN talks to the app directly rather than through a command-line tool, so there is nothing to point at.</p>
+
+<h2 id="creds-keepassxc-enabled">Use KeePassXC</h2>
+<p class="default">Default: on.</p>
+<p>Offers KeePassXC as a way to sign in. SimpleVPN talks to the running app over the same connection its browser extensions use, so KeePassXC keeps control of the unlock and asks you to allow SimpleVPN the first time.</p>
+<p>Off means SimpleVPN neither offers KeePassXC nor mentions it.</p>
+
+<h2 id="creds-keepassxc-socket">KeePassXC Connection Point</h2>
+<p class="default">Optional. Empty means SimpleVPN finds it.</p>
+<p>KeePassXC opens a connection point while it is running with browser integration on, and SimpleVPN talks to it there. It normally lives in this Mac&rsquo;s per-user temporary folder, and SimpleVPN finds it without help &mdash; leave this empty unless yours is somewhere else.</p>
+<p>A setting here only takes effect while something really is listening at that path; a stale one is ignored rather than being allowed to break the automatic search.</p>
+
+<h2 id="creds-keeper-enabled">Use Keeper</h2>
+<p class="default">Default: on.</p>
+<p>Offers Keeper as a way to sign in. SimpleVPN reads Keeper through <strong>Keeper Commander</strong>, Keeper&rsquo;s own command-line tool &mdash; the Keeper app on its own has nothing SimpleVPN can talk to. Commander keeps your Keeper sign-in in this Mac&rsquo;s keychain; SimpleVPN never sees your Keeper master password and never changes Commander&rsquo;s own setup.</p>
+<p>Off means SimpleVPN neither offers Keeper nor mentions it.</p>
+
+<h2 id="creds-keeper-tool-path">Keeper Commander Location</h2>
+<p class="default">Optional. Empty means SimpleVPN uses the one it found.</p>
+<p>Where Keeper Commander is on this Mac. Leave it empty and SimpleVPN uses whichever copy it found in a folder it will run from. Set it when your copy is somewhere else &mdash; a virtual environment, a version manager, or anywhere reached only through your shell&rsquo;s search path. That is what this field is for, and using it is not a workaround: an explicit path is the sanctioned way to run a tool SimpleVPN would otherwise leave alone.</p>
+<p>Two things it will not accept. A path must be complete, starting with a slash, because a bare name would be resolved by rules SimpleVPN does not control. And a program in a folder that everyone using this Mac can write to is refused even here &mdash; in that folder, anyone could replace the program between you setting the path and SimpleVPN running it.</p>
+<p>Keeper&rsquo;s own guide installs Commander with <code>pip3 install --user keepercommander</code> or into a virtual environment; Homebrew&rsquo;s <code>brew install keeper-commander</code> puts it somewhere SimpleVPN already looks.</p>
+
+<h2 id="creds-ykman-tool-path">YubiKey Manager Location</h2>
+<p class="default">Optional. Empty means SimpleVPN uses the one it found.</p>
+<p>Where <code>ykman</code>, YubiKey&rsquo;s own command-line tool, is on this Mac. SimpleVPN uses it to read a verification code stored on a security key. Leave it empty and SimpleVPN uses whichever copy it found in a folder it will run from.</p>
+<p>You may already have it without knowing: the YubiKey Manager app carries the tool inside it, at <code>/Applications/YubiKey Manager.app/Contents/MacOS/ykman</code>, and Homebrew&rsquo;s <code>brew install ykman</code> puts a copy somewhere SimpleVPN already looks.</p>
+<p>This field follows exactly the same rules as the other tool paths above &mdash; a complete path starting with a slash, and never a program in a folder everyone using this Mac can write to.</p>
 
 <hr style="border: none; border-top: 1px solid var(--border); margin-top: 48px">
 <p class="muted" style="font-size: 13px">SimpleVPN uses the OpenVPN 3, OpenConnect, libssh and Tailscale engines, the gVisor network stack, Sparkle for app updates, and the 1Password Go SDK for item lookup. <a href="https://db-ip.com">IP Geolocation by DB-IP</a>, licensed CC BY 4.0. Coastlines from Natural Earth. Every component and its licence is listed in <strong>SimpleVPN &#9656; About SimpleVPN</strong>.</p>

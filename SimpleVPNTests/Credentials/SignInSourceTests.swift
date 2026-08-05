@@ -324,6 +324,37 @@ struct SignInSourceCatalogTests {
         }
     }
 
+    /// The addresses that were shipping as REDIRECTS rather than as final URLs.
+    ///
+    /// A link table checked with `curl -L` reports 200 for a chain of redirects, so
+    /// three entries passed the audit while being 301/307s: 1Password moved its
+    /// developer documentation off `developer.1password.com/docs/…`, and Keeper 307s
+    /// its `/en/` locale prefix away. A redirect works today and is somebody else's
+    /// decision tomorrow, so what ships is the address the server actually serves.
+    ///
+    /// Asserted on SHAPE, offline — deliberately. Reaching the network from the unit
+    /// suite would make the gate flaky and, in a VPN app, would make it depend on the
+    /// very thing under test. Re-measure by hand with
+    /// `curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' <url>` and accept
+    /// only a bare 200.
+    @Test func theLinkTableCarriesFinalURLsRatherThanRedirects() {
+        for page in VendorDocs.all {
+            let url = page.url.absoluteString
+            #expect(!url.contains("developer.1password.com"),
+                    "\(page.title) uses the old 1Password host, which 301s to www.1password.dev")
+            #expect(!url.contains("docs.keeper.io/en/"),
+                    "\(page.title) carries Keeper's /en/ prefix, which 307s to the unprefixed path")
+        }
+        // The two 1Password pages, at the addresses that answer 200 directly. Note
+        // the ABSENCE of a trailing slash: www.1password.dev 308s `/sdks/` to
+        // `/sdks`, so the slash is itself a redirect.
+        #expect(VendorDocs.onePasswordSDKs.url.absoluteString == "https://www.1password.dev/sdks")
+        #expect(VendorDocs.onePasswordCLIIntegration.url.absoluteString
+                == "https://www.1password.dev/cli/app-integration")
+        #expect(VendorDocs.keeperCommander.url.absoluteString
+                == "https://docs.keeper.io/keeperpam/commander-cli/overview")
+    }
+
     /// Commander present ⇒ the Keeper row is the source, and the app is NOT also
     /// listed as a pointer. Two rows for one app, one of them lying, is exactly
     /// the confusion the two classes exist to prevent.
@@ -511,6 +542,54 @@ struct SignInSourceCatalogTests {
         #expect(apple.explanation.contains("Verification codes"))
     }
 
+    // MARK: - Apple Passwords promises AutoFill, not a fetch
+
+    /// THE FALSE PROMISE THIS PINS. The row used to say "macOS fills the username and
+    /// password in for you", which SimpleVPN cannot deliver: Safari's and the
+    /// Passwords app's items live in the data-protection keychain under the
+    /// `com.apple.cfnetwork` access group, which this app's entitlement does not
+    /// contain — so they are unreachable by construction, not merely absent.
+    ///
+    /// What is true is AutoFill: the key in the field, driven by the user, decided by
+    /// macOS. The copy must promise that and stop there — including not promising
+    /// that the menu will HAVE a match, which is macOS's business and which nobody
+    /// has yet watched happen in our fields.
+    @Test func applePasswordsPromisesOnlyWhatAutoFillDelivers() {
+        let apple = SignInSourceCatalog.applePasswords()
+        // It names the affordance, and says whose decision the contents are.
+        #expect(apple.summary.contains("click the key"))
+        #expect(apple.explanation.contains("AutoFill"))
+        #expect(apple.explanation.contains("macOS\u{2019}s decision"))
+        // It says plainly that SimpleVPN does not read Apple Passwords.
+        #expect(apple.explanation.contains("doesn\u{2019}t read Apple Passwords"))
+        // …and it does NOT claim we fill the fields, which was the old promise.
+        #expect(!apple.explanation.contains("macOS fills the username and password in for you"))
+        #expect(!apple.summary.lowercased().contains("simplevpn gets"))
+    }
+
+    /// Nothing may imply SAVING into Apple Passwords. SimpleVPN has no way to write
+    /// there at all — the only public path needs associated domains plus a file served
+    /// by the VPN operator, and it is deprecated with no macOS replacement. The row
+    /// points at the keychain row instead, which is the true version of that offer.
+    @Test func nothingPromisesToSaveIntoApplePasswords() {
+        let apple = SignInSourceCatalog.applePasswords()
+        #expect(apple.explanation.contains("saves nothing anywhere"))
+        #expect(apple.explanation.contains("Save it securely in SimpleVPN"))
+        // And the row that DOES save says where: the Apple keychain, protected by
+        // macOS — not Apple Passwords.
+        let keychain = SignInSourceCatalog.saveInSimpleVPN(biometricsAvailable: false)
+        #expect(keychain.summary.contains("Apple keychain"))
+        #expect(!keychain.summary.contains("Apple Passwords"))
+        #expect(!keychain.explanation.contains("Apple Passwords"))
+    }
+
+    /// Apple Passwords still never supplies a verification code — it exposes none of
+    /// them to other apps. Correct before this change and unchanged by it.
+    @Test func applePasswordsStillSuppliesNoVerificationCode() {
+        #expect(!CredentialSourceKind.applePasswords.suppliesOTP)
+        #expect(SignInSourceCatalog.applePasswords().storedKind == .applePasswords)
+    }
+
     // MARK: - Mapping a stored source back to its row
 
     /// A returning VPN's summary line has to name the way it signs in, including
@@ -538,6 +617,132 @@ struct SignInSourceCatalogTests {
             #expect(SignInSourceCatalog.option(for: kind, remembers: true, facts: facts) != nil,
                     "no row describes \(kind.rawValue)")
         }
+    }
+
+    // MARK: - Switched off means not offered AND not hinted
+
+    /// A vendor the user switched off disappears from the chooser entirely — and it
+    /// disappears through `availability(_:)`, which is the single choke point every
+    /// caller already goes through. Filtering at each call site instead is how one
+    /// of them gets missed.
+    @Test func aSwitchedOffVendorIsNotOffered() {
+        var facts = bareMac()
+        facts.vaults[.keeper] = .ready
+        facts.vaults[.onePassword] = .ready
+        #expect(ids(SignInSourceCatalog.options(facts)).contains(.vault(.keeper)))
+
+        facts.disabledVendors = [.keeper]
+        let after = ids(SignInSourceCatalog.options(facts))
+        #expect(!after.contains(.vault(.keeper)))
+        #expect(after.contains(.vault(.onePassword)), "one switch must not turn off another vendor")
+        #expect(facts.availability(.keeper) == .notInstalled,
+                "a switched-off vendor must be indistinguishable from an absent one")
+    }
+
+    /// THE TRAP, and it is specific. With only the chooser filtered, switching Keeper
+    /// off would MOVE the Keeper app into "Other password apps on this Mac" — still
+    /// advertised, now in a worse place. Off has to mean not hinted either.
+    @Test func aSwitchedOffVendorIsNotHintedAsAnotherAppEither() {
+        var facts = bareMac()
+        facts.vaults[.keeper] = .ready
+        facts.otherApps = [InstalledPasswordApp(bundleID: "com.callpod.KeeperDesktop",
+                                                name: "Keeper")]
+        facts.disabledVendors = [.keeper]
+
+        let all = SignInSourceCatalog.options(facts)
+        #expect(!ids(all).contains(.vault(.keeper)))
+        #expect(!ids(all).contains(.otherApp(bundleID: "com.callpod.KeeperDesktop")),
+                "switching a vendor off must not demote it to a pointer row")
+        #expect(SignInSourceCatalog.pointers(facts).isEmpty)
+    }
+
+    /// The Settings pane is the ONE place allowed to see past the switch, because
+    /// "installed, and you turned it off" is exactly what it has to be able to say.
+    @Test func thePaneCanStillSeeAnInstalledButSwitchedOffVendor() {
+        var facts = bareMac()
+        facts.vaults[.keeper] = .ready
+        facts.disabledVendors = [.keeper]
+        #expect(facts.availability(.keeper) == .notInstalled)
+        #expect(facts.rawAvailability(.keeper) == .ready)
+        #expect(!facts.isEnabled(.keeper))
+        #expect(facts.isEnabled(.onePassword))
+    }
+
+    /// Every vendor row offers a way to configure it — including the ones that
+    /// already work. Someone who wants to switch a working vendor off, or point it at
+    /// a different copy of its tool, should not have to go looking.
+    @Test func everyVendorRowIsConfigurable() {
+        var facts = bareMac()
+        for vendor in LocalVaultVendor.allCases { facts.vaults[vendor] = .ready }
+        for option in SignInSourceCatalog.fetchable(facts) {
+            guard case .vault(let vendor) = option.id else {
+                #expect(option.configurableVendor == nil,
+                        "\(option.id.rawValue) has nothing to configure")
+                continue
+            }
+            #expect(option.configurableVendor == vendor)
+        }
+    }
+
+    // MARK: - "Installed, just not where we look"
+
+    /// THE LIE THIS STATE EXISTS TO PREVENT. `.toolMissing` says "isn't installed",
+    /// which is false when we can see the thing — and it sends someone off to install
+    /// a second copy of what they already have.
+    @Test func aToolFoundOutsideTheAllowListDoesNotClaimToBeMissing() throws {
+        var facts = bareMac()
+        facts.vaults[.keeper] = .blocked(.toolOutsideAllowList)
+        facts.toolsFoundOutsideAllowList[.keeper] = "/Users/me/venv/bin/keeper"
+
+        let option = try #require(SignInSourceCatalog.options(facts)
+            .first { $0.id == .vault(.keeper) })
+        guard case .needsSetup(let headline, _) = option.state else {
+            Issue.record("expected a needs-setup row")
+            return
+        }
+        #expect(headline.contains("is installed"))
+        #expect(!headline.contains("isn\u{2019}t installed"))
+        #expect(headline.contains("not somewhere SimpleVPN will run it"))
+    }
+
+    /// …and the guidance NAMES THE PATH. Without it the advice is "your tool is
+    /// somewhere else", which helps nobody; with it, the fix is a paste.
+    @Test func theGuidanceNamesThePathItFound() throws {
+        var facts = bareMac()
+        facts.vaults[.keeper] = .blocked(.toolOutsideAllowList)
+        facts.toolsFoundOutsideAllowList[.keeper] = "/Users/me/venv/bin/keeper"
+
+        let option = try #require(SignInSourceCatalog.options(facts)
+            .first { $0.id == .vault(.keeper) })
+        let guidance = try #require(option.guidance)
+        #expect(guidance.benefit.contains("/Users/me/venv/bin/keeper"))
+        // The path is the first thing to copy, and there is a second way out that
+        // needs no setting at all.
+        #expect(guidance.example.first?.text == "/Users/me/venv/bin/keeper")
+        #expect(guidance.example.contains { $0.text.hasPrefix("brew install") })
+        #expect(guidance.settingLocation?.contains("Sign-In Sources") == true)
+        // Spoken in full: the commands and the link are content, not decoration.
+        #expect(guidance.spokenSummary.contains("/Users/me/venv/bin/keeper"))
+    }
+
+    /// The state earns a banner. It is something the user can fix in one field, which
+    /// is the definition the banner exists for — not a dead end and not an update.
+    @Test func theOutsideAllowListStateWantsABanner() {
+        #expect(LocalVaultBlock.toolOutsideAllowList.wantsEnablementBanner)
+        // …and the two that are NOT enablement problems still aren't.
+        #expect(!LocalVaultBlock.appNotRunning.wantsEnablementBanner)
+        #expect(!LocalVaultBlock.needsUpdate.wantsEnablementBanner)
+    }
+
+    /// With no path known (the master switch off, say) the row still renders rather
+    /// than crashing or promising a paste it cannot supply.
+    @Test func theRowSurvivesWithNoPathToName() throws {
+        var facts = bareMac()
+        facts.vaults[.keeper] = .blocked(.toolOutsideAllowList)
+        let option = try #require(SignInSourceCatalog.options(facts)
+            .first { $0.id == .vault(.keeper) })
+        #expect(option.guidance == nil || option.guidance?.example.isEmpty == false)
+        #expect(option.accessibilityStateValue.contains("is installed"))
     }
 
     /// Every vendor has copy — a vendor added to the enum without wording would

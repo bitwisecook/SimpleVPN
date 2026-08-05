@@ -631,8 +631,13 @@ final class VoiceOverWalkthroughTests: XCTestCase {
                 .matching(NSPredicate(format: "title == %@", title)).firstMatch
         }
         let general = tab("General"), labels = tab("Labels")
+        let signInSources = tab("Sign-In Sources")
         XCTAssertTrue(general.waitForExistence(timeout: 5), "The Settings window has no General tab")
         XCTAssertTrue(labels.exists, "The Settings window has no Labels tab")
+        XCTAssertTrue(signInSources.exists, """
+            The Settings window has no Sign-In Sources tab — the pane that says which password \
+            apps may be used and where their tools are is unreachable
+            """)
 
         general.click()
         // Matched on label/value from a snapshot, not with the `[…]` subscript: the

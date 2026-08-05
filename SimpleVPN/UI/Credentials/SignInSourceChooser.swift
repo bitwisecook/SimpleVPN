@@ -38,6 +38,10 @@ struct SignInSourceChooser: View {
     let selection: SignInSourceID?
     let onChoose: (SignInSourceOption) -> Void
     let onOpenApp: (SignInSourceOption) -> Void
+    /// "Configure…" on a vendor row — opens Settings ▸ Sign-In Sources for that
+    /// vendor. nil in a host that has no way to open a window (previews, and the
+    /// compact first-connect card if it ever wants the row without the button).
+    var onConfigure: ((LocalVaultVendor) -> Void)?
     /// Tighter type inside the first-connect card, which is already a card.
     var compact = false
     /// Put the keyboard on the chooser when it appears. The first-run card does;
@@ -86,9 +90,28 @@ struct SignInSourceChooser: View {
                 }
             }
 
-            Text(SignInSourceCatalog.autoFillFootnote)
-                .font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            // The footnote NAMES the pane and a button OPENS it. Both, deliberately:
+            // the sentence is what a VoiceOver user hears and what someone following
+            // along reads, and a button whose destination is invisible is the
+            // hover-only failure wearing a different hat.
+            VStack(alignment: .leading, spacing: 4) {
+                Text(SignInSourceCatalog.autoFillFootnote)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Open AutoFill Settings\u{2026}") {
+                    SignInSourceCatalog.openAutoFillSettings()
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help("Opens \(SignInSourceCatalog.autoFillSettingsPath)")
+                .accessibilityLabel("Open AutoFill settings")
+                .accessibilityHint("Opens \(SignInSourceCatalog.autoFillSettingsPath), where you "
+                                   + "switch a password app on for filling in fields.")
+                .accessibilityIdentifier("signin-open-autofill-settings")
+            }
+            // Holds a button, so a container with its own sentence — never .combine.
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(SignInSourceCatalog.autoFillFootnote)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         // A container, not a combined element: it is full of buttons, and a
@@ -105,7 +128,37 @@ struct SignInSourceChooser: View {
 
     // MARK: Fetchable row — SimpleVPN gets your sign-in
 
-    private func fetchableRow(_ option: SignInSourceOption) -> some View {
+    /// A fetchable row, plus — for a vendor row — the "Configure…" button beside it.
+    ///
+    /// The two are SIBLINGS in an HStack, never nested. A `Button` inside another
+    /// `Button`'s label does not work on macOS, and a row-wide
+    /// `.accessibilityElement(children: .combine)` silently swallows any button
+    /// inside it (the wave-3 bug class in Docs/Accessibility.md rule 4). So a row
+    /// with a Configure button becomes a `.contain` container with its own spoken
+    /// sentence, while a plain row keeps the cheaper `.combine`.
+    @ViewBuilder private func fetchableRow(_ option: SignInSourceOption) -> some View {
+        if let vendor = option.configurableVendor, onConfigure != nil {
+            HStack(alignment: .top, spacing: 8) {
+                radioRow(option)
+                Button("Configure\u{2026}") { onConfigure?(vendor) }
+                    .buttonStyle(.glass)
+                    .controlSize(.small)
+                    .help("Turn \(option.title) off, or tell SimpleVPN where its tool is")
+                    .accessibilityLabel("Configure \(option.title)")
+                    .accessibilityHint("Opens SimpleVPN\u{2019}s settings, where you can turn "
+                                       + "\(option.title) off or set where its tool is.")
+                    .accessibilityIdentifier("signin-configure-\(option.id.rawValue)")
+            }
+            // Holds two buttons: a container with its own sentence, never .combine.
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("\(option.title). \(option.summary)")
+            .accessibilityValue(option.accessibilityStateValue)
+        } else {
+            radioRow(option)
+        }
+    }
+
+    private func radioRow(_ option: SignInSourceOption) -> some View {
         let isSelected = option.id == selection
         return Button {
             onChoose(option)
@@ -193,11 +246,28 @@ struct SignInSourceChooser: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
-            Button("Open \(option.title)") { onOpenApp(option) }
-                .buttonStyle(.glass)
-                .controlSize(.small)
-                .help(option.explanation)
-                .accessibilityHint(option.explanation)
+            VStack(alignment: .trailing, spacing: 4) {
+                Button("Open \(option.title)") { onOpenApp(option) }
+                    .buttonStyle(.glass)
+                    .controlSize(.small)
+                    .help(option.explanation)
+                    .accessibilityHint(option.explanation)
+                // An app that ships an AutoFill extension can fill our fields once
+                // it is switched on — so the row offers the switch, not just its
+                // address. The address stays in the row's own sentence.
+                if option.fillsThroughAutoFill {
+                    Button("AutoFill Settings\u{2026}") {
+                        SignInSourceCatalog.openAutoFillSettings()
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .help("Opens \(SignInSourceCatalog.autoFillSettingsPath), where you switch "
+                          + "\(option.title) on for filling in fields")
+                    .accessibilityLabel("Open AutoFill settings for \(option.title)")
+                    .accessibilityHint("Opens \(SignInSourceCatalog.autoFillSettingsPath), where "
+                                       + "you switch \(option.title) on for filling in fields.")
+                }
+            }
         }
         .padding(.vertical, 2)
         // Contains a button, so: a container with its own sentence, never a
@@ -277,6 +347,7 @@ struct SignInChooserPopover: View {
     let allowsPasswordSave: Bool
     let sources: SignInSourceAvailability
     @Binding var isPresented: Bool
+    @Environment(SettingsRouter.self) private var router: SettingsRouter?
 
     private var source: CredentialSource { vpn.credentialSource(for: profile.id) }
     private var auth: VPNAuthConfig { vpn.authConfig(for: profile.id) }
@@ -296,7 +367,8 @@ struct SignInChooserPopover: View {
                 options: SignInSourceCatalog.options(facts),
                 selection: selectedID,
                 onChoose: { choose($0) },
-                onOpenApp: { open($0) })
+                onOpenApp: { open($0) },
+                onConfigure: { configure($0) })
             HStack {
                 Spacer()
                 Button("Done") { isPresented = false }
@@ -330,6 +402,17 @@ struct SignInChooserPopover: View {
             if a != auth { try? await vpn.setAuthConfig(a, for: profile.id) }
             if option.id == .typeEachTime { vpn.forgetSavedSignIn(id: profile.id) }
         }
+    }
+
+    /// Open Settings ▸ Sign-In Sources at this vendor. Routes through the SAME
+    /// `SettingsRouter` intent a global search hit uses, so there is one way to be
+    /// sent to a setting rather than a second one that can drift.
+    private func configure(_ vendor: LocalVaultVendor) {
+        isPresented = false
+        router?.go(to: SignInSourceSettings.enabledSettingID(vendor))
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        AccessibilityAnnouncer.sayNow(
+            "Opening SimpleVPN settings for \(vendor.displayTitle).")
     }
 
     private func open(_ option: SignInSourceOption) {
