@@ -133,7 +133,7 @@ extension VPNController {
             guard !source.reference.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
             return ApplePasswordsProvider(server: source.reference, account: source.account)
         case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane,
-             .keePassFile, .passwordStore, .lastPass:
+             .keePassFile, .passwordStore, .lastPass, .protonPass, .passbolt:
             // The adapter owns the vendor's quirks (1Password's account
             // fallback, Keeper's and Bitwarden's channel choice) — this seam only asks for a
             // fetcher. A source that names nothing to fetch yields nil, which

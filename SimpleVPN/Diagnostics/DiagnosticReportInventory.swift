@@ -149,6 +149,17 @@ nonisolated enum DiagnosticReportInventory {
         case .lastPass:
             PasswordAppCatalog.entry(forBundleID: "com.lastpass.LastPass")?.bundleIDs
                 ?? ["com.lastpass.LastPass"]
+        // The Proton Pass desktop app. It is NOT the read path — it has no local API
+        // — but which of Proton's two distributions is installed is exactly the kind
+        // of fact a maintainer wants, and its absence alongside a present `pass-cli`
+        // is itself informative.
+        case .protonPass: PasswordAppCatalog.entry(forBundleID: "me.proton.pass.electron")?.bundleIDs
+            ?? ["me.proton.pass.electron", "ch.protonmail.pass"]
+        // Passbolt has no macOS app to look for: it is a server, reached with a
+        // browser extension or its own command-line program. An empty list is the
+        // honest answer, and the tools section is where its real inventory (which of
+        // `passbolt` / `go-passbolt-cli` is installed, and where) shows up.
+        case .passbolt: []
         }
     }
 
@@ -384,6 +395,14 @@ nonisolated enum DiagnosticReportInventory {
             // from the outside it looks like a fetch that simply returns nothing.
             case .toolDivertsSecretToClipboard:
                 "its tool is set up to copy the password to the clipboard, so SimpleVPN will not run it"
+            // NOTHING IS BROKEN, and a report has to say that out loud: a maintainer
+            // reading "not signed in" would start debugging the tool, and the tool is
+            // fine.
+            case .planExcludesTool:
+                "everything is installed and signed in, but the account\u{2019}s plan does not "
+                + "include the tool SimpleVPN reads through \u{2014} not a fault on this Mac"
+            // A server, so the words are about an address rather than a file.
+            case .noServerConfigured: "no server address has been set up yet"
             }
         }
     }

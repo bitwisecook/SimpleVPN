@@ -277,6 +277,15 @@ enum LocalVaultRegistry {
         // A folder of GPG-encrypted files, read with gpg alone — no app, no socket, no
         // daemon, and neither `pass` nor `gopass` required.
         PasswordStoreVaultAdapter(),
+        // Proton Pass through Proton's own `pass-cli`. Its adapter lives in
+        // ProtonPassProvider.swift with its channel, like Bitwarden's — one vendor is
+        // one file plus this one line. NOT the same vendor as the row above, despite
+        // the tool names: see that file's header.
+        ProtonPassVaultAdapter(),
+        // A SERVER, through Passbolt's own command-line program. The first adapter
+        // whose instance is not on this Mac at all, which is why its deepScan adds
+        // nothing: see PassboltProvider.swift.
+        PassboltVaultAdapter(),
         // LastPass through `lpass`. LAST on purpose, and the order is a statement: it
         // is the least capable source here — no verification code, ever — so anything
         // else that can answer is a better answer.

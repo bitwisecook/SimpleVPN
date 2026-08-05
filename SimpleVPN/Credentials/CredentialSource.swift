@@ -42,6 +42,16 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
     /// derived key. See LastPassProvider.
     case lastPass
 
+    /// Proton Pass, reached through Proton's own `pass-cli`. A different vendor and a
+    /// different vault from `.passwordStore` above, whose tool is `pass` — see
+    /// ProtonPassProvider.
+    case protonPass
+    /// A Passbolt SERVER, read through Passbolt's own `go-passbolt-cli`. The
+    /// per-VPN reference is a resource's UUID (preferred, stable) or its name.
+    /// SimpleVPN holds no Passbolt secret at all — the OpenPGP key and its
+    /// passphrase stay in Passbolt's own program. See PassboltServer.swift.
+    case passbolt
+
     // nonisolated for the same reason as `suppliesOTP` below: it is a pure function
     // of the case, and nonisolated rules (the security-key mutual exclusions in
     // YubiKeyAuthConfig) name the source in their own explanations.
@@ -57,6 +67,8 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
         case .keePassFile: "KeePass database file"
         case .passwordStore: "pass / gopass"
         case .lastPass: "LastPass"
+        case .protonPass: "Proton Pass"
+        case .passbolt: "Passbolt"
         }
     }
     var systemImage: String {
@@ -71,6 +83,10 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
         case .keePassFile: "doc.badge.gearshape"
         case .passwordStore: "terminal.fill"
         case .lastPass: "asterisk.circle.fill"
+        // Deliberately NOT "terminal.fill" as well: two rows sharing a symbol is how
+        // somebody picks the wrong one of two adjacent-sounding sources at a glance.
+        case .protonPass: "lock.circle"
+        case .passbolt: "lock.rectangle.stack"
         }
     }
 
@@ -123,8 +139,26 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
         // is not "unproven"; it is "the vendor's tool cannot", and `LastPassProvider`
         // deliberately sets nothing for `.otp` rather than mining a free-text note
         // for something that looks like a seed.
+        // `.protonPass` is `false`, and for a reason of the same shape: `pass-cli item
+        // view --field totp` does print a current verification code, but it FAILS THE
+        // WHOLE RUN for an item that has not got one ("Field does not exist: totp"),
+        // and there is no way to ask whether an item has one without spending a run.
+        // More decisively, nobody has watched this work against a live Proton account
+        // — this feed was built with neither Proton Pass nor `pass-cli` installed — and
+        // this flag is a PROMISE that Connect succeeds with nothing typed. The fetch
+        // still USES a code when Proton hands one over.
+        // `.passbolt` is deliberately `false`, and NOT because Passbolt cannot
+        // carry a code — some of its resource types do, and SimpleVPN computes one
+        // locally from the seed when the resource it reads happens to have it
+        // (PassboltProvider). But only SOME types have it, whether a given
+        // resource does cannot be known without reading it, and nobody has watched
+        // this work against a live Passbolt server. This flag is a PROMISE — true
+        // means "Connect works with nothing typed" — so it stays false and the
+        // code is typed. Getting it wrong costs a failed sign-in and a burned code;
+        // getting it wrong this way costs one keystroke.
         case .manual, .applePasswords, .keeper, .bitwarden, .dashlane, .keePassFile,
-             .passwordStore, .lastPass: false
+             .passwordStore, .lastPass, .protonPass, .passbolt:
+            false
         case .onePassword, .keePassXC: true
         }
     }

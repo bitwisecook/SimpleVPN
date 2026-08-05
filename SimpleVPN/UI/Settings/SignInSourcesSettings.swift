@@ -55,9 +55,14 @@ struct SignInSourcesSettings: View {
     /// and never stored here beyond the keystroke: pressing Use hands it to
     /// `KDBXMasterPasswordStore` and empties this.
     @State private var typedDatabasePassword = ""
+    /// The same, for a Passbolt key's passphrase: handed straight to
+    /// `PassboltPassphraseStore` and emptied, so it does not sit in SwiftUI state for
+    /// the life of the window.
+    @State private var typedPassboltPassphrase = ""
     @State private var securityKeyCheck: KDBXSecurityKeyCheckResult?
     @State private var checkingSecurityKey = false
     @State private var databasePasswordStore = KDBXMasterPasswordStore.shared
+    @State private var passboltPassphraseStore = PassboltPassphraseStore.shared
     /// Which vault this PANE is editing, per vendor. Nothing to do with which one a
     /// VPN reads — that is level 3, in the profile.
     @State private var editingInstance: [LocalVaultVendor: SourceInstanceID] = [:]
@@ -335,14 +340,17 @@ struct SignInSourcesSettings: View {
                             fieldRows(field, instance: chosen)
                         }
                     }
-                    // Controls that are not paths. Only the `.kdbx` row has any today
-                    // (a password to type and whether macOS remembers it), and they are
-                    // here rather than in the generic field loop because neither is
-                    // stored where a field is stored — one is in memory, the other IS a
-                    // keychain item's existence. Per DATABASE, not per VPN: five VPNs
-                    // reading one database must not mean five copies of its password.
+                    // Controls that are not paths: a secret to type and whether macOS
+                    // remembers it. Here rather than in the generic field loop because
+                    // neither is stored where a field is stored — one is in memory, the
+                    // other IS a keychain item's existence. Per VAULT, not per VPN:
+                    // five VPNs reading one database (or one Passbolt) must not mean
+                    // five copies of its secret.
                     if vendor == .keePassFile {
                         keePassUnlockRows(locked: lock != nil, instance: chosen)
+                    }
+                    if vendor == .passbolt {
+                        passboltPassphraseRows(locked: lock != nil, instance: chosen)
                     }
                 }
                 // From `sources.discoveries` — the observable mirror of the ONE
@@ -639,6 +647,151 @@ struct SignInSourcesSettings: View {
         }
     }
 
+    // MARK: The Passbolt key's passphrase — the same two controls, per SERVER
+
+    /// A secret to type and whether macOS should remember it, for one Passbolt
+    /// server. The same shape as `keePassUnlockRows` and deliberately so: it is the
+    /// same promise about the same class of secret, and a person who has met one of
+    /// these rows should not have to learn a second mechanism.
+    ///
+    /// Per SERVER rather than per VPN: it is the key's passphrase, and five VPNs
+    /// reading one Passbolt must not mean five copies of it.
+    @ViewBuilder private func passboltPassphraseRows(locked: Bool,
+                                                    instance: SourceInstance?) -> some View {
+        let location = instance.map(PassboltVaultAdapter.location(from:))
+            ?? PassboltServerLocation()
+        let server = location.serverURL
+        let hasServer = !server.trimmingCharacters(in: .whitespaces).isEmpty
+        let passphraseSpec = specs[SignInSourceSettings.passboltPassphraseSettingID]
+        let rememberSpec = specs[SignInSourceSettings.passboltRememberPassphraseSettingID]
+        let remembered = hasServer && passboltPassphraseStore.isRemembered(server: server)
+        // Whether Passbolt's own program already has one. Read as a Boolean and never
+        // as a value — see `PassboltToolConfigProbe`.
+        let toolHasItsOwn = hasServer
+            && PassboltToolConfigProbe.read(path: location.effectiveConfigFile()).hasPassphrase
+        let held = passboltPassphraseStore.heldDescription(server: server,
+                                                          toolHasItsOwn: toolHasItsOwn)
+
+        EngineSettingRow(
+            spec: passphraseSpec, changed: false,
+            disabledReason: locked ? "Your organization has locked SimpleVPN\u{2019}s settings."
+                : (hasServer ? nil : "Set your server\u{2019}s address first.")
+        ) {
+            LabeledContent {
+                HStack(spacing: 6) {
+                    SecureField("", text: $typedPassboltPassphrase,
+                                prompt: Text("Your Passbolt key\u{2019}s passphrase"))
+                        .onSubmit { commitPassboltPassphrase(server: server, remember: remembered) }
+                        .accessibilityLabel(passphraseSpec.name)
+                        // Never the value, and never a length: what is spoken is what
+                        // SimpleVPN is holding, which is the thing a user needs to know.
+                        .accessibilityValue(held)
+                        .accessibilityIdentifier("creds-field-passbolt-passphrase")
+                    Button("Use") { commitPassboltPassphrase(server: server, remember: remembered) }
+                        .disabled(typedPassboltPassphrase.isEmpty || !hasServer || locked)
+                        .help(typedPassboltPassphrase.isEmpty
+                              ? "Type your Passbolt key\u{2019}s passphrase first"
+                              : "Let SimpleVPN unlock your Passbolt key with this")
+                        .accessibilityValue(typedPassboltPassphrase.isEmpty
+                                            ? "unavailable \u{2014} nothing typed" : "")
+                }
+                .controlSize(.small)
+            } label: {
+                EngineSettingLabel(spec: passphraseSpec, value: "")
+            }
+        }
+
+        Label(held, systemImage: remembered ? "touchid"
+              : (passboltPassphraseStore.isHeldForThisRun(server: server) ? "clock"
+                 : (toolHasItsOwn ? "doc.text" : "keyboard")))
+            .font(.callout).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("What SimpleVPN is holding")
+            .accessibilityValue(held)
+
+        EngineSettingRow(
+            spec: rememberSpec, changed: rememberSpec.isChanged(remembered),
+            disabledReason: locked ? "Your organization has locked SimpleVPN\u{2019}s settings."
+                : (passboltPassphraseStore.canRemember
+                   ? (hasServer ? nil : "Set your server\u{2019}s address first.")
+                   : "This Mac can\u{2019}t ask for a fingerprint, an Apple Watch or your password.")
+        ) {
+            Toggle(isOn: Binding(
+                get: { remembered },
+                set: { on in setRememberPassboltPassphrase(on, server: server) })) {
+                    EngineSettingLabel(spec: rememberSpec, value: remembered)
+                }
+        }
+
+        if !remembered, passboltPassphraseStore.isHeldForThisRun(server: server) {
+            Text("Turning this on remembers what SimpleVPN is holding now. macOS won\u{2019}t hand it "
+                 + "back without a fingerprint, your Apple Watch, or this Mac\u{2019}s password.")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        if passboltPassphraseStore.isHeldForThisRun(server: server) || remembered {
+            Button("Forget This Server\u{2019}s Passphrase") {
+                passboltPassphraseStore.forgetThisRun(server: server)
+                passboltPassphraseStore.forgetRemembered(server: server)
+                sources.refresh()
+                AccessibilityAnnouncer.sayNow("Passbolt passphrase forgotten.")
+            }
+            .controlSize(.small)
+            .disabled(locked)
+            .help("Drop it from this run and from the keychain")
+        }
+    }
+
+    private func commitPassboltPassphrase(server: String, remember: Bool) {
+        guard !typedPassboltPassphrase.isEmpty, !server.isEmpty else { return }
+        let passphrase = PassboltPassphrase(typedPassboltPassphrase)
+        // Emptied immediately: the secret belongs in the store, not in a view's state
+        // for as long as the window is open.
+        typedPassboltPassphrase = ""
+        guard !passphrase.containsNewline else {
+            // Named here rather than at connect time, because the tool would report it
+            // as a read failure and somebody would go and change a passphrase that is
+            // perfectly good.
+            AccessibilityAnnouncer.sayNow(
+                PassboltError.passphraseContainsNewline.errorDescription ?? "")
+            return
+        }
+        if remember {
+            try? passboltPassphraseStore.remember(passphrase, server: server)
+        } else {
+            passboltPassphraseStore.holdForThisRun(passphrase, server: server)
+        }
+        sources.refresh()
+        AccessibilityAnnouncer.sayNow(
+            passboltPassphraseStore.heldDescription(server: server, toolHasItsOwn: false))
+    }
+
+    private func setRememberPassboltPassphrase(_ on: Bool, server: String) {
+        guard !server.isEmpty else { return }
+        if on {
+            // Only possible when something is held: there is nothing to remember
+            // otherwise, and the row says so rather than silently doing nothing.
+            Task {
+                guard let held = try? await passboltPassphraseStore.passphrase(
+                    server: server, reason: "remember your Passbolt key\u{2019}s passphrase")
+                else {
+                    AccessibilityAnnouncer.sayNow(
+                        "Type your Passbolt key\u{2019}s passphrase first, then turn this on.")
+                    return
+                }
+                try? passboltPassphraseStore.remember(held, server: server)
+                sources.refresh()
+                AccessibilityAnnouncer.sayNow("Remembered behind Touch ID.")
+            }
+        } else {
+            passboltPassphraseStore.forgetRemembered(server: server)
+            sources.refresh()
+            AccessibilityAnnouncer.sayNow("No longer remembered.")
+        }
+    }
+
     private func commitDatabasePassword(path: String, remember: Bool) {
         guard !typedDatabasePassword.isEmpty, !path.isEmpty else { return }
         let password = KDBXPassword(typedDatabasePassword)
@@ -824,7 +977,17 @@ struct SignInSourcesSettings: View {
             // refuse the very thing being chosen.
             ("Choose Store Folder\u{2026}",
              "Pick your password store folder in the Finder instead of typing its path", [])
-        case .entryFieldName, .toolBinary, .unixSocket, .daemonEndpoint, .securityKeySlot, .pkcs11Module:
+        case .toolConfigFile:
+            // A FILE, and its extension is the vendor's business rather than ours —
+            // `go-passbolt-cli` writes TOML, and somebody may have named theirs
+            // anything. No filter, for the same reason the key-file row has none:
+            // filtering would hide the very file somebody was told to pick.
+            ("Choose Setup File\u{2026}",
+             "Pick the setup file in the Finder instead of typing its path", [])
+        // A server's address is typed, not picked: there is no Finder panel for
+        // something that is not on this Mac.
+        case .serverURL, .entryFieldName, .toolBinary, .unixSocket, .daemonEndpoint,
+             .securityKeySlot, .pkcs11Module:
             nil
         }
     }

@@ -478,6 +478,12 @@ struct SignInChooserPopover: View {
         // folders needs its folders typed. A bare title as the example would teach
         // the one mistake that reads as "LastPass hasn't got my password".
         case .dashlane, .lastPass: "vpn.example.com"
+        // Vault AND item, because Proton Pass addresses both in one string and a bare
+        // title is refused rather than guessed at (ProtonPassReference).
+        case .protonPass: "Work/GR Lab"
+        // Passbolt's own identifier shape, because that is the reference to prefer:
+        // it survives a rename and can never match two things.
+        case .passbolt: "8f4b9c1e-2a7d-4f60-9c31-5e8a0b7d6c42"
         case .onePassword, .keePassXC, .keeper, .bitwarden: "GR Lab VPN"
         }
     }

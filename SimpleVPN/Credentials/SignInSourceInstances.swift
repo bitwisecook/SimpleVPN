@@ -140,14 +140,31 @@ nonisolated extension LocalVaultVendor {
     ///    and SimpleVPN pins that to the directory it probes so the tool it runs and
     ///    the files it looked at can never disagree (see LastPassProvider). Same
     ///    answer as Bitwarden's, for the same structural reason.
+    ///  • `.protonPass` — SINGLE, and the reason is a fact about the tool rather than
+    ///    a simplification. `pass-cli` holds ONE session: one session file
+    ///    (`<data dir>/proton-pass-cli/.session/session.json`), one signed-in account,
+    ///    and no `--config`, `--account` or `--profile` flag anywhere in its command
+    ///    surface — `pass-cli logout` is how you change accounts. A Proton account CAN
+    ///    hold several vaults, and a person may have a work one and a personal one,
+    ///    but a vault is named INSIDE the item reference (`pass://Work/GR Lab`), which
+    ///    is level 3 where it belongs. An instance list here would be a list of rows
+    ///    with no fields in them — exactly the mistake `SourceCardinality` exists to
+    ///    prevent, in the other direction from `.keePassFile`'s.
     var cardinality: SourceCardinality {
         switch self {
-        case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane, .lastPass: .single
+        case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane, .lastPass, .protonPass:
+            .single
         // MULTIPLE, for the same reason as a .kdbx and then some: PASSWORD_STORE_DIR
         // exists precisely so one person can keep several stores, and "work" and
         // "personal" stores are entirely ordinary. Each also carries its own username
         // field convention, so they are configured separately, not just located.
-        case .keePassFile, .passwordStore: .multiple
+        // MULTIPLE, and the first one that is not a file: a Passbolt instance is a
+        // SERVER. `go-passbolt-cli`'s own config holds exactly ONE serverAddress,
+        // one key and one passphrase (internal/cmd/root.go), so a second server
+        // needs a second config file and `--config` — which is precisely a
+        // per-instance setting, not a per-Mac one. A company Passbolt and a
+        // self-hosted personal one, with different keys, is entirely ordinary.
+        case .keePassFile, .passwordStore, .passbolt: .multiple
         }
     }
 
@@ -158,7 +175,12 @@ nonisolated extension LocalVaultVendor {
         switch self {
         case .keePassFile: "database"
         case .passwordStore: "store"
-        case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane, .lastPass: "vault"
+        // Not "vault" and not "instance": what somebody sets up here IS a server,
+        // that is the word Passbolt itself uses, and calling it a vault would hide
+        // the one fact that matters — it is somewhere else, over a network.
+        case .passbolt: "server"
+        case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane, .lastPass, .protonPass:
+            "vault"
         }
     }
 
@@ -166,12 +188,31 @@ nonisolated extension LocalVaultVendor {
         switch self {
         case .keePassFile: "databases"
         case .passwordStore: "stores"
-        case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane, .lastPass: "vaults"
+        case .passbolt: "servers"
+        case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane, .lastPass, .protonPass:
+            "vaults"
         }
     }
 
     /// Title case, for a section heading ("Your Databases").
     var instanceSectionTitle: String { "Your \(instanceNounPlural.capitalized)" }
+
+    /// What removing an instance does NOT touch, in the vendor's own terms. It
+    /// used to be one sentence about "the file", which was true of every
+    /// multi-instance vendor until one of them stopped being a file: telling
+    /// somebody their SERVER "is left exactly as it is" reads as though SimpleVPN
+    /// could have changed a server, which is a much worse implication than the
+    /// vagueness it was avoiding.
+    var instanceRemovalReassurance: String {
+        switch self {
+        case .keePassFile: "the file itself is left exactly as it is"
+        case .passwordStore: "the folder itself is left exactly as it is"
+        case .passbolt:
+            "nothing on the server changes, and Passbolt\u{2019}s own setup is left alone"
+        case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane, .lastPass, .protonPass:
+            "nothing in the vault itself changes"
+        }
+    }
 }
 
 // MARK: - An instance's identity
@@ -319,7 +360,15 @@ nonisolated extension VendorConfigFieldKind {
         // A store's directory and the field name to read inside its entries are both
         // "which vault, and how it is laid out" — the same level as a .kdbx path,
         // and both legitimately differ between a work store and a personal one.
-        case .vaultFile, .keyFile, .securityKeySlot, .storeDirectory, .entryFieldName: .instance
+        //
+        // A SERVER'S ADDRESS is level 2 for the same reason and it is worth being
+        // explicit, because "an address" sounds transport-shaped: the address is
+        // WHICH Passbolt, not how SimpleVPN reaches Passbolt at all — the latter is
+        // the `passbolt` binary, which is one per Mac. And a vendor tool's own
+        // config FILE is level 2 whenever it holds one server's sign-in setup,
+        // which `go-passbolt-cli`'s does: two servers means two files.
+        case .vaultFile, .keyFile, .securityKeySlot, .storeDirectory, .entryFieldName,
+             .serverURL, .toolConfigFile: .instance
         }
     }
 }
@@ -956,6 +1005,18 @@ nonisolated enum SignInSourceSteps {
             // type "GR Lab" for an entry that lives in Work/VPN.
             "An entry\u{2019}s name has to match exactly, including its folders \u{2014} for "
             + "example Work/VPN/GR Lab. Its numeric id works too."
+        case .protonPass:
+            // Says BOTH halves, because Proton Pass addresses a vault and an item in
+            // one string and a bare title is refused rather than guessed at.
+            "An item is named by its vault and its title, separated by a slash "
+            + "\u{2014} for example Work/GR Lab. Proton\u{2019}s own identifiers work too."
+        case .passbolt:
+            // States the trade-off in the one place somebody is choosing, exactly as
+            // the kdbx row states it for entry paths: the identifier is stable and
+            // never ambiguous, the name is readable and neither.
+            "Paste the resource\u{2019}s identifier \u{2014} the long code in the web address when "
+            + "you open it in Passbolt. That never changes when somebody renames or moves it. A "
+            + "name works too, but only while it stays unique and unchanged."
         case .onePassword, .keePassXC, .keeper, .bitwarden:
             "Which entry SimpleVPN reads this VPN\u{2019}s sign-in from."
         }
@@ -979,7 +1040,7 @@ nonisolated enum SignInSourceSteps {
     static func removalWarning(vendor: LocalVaultVendor, name: String,
                                usedBy profiles: [String]) -> String {
         let head = "Remove \u{201C}\(name)\u{201D}? SimpleVPN forgets where that "
-            + "\(vendor.instanceNoun) is \u{2014} the file itself is left exactly as it is."
+            + "\(vendor.instanceNoun) is \u{2014} \(vendor.instanceRemovalReassurance)."
         guard !profiles.isEmpty else { return head }
         let list = profiles.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
         let named = list.count == 1

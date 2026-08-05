@@ -284,6 +284,60 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                 Text("SimpleVPN reads just this entry with LastPass\u{2019}s own command-line tool, and reads only its username and password. You type the verification code yourself \u{2014} LastPass\u{2019}s tool has no way to give one.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            case .protonPass:
+                // ONE field, and it holds BOTH halves of the address — the vault and
+                // the item. Not two fields: Proton's own reference syntax is one
+                // string, and splitting it here would mean re-joining it to store it
+                // and re-splitting it to show it.
+                HStack {
+                    TextField("Item", text: $apServer,
+                              prompt: Text("Vault and item, for example Work/GR Lab"))
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        .onSubmit(saveProtonPass)
+                        .accessibilityLabel("Proton Pass vault and item")
+                        .accessibilityValue(apServer.isEmpty
+                            ? "Not set. For example, Work slash GR Lab."
+                            : apServer)
+                    Button("Save", action: saveProtonPass)
+                        .disabled(apServer.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                .onAppear {
+                    apServer = source.reference.isEmpty ? profile.name : source.reference
+                }
+                Text("Name the vault as well as the item. Proton\u{2019}s own identifiers work here too and keep working when things are renamed. SimpleVPN reads just this item with Proton\u{2019}s command-line tool and never changes your vaults.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .passbolt:
+                // One question here too: which resource. WHICH server is a
+                // settings-level choice, and the editor's Sign-In tab has the full
+                // two-step server-then-resource picker for anyone with several.
+                //
+                // The prompt asks for the IDENTIFIER rather than the name, because the
+                // profile's name is a poor guess here: this card pre-fills the VPN's
+                // own name for every other source, and a Passbolt resource is far more
+                // often named something else. So it starts EMPTY.
+                Text(SignInSourceSteps.stepTwoSummary(vendor: .passbolt))
+                    .font(.caption.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
+                HStack {
+                    TextField("Resource", text: $apServer,
+                              prompt: Text("The resource\u{2019}s identifier, or its name"))
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        .onSubmit(savePassbolt)
+                        .accessibilityLabel("Resource identifier or name in Passbolt")
+                        .accessibilityValue(apServer.isEmpty
+                            ? "Not set. Paste the identifier from the web address when you open it in Passbolt, or type its name."
+                            : apServer)
+                    Button("Save", action: savePassbolt)
+                        .disabled(apServer.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                .onAppear { apServer = source.reference }
+                Text("Your server is set up in Settings \u{25B8} Sign-In Sources; this VPN just says which resource to read. Your OpenPGP key and its passphrase stay with Passbolt\u{2019}s own program \u{2014} SimpleVPN never sees either, and only ever reads.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(14)
@@ -472,6 +526,26 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
         // The entry NAME, which is its path inside the store without the `.gpg`.
         // Trimmed only — never lower-cased or otherwise normalised, because a store's
         // entries are files and the filesystem's case is the user's business.
+        s.reference = apServer.trimmingCharacters(in: .whitespaces)
+        Task { try? await vpn.setCredentialSource(s, for: profile.id) }
+    }
+
+    private func saveProtonPass() {
+        var s = source
+        s.kind = .protonPass
+        // The whole reference — vault and item — exactly as typed. Trimmed only: a
+        // Proton Pass title may legitimately contain spaces in the middle and its
+        // identifiers are case-sensitive base64, so nothing else may be normalised.
+        s.reference = apServer.trimmingCharacters(in: .whitespaces)
+        Task { try? await vpn.setCredentialSource(s, for: profile.id) }
+    }
+
+    private func savePassbolt() {
+        var s = source
+        s.kind = .passbolt
+        // Trimmed only. Never lower-cased: a resource NAME is the user's text, and
+        // an identifier is hex whose case does not matter — normalising either
+        // would be a change SimpleVPN has no business making.
         s.reference = apServer.trimmingCharacters(in: .whitespaces)
         Task { try? await vpn.setCredentialSource(s, for: profile.id) }
     }

@@ -71,6 +71,12 @@ nonisolated extension LocalVaultVendor {
         case .keePassFile: "keepassfile"
         case .passwordStore: "passwordstore"
         case .lastPass: "lastpass"
+        // "protonpass", never "pass" or "passcli": the slug is the MDM, CLI and
+        // manual-anchor contract, and it must never be confusable with the
+        // `passwordstore` slug above — an administrator's payload naming the wrong one
+        // would allow or forbid the wrong vendor.
+        case .protonPass: "protonpass"
+        case .passbolt: "passbolt"
         }
     }
 
@@ -130,6 +136,23 @@ nonisolated enum VendorConfigFieldKind: Sendable, Equatable {
     /// entry holds the username. Free text with no filesystem meaning at all, so
     /// it must never be validated or pre-filled as though it were a path.
     case entryFieldName(suggestions: [String])
+    /// A SERVER'S ADDRESS. `https://passbolt.example.com` — the first field kind
+    /// here that names something not on this Mac.
+    ///
+    /// Deliberately not `daemonEndpoint`: that is a `host:port` on loopback and is
+    /// REFUSED when it is anywhere else, which is the exact opposite of what this
+    /// one wants. And deliberately not free text: `https` only, no userinfo, no
+    /// query — see `PassboltServerLocation.validate`, which is the one definition.
+    case serverURL
+    /// THE VENDOR TOOL'S OWN CONFIG FILE, for one instance. Its CONTENTS are the
+    /// vendor's secrets, which we never read and never write; its PATH is not a
+    /// secret.
+    ///
+    /// A separate kind from `vaultFile` because it is a different question with
+    /// different copy — and because the check worth running on it is not "is this a
+    /// database" but "can anybody else on this Mac read it", which is a sentence
+    /// the other kinds have no use for.
+    case toolConfigFile
 
     // NOTE on `daemonEndpoint` and `pkcs11Module`: no shipped field declares them
     // yet. They are here because the adapters that need them are already designed —
@@ -223,6 +246,12 @@ nonisolated enum SignInSourceSettings {
     /// personal one has two of each of these, not one shared pair.
     static let passwordStoreDirectoryKey = "signin.passwordstore.directory"
     static let passwordStoreUsernameFieldKey = "signin.passwordstore.username-field"
+
+    /// Passbolt, both INSTANCE level: one server is one address plus one config
+    /// file, and somebody with a company server and a personal one has two of
+    /// each. Neither holds a secret — an address and a path.
+    static let passboltServerKey = "signin.passbolt.server"
+    static let passboltConfigFileKey = "signin.passbolt.config-file"
     static let keePassSecurityKeySlotKey = "signin.keepassfile.securitykey-slot"
     /// The master switch for the whole local scan. Default ON — the scan is
     /// filesystem-only, needs no macOS permission, and every sign-in source
@@ -252,6 +281,12 @@ nonisolated enum SignInSourceSettings {
     /// all, the other is a keychain item's existence).
     static let keePassPasswordSettingID = "creds.keepassfile.database-password"
     static let keePassRememberPasswordSettingID = "creds.keepassfile.remember-password"
+    /// Passbolt's two, and the same shape for the same reason: a secret to type and
+    /// whether macOS should remember it. Neither is stored where a `VendorConfigField`
+    /// is stored — one is in memory, the other IS a keychain item's existence — which
+    /// is exactly why neither can be a field.
+    static let passboltPassphraseSettingID = "creds.passbolt.passphrase"
+    static let passboltRememberPassphraseSettingID = "creds.passbolt.remember-passphrase"
 
     // MARK: Fields
 
@@ -414,6 +449,63 @@ nonisolated enum SignInSourceSettings {
                 kind: .toolBinary(tool: "lpass"),
                 defaultsKey: toolPathKey("lpass"),
                 example: "/opt/homebrew/bin/lpass")]
+        case .protonPass:
+            // ONE row, at level 1, and that is the whole configuration surface. Proton
+            // Pass is single-instance (`SourceCardinality` — one session, no
+            // `--config`), so there is no level-2 field to declare; which vault and
+            // which item a VPN reads is level 3 and lives in the profile as the
+            // `pass://` reference, which is not a settings field at all.
+            //
+            // `pass-cli`, and never `pass`: the tool name is what discovery searches
+            // by, and a row here pointing at `pass` would let somebody carefully set
+            // the path of the unix password store's tool and wonder why Proton Pass
+            // still failed.
+            [VendorConfigField(
+                settingID: "creds.protonpass.tool-path",
+                vendor: .protonPass,
+                ownerTitle: LocalVaultVendor.protonPass.displayTitle,
+                kind: .toolBinary(tool: ProtonPassCLIChannel.toolName),
+                defaultsKey: toolPathKey(ProtonPassCLIChannel.toolName),
+                // Proton's own installer prefers ~/.local/bin; the example names the
+                // Homebrew tap's location because that is the command the banner shows.
+                example: "/opt/homebrew/bin/pass-cli")]
+        case .passbolt:
+            // Two instance-level rows and one transport-level row, and the split is
+            // exactly the three-level model: WHICH server (its address, and which of
+            // Passbolt's own config files holds that server's key) belongs to the
+            // server; WHERE the `passbolt` program lives belongs to the Mac.
+            //
+            // THERE IS DELIBERATELY NO PASSPHRASE ROW, AND NO "SKIP CERTIFICATE
+            // CHECK" ROW. The first because SimpleVPN keeps no Passbolt secret —
+            // Passbolt's own program owns the passphrase, in its own 0600 file. The
+            // second because certificate verification is not a preference: the tool
+            // has a flag for it, SimpleVPN never passes it, and a switch like that
+            // ends up on across an estate.
+            [VendorConfigField(
+                settingID: "creds.passbolt.server",
+                vendor: .passbolt,
+                ownerTitle: LocalVaultVendor.passbolt.displayTitle,
+                kind: .serverURL,
+                defaultsKey: passboltServerKey,
+                example: "https://passbolt.example.com"),
+             VendorConfigField(
+                settingID: "creds.passbolt.config-file",
+                vendor: .passbolt,
+                ownerTitle: LocalVaultVendor.passbolt.displayTitle,
+                kind: .toolConfigFile,
+                defaultsKey: passboltConfigFileKey,
+                example: PassboltServerLocation.defaultConfigFile(),
+                // Empty is a WORKING state, not a gap: with no `--config` the tool
+                // reads its own default file, which is where `passbolt configure`
+                // writes. Only somebody with a second server needs a second file.
+                emptyMeansDefault: PassboltServerLocation.defaultConfigFile()),
+             VendorConfigField(
+                settingID: "creds.passbolt.tool-path",
+                vendor: .passbolt,
+                ownerTitle: LocalVaultVendor.passbolt.displayTitle,
+                kind: .toolBinary(tool: "passbolt"),
+                defaultsKey: toolPathKey("passbolt"),
+                example: "/opt/homebrew/bin/passbolt")]
         }
     }
 
@@ -580,15 +672,26 @@ nonisolated enum VendorFieldValidation: Sendable, Equatable {
     case notAReadableDatabase(String)
     /// A security-key slot that isn't 1 or 2.
     case badSecurityKeySlot
+    /// A well-formed address that is not one SimpleVPN will talk to. The clause
+    /// says which of the four things is wrong (no address, not a web address, not
+    /// https, credentials or a query in it) — see `PassboltServerLocation.validate`.
+    case badServerAddress(String)
+    /// The file is FINE and SimpleVPN will use it — but another account on this Mac
+    /// can read it, and it holds a private key. NOT a fault: refusing to read
+    /// somebody's own file because its permissions are loose would break a working
+    /// setup to make a point. It is a statement, with the one command that fixes it.
+    case readableByOthers
 
     /// Whether this state stops the field working. `sanctioned` and `notSet`
     /// don't — they are statements, not faults.
     var isProblem: Bool {
         switch self {
-        case .notSet, .notSetUsingDefault, .ok, .sanctioned: false
+        // `readableByOthers` sits with the non-problems on purpose: the setting
+        // works, and the sentence is advice rather than a correction.
+        case .notSet, .notSetUsingDefault, .ok, .sanctioned, .readableByOthers: false
         case .notAbsolute, .missing, .notExecutable, .unsafeDirectory, .notASocket,
              .badEndpoint, .notLoopback, .notAFile, .notAReadableDatabase,
-             .badSecurityKeySlot: true
+             .badSecurityKeySlot, .badServerAddress: true
         }
     }
 
@@ -604,7 +707,11 @@ nonisolated enum VendorFieldValidation: Sendable, Equatable {
                 "Not set, and SimpleVPN hasn\u{2019}t found one. Type a full path to use this."
             }
         case .notSetUsingDefault(let fallback):
-            "Not set, so SimpleVPN uses the usual address: \(fallback)"
+            // "the usual one" rather than "the usual address": this case started as
+            // a loopback endpoint and now also covers a vendor tool's own default
+            // config file, and a sentence that names the WRONG kind of thing is
+            // worse than a slightly vaguer one. The fallback itself is shown.
+            "Not set, so SimpleVPN uses the usual one: \(fallback)"
         case .ok:
             "Ready to use."
         case .sanctioned:
@@ -634,6 +741,13 @@ nonisolated enum VendorFieldValidation: Sendable, Equatable {
         case .badSecurityKeySlot:
             "Problem: a security key has two slots \u{2014} type 1 or 2, or leave this empty if your "
             + "database doesn\u{2019}t use one."
+        case .badServerAddress(let why):
+            "Problem: \(why). Use the address you open in your browser, starting with https."
+        case .readableByOthers:
+            // Advice, not a fault, and it names the command because "tighten the
+            // permissions" is not something most people can act on.
+            "Ready to use \u{2014} but other accounts on this Mac can read that file, and it holds "
+            + "your private key. Run \u{201C}chmod 600\u{201D} on it to keep it to yourself."
         }
     }
 
@@ -644,8 +758,12 @@ nonisolated enum VendorFieldValidation: Sendable, Equatable {
         case .notSet, .notSetUsingDefault: nil
         case .ok: "checkmark.circle.fill"
         case .sanctioned: "hand.raised.circle.fill"
+        // Its own symbol, because it is neither a tick nor a warning triangle: it
+        // works, and there is something worth doing about it.
+        case .readableByOthers: "eye.trianglebadge.exclamationmark.fill"
         case .notAbsolute, .missing, .notExecutable, .unsafeDirectory, .notASocket, .badEndpoint,
-             .notLoopback, .notAFile, .notAReadableDatabase, .badSecurityKeySlot:
+             .notLoopback, .notAFile, .notAReadableDatabase, .badSecurityKeySlot,
+             .badServerAddress:
             "exclamationmark.triangle.fill"
         }
     }
@@ -920,6 +1038,21 @@ final class SignInSourceSettingsStore {
             // about how its owner writes their entries. The conventional names are
             // offered as suggestions in the field itself, not as a detected value.
             return nil
+        case .serverURL:
+            // NO GUESS, ever. There is nothing on this Mac that names somebody's
+            // Passbolt server except the tool's own config file — and reading a
+            // value out of that file to pre-fill a field would mean holding its
+            // contents, which this source's whole design says we do not do. The
+            // placeholder shows the SHAPE of an answer instead.
+            return nil
+        case .toolConfigFile:
+            // The tool's own default file, but only when it is really there: a
+            // suggestion pointing at a path that does not exist is worse than none,
+            // because it reads as "SimpleVPN found this".
+            let path = PassboltServerLocation.defaultConfigFile()
+            var isDirectory: ObjCBool = false
+            let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+            return exists && !isDirectory.boolValue ? path : nil
         case .securityKeySlot, .daemonEndpoint, .pkcs11Module:
             return nil
         }
@@ -957,6 +1090,13 @@ final class SignInSourceSettingsStore {
             guard let endpoint = LoopbackEndpoint(parsing: path) else { return .badEndpoint }
             return endpoint.isLoopback ? .ok : .notLoopback
         }
+        // A SERVER'S ADDRESS is not a path either. Checked before the absolute-path
+        // rule, and against the one definition in `PassboltServerLocation` so the
+        // pane and the reader can never disagree about what SimpleVPN will talk to.
+        if case .serverURL = field.kind {
+            if let why = PassboltServerLocation.validate(path) { return .badServerAddress(why) }
+            return .ok
+        }
         // A slot number is not a path either, and telling somebody to start it with a
         // slash would be nonsense.
         if case .securityKeySlot = field.kind {
@@ -982,8 +1122,15 @@ final class SignInSourceSettingsStore {
         switch field.kind {
         case .unixSocket:
             return (st.st_mode & S_IFMT) == S_IFSOCK ? .ok : .notASocket
-        case .daemonEndpoint, .securityKeySlot:
+        case .daemonEndpoint, .securityKeySlot, .serverURL:
             return .ok               // handled above
+        case .toolConfigFile:
+            // A file, and one only its owner should be able to read: it holds an
+            // OpenPGP private key and possibly its passphrase. Loose permissions do
+            // NOT stop SimpleVPN using it — that would break a working setup to make
+            // a point — but they earn a sentence with the fix in it.
+            guard (st.st_mode & S_IFMT) == S_IFREG else { return .notAFile }
+            return (st.st_mode & (S_IRGRP | S_IROTH)) != 0 ? .readableByOthers : .ok
         case .entryFieldName:
             return .ok               // free text; not a path, so nothing on disk to check
         case .storeDirectory:

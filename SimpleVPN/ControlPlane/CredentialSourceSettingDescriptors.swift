@@ -104,6 +104,30 @@ enum CredentialSourceSettings {
                     + "why it is yours to set.",
                 group: .signIn,
                 default: "")
+        case .serverURL:
+            EngineSettingSpec(
+                id: field.settingID,
+                name: "Server address",
+                summary: "The address of the \(vendorTitle(field)) server SimpleVPN reads, starting "
+                    + "with https \u{2014} the same one you open in your browser. Your own server "
+                    + "works exactly like anybody else\u{2019}s. SimpleVPN always checks the "
+                    + "server\u{2019}s certificate and has no setting to stop: if your organization "
+                    + "runs its own certificate authority, trust that authority on this Mac and every "
+                    + "program benefits, not just this one.",
+                group: .signIn,
+                default: "")
+        case .toolConfigFile:
+            EngineSettingSpec(
+                id: field.settingID,
+                name: "\(vendorTitle(field)) setup file",
+                summary: "Which of \(vendorTitle(field))\u{2019}s own setup files holds this "
+                    + "server\u{2019}s key. Leave it empty for the usual one, which is where "
+                    + "\(vendorTitle(field))\u{2019}s own program writes when you set it up. A second "
+                    + "server needs a second file, because each file holds one server\u{2019}s "
+                    + "details. SimpleVPN only reads it \u{2014} it never writes it, and never takes "
+                    + "anything out of it.",
+                group: .signIn,
+                default: "")
         case .unixSocket:
             EngineSettingSpec(
                 id: field.settingID,
@@ -183,9 +207,43 @@ enum CredentialSourceSettings {
         // LastPass needs no extra spec either: the master password goes to `lpass`,
         // whose own agent holds the key it derives and hands it to no other program,
         // so there is nothing for SimpleVPN to hold, prompt for or remember.
+        // Proton Pass needs none either, and for a reason worth stating: Proton's own
+        // tool owns the session and the lock code entirely, so there is nothing for
+        // SimpleVPN to hold, prompt for or remember behind Touch ID. A "Proton
+        // password" row here would be a field for a secret we have promised never to
+        // see.
         case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane,
-             .passwordStore, .lastPass:
+             .passwordStore, .lastPass, .protonPass:
             []
+        // Passbolt needs the same two, and for the same reason: an OpenPGP key
+        // passphrase opens everything its owner can see in Passbolt, so it gets the
+        // narrowest handling in the app. Nowhere by default, the Touch ID keychain by
+        // opt-in, and nothing else.
+        //
+        // There is deliberately NO third control for "let Passbolt's own program keep
+        // it" and no "skip the certificate check". The first is a plaintext secret at
+        // rest — the shape somebody automating this in a script would provision, not
+        // what a person on a Mac should be steered towards; it keeps working when it
+        // is already set up, without being offered. The second is the tool's own
+        // `--tlsSkipVerify`, which SimpleVPN never passes: a setting like that ends up
+        // switched on everywhere.
+        case .passbolt:
+            [EngineSettingSpec(
+                id: SignInSourceSettings.passboltPassphraseSettingID,
+                name: "Passbolt key passphrase",
+                summary: "The passphrase that unlocks your Passbolt key. SimpleVPN keeps it only "
+                    + "until it quits, unless you ask macOS to remember it. It is never written to a "
+                    + "settings file, never put in a command, and never appears in a log.",
+                group: .signIn,
+                default: ""),
+             EngineSettingSpec(
+                id: SignInSourceSettings.passboltRememberPassphraseSettingID,
+                name: "Remember the passphrase with Touch ID",
+                summary: "Lets macOS keep your Passbolt passphrase and release it only when you give "
+                    + "a fingerprint, your Apple Watch, or this Mac\u{2019}s password. Off means you "
+                    + "type it once each time you open SimpleVPN.",
+                group: .signIn,
+                default: false)]
         case .keePassFile:
             [EngineSettingSpec(
                 id: SignInSourceSettings.keePassPasswordSettingID,

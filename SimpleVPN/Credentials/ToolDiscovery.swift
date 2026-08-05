@@ -449,13 +449,38 @@ nonisolated enum ToolCatalog {
         // Dashlane's manual-install instructions also name /usr/local/bin outright.
         DiscoverableTool(name: "pass", title: "pass (password-store)", vendor: nil),
         DiscoverableTool(name: "gopass", title: "gopass", vendor: nil),
-        // Homebrew's formula is `go-passbolt-cli` but the BINARY it installs is
-        // `passbolt`. Both names are searched: `go install` may produce the other.
-        DiscoverableTool(name: "passbolt", title: "Passbolt CLI", vendor: nil),
-        DiscoverableTool(name: "go-passbolt-cli", title: "Passbolt CLI (Go build)", vendor: nil),
+        // --- Back to vendors WITH an adapter ------------------------------
+        // VERIFIED, because discovery searches by binary NAME and the two names come
+        // from two different installs of the same program:
+        //  • `brew install passbolt/tap/go-passbolt-cli` — the tap's formula ends
+        //    `bin.install "passbolt"`, so the FORMULA is `go-passbolt-cli` and the
+        //    BINARY is `passbolt`. That mismatch is why both rows exist.
+        //  • `go install github.com/passbolt/go-passbolt-cli@latest` names the binary
+        //    after the module, so it lands as `go-passbolt-cli` (usually in
+        //    `~/go/bin`, which the `goBin` class already covers).
+        // The cobra root command is `Use: "passbolt"` either way, so the subcommands
+        // are identical. Both are mapped to the vendor: whichever one somebody has,
+        // "found at …, but not somewhere SimpleVPN will run it from" has to land on
+        // the Passbolt row.
+        DiscoverableTool(name: "passbolt", title: "Passbolt CLI", vendor: .passbolt),
+        DiscoverableTool(name: "go-passbolt-cli", title: "Passbolt CLI (Go build)",
+                         vendor: .passbolt),
         // Proton Pass's tool is `pass-cli`, deliberately not `pass` — the two are
-        // different products and confusing them would read the wrong vault.
-        DiscoverableTool(name: "pass-cli", title: "Proton Pass CLI", vendor: nil),
+        // different products and confusing them would read the wrong vault. It sits
+        // next to `pass` and `gopass` in this list precisely so that the difference is
+        // visible at the point where it could be got wrong: THREE entries, three
+        // names, and only this one carries `.protonPass`.
+        //
+        // No vendor installer path is asserted. Proton's `install.sh` prefers
+        // `$HOME/.local/bin` and falls back to `/usr/local/bin` (both already covered,
+        // as `pipx` and `homebrewIntel` respectively), their Homebrew tap
+        // (`brew install protonpass/tap/pass-cli`) lands in the Homebrew prefix, and
+        // `PROTON_PASS_CLI_INSTALL_DIR` lets a user put it anywhere at all — which is
+        // exactly the case `toolOutsideAllowList` and the explicit-path setting exist
+        // for, rather than something to guess at.
+        DiscoverableTool(name: "pass-cli", title: "Proton Pass CLI", vendor: .protonPass),
+
+        // --- Vendors on the seam, no adapter yet (continued) --------------
         DiscoverableTool(name: "vault", title: "HashiCorp Vault CLI", vendor: nil),
         // YubiKey Manager's CLI, which ALSO ships inside its app bundle at a path
         // Yubico publishes verbatim. Discovery only: what SimpleVPN does with a

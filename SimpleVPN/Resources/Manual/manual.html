@@ -363,6 +363,15 @@
   <a href="#creds-passwordstore-tool-path">GnuPG Location</a>
   <a href="#creds-lastpass-enabled">Use LastPass</a>
   <a href="#creds-lastpass-tool-path">LastPass CLI Location</a>
+  <a href="#creds-protonpass-enabled">Use Proton Pass</a>
+  <a href="#creds-protonpass-tool-path">Proton Pass CLI Location</a>
+  <a href="#creds-passbolt-enabled">Use Passbolt</a>
+  <a href="#creds-passbolt-tool-path">Passbolt Program Location</a>
+  <a href="#creds-passbolt-servers">Your Passbolt Servers</a>
+  <a href="#creds-passbolt-server">Passbolt Server Address</a>
+  <a href="#creds-passbolt-config-file">Passbolt Setup File</a>
+  <a href="#creds-passbolt-passphrase">Passbolt Key Passphrase</a>
+  <a href="#creds-passbolt-remember-passphrase">Remember the Passphrase with Touch ID</a>
   <a href="#creds-ykman-tool-path">YubiKey Manager Location</a>
 </nav>
 
@@ -1705,6 +1714,79 @@ the device's protection intact at the cost of typing four to eight digits per co
 <p>Where <code>lpass</code> is on this Mac. Leave it empty and SimpleVPN uses whichever copy it found in a folder it will run from. <code>brew install lastpass-cli</code> puts it in one of those; so does MacPorts. Set this when your copy is somewhere else &mdash; most often because it was built from source into a folder you chose.</p>
 <p>This field follows exactly the same rules as the other tool paths: a complete path starting with a slash, because a bare name would be resolved by rules SimpleVPN does not control; and never a program in a folder everyone using this Mac can write to, which is refused even if you ask for it by name.</p>
 <p>One thing SimpleVPN does <em>not</em> offer a setting for, deliberately: which folder LastPass keeps its copy of your vault in. LastPass&rsquo;s tool signs in one account at a time, so there is only ever one, and SimpleVPN uses the usual place (<code>~/.lpass</code>) for both its checks and its reads &mdash; so what it looked at and what it ran can never disagree. If you keep yours somewhere else by setting <code>LPASS_HOME</code> in your shell, SimpleVPN will report LastPass as not signed in.</p>
+<h2 id="creds-protonpass-enabled">Use Proton Pass</h2>
+<p class="default">Default: on.</p>
+<p>Offers Proton Pass as a way to sign in. SimpleVPN reads one item out of your Proton Pass vaults using Proton&rsquo;s own command-line tool, <code>pass-cli</code>.</p>
+<p><strong>This is not the same thing as a password store.</strong> The two sit next to each other in this list and their tools are called almost the same &mdash; Proton&rsquo;s is <code>pass-cli</code>, the unix password store&rsquo;s is <code>pass</code> &mdash; but they are different products holding different sign-ins. SimpleVPN keeps them completely apart, and setting one up does nothing for the other.</p>
+<p><strong>Your Proton plan has to include the tool.</strong> It comes with Pass Plus, Pass Family, Pass Professional and the Proton bundles. On a free plan you can install it and watch it start, and Proton will still refuse to sign it in &mdash; and because it signs itself back out when that happens, SimpleVPN then sees a Mac that is simply not signed in. That is why both messages mention your plan: nothing on this Mac is broken, and there is nothing here to reinstall.</p>
+<p>How signing in works: you run <code>pass-cli login</code> once in Terminal. Proton opens your browser and asks you there &mdash; or asks in the terminal, if you use <code>pass-cli login --interactive</code>. Either way <strong>Proton does the asking</strong>. SimpleVPN never asks for your Proton password, your verification code or your Pass extra password, never stores any of them, and never sets the environment variables Proton&rsquo;s own documentation warns about.</p>
+<p>After that, Proton&rsquo;s tool keeps its own session on this Mac and SimpleVPN reads just the one item each VPN names. You can lock that session with <code>pass-cli session create-lock</code>; while it is locked SimpleVPN says so and points you at <code>pass-cli session unlock</code>, and never asks for the lock code itself.</p>
+<p><strong>Naming an item: two ways, and one of them is safer.</strong> Each VPN says which vault and which item, like <code>Work/GR Lab</code>. You can use Proton&rsquo;s own identifiers for both instead &mdash; long strings you can copy out of Proton Pass &mdash; and for a VPN you depend on that is worth doing: identifiers keep working when you rename or move things, while names do not. Names are also not unique. Proton&rsquo;s tool, given a name that matches several items, picks one of them; SimpleVPN will not do that. It stops, tells you how many matched, and asks you to use the identifiers or rename one. Reading the wrong sign-in is worse than not reading one.</p>
+<p>A bare item name with no vault is refused for the same reason. Proton&rsquo;s tool would accept it and search whichever vault it has been told is the default &mdash; a setting SimpleVPN cannot see and did not choose &mdash; and then take the first match inside it. Two guesses to read a password with. Naming the vault costs one word.</p>
+<p><strong>What SimpleVPN reads, and nothing more:</strong> the item&rsquo;s password, its username (or its e-mail address, when the username is empty &mdash; Proton Pass keeps both), and its verification code when the item has one. Nothing is written, ever: no item is created, edited, moved or deleted, and your vaults are left exactly as they are. Nothing is put on the clipboard either &mdash; Proton&rsquo;s tool has no clipboard option at all, and a VPN password has no business sitting there waiting for the next paste.</p>
+<p>Because a verification code may or may not be on the item, SimpleVPN still asks you for one when this VPN needs one. If Proton hands one over, yours is not needed and nothing is lost by having typed it.</p>
+<p>Off means SimpleVPN neither offers Proton Pass nor mentions it &mdash; even if it is installed.</p>
+
+<h2 id="creds-protonpass-tool-path">Proton Pass CLI Location</h2>
+<p class="default">Optional. Empty means SimpleVPN uses the one it found.</p>
+<p>Where <code>pass-cli</code>, Proton&rsquo;s own command-line tool, is on this Mac. Leave it empty and SimpleVPN uses whichever copy it found in a folder it will run from.</p>
+<p><code>brew install protonpass/tap/pass-cli</code> puts it somewhere SimpleVPN already looks, and so does Proton&rsquo;s own installer script, which prefers <code>~/.local/bin</code> and falls back to <code>/usr/local/bin</code>. Proton&rsquo;s installer also honours a <code>PROTON_PASS_CLI_INSTALL_DIR</code> setting, so a copy can end up anywhere at all &mdash; and that is exactly what this field is for.</p>
+<p>If SimpleVPN can see your copy but will not run it, it says so and shows you the path, rather than telling you to install something you already have. Pasting that path here is the sanctioned way to use it. SimpleVPN never looks at your shell&rsquo;s search path to decide which program to run, deliberately: that program is about to be handed a request for a password.</p>
+<p>This field follows the same rules as the other tool paths above &mdash; a complete path starting with a slash, and never a program in a folder everyone using this Mac can write to.</p>
+<p>Note the name once more: <code>pass-cli</code> is Proton&rsquo;s tool. <code>pass</code> is the unix password store&rsquo;s, and it has its own row further up. Setting one here will not help the other.</p>
+<h2 id="creds-passbolt-enabled">Use Passbolt</h2>
+<p class="default">Default: on.</p>
+<p>Offers your <strong>Passbolt</strong> server as a way to sign in. Passbolt keeps passwords on a server &mdash; your organization&rsquo;s own, or one you run yourself &mdash; and unlocks them with an OpenPGP key. SimpleVPN asks Passbolt&rsquo;s own command-line program for the one resource a VPN names, and reads only that resource.</p>
+<p><strong>SimpleVPN only ever reads.</strong> It never creates, changes, shares, moves or deletes anything in Passbolt, and it never writes to Passbolt&rsquo;s own setup either.</p>
+<p><strong>Your key&rsquo;s passphrase is kept nowhere unless you ask.</strong> Your OpenPGP key opens everything you can see in Passbolt, not just one VPN&rsquo;s password, so it gets the narrowest handling in the app: you type it once, SimpleVPN holds it until it quits, and you are asked again next time you open the app. If you would rather not type it again, macOS can remember it and release it only for a fingerprint, your Apple Watch or this Mac&rsquo;s password. It is never written to a settings file, never put in a command, and never appears in a log. See <a href="#creds-passbolt-passphrase">Passbolt Key Passphrase</a>.</p>
+<p><strong>Passbolt&rsquo;s own program can hold a passphrase too, and SimpleVPN does not recommend it.</strong> <code>passbolt configure --userPassword</code> writes one into that program&rsquo;s own setup file. If you already have it set up that way it keeps working and SimpleVPN needs nothing from you. But a passphrase sitting in a file is the arrangement you would choose for a script that runs with nobody watching, and this is your laptop &mdash; a fingerprint, or one passphrase per app run, is both safer and less to think about. SimpleVPN never reads that passphrase, and never writes that file.</p>
+<p><strong>Setting <code>USERPASSWORD</code> in your shell will not help.</strong> Passbolt&rsquo;s program does read that variable, but SimpleVPN builds a clean environment for every program it runs and passes nothing through &mdash; so a passphrase in your shell profile reaches your own <code>passbolt</code> runs and never SimpleVPN&rsquo;s. That is deliberate: a secret in an inherited environment is a secret handed to every program started afterwards.</p>
+<p><strong>Your server&rsquo;s certificate is always checked.</strong> Passbolt&rsquo;s own program has an option to skip that check; SimpleVPN never uses it and gives you no way to. If your organization runs its own certificate authority, add that authority to this Mac&rsquo;s keychain and mark it trusted &mdash; that fixes it for every program on the Mac at once, which a per-app exception never does.</p>
+<p><strong>If your account asks for a verification code</strong>, SimpleVPN cannot supply it: doing so would mean keeping the code&rsquo;s secret next to your passphrase, which would undo the reason for asking. Read that VPN&rsquo;s sign-in another way.</p>
+
+<h2 id="creds-passbolt-tool-path">Passbolt Program Location</h2>
+<p class="default">Empty, which means SimpleVPN uses the copy it found.</p>
+<p>Where Passbolt&rsquo;s own command-line program is on this Mac. Leave it empty and SimpleVPN uses whichever copy it found in a folder it will run programs from. Set it when your copy lives somewhere SimpleVPN does not look on its own &mdash; that is what this is for.</p>
+<p><strong>The program has two names, and both are real.</strong> <code>brew install passbolt/tap/go-passbolt-cli</code> installs it as <code>passbolt</code>; building it yourself with <code>go install github.com/passbolt/go-passbolt-cli@latest</code> produces one called <code>go-passbolt-cli</code> instead. SimpleVPN looks for both, so either is found without any setting. This one field covers both as well: a full path you type here is used because you chose it, whatever the program at the end of it is called.</p>
+<p>Once it is installed, set it up for your server once, in Terminal, with <code>passbolt configure</code>. SimpleVPN never installs it and never runs its setup for you.</p>
+
+<h2 id="creds-passbolt-servers">Your Passbolt Servers</h2>
+<p class="default">None to begin with. Add one, or as many as you like.</p>
+<p>You can set up more than one Passbolt server. A company one and a personal one is the ordinary case, and they will have different keys &mdash; so each server you add here gets a name you choose, its own address, and its own setup file. Each VPN then picks which of them to read: first <em>which server</em>, then <em>which resource</em> inside it.</p>
+<p><strong>Each one is checked on its own.</strong> A server you cannot reach today does not stop another one working, and the pane says which is which rather than averaging them into one answer.</p>
+<p><strong>What &ldquo;ready&rdquo; can honestly mean here is different from a file.</strong> SimpleVPN can check a database file by looking at it. It cannot check a server without signing in to it, and signing in to somebody&rsquo;s server merely to draw a tick is a real sign-in attempt against a machine that only got asked a question &mdash; it can count against a rate limit or a lockout. So a server that looks completely set up is shown as ready to <em>try</em>, and SimpleVPN tells you exactly what happened the first time you connect or press <strong>Test</strong>.</p>
+<p>Removing a server <em>changes nothing on the server</em> and leaves Passbolt&rsquo;s own setup alone &mdash; SimpleVPN only forgets the address. If any of your VPNs read it, SimpleVPN names them first, and each will ask you to choose another server before it next connects.</p>
+
+<h2 id="creds-passbolt-server">Passbolt Server Address</h2>
+<p class="default">Empty. Nothing is guessed &mdash; you type the address.</p>
+<p>The address of the Passbolt server this entry stands for: the same one you open in your browser, starting with <code>https</code>. Your own server works exactly like anybody else&rsquo;s; SimpleVPN assumes nothing about where it is hosted.</p>
+<p><strong>It must start with <code>https</code>.</strong> Signing in to Passbolt exchanges an OpenPGP challenge and a session cookie, and neither belongs on a plain connection, so there is no setting to allow one. SimpleVPN also refuses an address with a name and password in it, or anything after the address itself &mdash; those mean nothing to Passbolt and the first would be a secret sitting in a settings file.</p>
+<p><strong>Nothing here is guessed for you.</strong> The only thing on this Mac that knows your server&rsquo;s address is Passbolt&rsquo;s own setup file, and reading a value out of that file to fill this in would mean handling its contents &mdash; which is exactly what SimpleVPN does not do. The grey text shows the shape of an answer instead.</p>
+<p><strong>Certificates are always verified.</strong> If your server uses a certificate from your organization&rsquo;s own authority, add that authority to this Mac&rsquo;s keychain and mark it trusted. SimpleVPN will not skip the check, and offers no option that could.</p>
+
+<h2 id="creds-passbolt-config-file">Passbolt Setup File</h2>
+<p class="default">Empty, which means the usual one: <code>~/Library/Application Support/go-passbolt-cli/go-passbolt-cli.toml</code>.</p>
+<p>Which of Passbolt&rsquo;s own setup files holds this server&rsquo;s key. Leave it empty and SimpleVPN uses the usual one, which is where <code>passbolt configure</code> writes. That is all most people need.</p>
+<p><strong>A second server needs a second file</strong>, because one file holds one server&rsquo;s address, key and passphrase. Create it with <code>passbolt configure --config ~/passbolt-work.toml &hellip;</code> and name it here.</p>
+<p><strong>SimpleVPN only reads this file to see which parts are set up</strong> &mdash; whether it has a key, and whether it has a passphrase &mdash; so it can tell you which one is missing. It keeps nothing out of it, never writes it, and never puts anything from it in a report or a log.</p>
+<p>The file holds an OpenPGP private key, so it should be readable only by you. Passbolt&rsquo;s own program sets that up correctly; if something has since loosened it, SimpleVPN says so beside the field and names the one command that tightens it again. It still works either way &mdash; refusing to read your own file to make a point would break a working setup.</p>
+
+<h2 id="creds-passbolt-passphrase">Passbolt Key Passphrase</h2>
+<p class="default">Nothing is kept. You type it once each time you open SimpleVPN, unless you turn on <a href="#creds-passbolt-remember-passphrase">Remember the Passphrase with Touch ID</a>.</p>
+<p>The passphrase that unlocks your Passbolt key. Type it here once and SimpleVPN can read this server; it is held until SimpleVPN quits and written nowhere at all.</p>
+<p><strong>Why this is handled more carefully than a VPN&rsquo;s own password.</strong> Your Passbolt key is your whole Passbolt identity: it opens every resource you can see, not just the one a VPN reads. So it gets the narrowest handling in the app &mdash; nowhere by default, and if you ask for it remembered, the Touch ID keychain and nothing else. Never an ordinary keychain item, which would let SimpleVPN open your Passbolt silently any time it liked.</p>
+<p><strong>Once per app run, not once per connect.</strong> A passphrase is long and connecting is frequent, so having typed it once you are not asked again until you next open SimpleVPN.</p>
+<p><strong>How it reaches Passbolt&rsquo;s program.</strong> On that program&rsquo;s standard input, and by no other route. Not on the command line &mdash; every program on this Mac can read another&rsquo;s command line &mdash; and not in an environment variable. <strong>Forget This Server&rsquo;s Passphrase</strong> drops it from this run and from the keychain at once.</p>
+<p><strong>A passphrase with a line break in it cannot be used.</strong> Passbolt&rsquo;s program reads exactly one line. SimpleVPN says so when you type it, rather than letting it come back later looking like a rejected sign-in.</p>
+<p>It is kept per <em>server</em>, not per VPN: it is the key&rsquo;s passphrase, so several VPNs reading one Passbolt share it.</p>
+
+<h2 id="creds-passbolt-remember-passphrase">Remember the Passphrase with Touch ID</h2>
+<p class="default">Default: off. Nothing is kept between runs of SimpleVPN until you turn this on.</p>
+<p>Lets macOS keep your Passbolt key&rsquo;s passphrase and hand it back only when you give a fingerprint, your Apple Watch, or this Mac&rsquo;s password. Turn it on with a passphrase already typed and it remembers that one.</p>
+<p><strong>macOS holds it, not SimpleVPN.</strong> It goes in the same protected keychain your other Touch ID secrets use, and macOS will not release it without you present &mdash; which a program running quietly in the background cannot arrange on its own.</p>
+<p><strong>Cancelling the fingerprint prompt is not a wrong passphrase.</strong> SimpleVPN says you cancelled and stops. It never retries, because a retry would count against your Passbolt server&rsquo;s own limit on failed attempts for something that was your decision.</p>
+<p><strong>Forget This Server&rsquo;s Passphrase</strong> removes it from both places at once.</p>
+<p>On a Mac that can&rsquo;t ask for a fingerprint, an Apple Watch or your password, this is switched off and says so, rather than offering protection it can&rsquo;t provide.</p>
 
 <h2 id="creds-ykman-tool-path">YubiKey Manager Location</h2>
 <p class="default">Optional. Empty means SimpleVPN uses the one it found.</p>

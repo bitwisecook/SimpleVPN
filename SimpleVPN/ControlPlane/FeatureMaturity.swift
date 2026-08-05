@@ -178,6 +178,33 @@ nonisolated enum FeatureMaturityRegistry {
         // the machine this was built on, so no real vault has ever answered, no agent
         // has ever been asked for a key, and nobody has connected a VPN with it.
         .vault(.lastPass):          .untested,
+        // Proton Pass. PROVEN: the addressing rules, the ID shape (Proton's own
+        // `is_id` — 88 characters ending "=="), the exact-title match, the
+        // duplicate-title refusal, the four availability states, and every failure
+        // classification — all against fixtures whose strings are quoted from Proton's
+        // own GPL-3 source (see SimpleVPNTests/Credentials/ProtonPassTests.swift, which
+        // cites the file and line per fixture). NOT PROVEN, and it is the larger half:
+        // no `pass-cli` has ever run here, no Proton account exists, and no item has
+        // ever been read — the machine this was built on has neither the tool nor the
+        // app. The entitlement state in particular has never been observed: Proton
+        // checks the plan inside `pass-cli login`, which SimpleVPN deliberately never
+        // runs, so that sentence is recognised from the vendor's source rather than
+        // from a transcript.
+        .vault(.protonPass):        .untested,
+        // WHAT WAS PROVEN: the argument building, the config-file key probe, the JSON
+        // parsing, the passphrase store's three tiers and the whole failure taxonomy,
+        // against fixtures taken from `go-passbolt-cli`'s own source and its own
+        // testdata — including that `--tlsSkipVerify` can never be emitted, that no
+        // secret can reach argv or the child's environment, and that a cancelled Touch
+        // ID sheet is never mistaken for a rejected sign-in.
+        // WHAT WAS NOT: anything involving a server, and anything involving a real
+        // fingerprint. Passbolt is not installed on the machine this was built on and
+        // there is no Passbolt server here, so no sign-in has ever completed, no
+        // certificate has ever been verified for real, no Touch ID prompt has ever been
+        // answered, and no resource has ever come back. Even the states this feed most
+        // wants confirmed — a private certificate authority, and two servers where one
+        // is broken — are fixture-level only.
+        .vault(.passbolt):          .untested,
     ]
 
     // MARK: Lookups

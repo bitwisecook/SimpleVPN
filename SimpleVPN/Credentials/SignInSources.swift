@@ -81,6 +81,22 @@ nonisolated enum LocalVaultVendor: String, CaseIterable, Sendable, Hashable {
     /// verification code — and its own copy says so rather than letting somebody
     /// find out at connect time.
     case lastPass
+    /// PROTON PASS, through Proton's own command-line tool. A BRAND, unlike the two
+    /// format entries above: it is one vendor, one account, one hosted service.
+    ///
+    /// NOT TO BE CONFUSED WITH `.passwordStore`, and the confusion is a real risk
+    /// rather than a theoretical one — Proton's tool is called `pass-cli` and the
+    /// unix password store's is called `pass`, discovery searches by binary name, and
+    /// the two read completely different vaults. `ToolCatalog` keeps three separate
+    /// entries (`pass`, `gopass`, `pass-cli`) and only `pass-cli` maps here; see
+    /// ProtonPassProvider.swift's header for the rest of the separation.
+    case protonPass
+    /// A PASSBOLT SERVER, read through Passbolt's own `go-passbolt-cli`. The first
+    /// vendor here whose level-2 instance is not a thing on disk: an instance is a
+    /// SERVER — an https address plus that server's own OpenPGP sign-in
+    /// configuration — so no `stat` can ever settle whether it can answer. See
+    /// PassboltServer.swift, which states what that costs the availability model.
+    case passbolt
 }
 
 /// HOW a vendor is reached. Deliberately separate from the vendor, and named in
@@ -152,6 +168,23 @@ nonisolated enum LocalVaultBlock: String, Sendable, Equatable {
     /// sanctioned way to use a tool we would otherwise decline to run. So this is
     /// an enablement state, not a failure.
     case toolOutsideAllowList
+    /// EVERYTHING IS INSTALLED, EVERYTHING IS SIGNED IN, AND THE VENDOR'S PLAN DOES
+    /// NOT INCLUDE THE PART SIMPLEVPN READS THROUGH.
+    ///
+    /// This is a state, not an error, and it is its own state because none of the
+    /// others can be made to say it. Proton Pass is the case that names it: its
+    /// command-line tool ships to everybody and is licensed to Pass Plus, Pass
+    /// Family, Pass Professional and the Proton bundles, so somebody on a free plan
+    /// can install it, watch it start, and still be refused — the tool prints "your
+    /// account is not yet allowed to use our CLI" and logs itself back out.
+    ///
+    /// Folding that into `toolMissing` would tell them to install what they have;
+    /// folding it into `notSignedIn` would send them round the sign-in loop for ever.
+    /// Both are how a person concludes an app is broken when the answer is a
+    /// subscription. The FIX is on the vendor's own account pages and there is no
+    /// command to run, which is why the banner for this one carries a link and a
+    /// sentence instead of an example.
+    case planExcludesTool
 
     // MARK: The file-backed states
     //
@@ -212,6 +245,12 @@ nonisolated enum LocalVaultBlock: String, Sendable, Equatable {
     /// one line to delete. It is an enablement state, not a failure: nothing is
     /// broken, and the fix is one edit the user makes.
     case toolDivertsSecretToClipboard
+    /// NO SERVER HAS BEEN SET UP. The server-shaped equivalent of `noVaultFile`,
+    /// and its own case rather than a reuse: `noVaultFile`'s whole vocabulary is a
+    /// file that was chosen and can be re-chosen ("no database has been chosen
+    /// yet", a Finder picker), and none of that is true of an address somebody
+    /// types. Passbolt is the case that names it. An enablement state: one field.
+    case noServerConfigured
 
     /// The states the enablement banner exists for: something to switch on,
     /// install, sign in to, or point at — as opposed to "your app isn't running"
@@ -224,13 +263,21 @@ nonisolated enum LocalVaultBlock: String, Sendable, Equatable {
         case .toolMissing, .integrationOff, .notSignedIn, .toolOutsideAllowList,
              .vaultLocked, .noVaultFile, .vaultPasswordRejected:
             true
+        // A BANNER, even though the fix is not on this Mac. It is exactly the state
+        // whose banner earns its place: without one, the row says a true thing
+        // ("Proton Pass can't answer") that leads somewhere useless, and the person
+        // goes looking for a bug. With one, they read the word "plan" and stop.
+        case .planExcludesTool:
+            true
         // "You pointed at the wrong folder" IS something to fix, with an exact fix
         // (choose the folder with .gpg-id in it), so it earns a banner.
         case .vaultNotAPasswordStore:
             true
         // "Take the -c out of that one file" is as exact a fix as this app has, and
         // the banner is the only place it can be spelled out.
-        case .toolDivertsSecretToClipboard:
+        // "Tell SimpleVPN your server's address" is the shortest enablement in the
+        // whole list: one field, and the row works.
+        case .toolDivertsSecretToClipboard, .noServerConfigured:
             true
         case .appNotRunning, .needsUpdate, .vaultFileMissing, .vaultFileNotDownloaded,
              .vaultFileNotReadable, .vaultFileNotAKeePassDatabase, .vaultFileTooNew:
@@ -350,10 +397,38 @@ nonisolated enum VendorDocs {
     static let dashlaneAuthentication = page("Dashlane CLI sign-in",
                                              "https://cli.dashlane.com/personal/authentication")
 
+    // Proton Pass. The tool's own documentation site, which is where Proton
+    // documents installing it, signing in, the session lock and the `pass://`
+    // reference syntax. All four measured at a bare 200 with NO redirect followed —
+    // note the trailing slashes, which this site requires: the same address without
+    // one 301s (`/pass-cli` → `/pass-cli/`), and shipping the redirecting form is
+    // exactly the mistake three earlier entries in this table made.
+    //
+    // The PLANS page is Proton's own support article and is the authority for the
+    // one thing nobody can fix from this Mac — which plans include the tool. It is
+    // on proton.me rather than the docs site because that is where Proton says it.
+    static let protonPassCLI = page("Proton Pass CLI", "https://protonpass.github.io/pass-cli/")
+    static let protonPassCLILogin = page("Proton Pass CLI sign-in",
+                                        "https://protonpass.github.io/pass-cli/commands/login/")
+    static let protonPassCLISession = page("Proton Pass CLI session lock",
+                                          "https://protonpass.github.io/pass-cli/commands/session/")
+    static let protonPassCLIReferences = page(
+        "Proton Pass item references",
+        "https://protonpass.github.io/pass-cli/commands/contents/secret-references/")
+    static let protonPassPlans = page("Proton Pass plans",
+                                      "https://proton.me/support/proton-pass-plans-explained")
+
+    // Passbolt. The CLI's repository is the authority for its flags, its config
+    // file and its own error text — everything SimpleVPN's argument building and
+    // failure classification is derived from — and Passbolt's documentation site
+    // is where somebody self-hosting starts. Both measured at a bare 200, no
+    // redirect (`passbolt.com/docs` 301s to `/docs/`, so the slash is part of the
+    // address that actually gets served).
+    static let passboltCLI = page("Passbolt CLI", "https://github.com/passbolt/go-passbolt-cli")
+    static let passbolt = page("Passbolt documentation", "https://www.passbolt.com/docs/")
+
     // Vendors on the seam but not yet implemented — listed here so the next
     // adapter's author has the same auditable table rather than a fresh guess.
-    static let protonPassCLI = page("Proton Pass CLI", "https://protonpass.github.io/pass-cli/")
-    static let passboltCLI = page("Passbolt CLI", "https://github.com/passbolt/go-passbolt-cli")
     static let passwordStore = page("pass", "https://www.passwordstore.org/")
     static let gopass = page("gopass", "https://www.gopass.pw/")
     static let lastPassCLI = page("LastPass CLI", "https://github.com/lastpass/lastpass-cli")
@@ -367,7 +442,9 @@ nonisolated enum VendorDocs {
         keePassXC, keePassXCCLI, strongbox, keePassium,
         bitwardenCLI, bitwardenVaultAPI,
         dashlaneCLI, dashlaneAuthentication,
-        protonPassCLI, passboltCLI,
+        protonPassCLI, protonPassCLILogin, protonPassCLISession, protonPassCLIReferences,
+        protonPassPlans,
+        passboltCLI, passbolt,
         passwordStore, gopass, lastPassCLI, hashiCorpVaultCLI,
     ]
 }
@@ -518,6 +595,12 @@ nonisolated enum LocalVaultCopyBook {
         // carries the argument for why this row's copy sets lower expectations than
         // any other's without being unfair to the vendor.
         case .lastPass: lastPass
+        // Lives in ProtonPassCopy.swift. NOT next to `passwordStore` by accident:
+        // they are different vendors with adjacent tool names, and keeping their copy
+        // in separate files is part of what stops one row describing the other's tool.
+        case .protonPass: protonPass
+        // Lives in PassboltCopy.swift, same reason again.
+        case .passbolt: passbolt
         }
     }
 
@@ -994,9 +1077,14 @@ nonisolated enum PasswordAppCatalog {
               prefixes: ["com.lastpass."], localReadPath: .officialCLI("lpass")),
         .init(name: "NordPass", bundleIDs: ["com.nordpass.macos", "com.nordpass.desktop"],
               prefixes: ["com.nordpass."]),
+        // Proton Pass's own CLI IS built — see `gatedVendor`. This entry only matters
+        // when `pass-cli` isn't installed. The tool is named exactly, because "the
+        // Proton Pass command-line tool" was true but unsearchable, and because the
+        // one thing a reader must not conclude is that it is the `pass` they may
+        // already have.
         .init(name: "Proton Pass", bundleIDs: ["me.proton.pass.electron", "ch.protonmail.pass"],
               prefixes: ["me.proton.pass", "ch.protonmail.pass"],
-              localReadPath: .officialCLI("the Proton Pass command-line tool")),
+              localReadPath: .officialCLI("pass-cli")),
         .init(name: "RoboForm", bundleIDs: ["com.siber.roboform"], prefixes: ["com.siber.roboform"]),
         .init(name: "Strongbox", bundleIDs: ["com.markmcguill.strongbox.mac", "com.markmcguill.strongbox"],
               prefixes: ["com.markmcguill.strongbox"], localReadPath: .keePassFormat),
@@ -1050,6 +1138,10 @@ nonisolated enum PasswordAppCatalog {
         // locally, and `lpass` is what turns it into a real source. So the app points
         // at the way in rather than appearing as a second, dead row.
         case "LastPass": .lastPass
+        // Proton Pass is the same shape again: the desktop app has no local API, and
+        // Proton's own `pass-cli` is what turns it into a real source. So the app
+        // alone points at the way in rather than appearing as a second, dead row.
+        case "Proton Pass": .protonPass
         case "Strongbox", "KeePassium": .keePassFile
         default: nil
         }
@@ -1471,6 +1563,23 @@ nonisolated enum SignInFlow {
             + "LastPass\u{2019}s own tool isn\u{2019}t signed in, or it has forgotten your master "
             + "password. Check it in Settings \u{25B8} Sign-In Sources, which will say which and "
             + "give you the one command that fixes it."
+        case .protonPass:
+            // Names the source (every recovery sentence does) and names the PLAN,
+            // because "sign in again" is the wrong advice for the one person this
+            // sentence cannot help: a free-plan account is refused at sign-in and left
+            // signed out, so it lands here looking identical to a lapsed session.
+            // The settings pane says which; this says both are possible.
+            "SimpleVPN can\u{2019}t read Proton Pass right now \u{2014} its command-line tool "
+            + "isn\u{2019}t signed in, its session is locked, or your Proton plan doesn\u{2019}t "
+            + "include the tool. Check it in Settings \u{25B8} Sign-In Sources, which will say which."
+        case .passbolt:
+            // Names the source, as every recovery sentence must, and deliberately
+            // does NOT guess which of the four things is missing: the program, the
+            // server address, the program's own setup for that server, or its
+            // passphrase. Naming one would be wrong three times in four, and the
+            // settings pane says which in one sentence right beside the fix.
+            "SimpleVPN can\u{2019}t read your Passbolt server right now. Check it in "
+            + "Settings \u{25B8} Sign-In Sources \u{2014} it will say which part is missing."
         }
     }
 

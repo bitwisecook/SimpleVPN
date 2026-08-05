@@ -149,6 +149,13 @@ struct EditVPNView: View {
     /// Whether LastPass's own tool is signed in with a live session — the only state
     /// a fetch works in. Same optimistic start as the others, same reason.
     @State private var lastPassAvailable = true
+    /// Whether Proton Pass can serve right now — its command-line tool present with a
+    /// session the Proton Pass API still accepts. Same optimistic start, same reason.
+    ///
+    /// A Bool cannot say WHICH of the three unhappy answers it is, and one of them
+    /// (the plan) needs its own sentence — so the warning below reads it alongside
+    /// `protonPassState`, which keeps the state rather than flattening it.
+    @State private var protonPassState: ProtonPassSessionState? = .ready
 
     // 1Password browsing (vault/item pickers). Every list is fetched ONLY on an
     // explicit click: the first one can raise 1Password's authorization prompt,
@@ -295,6 +302,14 @@ struct EditVPNView: View {
                    LastPassCLIClient.locate() != nil,
                    LastPassHomeProbe().facts().directoryExists {
                     lastPassAvailable = await LastPassCLIClient().statusSaysSignedIn() == true
+                }
+                // Proton Pass: one `pass-cli info` run, and only when the vendor is
+                // switched on and there is a tool we may run — so a Mac without it
+                // spawns nothing. Asked at all because the three unhappy answers have
+                // three different fixes and one of them cannot be fixed here.
+                if SignInSourceSettingsStore.shared.isEnabled(.protonPass),
+                   ProtonPassCLIChannel.locate() != nil {
+                    protonPassState = await ProtonPassCLIChannel().sessionState()
                 }
                 // Prompt-free, so this much can be said without anyone asking:
                 // no 1Password on this Mac is a setup state, not a failure.
@@ -838,6 +853,44 @@ struct EditVPNView: View {
                 Text("SimpleVPN decrypts one entry with GnuPG when you connect. It never writes to your store and never runs git in it. Your key\u{2019}s passphrase stays with GnuPG.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            case .protonPass:
+                // ONE field, because Proton Pass has one session and its vault is part
+                // of the item's own address: `Work/GR Lab`, or the two identifiers.
+                // There is no instance picker here on purpose — see
+                // `LocalVaultVendor.cardinality`.
+                TextField("Vault and item", text: $sourceReference,
+                          prompt: Text(verbatim: "Work/GR Lab"))
+                    .autocorrectionDisabled()
+                TextField("Username (optional \u{2014} overrides the item\u{2019}s own)",
+                          text: $sourceAccount)
+                    .autocorrectionDisabled()
+                if let warning = protonPassWarning {
+                    Label(warning, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text("SimpleVPN reads just this item using Proton\u{2019}s own command-line tool, and reads only its username and password. Name the vault as well as the item \u{2014} you can use Proton\u{2019}s identifiers for both instead, which keep working when things are renamed. If two items in the vault share a title, SimpleVPN stops and says so rather than reading whichever it found first. If a verification code is required, type it below.")
+                    .font(.callout).foregroundStyle(.secondary)
+                sourceTestRow
+            case .passbolt:
+                // The same two steps again, and here the first one is a SERVER rather
+                // than a file — the first level-2 question in this editor that names
+                // something on the other end of a network. The reference is best given
+                // as Passbolt's own identifier, which survives a rename; a name works
+                // while it stays unique, and SimpleVPN refuses rather than guessing
+                // when it stops being.
+                SignInInstanceEntryPicker(
+                    vendor: .passbolt,
+                    instance: $sourceInstance,
+                    entry: $sourceReference,
+                    account: $sourceAccount,
+                    entryPrompt: "8f4b9c1e-2a7d-4f60-9c31-5e8a0b7d6c42",
+                    accountLabel: "Username (optional)",
+                    onConfigure: { openSignInSourceSettings(for: .passbolt) })
+                Text("SimpleVPN asks Passbolt\u{2019}s own program for this one resource when you connect, and reads nothing else. Your OpenPGP key and its passphrase stay with that program \u{2014} SimpleVPN never sees either. Your server\u{2019}s certificate is always checked.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                sourceTestRow
             case .keePassFile:
                 // TWO STEPS, because there are two questions: WHICH database (level
                 // 2 — a person may have a work one and a personal one) and WHICH
@@ -1442,6 +1495,35 @@ struct EditVPNView: View {
             guard let fieldID = fieldMap[role.id], !fieldID.isEmpty else { return nil }
             let label = opFields.first { $0.id == fieldID }?.label ?? fieldID
             return "\(role.title) → \(label)"
+        }
+    }
+
+    /// The one-line warning above the Proton Pass fields, or nil when nothing is
+    /// wrong.
+    ///
+    /// THREE SENTENCES, NOT ONE, and the third is why this is a state rather than a
+    /// Bool: "sign in", "unlock" and "your plan doesn't include the tool" are three
+    /// different actions and only two of them happen on this Mac. Telling somebody on
+    /// a free plan to sign in again is how an afternoon disappears.
+    private var protonPassWarning: String? {
+        switch protonPassState {
+        case .ready, nil:
+            // nil means the probe could not answer (no tool, or it timed out), and
+            // that is not something to accuse anybody of — the row's own copy in
+            // Settings ▸ Sign-In Sources says which part is missing.
+            nil
+        case .notSignedIn:
+            "Proton Pass isn\u{2019}t signed in on this Mac. In Terminal, run "
+            + "\u{201C}pass-cli login\u{201D} and finish in your browser. If Proton refuses, it is "
+            + "your plan rather than this Mac: the command-line tool comes with Pass Plus, Pass "
+            + "Family, Pass Professional and the Proton bundles."
+        case .locked:
+            "Your Proton Pass session is locked. In Terminal, run "
+            + "\u{201C}pass-cli session unlock\u{201D}."
+        case .planExcludesTool:
+            "Your Proton plan doesn\u{2019}t include Proton Pass\u{2019}s command-line tool, so "
+            + "Proton won\u{2019}t let SimpleVPN read your items. Nothing on this Mac is broken \u{2014} "
+            + "the tool comes with Pass Plus, Pass Family, Pass Professional and the Proton bundles."
         }
     }
 

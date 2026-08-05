@@ -113,6 +113,16 @@ enum Acknowledgements {
         .init(name: "p11-kit", license: "BSD-3-Clause",
               role: "Registry that resolves PKCS#11 modules for OpenConnect \u{2014} system component, not bundled",
               url: "https://p11-glue.github.io/p11-glue/p11-kit.html"),
+        // Two more of the same courtesy, both INVOKED and neither bundled. GnuPG is
+        // listed for the `pass` / `gopass` source, whose whole read path is a `gpg
+        // --decrypt`; go-passbolt-cli for the Passbolt source, which is nothing but
+        // that program plus argument building. Neither has any code here.
+        .init(name: "GnuPG", license: "GPL-3.0-or-later",
+              role: "Invoked to decrypt one entry from a pass / gopass store \u{2014} user-installed, not bundled",
+              url: "https://gnupg.org"),
+        .init(name: "go-passbolt-cli", license: "MIT",
+              role: "Invoked to read one Passbolt resource \u{2014} user-installed, not bundled",
+              url: "https://github.com/passbolt/go-passbolt-cli"),
     ]
 
     /// Where the corresponding source (SimpleVPN's own code + these build scripts)

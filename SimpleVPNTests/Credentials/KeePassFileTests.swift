@@ -1027,7 +1027,7 @@ struct KeePassFileAvailabilityTests {
                 #expect(shown.prompt == field.example)
                 #expect(!shown.isSet)
             case .toolBinary, .unixSocket, .daemonEndpoint, .securityKeySlot, .pkcs11Module,
-                 .storeDirectory, .entryFieldName:
+                 .storeDirectory, .entryFieldName, .serverURL, .toolConfigFile:
                 // Not kdbx fields — a password store's own are covered by its own tests.
                 continue
             }
