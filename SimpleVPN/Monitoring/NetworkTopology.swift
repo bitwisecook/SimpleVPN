@@ -29,6 +29,16 @@ nonisolated struct NetInterface: Identifiable, Sendable, Equatable {
     let displayName: String     // "Wi-Fi", "USB 10/100/1000 LAN", "VPN tunnel"…
     var ipv4: [String] = []
     var ipv6: [String] = []     // global scope only
+    /// The IPv4 NETWORKS this interface is on, as CIDR ("192.168.64.0/24") —
+    /// address AND mask, in the order of `ipv4`.
+    ///
+    /// Additive and defaulted so every existing consumer is untouched. It exists
+    /// because `ipv4` alone cannot answer "which subnet is behind this
+    /// interface": a VM's guest network is a subnet, and offering to route
+    /// `192.168.64.1/32` around a tunnel instead of `192.168.64.0/24` would carve
+    /// out the host end and leave every guest still captured.
+    /// `VirtualizationDiscovery` is the consumer.
+    var ipv4Subnets: [String] = []
     var isUp = false
 
     // Live rates derived from the link-level counters (bytes/sec).
@@ -305,7 +315,20 @@ final class TopologyMonitor {
                 memcpy(&addr, sa, MemoryLayout<sockaddr_in>.size)
                 var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
                 inet_ntop(AF_INET, &addr.sin_addr, &buf, socklen_t(INET_ADDRSTRLEN))
-                byName[name]?.ipv4.append(String(cBuffer: buf))
+                let text = String(cBuffer: buf)
+                byName[name]?.ipv4.append(text)
+                // The mask travels beside the address in the same `ifaddrs` entry,
+                // so the subnet costs nothing extra to record. Kept in step with
+                // `ipv4` (a placeholder on the rare entry with no netmask) so the
+                // two arrays stay index-aligned.
+                var maskBits: Int?
+                if let maskSA = ifa.ifa_netmask, Int32(maskSA.pointee.sa_family) == AF_INET {
+                    var mask = sockaddr_in()
+                    memcpy(&mask, maskSA, MemoryLayout<sockaddr_in>.size)
+                    maskBits = Self.prefixLength(mask: mask.sin_addr.s_addr)
+                }
+                byName[name]?.ipv4Subnets.append(
+                    maskBits.flatMap { Self.networkCIDR(address: text, prefix: $0) } ?? "")
             case AF_INET6:
                 var addr = sockaddr_in6()
                 memcpy(&addr, sa, MemoryLayout<sockaddr_in6>.size)
@@ -332,6 +355,36 @@ final class TopologyMonitor {
         return (interfaces, counters)
     }
 
+    /// Contiguous-prefix length of a netmask in network byte order, or nil for a
+    /// non-contiguous mask (which nothing sane produces, and which we refuse to
+    /// summarise as a prefix rather than guess at).
+    nonisolated static func prefixLength(mask: in_addr_t) -> Int? {
+        // `ifa_netmask` is network byte order; compare in host order.
+        let value = UInt32(bigEndian: mask)
+        guard value != 0 else { return 0 }
+        // The prefix is the run of leading ones, so its length is 32 minus the run
+        // of trailing zeroes.
+        let trailingZeros = value.trailingZeroBitCount
+        // Every bit above that run must be set, or this is not a prefix at all and
+        // summarising it as one would quietly mean something else.
+        let expected: UInt32 = ~((UInt32(1) << UInt32(trailingZeros)) - 1)
+        return value == expected ? 32 - trailingZeros : nil
+    }
+
+    /// "192.168.64.1" + 24 → "192.168.64.0/24". The NETWORK, with the host bits
+    /// cleared — an exclusion built from an unmasked address would be the wrong
+    /// prefix.
+    nonisolated static func networkCIDR(address: String, prefix: Int) -> String? {
+        guard (0...32).contains(prefix) else { return nil }
+        var raw = in_addr()
+        guard inet_pton(AF_INET, address, &raw) == 1 else { return nil }
+        let host = UInt32(bigEndian: raw.s_addr)
+        let mask: UInt32 = prefix == 0 ? 0 : ~((UInt32(1) << UInt32(32 - prefix)) - 1)
+        let network = host & mask
+        let octets = [network >> 24 & 0xFF, network >> 16 & 0xFF, network >> 8 & 0xFF, network & 0xFF]
+        return octets.map(String.init).joined(separator: ".") + "/\(prefix)"
+    }
+
     private nonisolated static func isBoring(_ name: String) -> Bool {
         for prefix in ["lo", "awdl", "llw", "anpi", "gif", "stf", "ap", "pktap"]
         where name.hasPrefix(prefix) { return true }
@@ -356,7 +409,15 @@ final class TopologyMonitor {
         if name.hasPrefix("utun") || name.hasPrefix("ipsec") || name.hasPrefix("tun") {
             return (.tunnel, "VPN (\(name))")
         }
-        if name.hasPrefix("vmenet") || name.hasPrefix("vnic") { return (.virtualMachine, "VM network (\(name))") }
+        // Guest-network taps and host-only adapters. `vmenet` is Apple's vmnet
+        // (Virtualization.framework, the `container` CLI, UTM's Apple backend),
+        // `vnic` Parallels, `vboxnet` VirtualBox, `vmnet` VMware Fusion — which is
+        // NOT the same thing as Apple's `vmenet` despite the near-identical
+        // spelling, and conflating the two would attribute a VMware network to
+        // Apple's stack. See `VirtualizationDiscovery`.
+        for prefix in ["vmenet", "vnic", "vboxnet", "vmnet"] where name.hasPrefix(prefix) {
+            return (.virtualMachine, "VM network (\(name))")
+        }
         if name.hasPrefix("bridge") { return (.bridge, "Bridge (\(name))") }
         if let info = sc[name] {
             if info.type == kSCNetworkInterfaceTypeIEEE80211 as String { return (.wifi, info.display) }
