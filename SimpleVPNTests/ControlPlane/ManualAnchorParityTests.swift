@@ -75,6 +75,11 @@ struct ManualAnchorParityTests {
         "problem-idle", "problem-captive",
         // Per-engine introductions
         "ts-what-is-it", "cr-what-is-it", "sshnet-what-is-it",
+        // Prose about a WAY of signing in rather than a setting: what an SSH
+        // agent is, which agents work, what its three failures mean, and why
+        // agent forwarding isn't offered. The setting itself is
+        // "ssh.agent-socket"; this is the chapter its row's help links into.
+        "ssh-agent",
     ]
 
     private func manualHTML() throws -> String {

@@ -81,6 +81,10 @@ enum SSHSettings {
               summary: "A certificate that vouches for your key — a file ending in -cert.pub. Only needed if your organisation issues SSH certificates.",
               group: .signIn, default: ""),
 
+        .init(id: "ssh.agent-socket", name: "SSH Agent Socket",
+              summary: "Where your key manager offers its keys, if it isn't the one macOS provides — 1Password and Secretive each listen in their own place. Leave empty to use the agent macOS already gives this Mac.",
+              group: .signIn, default: ""),
+
         .init(id: "ssh.password", name: "Password",
               summary: "Used when the server asks for a password, and to unlock a protected key file. “Remember” keeps it in your login keychain.",
               group: .signIn, default: ""),

@@ -189,6 +189,8 @@
   <a href="#ssh-username">Username</a>
   <a href="#ssh-identity-file">Identity File</a>
   <a href="#ssh-certificate-file">Certificate File</a>
+  <a href="#ssh-agent">Signing In With An SSH Agent</a>
+  <a href="#ssh-agent-socket">SSH Agent Socket</a>
   <a href="#ssh-password">Password</a>
   <a href="#ssh-mode">Mode</a>
   <a href="#ssh-socks-port">Local SOCKS Port</a>
@@ -678,7 +680,7 @@
   <li><strong>Password</strong> — the saved or typed password only. Keys and the agent are never offered.</li>
   <li><strong>Key file</strong> — the identity file only (other keys on your Mac are not tried). This includes a <a href="#ssh-identity-file">hardware security key</a>, which asks for a touch.</li>
   <li><strong>Certificate</strong> — the identity file plus its <a href="#ssh-certificate-file">certificate</a>.</li>
-  <li><strong>SSH agent</strong> — only keys held by the running SSH agent.</li>
+  <li><strong>SSH agent</strong> — only keys held by an <a href="#ssh-agent">SSH agent</a> (1Password, Secretive, KeePassXC, <code>ssh-agent</code>). The key never leaves the agent; choose which one with <a href="#ssh-agent-socket">SSH Agent Socket</a>.</li>
   <li><strong>Kerberos</strong> — your organisation's existing Kerberos ticket (the sign-on from Active Directory, or <code>kinit</code>); nothing to type at all. Never tried unless chosen.</li>
 </ul>
 <p>The editor greys out the fields a method doesn't use, and says which choice re-enables them.</p>
@@ -695,6 +697,31 @@
 <h2 id="ssh-certificate-file">Certificate File</h2>
 <p class="default">Optional.</p>
 <p>An OpenSSH certificate — a file ending in <code>-cert.pub</code> — that vouches for your key. Some organisations issue these instead of putting every user's key on every server: the server trusts the organisation's signing authority, and the certificate says your key belongs. Set it alongside the <a href="#ssh-identity-file">identity file</a> it certifies, and choose the <strong>Certificate</strong> <a href="#ssh-auth-method">sign-in method</a>. If you weren't given one, you don't need one.</p>
+
+<h2 id="ssh-agent">Signing In With An SSH Agent</h2>
+<p>An <strong>SSH agent</strong> holds your keys and signs on their behalf. Choosing it as the <a href="#ssh-auth-method">sign-in method</a> means SimpleVPN never has a copy of the private key at all: it hands the server's challenge to the agent, the agent signs it, and the key itself stays where it lives. That is strictly safer than pointing us at a key file, and it is the only way to use a key that <em>cannot</em> be copied — one in the Secure Enclave, or on a hardware token.</p>
+<p>Anything that speaks the OpenSSH agent protocol works: <strong>1Password</strong>, <strong>Secretive</strong> (keys generated inside this Mac's Secure Enclave), <strong>KeePassXC</strong>, and macOS's own <code>ssh-agent</code> holding a YubiKey or any <code>ssh-add</code>-ed key. The agent decides whether to sign — so it, not SimpleVPN, is what shows you a Touch ID prompt, an approval sheet, or a request to touch your token.</p>
+<p><strong>Which agent gets asked.</strong> By default, the one macOS gives every app in your login session — its built-in <code>ssh-agent</code>. Agents that ship with an app listen somewhere else, in their own folder, and the line in a shell startup file that points <code>ssh</code> at them is not read by an app you launch from the Dock. That is what <a href="#ssh-agent-socket">SSH Agent Socket</a> is for, and the editor offers a one-click fill for any agent it can see.</p>
+<p><strong>What the row tells you before you connect.</strong> The Sign-In section says what the agent is holding right now — “Your SSH agent has 3 keys: …”, “Your SSH agent is running but holds no keys”, “No SSH agent is running” — so choosing this method is a decision rather than a hope. <strong>Check Again</strong> re-asks after you unlock a vault or start an agent.</p>
+<p><strong>When it doesn't work</strong>, the reason is named, because the three causes need three different fixes:</p>
+<ul>
+  <li><strong>No agent answered.</strong> Nothing is listening where we looked. Start your agent, or set <a href="#ssh-agent-socket">SSH Agent Socket</a> to where it listens. (If the socket was there and has gone, the message says that instead — an agent that has quit leaves its address behind.)</li>
+  <li><strong>The agent holds no keys.</strong> It answered, and offered nothing. Unlock the vault, turn the agent on for the key you want to use, or <code>ssh-add</code> a key to the built-in agent.</li>
+  <li><strong>The server refused the keys.</strong> The agent offered keys and the server said no to all of them — the message names them. Add the matching public key to your account on the server, or check you're signing in as the right <a href="#ssh-username">username</a>.</li>
+</ul>
+<p><strong>Where it works.</strong> Agent sign-in is available to the SSH tunnel kinds that sign in inside SimpleVPN itself — the SOCKS proxy and port-forward modes. The <strong>SSH Network Tunnel</strong> kind cannot use it: that session is made by SimpleVPN's network extension, which runs outside your login session and so cannot reach your agent. Give that kind a key or a password instead.</p>
+<div class="warn"><strong>Agent forwarding</strong> (OpenSSH's <code>ForwardAgent</code>) is deliberately not offered. It only means anything for a remote shell, which a tunnel never opens — and it would let anything running as root on the server use your keys for as long as you stay connected. There is nothing to forward here, so there is no switch for it.</div>
+
+<h2 id="ssh-agent-socket">SSH Agent Socket</h2>
+<p class="default">Default: empty — the agent macOS provides.</p>
+<p>Where the agent you want to use is listening (the same idea as OpenSSH's <code>IdentityAgent</code>). Leave it empty and SimpleVPN asks the agent your login session already provides, which is macOS's own.</p>
+<p>Set it when your keys live in an app's own agent. The editor lists the ones it finds with a button that fills this in for you; the current paths are:</p>
+<ul>
+  <li><strong>1Password</strong> — <code>~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock</code>, after turning on <em>Settings ▸ Developer ▸ Use the SSH agent</em>. Its own guide is the authority: <code>1password.dev/ssh/get-started/</code>.</li>
+  <li><strong>Secretive</strong> — <code>~/Library/Containers/com.maxgoedjen.Secretive.SecretAgent/Data/socket.ssh</code>. See <code>github.com/maxgoedjen/secretive</code>.</li>
+  <li><strong>KeePassXC</strong> — nothing to set: it adds your keys to the agent macOS already runs (turn on <em>Settings ▸ SSH Agent ▸ Enable SSH Agent integration</em>). Leave this field empty. See <code>keepassxc.org/docs/</code>.</li>
+</ul>
+<p>Used by the <strong>SSH agent</strong> and <strong>Automatic</strong> <a href="#ssh-auth-method">sign-in methods</a>; the other methods never ask an agent anything, and the row greys out to say so. A full path is required (<code>/</code> or <code>~</code>), and macOS limits how long it can be — the row says so rather than failing at connect time.</p>
 
 <h2 id="ssh-password">Password</h2>
 <p class="default">Optional.</p>
