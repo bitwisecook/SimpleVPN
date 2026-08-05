@@ -168,6 +168,16 @@ nonisolated enum FeatureMaturityRegistry {
         // real reader, in both pinentry modes — but no real store belonging to a real
         // person has ever been read, and nobody has connected a VPN with it.
         .vault(.passwordStore):     .untested,
+        // LastPass. WHAT WAS PROVEN: every flag, every state transition and every
+        // failure sentence is driven by fixtures taken from `lastpass/lastpass-cli`'s
+        // own source — `cmd-status.c` for the exit codes, `agent.c` for the agent and
+        // the on-disk key, `cmd-show.c` for the "Multiple matches found." exit-zero
+        // trap, `json-format.c` for the reply shape and for the absence of any
+        // verification code, `lpass.c` for the alias expansion the clipboard guard
+        // exists to catch. WHAT WAS NOT: no `lpass` and no LastPass account exists on
+        // the machine this was built on, so no real vault has ever answered, no agent
+        // has ever been asked for a key, and nobody has connected a VPN with it.
+        .vault(.lastPass):          .untested,
     ]
 
     // MARK: Lookups

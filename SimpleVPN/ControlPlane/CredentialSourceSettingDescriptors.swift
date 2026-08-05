@@ -180,7 +180,11 @@ enum CredentialSourceSettings {
         // Dashlane password goes to Dashlane's own tool, which keeps what it needs in
         // this Mac's keychain and decides for itself whether to ask for a fingerprint.
         // There is nothing here for SimpleVPN to hold or prompt for.
-        case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane, .passwordStore:
+        // LastPass needs no extra spec either: the master password goes to `lpass`,
+        // whose own agent holds the key it derives and hands it to no other program,
+        // so there is nothing for SimpleVPN to hold, prompt for or remember.
+        case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane,
+             .passwordStore, .lastPass:
             []
         case .keePassFile:
             [EngineSettingSpec(

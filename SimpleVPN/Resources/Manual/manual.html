@@ -361,6 +361,8 @@
   <a href="#creds-passwordstore-store-directory">Password Store Folder</a>
   <a href="#creds-passwordstore-username-field">Username Line in an Entry</a>
   <a href="#creds-passwordstore-tool-path">GnuPG Location</a>
+  <a href="#creds-lastpass-enabled">Use LastPass</a>
+  <a href="#creds-lastpass-tool-path">LastPass CLI Location</a>
   <a href="#creds-ykman-tool-path">YubiKey Manager Location</a>
 </nav>
 
@@ -1680,6 +1682,29 @@ the device's protection intact at the cost of typing four to eight digits per co
 <p>Where GnuPG is on this Mac. Set it only when your copy lives somewhere SimpleVPN does not look on its own &mdash; that is what this is for.</p>
 <p>GnuPG is the only thing this source needs: SimpleVPN decrypts your store itself, so neither <code>pass</code> nor <code>gopass</code> has to be installed. If GnuPG is missing, <code>brew install gnupg</code> is the whole fix.</p>
 <p>Your key&rsquo;s passphrase is GnuPG&rsquo;s business, not SimpleVPN&rsquo;s: it is never asked for here, never stored, and never seen. GnuPG asks for it through a PIN entry program and remembers it for a while afterwards. If no graphical PIN entry program is installed, GnuPG has no way to ask from inside an app &mdash; SimpleVPN can then read your store only while GnuPG still remembers the passphrase, and it says so rather than appearing to hang. <code>brew install pinentry-mac</code>, then a <code>pinentry-program</code> line in <code>~/.gnupg/gpg-agent.conf</code>, fixes that for good.</p>
+
+<h2 id="creds-lastpass-enabled">Use LastPass</h2>
+<p class="default">Default: on.</p>
+<p>Offers LastPass as a way to sign in. SimpleVPN reads one entry using <code>lpass</code>, LastPass&rsquo;s own command-line tool &mdash; the LastPass app on its own has nothing SimpleVPN can talk to.</p>
+<p><strong>Your master password never reaches SimpleVPN, and neither does the key it makes.</strong> You sign in once in Terminal with <code>lpass login you@example.com</code>. LastPass&rsquo;s tool then leaves a small helper running in the background holding the key to your vault, and every later read is silent. That helper hands the key to <code>lpass</code> and to nothing else: it checks that whatever asks is the same program it is, and refuses everything else, SimpleVPN included. So there is nothing here for SimpleVPN to store, and nothing for it to ask you for.</p>
+<p><strong>This one is best-effort, and it is worth knowing why before you rely on it.</strong> LastPass&rsquo;s tool is the least capable of the ones SimpleVPN reads, and three of its limits are not things this app can work around:</p>
+<ul>
+<li><strong>It can never give a verification code.</strong> There is no field for one anywhere in what the tool hands back, and no command to ask for one. If your VPN needs a code, you type it every time.</li>
+<li><strong>Its memory expires.</strong> The helper quits after an hour by default, and after that SimpleVPN cannot read anything until you sign in again in Terminal. To be asked far less often, put <code>LPASS_AGENT_TIMEOUT=0</code> in the file <code>~/.lpass/env</code> &mdash; nought means never forget.</li>
+<li><strong>An entry set to ask for your master password every time cannot be read at all.</strong> LastPass calls that &ldquo;Require Password Reprompt&rdquo;. SimpleVPN will not ask you for your LastPass master password, so an entry using it is one SimpleVPN says no to rather than one it prompts for. Turn the setting off on that entry, or point the VPN at a different one.</li>
+</ul>
+<p>The tool itself also moves slowly, so what works today is what will keep working; nothing new is likely to arrive.</p>
+<p><strong>Nothing goes to the clipboard, and SimpleVPN checks.</strong> LastPass&rsquo;s tool has an option that copies a password to the clipboard instead of handing it over, and it can be switched on permanently by a file called <code>~/.lpass/alias.show</code> &mdash; LastPass&rsquo;s own documentation suggests exactly that. SimpleVPN never asks for it, and there is no way to cancel it once that file says so, so instead SimpleVPN reads that file and refuses to fetch while it would apply, telling you the one line to remove. A VPN password left on the clipboard can be read by anything running on this Mac.</p>
+<p><strong>SimpleVPN reads the copy already on this Mac.</strong> It never asks LastPass&rsquo;s servers when you connect, so connecting never waits on the network and never uploads anything. The one consequence: if you change a password in your browser, run <code>lpass sync</code> once so this Mac has the new one.</p>
+<p>The entry&rsquo;s name has to match <em>exactly</em>, including its folders &mdash; <code>Work/VPN/GR Lab</code>, not <code>GR Lab</code>. Its numeric id works too, and is worth using when two entries share a name. SimpleVPN deliberately does not use the tool&rsquo;s loose matching: a search that nearly matches could read a different entry, and reading the wrong sign-in is worse than reading none.</p>
+<p>SimpleVPN only ever reads, and only ever the one entry a VPN names. Nothing is added, changed or removed in your vault, and SimpleVPN never signs you in or out.</p>
+<p>Off means SimpleVPN neither offers LastPass nor mentions it, even if it is installed.</p>
+
+<h2 id="creds-lastpass-tool-path">LastPass CLI Location</h2>
+<p class="default">Optional. Empty means SimpleVPN uses the one it found.</p>
+<p>Where <code>lpass</code> is on this Mac. Leave it empty and SimpleVPN uses whichever copy it found in a folder it will run from. <code>brew install lastpass-cli</code> puts it in one of those; so does MacPorts. Set this when your copy is somewhere else &mdash; most often because it was built from source into a folder you chose.</p>
+<p>This field follows exactly the same rules as the other tool paths: a complete path starting with a slash, because a bare name would be resolved by rules SimpleVPN does not control; and never a program in a folder everyone using this Mac can write to, which is refused even if you ask for it by name.</p>
+<p>One thing SimpleVPN does <em>not</em> offer a setting for, deliberately: which folder LastPass keeps its copy of your vault in. LastPass&rsquo;s tool signs in one account at a time, so there is only ever one, and SimpleVPN uses the usual place (<code>~/.lpass</code>) for both its checks and its reads &mdash; so what it looked at and what it ran can never disagree. If you keep yours somewhere else by setting <code>LPASS_HOME</code> in your shell, SimpleVPN will report LastPass as not signed in.</p>
 
 <h2 id="creds-ykman-tool-path">YubiKey Manager Location</h2>
 <p class="default">Optional. Empty means SimpleVPN uses the one it found.</p>

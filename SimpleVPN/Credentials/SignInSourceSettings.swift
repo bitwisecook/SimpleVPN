@@ -70,6 +70,7 @@ nonisolated extension LocalVaultVendor {
         // mentioned on screen.
         case .keePassFile: "keepassfile"
         case .passwordStore: "passwordstore"
+        case .lastPass: "lastpass"
         }
     }
 
@@ -391,6 +392,28 @@ nonisolated enum SignInSourceSettings {
                 kind: .toolBinary(tool: "gpg"),
                 defaultsKey: toolPathKey("gpg"),
                 example: "/opt/homebrew/bin/gpg")]
+        case .lastPass:
+            // ONE field, and only one, because there is exactly one thing about
+            // LastPass that can be configured and read: where `lpass` is. It is
+            // TRANSPORT level — how SimpleVPN reaches the one `lpass` on this Mac.
+            //
+            // What is deliberately NOT a field, and why: LastPass's cache directory.
+            // It looks instance-shaped ("which vault"), but `lpass` keeps ONE
+            // signed-in account, so the vendor is single-instance and a level-2 field
+            // cannot exist for it — and putting a "which vault" question at level 1
+            // would be exactly the conflation the three-level model exists to fix.
+            // SimpleVPN therefore pins `LPASS_HOME` to the directory it probes
+            // (`$HOME/.lpass`, which is what the tool itself resolves given a built
+            // environment), so the files checked and the process run can never
+            // disagree. Somebody who keeps their cache elsewhere is reported as not
+            // signed in — a coherent state with a real fix, never a wrong-vault read.
+            [VendorConfigField(
+                settingID: "creds.lastpass.tool-path",
+                vendor: .lastPass,
+                ownerTitle: LocalVaultVendor.lastPass.displayTitle,
+                kind: .toolBinary(tool: "lpass"),
+                defaultsKey: toolPathKey("lpass"),
+                example: "/opt/homebrew/bin/lpass")]
         }
     }
 

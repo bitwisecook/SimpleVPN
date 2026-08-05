@@ -474,7 +474,10 @@ struct SignInChooserPopover: View {
         case .passwordStore: "vpn/work"
         // An address, because that is what Dashlane matches first and what a VPN's
         // entry almost always carries.
-        case .dashlane: "vpn.example.com"
+        // A FULL path, because `lpass` matches names exactly and an entry inside
+        // folders needs its folders typed. A bare title as the example would teach
+        // the one mistake that reads as "LastPass hasn't got my password".
+        case .dashlane, .lastPass: "vpn.example.com"
         case .onePassword, .keePassXC, .keeper, .bitwarden: "GR Lab VPN"
         }
     }

@@ -36,6 +36,11 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
     /// A `pass` / `gopass` password store. One kind for both tools and for reading
     /// the store with `gpg` alone — the store format is what we support, not a CLI.
     case passwordStore
+    /// LastPass, reached through `lpass` — LastPass's own command-line tool, and the
+    /// only local read path LastPass has. Its own agent holds the vault key and hands
+    /// it to no program but `lpass`, so SimpleVPN never sees a master password or a
+    /// derived key. See LastPassProvider.
+    case lastPass
 
     // nonisolated for the same reason as `suppliesOTP` below: it is a pure function
     // of the case, and nonisolated rules (the security-key mutual exclusions in
@@ -51,6 +56,7 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
         case .dashlane: "Dashlane"
         case .keePassFile: "KeePass database file"
         case .passwordStore: "pass / gopass"
+        case .lastPass: "LastPass"
         }
     }
     var systemImage: String {
@@ -64,6 +70,7 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
         case .dashlane: "key.radiowaves.forward"
         case .keePassFile: "doc.badge.gearshape"
         case .passwordStore: "terminal.fill"
+        case .lastPass: "asterisk.circle.fill"
         }
     }
 
@@ -108,8 +115,16 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
         // too: whether a given entry carries a seed at all is unknowable until the
         // fetch has already happened, so "Dashlane supplies codes" would be a claim
         // about the user's data rather than about Dashlane.
-        case .manual, .applePasswords, .keeper, .bitwarden, .dashlane,
-             .keePassFile, .passwordStore: false
+        // `.lastPass` is `false` for a reason that is not caution but ARITHMETIC:
+        // LastPass's command-line tool has no code to give. Its `--json` output is
+        // whatever `account_to_json_field` writes (`json-format.c`) — id, name,
+        // fullname, username, password, timestamps, share, group, url, note — and
+        // there is no code, no seed, and no `lpass totp` subcommand at all. So this
+        // is not "unproven"; it is "the vendor's tool cannot", and `LastPassProvider`
+        // deliberately sets nothing for `.otp` rather than mining a free-text note
+        // for something that looks like a seed.
+        case .manual, .applePasswords, .keeper, .bitwarden, .dashlane, .keePassFile,
+             .passwordStore, .lastPass: false
         case .onePassword, .keePassXC: true
         }
     }

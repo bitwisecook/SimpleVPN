@@ -37,6 +37,18 @@
 //     <name>`; `lpass login` is interactive, so it is the "needs a one-time
 //     sign-in" state. It would be `.blocked(.notSignedIn)` until its CLI has a
 //     session, exactly like Keeper.
+//  ALSO BUILT ELSEWHERE: LastPass — see LastPassProvider.swift. `lpass status` is
+//  the liveness probe and `lpass show --json` the read, and the one thing that made
+//  it worth building rather than declaring dormant is its AGENT: one `lpass login`
+//  in Terminal leaves a background process holding the vault key, which it hands to
+//  `lpass` and to nothing else — so every later fetch is silent and SimpleVPN never
+//  holds a master password or a derived key. Its own file explains why that row's
+//  copy nonetheless sets lower expectations than any other.
+//
+//  Not built, but a small additive adapter when it is wanted:
+//   • Dashlane — `dcli` CLI. `dcli sync` / `dcli password <filter> --output
+//     console`; device registration is the one-time step. It would be
+//     `.blocked(.notSignedIn)` until its CLI has a session, exactly like Keeper.
 //
 
 import Foundation
@@ -265,6 +277,10 @@ enum LocalVaultRegistry {
         // A folder of GPG-encrypted files, read with gpg alone — no app, no socket, no
         // daemon, and neither `pass` nor `gopass` required.
         PasswordStoreVaultAdapter(),
+        // LastPass through `lpass`. LAST on purpose, and the order is a statement: it
+        // is the least capable source here — no verification code, ever — so anything
+        // else that can answer is a better answer.
+        LastPassVaultAdapter(),
     ]
 
     static func adapter(for vendor: LocalVaultVendor) -> (any LocalVaultAdapter)? {
