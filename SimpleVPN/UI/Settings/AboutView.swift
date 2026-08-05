@@ -82,8 +82,37 @@ enum Acknowledgements {
         // KeePassXC's OWN licence (useful, and true of the project); the role says
         // plainly that none of that code is here.
         .init(name: "KeePassXC", license: "GPL-3.0",
-              role: "Browser-integration protocol we implement \u{2014} no KeePassXC code is included",
+              role: "Browser-integration protocol we implement, and keepassxc-cli invoked to read a .kdbx \u{2014} no KeePassXC code is included",
               url: "https://keepassxc.org"),
+        // The rows below are the same courtesy as KeePassXC's, for the same reason:
+        // SimpleVPN INVOKES these as programs the user installed themselves. Nothing
+        // is bundled, nothing is linked, and no vendor code is included — so there is
+        // no licence obligation. They are listed because a reader who sees the feature
+        // should be able to find out whose work makes it possible, and because the
+        // badge tells them what THEY are getting if they go and install it.
+        //
+        // Where a format's magic numbers or an algorithm's shape were taken from one of
+        // these projects, they were reimplemented in original Swift: a file signature
+        // is a fact about a published format, not borrowed expression. Said plainly in
+        // the note below rather than left for someone to wonder about.
+        .init(name: "Keeper Commander", license: "MIT",
+              role: "Invoked to read a Keeper record \u{2014} user-installed, not bundled",
+              url: "https://github.com/Keeper-Security/Commander"),
+        .init(name: "Bitwarden CLI", license: "GPL-3.0",
+              role: "Invoked, and its local API spoken, to read a Bitwarden item \u{2014} user-installed, not bundled",
+              url: "https://bitwarden.com/help/cli/"),
+        .init(name: "yubikey-manager (ykman)", license: "BSD-2-Clause",
+              role: "Invoked for OATH codes and slot challenge-response \u{2014} user-installed, not bundled",
+              url: "https://github.com/Yubico/yubikey-manager"),
+        .init(name: "GnuTLS p11tool", license: "GPL-3.0",
+              role: "Invoked to list certificates on a smartcard \u{2014} user-installed, not bundled",
+              url: "https://gnutls.org"),
+        .init(name: "OpenSC", license: "LGPL-2.1-or-later",
+              role: "Its pkcs11-tool invoked for token details, and its PKCS#11 module loaded by OpenConnect \u{2014} user-installed, not bundled",
+              url: "https://github.com/OpenSC/OpenSC"),
+        .init(name: "p11-kit", license: "BSD-3-Clause",
+              role: "Registry that resolves PKCS#11 modules for OpenConnect \u{2014} system component, not bundled",
+              url: "https://p11-glue.github.io/p11-glue/p11-kit.html"),
     ]
 
     /// Where the corresponding source (SimpleVPN's own code + these build scripts)
@@ -117,6 +146,21 @@ enum Acknowledgements {
     golang.org/x/crypto and the RFC 8439 Poly1305 vector. The KeePassXC integration \
     itself is likewise an original implementation of their published protocol: no \
     KeePassXC code is included, and the credit above is a courtesy, not an obligation.
+
+    The same is true of every sign-in source that reaches a password manager. SimpleVPN \
+    never bundles or installs a vendor's tool: it runs a program you installed yourself, \
+    or speaks to one already running on your Mac. Nothing is statically linked, no vendor \
+    code is compiled in, and so nothing in that list imposes an obligation on this \
+    binary — the rows are there so you can see whose work a feature depends on, and \
+    what licence you get if you go and install it. Two consequences worth stating: a \
+    feature simply does not appear when its tool is absent, and the licence badge \
+    describes that project, not this one.
+
+    Where reading a format needed its constants — a KeePass database's file signatures \
+    and header field ids, a YubiKey challenge's padding, a modhex alphabet — those were \
+    reimplemented in original Swift from the published format. A file signature is a \
+    fact about a format rather than borrowed expression, and the tests pin them against \
+    the format's own documentation so a future change is caught rather than assumed.
     """
 }
 
