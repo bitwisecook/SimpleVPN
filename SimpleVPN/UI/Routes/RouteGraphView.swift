@@ -185,10 +185,17 @@ struct RouteGraphView: View {
                         .onEnded { _ in dragBase = nil }
                 )
                 .onTapGesture(count: 2) { toggleZoom() }
-                // Keyboard equivalents for the mouse-only gestures: Tab focuses
-                // the diagram, arrows pan, +/− zoom, 0 fits — mirroring the
-                // toolbar's ⌘−/⌘=/⌘0 but usable without modifiers once focused.
-                .focusable()
+                // Keyboard equivalents for the mouse-only gestures: once focused,
+                // arrows pan, +/− zoom, 0 fits — mirroring the toolbar's
+                // ⌘−/⌘=/⌘0 but usable without modifiers.
+                //
+                // `interactions: .activate`, not a bare `.focusable()`: the bare
+                // form joins the key-view loop unconditionally, so the diagram
+                // became a tab stop even for users who have Full Keyboard Access
+                // off and therefore expect Tab to skip controls (see the same
+                // note on MercatorMapView, where it made Tab cycle between the
+                // sidebar and the map and nothing else).
+                .focusable(interactions: .activate)
                 .onMoveCommand { direction in
                     let step: CGFloat = 48
                     let delta: CGSize = switch direction {

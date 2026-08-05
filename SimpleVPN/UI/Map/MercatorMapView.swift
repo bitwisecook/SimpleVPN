@@ -119,8 +119,17 @@ struct MercatorMapView: View {
                 camera.zoom(by: 2, anchor: location, viewSize: size)
             }
             // Keyboard path for the mouse-only pan/zoom (same keys as the route
-            // diagram): Tab focuses the map, arrows pan, +/− zoom.
-            .focusable()
+            // diagram): once focused, arrows pan and +/− zoom.
+            //
+            // `interactions: .activate` is load-bearing, NOT decoration. A bare
+            // `.focusable()` joins the key-view loop UNCONDITIONALLY, while
+            // buttons and pop-ups join it only when the user turns on Full
+            // Keyboard Access. With that setting off (the default) the map became
+            // the ONLY tab stop besides the sidebar, so Tab cycled
+            // sidebar → map → sidebar and skipped Connect and the server picker
+            // entirely. `.activate` makes it behave like every other control:
+            // in the loop exactly when the user asked for controls to be in it.
+            .focusable(interactions: .activate)
             .onMoveCommand { direction in
                 let step: CGFloat = 40
                 let delta: CGSize = switch direction {
