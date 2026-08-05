@@ -345,10 +345,26 @@ final class SubprocessTunnelManager {
         (c.sshAuthMethod ?? "").trimmingCharacters(in: .whitespaces)
     }
 
+    /// The agent socket this tunnel should ask, tilde-expanded, or nil for
+    /// "whatever this process inherited". BOTH connect paths need it and neither
+    /// may guess: in-process it becomes libssh's `SSH_OPTIONS_IDENTITY_AGENT`, and
+    /// for /usr/bin/ssh it becomes the child's `SSH_AUTH_SOCK` (ssh has no
+    /// command-line form of `IdentityAgent`, only the config keyword).
+    static func sshAgentSocket(_ c: SubprocessTunnelConfig) -> String? {
+        let raw = (c.sshAgentSocket ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return raw.isEmpty ? nil : (raw as NSString).expandingTildeInPath
+    }
+
     /// Why the chosen sign-in method can't work as configured, or nil. The
     /// single rule the editor's Connect button and connect() both consult, so
     /// a doomed sign-in is refused with its fix rather than failing downstream.
     static func sshAuthBlockReason(_ c: SubprocessTunnelConfig) -> String? {
+        // A malformed agent socket path blocks whatever the method is: automatic
+        // sign-in asks the agent too, so a path neither connect path can use is a
+        // problem before the method is even considered.
+        if let problem = SubprocessTunnelConfig.agentSocketProblem(c.sshAgentSocket ?? "") {
+            return problem
+        }
         switch sshAuthMethod(c) {
         case "key" where c.identityFile.trimmingCharacters(in: .whitespaces).isEmpty:
             return "Key sign-in needs an identity file — set it under Sign-In."
@@ -402,6 +418,7 @@ final class SubprocessTunnelManager {
             strictHostKey: config.strictHostKey,
             connectTimeout: config.connectTimeout ?? 15,
             authMethod: Self.sshAuthMethod(config).isEmpty ? nil : Self.sshAuthMethod(config),
+            agentSocketPath: Self.sshAgentSocket(config),
             kexAlgorithms: (config.sshKexAlgorithms?.trimmingCharacters(in: .whitespaces)).flatMap { $0.isEmpty ? nil : $0 },
             // ssh.keepalive and ssh.compression are honoured HERE now, not only by
             // /usr/bin/ssh: the engine arms a keepalive timer on its session queue
@@ -1134,6 +1151,16 @@ final class SubprocessTunnelManager {
         }
         if method == "certificate", let cert = c.sshCertificateFile, !cert.isEmpty {
             a += ["-o", "CertificateFile=\((cert as NSString).expandingTildeInPath)"]
+        }
+        // Which agent to ask, when one is in play (automatic and agent sign-in).
+        // ssh has no command-line flag for this — only the ssh_config keyword —
+        // and the value MUST be quoted because the paths that matter contain
+        // spaces ("~/Library/Group Containers/…"): verified against
+        // OpenSSH 10.3p1 with `ssh -G -o 'IdentityAgent="/tmp/a b/agent.sock"'`,
+        // which reports `identityagent /tmp/a b/agent.sock`.
+        if ["", "agent"].contains(method), let socket = sshAgentSocket(c),
+           SubprocessTunnelConfig.agentSocketProblem(socket) == nil {
+            a += ["-o", "IdentityAgent=\"\(socket)\""]
         }
         if let kex = c.sshKexAlgorithms?.trimmingCharacters(in: .whitespaces), !kex.isEmpty {
             a += ["-o", "KexAlgorithms=\(kex)"]

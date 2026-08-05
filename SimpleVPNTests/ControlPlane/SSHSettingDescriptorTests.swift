@@ -29,7 +29,8 @@ struct SSHSettingDescriptorTests {
         let shipped: Set<String> = [
             "ssh.server", "ssh.port", "ssh.connect-timeout",
             "ssh.proxy-jump", "ssh.jump-port", "ssh.jump-username", "ssh.jump-identity-file",
-            "ssh.auth-method", "ssh.username", "ssh.identity-file", "ssh.certificate-file", "ssh.password",
+            "ssh.auth-method", "ssh.username", "ssh.identity-file", "ssh.certificate-file",
+            "ssh.agent-socket", "ssh.password",
             "ssh.mode", "ssh.socks-port", "ssh.system-proxy", "ssh.forwards",
             "ssh.strict-host-key", "ssh.pinned-host-key", "ssh.key-exchange",
             "ssh.keepalive", "ssh.compression", "ssh.extra-options",

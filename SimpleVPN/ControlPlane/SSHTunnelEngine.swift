@@ -15,7 +15,11 @@
 //  PacketTunnel/Engines/SSHNetworkTunnelEngine.swift), which needs no server-side
 //  root or PermitTunnel.
 //  Auth honours the PINNED method when one is set (password / key / certificate /
-//  agent / kerberos); unpinned it tries key, then agent, then password.
+//  agent / kerberos); unpinned it tries key, then agent, then password. Agent
+//  sign-in asks whichever agent `agentSocketPath` names (1Password, Secretive,
+//  KeePassXC, ssh-agent) and, on failure, asks that agent what went wrong so the
+//  user is told which of the three agent failures it was — see SSHAgent.swift and
+//  Docs/SSHAgent.md.
 //
 //  Concurrency model: the session runs BLOCKING through handshake/host-key/auth,
 //  then switches to NON-BLOCKING (`enterDataMode`) for the data pump. Every libssh
@@ -91,6 +95,12 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
         /// method — that method is used and nothing else, so what the user
         /// chose is what actually authenticates. Kerberos is opt-in only.
         var authMethod: String? = nil
+        /// Which SSH agent to ask, when signing in through one (OpenSSH's
+        /// `IdentityAgent`). nil/empty = whatever `SSH_AUTH_SOCK` says, which in a
+        /// windowed app is macOS's own ssh-agent — 1Password, Secretive and
+        /// friends listen in their own containers, so pointing at them takes an
+        /// explicit path. See Docs/SSHAgent.md.
+        var agentSocketPath: String? = nil
         /// Key-exchange preference (OpenSSH KexAlgorithms syntax); nil = libssh default.
         var kexAlgorithms: String? = nil
         /// Session keepalive interval in seconds (`ssh -o ServerAliveInterval`);
@@ -216,6 +226,10 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
         default:
             var plan: [AuthStep] = []
             if !key.isEmpty { plan.append(.key(certificate: !cert.isEmpty)) }
+            // The agent step is unconditional and costs nothing when there is no
+            // agent: libssh checks `ssh_agent_is_running` first and refuses
+            // locally, so no userauth request reaches the server and none of its
+            // `MaxAuthTries` budget is spent.
             plan.append(.agent)
             if let pw = c.password, !pw.isEmpty { plan.append(.password) }
             return plan
@@ -234,6 +248,34 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
         }
         return "The security key didn't sign in. Plug it in, then touch it when it lights up "
             + "(some keys also ask for their PIN)."
+    }
+
+    /// Agent sign-in: point libssh at the right agent, then turn its answer into
+    /// something the user can act on.
+    ///
+    /// THE WHOLE POINT of the extra work here: `ssh_userauth_agent` reports the
+    /// same SSH_AUTH_DENIED whether no agent answered, an agent answered with no
+    /// keys, or the server refused every key it offered — three failures with
+    /// three different fixes, and the three users actually hit. So on failure we
+    /// ask the agent itself (`SSHAgentProbe`, one read-only round trip) and let
+    /// that decide what to say. `prober` is injected so the mapping is testable
+    /// without an agent or a server.
+    static func authAgent(_ s: SSHSession, _ c: Config,
+                          prober: SSHAgentProbe = SSHAgentProbe()) throws {
+        let configured = (c.agentSocketPath ?? "").trimmingCharacters(in: .whitespaces)
+        if !configured.isEmpty {
+            // A path the user set that libssh won't take is a configuration
+            // error, not a sign-in failure — report it as itself.
+            try s.useAgentSocketPath(configured)
+        }
+        do {
+            try s.authAgent(forUser: c.username)
+        } catch {
+            let state = prober.probe(configuredSocketPath: configured.isEmpty ? nil : configured)
+            throw AuthError(SSHAgentDiagnosis.message(for: SSHAgentDiagnosis.classify(error),
+                                                      state: state,
+                                                      username: c.username))
+        }
     }
 
     /// Walk the plan, first success wins; if every attempt fails the LAST error is
@@ -260,7 +302,7 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
                         throw error
                     }
                 case .agent:
-                    try s.authAgent(forUser: c.username)
+                    try authAgent(s, c)
                 case .kerberos:
                     try s.authGSSAPI(forUser: c.username)
                 }

@@ -96,6 +96,12 @@ nonisolated enum SettingRelations {
         // which of the three below is the one that matters.
         ["ssh.auth-method", "ssh.identity-file", "ssh.certificate-file",
          "ssh.password", "ssh.username"],
+        // Signing in through an agent is the method, and the socket says WHICH
+        // agent — the two are useless apart, and the socket is the part nobody
+        // guesses (a vendor agent doesn't listen where macOS's own does).
+        ["ssh.auth-method", "ssh.agent-socket"],
+        // The alternative to handing us a key file is letting an agent hold it.
+        ["ssh.identity-file", "ssh.agent-socket"],
         // A certificate vouches for a key, so it is useless without one.
         ["ssh.identity-file", "ssh.certificate-file"],
         // The jump host's sign-in is independent of the server's, which is

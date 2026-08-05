@@ -94,6 +94,13 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     // Kerberos (gssapi-with-mic) is never tried unless chosen — opt-in.
     var sshAuthMethod: String? = nil
     var sshCertificateFile: String? = nil // OpenSSH certificate (…-cert.pub) presented with the key
+    // Which SSH agent to ask when signing in through one (OpenSSH's
+    // `IdentityAgent`; libssh's SSH_OPTIONS_IDENTITY_AGENT). nil/empty means
+    // "whatever SSH_AUTH_SOCK says" — which for an app launched from the Dock is
+    // macOS's own ssh-agent, NOT the vendor agent a shell profile points at. A
+    // path is therefore how 1Password's or Secretive's keys become reachable at
+    // all. See Docs/SSHAgent.md.
+    var sshAgentSocket: String? = nil
     // SHA-256 host-key pin (hex, optional "SHA256:" prefix). Enforced by the
     // in-process libssh engine ONLY — /usr/bin/ssh has no pin-by-hash option,
     // so a pinned config must never silently route to the subprocess
@@ -223,6 +230,13 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
         n.localHostname = clean(localHostname)
         n.userAgent = clean(userAgent)
         n.versionString = clean(versionString)
+        // Trimmed, and a path that is only whitespace collapses back to "use the
+        // inherited agent" — libssh rejects an empty IdentityAgent outright, so a
+        // blank must never reach it as a path.
+        if let socket = n.sshAgentSocket {
+            let cleaned = clean(socket)
+            n.sshAgentSocket = cleaned.isEmpty ? nil : cleaned
+        }
         n.forwards = forwards.map(clean).filter { !$0.isEmpty }
         n.sshExtraOptions = sshExtraOptions.map(clean).filter { !$0.isEmpty }
         n.extraArgs = extraArgs.map(clean).filter { !$0.isEmpty }
@@ -273,6 +287,33 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     static func socksPortProblem(_ port: Int) -> String? {
         guard !socksPortRange.contains(port) else { return nil }
         return "Use a SOCKS port between \(socksPortRange.lowerBound) and \(socksPortRange.upperBound) \u{2014} ports below 1024 need root."
+    }
+
+    /// The longest AF_UNIX path macOS can connect to: `sockaddr_un.sun_path` is
+    /// 104 bytes including its terminator. Vendor agents live deep inside
+    /// containers, so this ceiling is reachable in practice rather than theory.
+    static let agentSocketPathLimit = 103
+
+    /// Why this SSH agent socket path can't be used, or nil. BLOCKING, because
+    /// both connect paths would otherwise fail obscurely: libssh rejects the
+    /// option, and `/usr/bin/ssh` needs the value quoted in an `-o
+    /// IdentityAgent="…"` line, which a path containing a quote character would
+    /// break open. (Existence is deliberately NOT checked here — an agent may not
+    /// be running yet, and the editor reports that separately as live status.)
+    static func agentSocketProblem(_ path: String) -> String? {
+        let p = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !p.isEmpty else { return nil }
+        if p.contains("\"") || p.contains("\\") {
+            return "An SSH agent socket path can't contain a quote or a backslash."
+        }
+        if !p.hasPrefix("/") && !p.hasPrefix("~") {
+            return "Give the full path to the agent's socket, starting with / or ~."
+        }
+        let expanded = (p as NSString).expandingTildeInPath
+        if expanded.utf8.count > agentSocketPathLimit {
+            return "That path is too long for macOS to connect to (\(expanded.utf8.count) characters; the limit is \(agentSocketPathLimit))."
+        }
+        return nil
     }
 
     /// Non-blocking: a path that isn't there. The tool fails at startup with an

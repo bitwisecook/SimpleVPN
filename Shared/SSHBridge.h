@@ -61,6 +61,27 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)close;
 @end
 
+/// The `code` on an NSError from this bridge (domain "SSHBridge"). Everything
+/// that isn't agent sign-in reports `SSHBridgeErrorGeneric` — the message is the
+/// payload there. AGENT sign-in is the exception: its three real-world failures
+/// need three different pieces of advice, and libssh cannot tell them apart on
+/// its own (see `authAgentForUser:error:`), so the code says exactly what libssh
+/// reported and the caller refines it with what it knows about the agent.
+typedef NS_ENUM(NSInteger, SSHBridgeErrorCode) {
+    SSHBridgeErrorGeneric = 1,
+    /// SSH_AUTH_DENIED from `ssh_userauth_agent`. AMBIGUOUS BY LIBSSH'S DESIGN:
+    /// it is returned for "no agent answered", "the agent offered no identity"
+    /// AND "the server refused every identity the agent offered" alike
+    /// (libssh 0.12.2 src/auth.c). The caller must consult the agent itself to
+    /// choose between them.
+    SSHBridgeErrorAgentDenied = 20,
+    /// SSH_AUTH_PARTIAL: an agent key WAS accepted, and the server wants a
+    /// further step as well.
+    SSHBridgeErrorAgentPartial = 21,
+    /// SSH_AUTH_ERROR: the exchange itself broke (transport or agent protocol).
+    SSHBridgeErrorAgentTransport = 22,
+};
+
 /// What consulting known_hosts (or a pin) says about the key a server just
 /// presented. Kept separate from `verifyHostKeyWithKnownHosts:` because the
 /// staged probe must be able to ASK without the accept-new side effect of
@@ -175,6 +196,35 @@ typedef NS_ENUM(NSInteger, SSHHostKeyStatus) {
             passphrase:(nullable NSString *)passphrase
                  error:(NSError * _Nullable * _Nullable)error;
 
+/// Point this session's agent lookups at ONE specific listening socket instead
+/// of whatever `SSH_AUTH_SOCK` says (libssh's `SSH_OPTIONS_IDENTITY_AGENT`, the
+/// same knob as OpenSSH's `IdentityAgent`). Tilde paths are expanded by libssh.
+///
+/// WHY THIS EXISTS: the agents worth having on a Mac do not live at the socket a
+/// GUI app inherits. `SSH_AUTH_SOCK` in a windowed app comes from the user's
+/// launchd session (macOS's own ssh-agent); 1Password, Secretive and any other
+/// vendor agent listen in their own container, and users point at them with a
+/// line in a shell profile that an app launched from the Dock never reads. This
+/// is how a VPN gets to those keys.
+///
+/// Call it BEFORE `authAgentForUser:` (the option is read when the agent is
+/// first contacted). An empty path is rejected rather than quietly meaning
+/// "default" — libssh treats "" as an error, and so should the caller's config.
+- (BOOL)useAgentSocketPath:(NSString *)path error:(NSError * _Nullable * _Nullable)error;
+
+/// Sign in with the keys an SSH agent holds — 1Password, Secretive (Secure
+/// Enclave), KeePassXC, a hardware token behind ssh-agent — so the private key
+/// never leaves the vault. libssh asks the agent to sign; we never see the key.
+///
+/// ON FAILURE the NSError's `code` is one of `SSHBridgeErrorCode`'s agent cases.
+/// `SSHBridgeErrorAgentDenied` deliberately does NOT distinguish "no agent" from
+/// "agent with no keys" from "server said no" — libssh returns SSH_AUTH_DENIED
+/// for all three — so the message here is the neutral one and the caller (which
+/// can ask the agent how many identities it holds) is what turns it into advice.
+/// See SimpleVPN/ControlPlane/SSHAgent.swift.
+///
+/// NOT USABLE FROM THE PACKET-TUNNEL EXTENSION: it runs as root in the system
+/// context, has no `SSH_AUTH_SOCK`, and must not reach into a user's session.
 - (BOOL)authAgentForUser:(NSString *)user error:(NSError * _Nullable * _Nullable)error;
 /// Kerberos single sign-on (gssapi-with-mic) using the user's existing ticket —
 /// a libssh capability libssh2 never had. Needs a ticket (kinit / AD login);

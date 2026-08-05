@@ -50,6 +50,13 @@ struct SubprocessTunnelView: View {
     @State private var applyForwardsTask: Task<Void, Never>?
     /// The saved-confirmation affordance every editor's primary action now has.
     @State private var savedTick = false
+    /// What the SSH agent said last time we asked (nil until the first answer).
+    @State private var agentStatus: SSHAgentState?
+    /// Vendor agents whose socket is on this Mac right now, offered as one-click
+    /// fills rather than asking anyone to type a container path.
+    @State private var agentSuggestions: [SSHAgentProbe.VendorAgent] = []
+    /// Bumped by "Check Again" to re-run the probe task.
+    @State private var agentProbeNonce = 0
     // The Advanced disclosures' expansion state now lives in the shared
     // CollapsibleSettingsSection, which opens itself when the group already holds
     // changes — the two hand-kept `…Expanded` flags (and the long boolean chains
@@ -281,8 +288,112 @@ struct SubprocessTunnelView: View {
                 disabled: sshMethod == "certificate" ? nil
                     : "Choose “Certificate” as the sign-in method to use an SSH certificate.",
                 warning: SubprocessTunnelConfig.missingFileWarning(draft.sshCertificateFile ?? ""))
+            sshAgentSocketRow
             sshPasswordRow
         }
+    }
+
+    /// The SSH agent row: which agent to ask, what it is holding RIGHT NOW, and
+    /// one-click paths for the agents people actually run.
+    ///
+    /// The live status is the point. Agent sign-in fails for three different
+    /// reasons — no agent, an agent holding nothing, a server that refuses the
+    /// keys — and only the first two are knowable before connecting. Saying "your
+    /// SSH agent has 3 keys" (or "no SSH agent is running") here is the difference
+    /// between choosing this method deliberately and choosing it hopefully.
+    @ViewBuilder private var sshAgentSocketRow: some View {
+        let s = spec("ssh.agent-socket")
+        let path = draft.sshAgentSocket ?? ""
+        let problem = SubprocessTunnelConfig.agentSocketProblem(path)
+        // Mutual exclusion, same shape as the identity-file and password rows: a
+        // disabled row says which choice brings it back.
+        let unused: String? = ["password", "key", "certificate", "kerberos"].contains(sshMethod)
+            ? "Not used when signing in with \(sshMethodLabel) — choose Automatic or \u{201C}SSH agent\u{201D}."
+            : nil
+        EngineSettingRow(spec: s, value: path, disabledReason: unused) {
+            VStack(alignment: .leading, spacing: 6) {
+                LabeledContent {
+                    TextField("", text: optionalText(\.sshAgentSocket),
+                              prompt: Text("the agent macOS provides"))
+                        .font(.callout.monospaced())
+                        .autocorrectionDisabled()
+                        .multilineTextAlignment(.trailing)
+                        // The problem and the live status ride the FIELD's value,
+                        // so VoiceOver hears them where the value is spoken
+                        // (Docs/Accessibility.md) rather than as ambient text.
+                        .accessibilityValue([path.isEmpty ? "the agent macOS provides" : path,
+                                             problem.map { "Problem: \($0)" },
+                                             problem == nil ? agentStatus?.summary : nil]
+                            .compactMap { $0 }.joined(separator: ". "))
+                } label: { EngineSettingLabel(spec: s, value: path) }
+                if let problem {
+                    Text(problem)
+                        .font(.callout).foregroundStyle(.red)
+                        .accessibilityLabel("Error: \(problem)")
+                } else if let state = agentStatus {
+                    // Words AND a shape, never colour alone (Differentiate
+                    // Without Color); the words are already in the field's value,
+                    // so this label is not announced twice.
+                    Label(state.summary, systemImage: Self.agentStatusSymbol(state))
+                        .font(.callout)
+                        .foregroundStyle(state.canSignIn ? Color.secondary : Color.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityHidden(true)
+                }
+                HStack(spacing: 12) {
+                    Button("Check Again") { agentProbeNonce += 1 }
+                        .controlSize(.small)
+                        .accessibilityLabel("Check the SSH agent again")
+                    ForEach(agentSuggestions, id: \.name) { vendor in
+                        Button("Use \(vendor.name)\u{2019}s Agent") {
+                            draft.sshAgentSocket = vendor.socketPath
+                        }
+                        .controlSize(.small)
+                        .accessibilityHint("Points this tunnel at \(vendor.name)\u{2019}s SSH agent socket.")
+                    }
+                }
+            }
+            // Re-probed on appear, when the path changes, and when the method
+            // changes — never on a timer, and never on hover.
+            .task(id: "\(path)|\(sshMethod)|\(agentProbeNonce)") {
+                await refreshAgentStatus(path: path)
+            }
+        }
+    }
+
+    /// Which shape goes with an agent state, so the row is legible without colour.
+    private static func agentStatusSymbol(_ state: SSHAgentState) -> String {
+        switch state {
+        case .running(_, let ids) where !ids.isEmpty: "key.fill"
+        case .running: "key.slash"
+        case .noAgent, .socketMissing: "questionmark.circle"
+        case .unreachable: "exclamationmark.triangle.fill"
+        }
+    }
+
+    /// Ask the agent, off the main actor: a wedged agent must not freeze the
+    /// editor, and the probe is a blocking socket round trip. Typing is debounced
+    /// so a keystroke doesn't open a socket.
+    private func refreshAgentStatus(path: String) async {
+        // Don't go poking somebody's vault for a method that never asks an agent
+        // anything — the row is greyed out in that case, and a probe would be a
+        // connection to their key manager they didn't ask for.
+        guard !["password", "key", "certificate", "kerberos"].contains(sshMethod),
+              SubprocessTunnelConfig.agentSocketProblem(path) == nil else {
+            agentStatus = nil
+            return
+        }
+        try? await Task.sleep(for: .milliseconds(350))
+        guard !Task.isCancelled else { return }
+        let configured = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let state = await Task.detached(priority: .utility) {
+            SSHAgentProbe().probe(configuredSocketPath: configured.isEmpty ? nil : configured)
+        }.value
+        guard !Task.isCancelled else { return }
+        agentStatus = state
+        agentSuggestions = await Task.detached(priority: .utility) {
+            SSHAgentProbe().vendorAgentsPresent()
+        }.value
     }
 
     private var sshMethodLabel: String {

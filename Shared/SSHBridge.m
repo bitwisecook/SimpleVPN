@@ -62,7 +62,15 @@ static void ssh_trace(int priority, const char *function,
 }
 
 static NSError *sshErr(NSString *m) {
-    return [NSError errorWithDomain:kSSHErrorDomain code:1 userInfo:@{ NSLocalizedDescriptionKey: m }];
+    return [NSError errorWithDomain:kSSHErrorDomain code:SSHBridgeErrorGeneric
+                           userInfo:@{ NSLocalizedDescriptionKey: m }];
+}
+
+/// Same, with a `SSHBridgeErrorCode` the caller can branch on — used by agent
+/// sign-in, whose three failure modes need three different pieces of advice.
+static NSError *sshErrCode(NSString *m, SSHBridgeErrorCode code) {
+    return [NSError errorWithDomain:kSSHErrorDomain code:code
+                           userInfo:@{ NSLocalizedDescriptionKey: m }];
 }
 
 /// Fixed user-facing sentence + libssh's own reason in parentheses. The
@@ -527,13 +535,52 @@ static NSString *hexTail(NSString *s) {
     return YES;
 }
 
-- (BOOL)authAgentForUser:(NSString *)user error:(NSError **)error {
-    // libssh speaks to the agent at SSH_AUTH_SOCK itself, trying each identity.
-    if (ssh_userauth_agent(_session, user.UTF8String) != SSH_AUTH_SUCCESS) {
-        if (error) *error = sshErr(@"The SSH agent had no key the server accepted.");
+- (BOOL)useAgentSocketPath:(NSString *)path error:(NSError **)error {
+    if (!_session) { if (error) *error = sshErr(@"No SSH session to configure."); return NO; }
+    NSString *trimmed = [path stringByTrimmingCharactersInSet:
+                         NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (trimmed.length == 0) {
+        // libssh rejects "" outright (options.c), and a blank path in a config
+        // means "use the default", which is the CALLER's decision to make — it
+        // must not arrive here as an empty string and be read as an error.
+        if (error) *error = sshErr(@"No SSH agent socket path was provided.");
+        return NO;
+    }
+    if (ssh_options_set(_session, SSH_OPTIONS_IDENTITY_AGENT, trimmed.UTF8String) < 0) {
+        if (error) *error = sshErrDetail(@"That SSH agent socket path couldn't be used.", _session);
         return NO;
     }
     return YES;
+}
+
+- (BOOL)authAgentForUser:(NSString *)user error:(NSError **)error {
+    if (!_session) { if (error) *error = sshErr(@"No SSH session to sign in to."); return NO; }
+    // libssh contacts the agent itself (SSH_OPTIONS_IDENTITY_AGENT if set,
+    // otherwise SSH_AUTH_SOCK) and offers each identity in turn. The private key
+    // stays in the agent throughout; only signatures cross.
+    int rc = ssh_userauth_agent(_session, user.UTF8String);
+    if (rc == SSH_AUTH_SUCCESS) return YES;
+    switch (rc) {
+        case SSH_AUTH_PARTIAL:
+            // A key WAS accepted and the server wants another factor as well.
+            if (error) *error = sshErrCode(
+                @"The SSH agent's key was accepted, but the server wants another sign-in step as well.",
+                SSHBridgeErrorAgentPartial);
+            return NO;
+        case SSH_AUTH_ERROR: {
+            NSError *detailed = sshErrDetail(@"The conversation with the SSH agent failed.", _session);
+            if (error) *error = sshErrCode(detailed.localizedDescription,
+                                           SSHBridgeErrorAgentTransport);
+            return NO;
+        }
+        default:
+            // SSH_AUTH_DENIED — see SSHBridgeErrorAgentDenied: this ONE code
+            // covers no agent, an agent holding nothing, and a server that
+            // refused everything offered. The caller asks the agent which.
+            if (error) *error = sshErrCode(
+                @"The SSH agent didn't sign you in.", SSHBridgeErrorAgentDenied);
+            return NO;
+    }
 }
 
 - (BOOL)authGSSAPIForUser:(NSString *)user error:(NSError **)error {
