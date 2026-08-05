@@ -184,6 +184,21 @@ struct SignInSourcesSettings: View {
             // switch (`rawAvailability`).
             stateRow(vendor, enabled: enabled)
 
+            // MATURITY IS A DIFFERENT AXIS FROM THE ROW ABOVE, and the two must not
+            // be read as one. `stateRow` answers "what does this Mac have right
+            // now" — a live probe that changes when the user installs something.
+            // This answers "has the code that talks to it ever been proven" — a
+            // constant that changes only when somebody reports a result. “Ready to
+            // use” and “Untested” together is not a contradiction; it is the normal
+            // state of a freshly written adapter. Nothing here consults the probe,
+            // and the claim lives one line deep in the maturity registry.
+            if let notice = MaturityNotice.forSignInSource(id: .vault(vendor),
+                                                           title: copy.title) {
+                MaturityBanner(notice: notice,
+                               request: .init(kind: nil, profileID: nil,
+                                              reason: .untestedSource))
+            }
+
             if enabled {
                 ForEach(SignInSourceSettings.fields(for: vendor)) { field in
                     fieldRows(field)

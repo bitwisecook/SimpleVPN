@@ -225,7 +225,8 @@ struct NativeVPNView: View {
         .onAppear { search.visibility = SettingVisibility.native(draft) }
         .onChange(of: SettingVisibility.native(draft)) { _, new in search.visibility = new }
         .settingsEditor(search: search, tab: $tab,
-                        surfaces: [.native, .customRouting], profileID: draft.id)
+                        surfaces: [.native, .customRouting], profileID: draft.id,
+                        kind: draft.kind)
         .onChange(of: draft.kind) { search.kind = draft.kind }
         .padding(.top, 10)
         .navigationTitle(draft.name)

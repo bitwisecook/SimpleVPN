@@ -55,9 +55,16 @@ struct VPNSidebarRow: View {
                     Text(statusText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         .accessibilityHidden(true)
                 }
-                if !labelDefs.isEmpty {
-                    HStack(spacing: 4) { ForEach(labelDefs) { LabelPill(label: $0) } }
-                        .accessibilityHidden(true)
+                // The user's labels, and — for a VPN kind nobody has been able to
+                // test — the compact maturity chip. Both hidden from VoiceOver:
+                // the row's one sentence above already carries them in words, the
+                // same way the status dot does.
+                if !labelDefs.isEmpty || maturityNotice != nil {
+                    HStack(spacing: 4) {
+                        ForEach(labelDefs) { LabelPill(label: $0) }
+                        if let maturityNotice { MaturityBadge(notice: maturityNotice) }
+                    }
+                    .accessibilityHidden(true)
                 }
             }
 
@@ -68,13 +75,20 @@ struct VPNSidebarRow: View {
         .frame(minHeight: 52)
     }
 
+    /// Whether this VPN's kind still carries a maturity notice. One lookup, from
+    /// the registry — never a list of kinds written out here.
+    private var maturityNotice: MaturityNotice? { profile.kind.maturityNotice }
+
     /// The row as one sentence: name, protocol, live state (same words the
     /// visible status line uses, plus the dot-only degraded/captive states),
-    /// route ownership, then the user's labels.
+    /// route ownership, the user's labels, and — last, because it is the least
+    /// urgent of them — whether the kind is proven. The chip beside the labels is
+    /// hidden, so this is how it reaches VoiceOver.
     private var rowAccessibilitySummary: String {
         var bits = [profile.name, profile.kind.displayName, rowStateDescription]
         if vpn.routes.effectiveGatewayOwner == profile.id { bits.append("owns the default route") }
         bits.append(contentsOf: labelDefs.map(\.name))
+        if let maturityNotice { bits.append(maturityNotice.spokenValue) }
         return bits.joined(separator: ", ")
     }
 

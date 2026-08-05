@@ -523,14 +523,27 @@ struct MenuBarView: View {
                 Text(p.name).lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 6)
                 ForEach(labels.labels(for: p.id)) { LabelPill(label: $0) }
+                // Same chip as the two window lists, for the same reason: a kind
+                // nobody has proven must not look like one that has been.
+                if let notice = p.kind.maturityNotice { MaturityBadge(notice: notice) }
                 trailingGlyph(p)
             }
         }
         .help(rowHelp(p))
         // One sentence per row (the dot and glyph are visuals-only): name +
-        // state; the hint says what a press does, which changes with the state.
-        .accessibilityLabel("\(p.name), \(dotState.accessibilityDescription)")
+        // state (+ "untested", which the chip shows but cannot speak from inside a
+        // combined row); the hint says what a press does, which changes with the
+        // state.
+        .accessibilityLabel(rowAccessibilityLabel(p, dotState: dotState))
         .accessibilityHint(busy ? "" : rowHelp(p))
+    }
+
+    /// The row as one sentence. Maturity comes last: it is the least urgent thing
+    /// about a row and the most permanent.
+    private func rowAccessibilityLabel(_ p: VPNController.Profile, dotState: DotState) -> String {
+        var bits = [p.name, dotState.accessibilityDescription]
+        if let notice = p.kind.maturityNotice { bits.append(notice.spokenValue) }
+        return bits.joined(separator: ", ")
     }
 
     private func rowAction(_ p: VPNController.Profile) {

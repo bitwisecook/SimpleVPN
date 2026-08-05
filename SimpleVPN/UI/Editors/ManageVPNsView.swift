@@ -170,10 +170,16 @@ struct ManageVPNsView: View {
                                             .foregroundStyle(st.isFailed ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
                                             .lineLimit(1)
                                     }
+                                    // The SSL-VPN kinds live here, and they are
+                                    // exactly the ones nobody has been able to try.
+                                    if let notice = t.kind.maturityNotice {
+                                        MaturityBadge(notice: notice)
+                                    }
                                 }
-                                // One sentence, dot state in words (the dot is hidden).
+                                // One sentence, dot state in words (the dot is
+                                // hidden), then the maturity the chip shows.
                                 .accessibilityElement(children: .combine)
-                                .accessibilityLabel("\(t.name), \(t.kind.displayName), \(DotState.from(subprocess: st).accessibilityDescription)\(st.isFailed ? ", \(st.failureText ?? "failed")" : "")")
+                                .accessibilityLabel("\(t.name), \(t.kind.displayName), \(DotState.from(subprocess: st).accessibilityDescription)\(st.isFailed ? ", \(st.failureText ?? "failed")" : "")\(t.kind.maturityNotice.map { ", \($0.spokenValue)" } ?? "")")
                                 .tag(Self.tunnelTag + t.id)
                                 .contextMenu {
                                     Button("Remove", role: .destructive) {
@@ -199,11 +205,17 @@ struct ManageVPNsView: View {
                                         Text(c.name)
                                         Text(c.kind.displayName).font(.caption).foregroundStyle(.secondary)
                                     }
+                                    // All three native kinds are unproven — this Mac
+                                    // has no IKEv2, IPsec or L2TP server to try.
+                                    if let notice = c.kind.maturityNotice {
+                                        MaturityBadge(notice: notice)
+                                    }
                                 }
                                 // One sentence incl. the dot's state in words — the
-                                // hidden dot and icon tint said "connected" to nobody.
+                                // hidden dot and icon tint said "connected" to nobody
+                                // — then the maturity the chip shows.
                                 .accessibilityElement(children: .combine)
-                                .accessibilityLabel("\(c.name), \(c.kind.displayName), \(DotState.from(status: isThis ? nativeVPN.status : .disconnected).accessibilityDescription)")
+                                .accessibilityLabel("\(c.name), \(c.kind.displayName), \(DotState.from(status: isThis ? nativeVPN.status : .disconnected).accessibilityDescription)\(c.kind.maturityNotice.map { ", \($0.spokenValue)" } ?? "")")
                                 .tag(Self.nativeTag + c.id)
                                 .contextMenu {
                                     Button("Remove", role: .destructive) { nativeVPN.remove(c.id) }

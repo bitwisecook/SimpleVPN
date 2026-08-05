@@ -260,6 +260,11 @@ struct VPNRow: View {
             Text(profile.name).lineLimit(1).truncationMode(.tail)
             Spacer(minLength: 6)
             ForEach(labelDefs) { LabelPill(label: $0) }
+            // A kind nobody has been able to test says so here too — Manage VPNs
+            // is where somebody picks which VPN to set up next, so it is exactly
+            // where the state belongs. Hidden from VoiceOver; the row's sentence
+            // below carries it in words.
+            if let maturityNotice { MaturityBadge(notice: maturityNotice) }
         }
         // One element, one sentence — not a logo, a name and n pill fragments.
         // The dot is hidden, so its state rides here in words.
@@ -267,10 +272,14 @@ struct VPNRow: View {
         .accessibilityLabel(accessibilitySummary)
     }
 
+    /// From the maturity registry, never a list of kinds written out here.
+    private var maturityNotice: MaturityNotice? { profile.kind.maturityNotice }
+
     private var accessibilitySummary: String {
         let state = dotState ?? .from(status: profile.status)
         var bits = [profile.name, profile.kind.displayName, state.accessibilityDescription]
         bits.append(contentsOf: labelDefs.map(\.name))
+        if let maturityNotice { bits.append(maturityNotice.spokenValue) }
         return bits.joined(separator: ", ")
     }
 }

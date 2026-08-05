@@ -56,10 +56,20 @@ private struct SettingsEditorShell: ViewModifier {
 
 extension View {
     /// Wire an editor's TabView: publish `search` to its rows, follow reveals
-    /// across tabs, and serve routes for `surfaces`.
+    /// across tabs, serve routes for `surfaces`, and — when the kind being edited
+    /// is one nobody has been able to test — put the maturity banner above the
+    /// whole editor.
+    ///
+    /// The banner rides HERE, at the one container all seven editors already share,
+    /// rather than inside each editor: sixteen kinds are served by one insertion,
+    /// the two editors with a Kind picker (subprocess, native) follow the picker for
+    /// free, and flipping a kind to tested needs no view edit at all. `kind` is
+    /// optional only so a host without one (previews) can still use the shell.
     func settingsEditor(search: SettingsSearch, tab: Binding<SettingsTab>,
-                        surfaces: Set<SettingSurface>, profileID: String? = nil) -> some View {
+                        surfaces: Set<SettingSurface>, profileID: String? = nil,
+                        kind: VPNKind? = nil) -> some View {
         modifier(SettingsEditorShell(search: search, tab: tab,
                                      surfaces: surfaces, profileID: profileID))
+            .modifier(MaturityBannerScaffold(kind: kind, profileID: profileID))
     }
 }

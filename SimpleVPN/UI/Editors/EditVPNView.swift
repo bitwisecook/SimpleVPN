@@ -243,7 +243,8 @@ struct EditVPNView: View {
             // Publishes `search` to every row, follows a reveal across tabs, and
             // serves incoming SettingsRoutes (UI/Components/SettingsEditorShell.swift).
             .settingsEditor(search: search, tab: $tab,
-                            surfaces: [.openVPN, .customRouting], profileID: profileID)
+                            surfaces: [.openVPN, .customRouting], profileID: profileID,
+                            kind: .openVPN)
             // Clear the toolbar's scroll-edge shadow band — without this the
             // segmented tab strip sits flush under the title bar and the edge
             // effect overlays its top pixels.
