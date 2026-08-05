@@ -308,6 +308,9 @@ struct SimpleVPNApp: App {
             SettingsView(ext: ext, labels: labels, updater: updaterController.updater)
                 .environment(publicIP)
                 .environment(endpointProbes)
+                // So Sign-In Sources can NAME the VPNs that read a vault before
+                // removing it, instead of orphaning them silently.
+                .environment(vpn)
                 // So a route to an app-level setting (a `creds.*` global-search hit,
                 // or "Configure…" on a sign-in chooser row) can select the tab.
                 .environment(settingsRouter)

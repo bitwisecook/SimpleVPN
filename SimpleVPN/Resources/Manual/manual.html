@@ -347,6 +347,7 @@
   <a href="#creds-bitwarden-tool-path">Bitwarden CLI Location</a>
   <a href="#creds-bitwarden-daemon-endpoint">Bitwarden Local Service Address</a>
   <a href="#creds-keepassfile-enabled">Use a KeePass Database File</a>
+  <a href="#creds-keepassfile-databases">Your KeePass Databases</a>
   <a href="#creds-keepassfile-database">KeePass Database File</a>
   <a href="#creds-keepassfile-key-file">KeePass Key File</a>
   <a href="#creds-keepassfile-security-key-slot">KeePass Security Key Slot</a>
@@ -1575,8 +1576,18 @@ the device's protection intact at the cost of typing four to eight digits per co
 <p><strong>One thing to know before you choose this.</strong> Unlike the other ways of signing in, SimpleVPN does see your database&rsquo;s password, because a file has nobody to hold it for you. By default nothing is kept: you type it once each time you open SimpleVPN. You can ask macOS to remember it behind Touch ID instead. If KeePassXC is running on this Mac, <strong>Use KeePassXC</strong> above is the better choice &mdash; there the app does the unlocking and SimpleVPN never sees anything.</p>
 <p>Off means SimpleVPN neither offers this nor mentions it.</p>
 
+<h2 id="creds-keepassfile-databases">Your KeePass Databases</h2>
+<p class="default">One to begin with &mdash; the one you already had. Add as many as you like.</p>
+<p>You can set up more than one database. A work one and a personal one is the ordinary case, and each gets a name you choose, its own file, its own key file and its own security-key slot. Each VPN then picks which of them to read when you set its sign-in up: first <em>which database</em>, then <em>which entry</em> inside it.</p>
+<p><strong>Each one is checked on its own.</strong> Your work database being on a drive that isn&rsquo;t plugged in doesn&rsquo;t stop the personal one working, and the pane says which is which rather than averaging them into one answer.</p>
+<p>Three buttons: <strong>Add Database&hellip;</strong> makes a new one (name it, then point it at its file), <strong>Rename&hellip;</strong> changes what it is called, and <strong>Remove</strong> forgets where it is. Removing one <em>never touches the file</em> &mdash; SimpleVPN only forgets the path. If any of your VPNs read that database, SimpleVPN names them before removing it, and each of those will ask you to choose another database before it next connects.</p>
+<p>Renaming is free: a VPN remembers which database it uses by an identity of its own, not by its name or its path. Move the file, rename the database, and the VPNs pointing at it keep working &mdash; you only have to update the path.</p>
+<p>Where SimpleVPN&rsquo;s <em>tool</em> is (<a href="#creds-keepassfile-tool-path">KeePassXC Tool Location</a>) is a different question, and there is only one answer to it for this Mac: the same <code>keepassxc-cli</code> opens all of your databases.</p>
+<p>Your organization can set this list for you, and can stop you adding to it. When it does, the rows say so and cannot be changed here.</p>
+
 <h2 id="creds-keepassfile-database">KeePass Database File</h2>
 <p class="default">Nothing is chosen until you choose it.</p>
+<p>This belongs to whichever of <a href="#creds-keepassfile-databases">your databases</a> is selected above &mdash; each one has its own file, its own key file and its own slot.</p>
 <p>Your database: the file whose name ends in <code>.kdbx</code>. Use <strong>Choose Database&hellip;</strong> to pick it, or type its whole path. SimpleVPN deliberately does not go looking for one: finding it would mean reading through your files to guess which of them holds your passwords, and a guess is as likely to be the wrong database as the right one.</p>
 <p>Where to find it, per app: in <strong>KeePassXC</strong>, the path is in the window title and under Database &#9656; Database Settings. In <strong>Strongbox</strong>, it is under the database&rsquo;s own settings. In <strong>KeePassium</strong>, it is in the database list.</p>
 <p>SimpleVPN checks the file as soon as you set it, and says which of these it is, because they need different things from you: the file is not there; it is a database of a newer version than the KeePassXC on this Mac can read; it is not a KeePass database at all; it is an old KeePass 1 file (<code>.kdb</code>), which has to be converted in KeePassXC first; or it is in iCloud Drive and has not been downloaded to this Mac yet. That last one is not a fault and fixes itself &mdash; open its folder in the Finder and wait.</p>

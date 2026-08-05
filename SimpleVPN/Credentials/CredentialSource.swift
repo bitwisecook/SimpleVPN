@@ -114,13 +114,26 @@ struct CredentialSource: Codable, Sendable, Equatable {
     /// conflating the two is what made every 1Password fetch fail.
     var vault = ""
 
+    /// WHICH CONFIGURED SOURCE INSTANCE this VPN reads — level 2's id, stored at
+    /// level 3 (see SignInSourceInstances.swift). "" means "the one SimpleVPN set
+    /// up", which after migration is the database the old single-valued settings
+    /// named; it deliberately does not mean "any of them"
+    /// (`SourceInstanceResolver`).
+    ///
+    /// An OPAQUE id, never a path: a database that moves is the same database, and
+    /// a profile keyed on its path would silently point at nothing — or at whatever
+    /// now sits there. Empty for every single-instance vendor, which have exactly
+    /// one thing to talk to and so nothing to name.
+    var instanceID = ""
+
     /// Which of the source item's fields feed which auth role, keyed by
     /// `CredentialField.rawValue` (username/password/otp). Empty ⇒ auto-detect
     /// from the item's field purposes/types (1Password's USERNAME/PASSWORD/OTP).
     var fieldMap: [String: String] = [:]
 
     var isDefault: Bool {
-        kind == .manual && reference.isEmpty && account.isEmpty && vault.isEmpty && fieldMap.isEmpty
+        kind == .manual && reference.isEmpty && account.isEmpty && vault.isEmpty
+            && instanceID.isEmpty && fieldMap.isEmpty
     }
 
     init() {}
@@ -138,6 +151,10 @@ struct CredentialSource: Codable, Sendable, Equatable {
         kind = try c.decodeIfPresent(CredentialSourceKind.self, forKey: .kind) ?? .manual
         reference = try c.decodeIfPresent(String.self, forKey: .reference) ?? ""
         account = try c.decodeIfPresent(String.self, forKey: .account) ?? ""
+        // Absent in every blob written before instances existed — and absent means
+        // "the one SimpleVPN set up", which is exactly what makes those profiles
+        // keep reading the database they always read.
+        instanceID = try c.decodeIfPresent(String.self, forKey: .instanceID) ?? ""
         fieldMap = try c.decodeIfPresent([String: String].self, forKey: .fieldMap) ?? [:]
         if let stored = try c.decodeIfPresent(String.self, forKey: .vault) {
             vault = stored

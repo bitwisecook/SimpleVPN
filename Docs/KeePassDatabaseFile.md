@@ -66,8 +66,34 @@ brew install --cask keepassxc     # SimpleVPN never installs it for you
 `.kdbx`, type its password, and (optionally) turn on *Remember the database password with
 Touch ID*.
 
-Per VPN, the entry is named by its **path in the database** — its groups and its title,
-separated by slashes, e.g. `VPN/Work`. That goes in the VPN's **Sign-In** tab.
+### More than one database
+
+You can set up **as many databases as you like** — a work one and a personal one is the
+ordinary case. Each is a named entry in **Your KeePass Databases**, with its own file, its own
+key file and its own security-key slot, and each is checked on its own: the work database
+being on a drive that isn't plugged in does not stop the personal one working, and the pane
+says which is which rather than averaging them into one answer.
+
+Three levels, kept apart deliberately (see `SimpleVPN/Credentials/SignInSourceInstances.swift`):
+
+| Level | What it is | Where it lives |
+|---|---|---|
+| 1 · transport | Where `keepassxc-cli` is on this Mac | App settings, one per Mac — the same tool opens every database |
+| 2 · database | Which `.kdbx`, plus its key file and slot | App settings, **one or more**, each named |
+| 3 · per VPN | Which database + which entry (+ optional username) | That VPN's profile. No secrets, ever — not even a path |
+
+A VPN remembers its database by an **opaque id**, not by its name or its path: rename the
+database, or move the file, and the VPNs reading it keep working. Removing a database names the
+VPNs that read it first, and each of those then asks you to choose another rather than being
+silently pointed at somebody else's vault.
+
+Per VPN, in the **Sign-In** tab, the question is asked as two numbered steps: **which database**,
+then **which entry** in it. The entry is named by its **path in the database** — its groups and
+its title, separated by slashes, e.g. `VPN/Work`.
+
+A VPN set up before any of this existed keeps working untouched: the previous single-valued
+settings become the first database (named after its own file), and a profile that names no
+database reads that one.
 
 ### KeePassXC
 

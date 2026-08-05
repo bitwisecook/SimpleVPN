@@ -206,6 +206,19 @@ nonisolated enum LocalVaultAvailability: Sendable, Equatable {
 
     var isOffered: Bool { self != .notInstalled }
     var isReady: Bool { self == .ready }
+
+    /// Useless to usable, as a number — so "the best of this vendor's vaults" is one
+    /// `max` rather than a chain of `if`s in the gatherer. It exists because a
+    /// multi-instance vendor's ROW has to be offered when ANY of its vaults can
+    /// answer: one database being missing must not hide the one that is ready.
+    var rank: Int {
+        switch self {
+        case .notInstalled: 0
+        case .blocked: 1
+        case .unchecked: 2
+        case .ready: 3
+        }
+    }
 }
 
 // MARK: - Where the vendor's own documentation lives
@@ -744,7 +757,21 @@ nonisolated struct SignInSourceFacts: Sendable, Equatable {
     /// Per-vendor live answer. A vendor missing from the dictionary is treated
     /// as `.notInstalled` — an unscanned Mac offers no vendor rows rather than
     /// offering broken ones.
+    ///
+    /// For a vendor that can have several vaults (`SourceCardinality.multiple`) this
+    /// is the BEST of them: the row is offered when any one of them can answer.
+    /// Which one is which is `vaultInstances`.
     var vaults: [LocalVaultVendor: LocalVaultAvailability] = [:]
+
+    /// LEVEL 2's live answer, per configured instance. One database can be missing
+    /// while another is ready, and the four-state model plus its enablement banners
+    /// apply to each of them separately.
+    var vaultInstances: [SourceInstanceID: LocalVaultAvailability] = [:]
+
+    /// The instances themselves, as they were when this was gathered — so the
+    /// chooser, the readiness check and a diagnostic report all name the same
+    /// vaults without a second read of the defaults.
+    var instances: [LocalVaultVendor: [SourceInstance]] = [:]
 
     /// This Mac can ask for a fingerprint (or Apple Watch, or the account
     /// password) — decides whether the keychain row promises one.
@@ -784,6 +811,31 @@ nonisolated struct SignInSourceFacts: Sendable, Equatable {
     /// from an absent one.
     func rawAvailability(_ vendor: LocalVaultVendor) -> LocalVaultAvailability {
         vaults[vendor] ?? .notInstalled
+    }
+
+    /// ONE INSTANCE's live answer — the level-2 form of `availability(_:)`, and
+    /// filtered by the vendor's switch for exactly the same reason: off means not
+    /// offered anywhere.
+    ///
+    /// A single-instance vendor answers from the vendor row, because it has one
+    /// thing to talk to and no list. A `nil` instance means the default one.
+    func availability(_ vendor: LocalVaultVendor,
+                      instance: SourceInstanceID?) -> LocalVaultAvailability {
+        guard !disabledVendors.contains(vendor) else { return .notInstalled }
+        return rawAvailability(vendor, instance: instance)
+    }
+
+    /// The same, past the switch. Settings-pane only, like `rawAvailability(_:)`.
+    func rawAvailability(_ vendor: LocalVaultVendor,
+                         instance: SourceInstanceID?) -> LocalVaultAvailability {
+        guard vendor.cardinality.allowsSeveral else { return rawAvailability(vendor) }
+        let resolved = instance ?? instances[vendor]?.first?.id
+        guard let resolved else { return rawAvailability(vendor) }
+        return vaultInstances[resolved] ?? rawAvailability(vendor)
+    }
+
+    func instances(for vendor: LocalVaultVendor) -> [SourceInstance] {
+        instances[vendor] ?? []
     }
 
     func isEnabled(_ vendor: LocalVaultVendor) -> Bool { !disabledVendors.contains(vendor) }

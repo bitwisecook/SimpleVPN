@@ -55,12 +55,26 @@ protocol LocalVaultAdapter: Sendable {
     /// Cheap, prompt-free, no subprocesses. Safe to call on every refresh.
     /// May answer `.unchecked` when only a deep scan can tell.
     func quickScan() -> LocalVaultAvailability
+    /// The same cheap answer for ONE configured instance (level 2 — see
+    /// SignInSourceInstances.swift). A vendor that declares
+    /// `SourceCardinality.single` has exactly one thing to talk to and inherits the
+    /// default below, which ignores the argument; a multi-instance vendor probes
+    /// each of its vaults separately, because one database can be missing while
+    /// another is ready.
+    func quickScan(instance: SourceInstance?) -> LocalVaultAvailability
     /// The full answer. `quick` is what the cheap scan already established, so
     /// an adapter never repeats work (or spawns anything for an absent vendor).
     func deepScan(quick: LocalVaultAvailability) async -> LocalVaultAvailability
     /// The fetcher for a stored source, or nil when the source names nothing to
     /// fetch from (no item linked yet).
     func provider(for source: CredentialSource) -> (any CredentialProvider)?
+}
+
+extension LocalVaultAdapter {
+    /// A singular vendor's instance scan IS its vendor scan. Declared once here so a
+    /// `.single` adapter needs no boilerplate and cannot accidentally grow a
+    /// per-instance answer that means nothing.
+    func quickScan(instance: SourceInstance?) -> LocalVaultAvailability { quickScan() }
 }
 
 // MARK: - 1Password
@@ -271,6 +285,38 @@ enum LocalVaultRegistry {
         var out: [LocalVaultVendor: LocalVaultAvailability] = [:]
         for adapter in all { out[adapter.vendor] = adapter.quickScan() }
         return out
+    }
+
+    /// The cheap pass over every vendor AND every configured instance.
+    ///
+    /// A multi-instance vendor's own row is the BEST of its vaults, because the row
+    /// answers "can this vendor get me in at all" — hiding a ready personal
+    /// database because the work one is on an unmounted volume would be a lie. The
+    /// per-vault answers ride alongside it, so the pane, the chooser and a report
+    /// can each say which is which. A vendor with no vaults configured yet still
+    /// gets its vendor-level scan, which is what produces "no database chosen".
+    static func quickScanAll(
+        instances: [LocalVaultVendor: [SourceInstance]]
+    ) -> (vendors: [LocalVaultVendor: LocalVaultAvailability],
+          instances: [SourceInstanceID: LocalVaultAvailability]) {
+        var vendors: [LocalVaultVendor: LocalVaultAvailability] = [:]
+        var perInstance: [SourceInstanceID: LocalVaultAvailability] = [:]
+        for adapter in all {
+            let list = adapter.vendor.cardinality.allowsSeveral
+                ? (instances[adapter.vendor] ?? []) : []
+            guard !list.isEmpty else {
+                vendors[adapter.vendor] = adapter.quickScan()
+                continue
+            }
+            var best = LocalVaultAvailability.notInstalled
+            for instance in list {
+                let answer = adapter.quickScan(instance: instance)
+                perInstance[instance.id] = answer
+                if answer.rank > best.rank { best = answer }
+            }
+            vendors[adapter.vendor] = best
+        }
+        return (vendors, perInstance)
     }
 
     /// The full pass. Sequential on purpose: each of these can put a vendor's own

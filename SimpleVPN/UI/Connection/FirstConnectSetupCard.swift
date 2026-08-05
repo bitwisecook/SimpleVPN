@@ -181,22 +181,37 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             case .keePassFile:
+                // TWO QUESTIONS, in order, even in this small card: WHICH database
+                // (you may have a work one and a personal one) and WHICH entry in it.
+                // The step numbering is what stops the second field reading as the
+                // whole answer.
+                keePassFileDatabaseStep
                 // A `.kdbx` entry is named by its PATH in the database — its groups
                 // and its title, separated by slashes. Not an address: the file has no
                 // URL matching of its own, which is the one place this row differs
                 // from the KeePassXC row above it.
+                Text(SignInSourceSteps.stepTwoTitle(vendor: .keePassFile,
+                                                    instanceName: keePassFileDatabaseName))
+                    .font(.caption.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
                 HStack {
                     TextField("Entry path in your database, for example VPN/Work", text: $apServer)
                         .textFieldStyle(.roundedBorder)
                         .autocorrectionDisabled()
                         .onSubmit(saveKeePassFile)
+                        .accessibilityLabel(SignInSourceSteps.stepTwoTitle(
+                            vendor: .keePassFile, instanceName: keePassFileDatabaseName))
+                        .accessibilityValue(SignInSourceSteps.spokenStep(
+                            2, of: .keePassFile,
+                            chosen: apServer.isEmpty ? nil : apServer))
                     Button("Use") { saveKeePassFile() }.buttonStyle(.glass)
                         .disabled(apServer.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
                 .onAppear {
                     apServer = source.reference.isEmpty ? profile.name : source.reference
                 }
-                Text("Which database, and its password, are set once for every VPN in Settings \u{25B8} Sign-In Sources. SimpleVPN only ever reads your database.")
+                Text("Your databases, and their passwords, are set up in Settings \u{25B8} Sign-In Sources; this VPN just says which of them to read. SimpleVPN only ever reads your database.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -407,5 +422,51 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
         s.kind = .keePassFile
         s.reference = apServer.trimmingCharacters(in: .whitespaces)
         Task { try? await vpn.setCredentialSource(s, for: profile.id) }
+    }
+
+    // MARK: Step one — which database
+
+    private var keePassFileDatabases: [SourceInstance] {
+        SignInSourceSettingsStore.shared.instances(for: .keePassFile)
+    }
+
+    private var keePassFileDatabaseName: String? {
+        SourceInstanceResolver.resolve(id: source.selection.instance, vendor: .keePassFile,
+                                      instances: keePassFileDatabases).instance?.name
+    }
+
+    /// Only shown when there is genuinely a choice: one database (the ordinary case,
+    /// and what somebody who has just migrated has) needs no picker, and none at all
+    /// is a setup state the source's own row already explains.
+    @ViewBuilder private var keePassFileDatabaseStep: some View {
+        let databases = keePassFileDatabases
+        if databases.count > 1 {
+            Text(SignInSourceSteps.stepOneTitle(vendor: .keePassFile))
+                .font(.caption.weight(.semibold))
+                .accessibilityAddTraits(.isHeader)
+            Picker(SignInSourceSteps.stepOneTitle(vendor: .keePassFile),
+                   selection: Binding(
+                    get: { source.selection.instance ?? databases.first?.id },
+                    set: { chooseKeePassFileDatabase($0) })) {
+                ForEach(databases) { database in
+                    Text(database.name).tag(Optional(database.id))
+                }
+            }
+            .labelsHidden()
+            .accessibilityLabel(SignInSourceSteps.stepOneTitle(vendor: .keePassFile))
+            .accessibilityValue(SignInSourceSteps.spokenStep(1, of: .keePassFile,
+                                                            chosen: keePassFileDatabaseName))
+            .accessibilityHint("Chooses which of your KeePass databases this VPN reads.")
+        }
+    }
+
+    private func chooseKeePassFileDatabase(_ id: SourceInstanceID?) {
+        var s = source
+        s.kind = .keePassFile
+        s.instanceID = id?.rawValue ?? ""
+        Task { try? await vpn.setCredentialSource(s, for: profile.id) }
+        if let name = keePassFileDatabases.first(where: { $0.id == id })?.name {
+            AccessibilityAnnouncer.sayNow("Reading \(name).")
+        }
     }
 }

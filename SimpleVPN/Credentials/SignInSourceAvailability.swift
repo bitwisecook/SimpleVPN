@@ -94,7 +94,15 @@ final class SignInSourceAvailability {
             scanned = true
             return
         }
-        next.vaults = LocalVaultRegistry.quickScanAll()
+        // LEVEL 2 first: the configured vaults, then a cheap scan of each. The
+        // vendor row is the best of them (`quickScanAll(instances:)` says why), so a
+        // missing work database never hides a ready personal one.
+        next.instances = Dictionary(uniqueKeysWithValues: LocalVaultVendor.allCases.map {
+            ($0, settings.instances(for: $0))
+        }.filter { !$0.1.isEmpty })
+        let probed = LocalVaultRegistry.quickScanAll(instances: next.instances)
+        next.vaults = probed.vendors
+        next.vaultInstances = probed.instances
         // For the vendors whose tool is installed somewhere we won't run from: the
         // path, so the banner can name it instead of claiming it isn't installed.
         next.toolsFoundOutsideAllowList = Self.toolsOutsideAllowList()
@@ -252,6 +260,15 @@ final class SignInSourceAvailability {
         }
         guard let adapter = LocalVaultRegistry.adapter(for: source.kind) else { return false }
         guard facts.availability(adapter.vendor).isOffered else { return false }
+        // WHICH VAULT, not just which vendor. A profile naming a database that is no
+        // longer set up cannot serve — and must say so here, before a connect
+        // discovers it, rather than being quietly pointed at a different one.
+        let selection = source.selection
+        guard SourceInstanceResolver.resolve(
+            selection, vendor: adapter.vendor,
+            instances: facts.instances(for: adapter.vendor)).isUsable else { return false }
+        guard facts.availability(adapter.vendor, instance: selection.instance).isOffered
+        else { return false }
         return adapter.provider(for: source) != nil
     }
 

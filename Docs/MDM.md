@@ -26,6 +26,22 @@ All keys are optional. An absent key means the user is free.
 | `SignInSourceToolPaths` | dictionary of string → string | Pins a tool's absolute path, keyed by the tool's binary name (currently `keeper`). Relative paths are ignored — a bare name would be resolved by rules the app does not control. |
 | `DisableCredentialToolDiscovery` | Boolean | SimpleVPN never looks for password apps on this Mac: no vendor rows, no inventory. Typing a sign-in, the Apple keychain and Apple Passwords still work. |
 
+Sign-in configuration has **three levels**, and policy can pin at each of them. The keys above are
+level 1 — *how* SimpleVPN reaches a vendor at all (its switch, its tool's path, its endpoint), which
+is genuinely one per Mac per vendor. The two keys below are level 2 — *which* vault, of which a
+person may legitimately have several (a work `.kdbx` and a personal one). Level 3 — which vault plus
+which entry a given VPN uses — lives in that VPN's own profile and is not an app setting.
+
+| Key | Type | Effect |
+|---|---|---|
+| `SignInSourceInstances` | dictionary of string → array of dictionaries | Sets the **list of vaults** for a vendor, keyed by vendor slug (only `keepassfile` has more than one today). Each entry is `{ "name": …, "database": …, "key-file": …, "security-key-slot": … }` — the field keys are the last components of the `creds.<slug>.<field>` setting ids. Present for a vendor ⇒ that vendor's list is policy's: read-only, and nothing may be added to it. Ids are derived from the array's order (`managed-1`, `managed-2`, …), so one profile deployed to a fleet names the same vault on every Mac. |
+| `SignInSourceForbidAddingInstances` | Boolean | The user may use the vaults that are there and may not add more. Renaming and removing are still theirs unless `SignInSourceInstances` or `LockConfiguration` is also set. |
+
+A single-valued `signin.keepassfile.database` (or `…keyfile`, or `…securitykey-slot`) forced by an
+existing payload **still works**: it pins that field on the FIRST vault in the list, which is the one
+the app's own migration creates out of the previous single-valued settings. Nothing an administrator
+already deployed has to change.
+
 Notes on the sign-in keys:
 
 - A denied or pinned row is **visibly locked and says why** ("Your organization decides whether
@@ -38,8 +54,15 @@ Notes on the sign-in keys:
   check and the run.
 - Forbidding a vendor means it is **neither offered nor mentioned** — it does not reappear in the
   chooser's "other password apps on this Mac" list.
+- A vault list set by `SignInSourceInstances` is shown with its rows **read-only and saying whose
+  decision it is**, and Add / Rename / Remove all say why they are unavailable — the same
+  never-silently-revert rule as a pinned path.
+- Removing a vault a VPN reads **names that VPN first**. Policy cannot cause a silent orphan either:
+  a VPN whose vault is no longer in the list is told to choose one rather than being pointed at a
+  different vault.
 - The slugs are a stable contract, like every setting id. Each vendor's controls are also
-  addressable individually as `creds.<slug>.enabled` and `creds.<slug>.<field>` — see
+  addressable individually as `creds.<slug>.enabled`, `creds.<slug>.<field>` and — for a vendor with
+  more than one vault — `creds.<slug>.<vaults>` (`creds.keepassfile.databases`) — see
   `Docs/ToolDiscovery.md` and the app's own manual (Sign-In Sources).
 
 ## Sample configuration profile payload
@@ -77,6 +100,19 @@ targeting `com.bragi0.SimpleVPN`:
           <dict>
             <key>keeper</key><string>/opt/corp/bin/keeper</string>
           </dict>
+          <!-- Level 2: the one shared database everybody reads, and no adding
+               to the list. -->
+          <key>SignInSourceInstances</key>
+          <dict>
+            <key>keepassfile</key>
+            <array>
+              <dict>
+                <key>name</key><string>Company vault</string>
+                <key>database</key><string>/Volumes/Corp/vpn.kdbx</string>
+              </dict>
+            </array>
+          </dict>
+          <key>SignInSourceForbidAddingInstances</key><true/>
         </dict>
       </dict>
     </array>

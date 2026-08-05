@@ -177,7 +177,53 @@ nonisolated enum DiagnosticReportInventory {
     /// installed-but-not-enabled, and installed-outside-the-allow-list.
     @MainActor
     static func vendorStateFields(facts: SignInSourceFacts) -> [DiagnosticReportField] {
-        LocalVaultVendor.allCases.map { vendor in
+        LocalVaultVendor.allCases.flatMap { vendor -> [DiagnosticReportField] in
+            [vendorStateField(vendor, facts: facts)] + instanceStateFields(vendor, facts: facts)
+        }
+    }
+
+    /// One row per CONFIGURED VAULT, for a vendor that can have several (level 2 —
+    /// see SignInSourceInstances.swift). Reported separately from the vendor's own
+    /// row because they answer different questions: the vendor row says whether this
+    /// vendor can get you in at all, and these say which of your vaults is actually
+    /// readable. A maintainer looking at "KeePass database file: ready" needs to know
+    /// that the work database is on an unmounted volume and the personal one is fine.
+    ///
+    /// NO PATHS. A report says a vault's NAME and its state; where somebody keeps
+    /// their passwords is not something to put in a bundle they email to us. (The
+    /// per-vault state sentence names the KIND of problem — "the database file is not
+    /// where SimpleVPN was told to look" — which is what a maintainer needs.)
+    @MainActor
+    static func instanceStateFields(_ vendor: LocalVaultVendor,
+                                    facts: SignInSourceFacts) -> [DiagnosticReportField] {
+        guard vendor.cardinality.allowsSeveral else { return [] }
+        let copy = LocalVaultCopyBook.copy(for: vendor)
+        let instances = facts.instances(for: vendor)
+        guard !instances.isEmpty else {
+            return [DiagnosticReportField(
+                label: "\(copy.title): \(vendor.instanceNounPlural)",
+                value: .words("none set up"))]
+        }
+        return instances.enumerated().map { index, instance in
+            var detail: [ReportValue] = [
+                .state(index == 0
+                    ? "the one a VPN gets when it names none (the default)"
+                    : "chosen by name"),
+            ]
+            for field in SignInSourceSettings.instanceFields(for: vendor) {
+                // Whether it is SET, never what it is set to.
+                detail.append(.flag(!instance.value(for: field).isEmpty))
+            }
+            return DiagnosticReportField(
+                label: "\(copy.title): \(instance.name)",
+                value: .state(stateWords(facts.rawAvailability(vendor, instance: instance.id))),
+                detail: detail)
+        }
+    }
+
+    @MainActor
+    static func vendorStateField(_ vendor: LocalVaultVendor,
+                                 facts: SignInSourceFacts) -> DiagnosticReportField {
             let copy = LocalVaultCopyBook.copy(for: vendor)
             // HOW SimpleVPN reaches it, from the adapter itself — the shape of the
             // channel is what decides how detection and failure behave, so it is
@@ -198,7 +244,6 @@ nonisolated enum DiagnosticReportInventory {
                 label: copy.title,
                 value: .state(stateWords(facts.rawAvailability(vendor))),
                 detail: detail)
-        }
     }
 
     /// PKCS#11 provider modules. Filesystem only — `PKCS11ModuleDiscovery.modules()`

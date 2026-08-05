@@ -385,6 +385,15 @@ struct SignInChooserPopover: View {
     @Binding var isPresented: Bool
     @Environment(SettingsRouter.self) private var router: SettingsRouter?
 
+    /// The second half of the two-step question, held as a draft and committed
+    /// deliberately — NOT on every keystroke. Writing the profile means
+    /// `saveToPreferences()`, which is a system call and a preferences round trip:
+    /// one per typed character would be absurd. Committed when a vault is chosen
+    /// (rare, and worth persisting at once), on Return, and on Done.
+    @State private var draftInstance: SourceInstanceID?
+    @State private var draftEntry = ""
+    @State private var draftAccount = ""
+
     private var source: CredentialSource { vpn.credentialSource(for: profile.id) }
     private var auth: VPNAuthConfig { vpn.authConfig(for: profile.id) }
     private var facts: SignInSourceFacts { sources.facts(allowsPasswordSave: allowsPasswordSave) }
@@ -405,15 +414,38 @@ struct SignInChooserPopover: View {
                 onChoose: { choose($0) },
                 onOpenApp: { open($0) },
                 onConfigure: { configure($0) })
+            // STEP TWO OF THE SAME QUESTION. Picking "KeePass database file" is not
+            // an answer on its own: which database, and which entry in it, is what
+            // makes it work — and asking that here, in order, is what keeps the
+            // chooser from being a flat list that leaves the real choice somewhere
+            // else. Only for a vendor that can genuinely have several: the singular
+            // ones have nothing to choose between.
+            if let vendor = chosenMultiInstanceVendor {
+                Divider()
+                SignInInstanceEntryPicker(
+                    vendor: vendor,
+                    instance: Binding(get: { draftInstance },
+                                      set: { draftInstance = $0; commitSelection() }),
+                    entry: $draftEntry,
+                    account: $draftAccount,
+                    entryPrompt: entryPrompt(for: vendor),
+                    accountLabel: "Username (optional)",
+                    onConfigure: { configure(vendor) })
+                    .onSubmit { commitSelection() }
+            }
             HStack {
                 Spacer()
-                Button("Done") { isPresented = false }
+                Button("Done") { commitSelection(); isPresented = false }
                     .keyboardShortcut(.cancelAction)   // ESC closes, house rule
             }
         }
         .padding(14)
         .frame(width: 420)
-        .onAppear { sources.refresh() }
+        .onAppear { sources.refresh(); seedDraft() }
+        .onDisappear { commitSelection() }
+        // Choosing a different source rewrites what step two is asking about, so the
+        // draft is reseeded rather than carrying one vendor's entry into another's.
+        .onChange(of: source.kind) { seedDraft() }
         .task { await sources.deepScan() }
         // Same live refresh as the first-run card: an app started or a CLI
         // installed while this is open must change what is on offer, and
@@ -425,6 +457,46 @@ struct SignInChooserPopover: View {
                 await sources.recheckIfDue()
             }
         }
+    }
+
+    /// The vendor whose two-step block is on screen: the one just chosen, and only
+    /// when it can have several vaults.
+    private var chosenMultiInstanceVendor: LocalVaultVendor? {
+        guard let vendor = LocalVaultRegistry.adapter(for: source.kind)?.vendor,
+              vendor.cardinality.allowsSeveral else { return nil }
+        return vendor
+    }
+
+    private func entryPrompt(for vendor: LocalVaultVendor) -> String {
+        switch vendor {
+        case .keePassFile: "VPN/Work"
+        case .onePassword, .keePassXC, .keeper, .bitwarden: "GR Lab VPN"
+        }
+    }
+
+    private func seedDraft() {
+        let selection = source.selection
+        draftInstance = selection.instance
+        draftEntry = selection.entry
+        draftAccount = selection.account
+    }
+
+    /// Write the two-step answer into the profile — once, and only when something
+    /// really changed.
+    private func commitSelection() {
+        guard let vendor = chosenMultiInstanceVendor else { return }
+        var next = source
+        var selection = next.selection
+        // A vault that has gone is left named rather than silently repointed: the
+        // picker says so, and the user chooses.
+        let resolved = SignInSourceSettingsStore.shared.instanceStore
+            .resolve(draftInstance, for: vendor)
+        selection.instance = resolved.instance?.id ?? draftInstance
+        selection.entry = draftEntry.trimmingCharacters(in: .whitespaces)
+        selection.account = draftAccount.trimmingCharacters(in: .whitespaces)
+        next.selection = selection
+        guard next != source else { return }
+        Task { try? await vpn.setCredentialSource(next, for: profile.id) }
     }
 
     private func choose(_ option: SignInSourceOption) {

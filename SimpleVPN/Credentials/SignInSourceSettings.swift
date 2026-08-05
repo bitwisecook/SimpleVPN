@@ -216,6 +216,15 @@ nonisolated enum SignInSourceSettings {
     static func enabledSettingID(_ vendor: LocalVaultVendor) -> String {
         "creds.\(vendor.settingSlug).enabled"
     }
+    /// The LEVEL-2 LIST control for a vendor that can have several vaults — the
+    /// add/rename/remove/choose row. A real user-facing control, so it is a real
+    /// spec with a real manual anchor, addressable by MDM and the CLI like every
+    /// other. Only declared for a vendor whose cardinality is `.multiple`: a spec
+    /// for a list that cannot have two entries in it would be a question with no
+    /// answer.
+    static func instanceListSettingID(_ vendor: LocalVaultVendor) -> String {
+        "creds.\(vendor.settingSlug).\(vendor.instanceNounPlural)"
+    }
     static let discoverySettingID = "creds.discovery"
     /// The two `.kdbx` controls that are not fields: a secret to type, and whether
     /// macOS should remember it. They are real user-facing controls, so per AGENTS.md
@@ -359,7 +368,12 @@ nonisolated enum ManagedSignInSourcePolicy {
     static let pinnedPathsKey = "SignInSourceToolPaths"
     static let disableDiscoveryKey = "DisableCredentialToolDiscovery"
 
+    /// Every key an administrator can force. The level-2 ones (pinned instance
+    /// lists, and forbidding additions) are declared in SignInSourceInstances.swift
+    /// beside the type they configure, and joined here so `isManaged` and the
+    /// summary stay total.
     static let allKeys = [allowedKey, forbiddenKey, pinnedPathsKey, disableDiscoveryKey]
+        + instancePolicyKeys
 
     private static func forcedArray(_ key: String, _ store: UserDefaults) -> [String]? {
         guard store.objectIsForced(forKey: key) else { return nil }
@@ -430,6 +444,8 @@ nonisolated enum ManagedSignInSourcePolicy {
         if discoveryForbidden(store) {
             out.append("SimpleVPN doesn\u{2019}t look for password apps on this Mac.")
         }
+        // Level 2: which vaults are set up for you, and whether you may add more.
+        out += instanceSummary(store)
         return out
     }
 }
@@ -664,8 +680,18 @@ final class SignInSourceSettingsStore {
     /// which Observation cannot see into.
     private(set) var revision = 0
 
+    /// LEVEL 2 — the named vaults, one or more per vendor (SignInSourceInstances
+    /// .swift). A separate object because it is a separate level: this class owns
+    /// "how we reach a vendor" (level 1) and the validation every level shares.
+    let instanceStore: SourceInstanceStore
+
     init(store: UserDefaults = .standard) {
         self.store = store
+        self.instanceStore = SourceInstanceStore(store: store)
+        // The single-valued settings become instance #1, once. Done HERE rather
+        // than lazily in a getter: a getter that writes defaults and bumps a
+        // revision mid-render is how a SwiftUI update loop starts.
+        instanceStore.migrateIfNeeded()
     }
 
     // MARK: The master switch
@@ -755,6 +781,15 @@ final class SignInSourceSettingsStore {
     }
 
     func setValue(_ raw: String, for field: VendorConfigField) {
+        // A LEVEL-2 FIELD BELONGS TO ONE VAULT, never to the vendor as a whole, so a
+        // write that names no vault lands on the default one (creating it if this is
+        // the first database somebody has chosen) rather than on the old
+        // single-valued key. Without this redirect a caller could write a path that
+        // nothing reads — see SignInSourceInstances.swift.
+        if field.level == .instance, field.vendor != nil {
+            setValue(raw, for: field, instance: nil)
+            return
+        }
         guard pinnedValue(for: field) == nil, !ManagedPolicy.lockConfiguration else { return }
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty {

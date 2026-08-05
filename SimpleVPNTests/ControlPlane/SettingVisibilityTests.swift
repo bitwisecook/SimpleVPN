@@ -258,8 +258,27 @@ struct SettingRenderingTests {
         // The two lists the catalog is generated from.
         #expect(pane.contains("LocalVaultVendor.allCases"),
                 "the pane must walk every vendor, or a new vendor ships with no row")
-        #expect(pane.contains("SignInSourceSettings.fields(for: vendor)"),
-                "the pane must walk each vendor's declared fields")
+        // Each vendor's declared fields, walked BY LEVEL: level 1 (how SimpleVPN
+        // reaches the vendor at all) and level 2 (which of its vaults) are separate
+        // sections on screen because they are separate questions — see
+        // SignInSourceInstances.swift. Both lists must be walked, or a field at one
+        // level ships with no row.
+        #expect(pane.contains("SignInSourceSettings.transportFields(for: vendor)"),
+                "the pane must walk each vendor's level-1 fields")
+        #expect(pane.contains("SignInSourceSettings.instanceFields(for: vendor)"),
+                "the pane must walk each vendor's level-2 fields")
+        // …and those two lists together really are every field, so nothing is at a
+        // level the pane never renders.
+        for vendor in LocalVaultVendor.allCases {
+            #expect(SignInSourceSettings.transportFields(for: vendor).count
+                    + SignInSourceSettings.instanceFields(for: vendor).count
+                    == SignInSourceSettings.fields(for: vendor).count,
+                    "\(vendor) has a field at neither level")
+        }
+        // The level-2 LIST control is rendered too — a vendor that can have several
+        // vaults and no way to add one would be a setting with no screen.
+        #expect(pane.contains("SignInSourceSettings.instanceListSettingID(vendor)"),
+                "the pane must render the list of vaults for a multi-vault vendor")
         // …and it must render them through the shared row idiom, which is what
         // carries the label, summary, manual link and reveal.
         #expect(pane.contains("EngineSettingRow"))
@@ -269,6 +288,31 @@ struct SettingRenderingTests {
         for spec in CredentialSourceSettings.all {
             #expect(CredentialSourceSettings.catalog[spec.id].id == spec.id)
         }
+    }
+
+    /// THE PER-VPN CHOICE IS TWO STEPS, in every host that asks it. "Which vault"
+    /// used to be invisible from the VPN's own editor — it was a single app-wide
+    /// setting — so the check is that each host that asks for an ENTRY also asks
+    /// which vault it is in, through the one shared component rather than by
+    /// hand-rolling a picker that could drift from it.
+    @Test func everyHostAsksWhichVaultBeforeWhichEntry() throws {
+        let sources = try Self.uiSources()
+        let editor = try #require(sources["EditVPNView.swift"])
+        #expect(editor.contains("SignInInstanceEntryPicker"),
+                "the editor must ask which vault, not just which entry")
+        let chooser = try #require(sources["SignInSourceChooser.swift"])
+        #expect(chooser.contains("SignInInstanceEntryPicker"),
+                "the chooser must carry the two-step question, not leave it elsewhere")
+        // The compact first-connect card has its own layout, so it uses the shared
+        // COPY rather than the shared view — which is what keeps the step numbering
+        // identical in all three places.
+        let card = try #require(sources["FirstConnectSetupCard.swift"])
+        #expect(card.contains("SignInSourceSteps.stepOneTitle"))
+        #expect(card.contains("SignInSourceSteps.stepTwoTitle"))
+        // And the numbering is the shared type's, never a literal in a view.
+        let picker = try #require(sources["SignInInstanceEntryPicker.swift"])
+        #expect(!picker.contains("\"Step 1"), "step numbering belongs to SignInSourceSteps")
+        #expect(!picker.contains("\"Step 2"), "step numbering belongs to SignInSourceSteps")
     }
 
     /// THE LANDMINE, checked in the source. `TextField("some example", text:)` passes

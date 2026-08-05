@@ -58,7 +58,22 @@ struct SignInSourcesSettings: View {
     @State private var securityKeyCheck: KDBXSecurityKeyCheckResult?
     @State private var checkingSecurityKey = false
     @State private var databasePasswordStore = KDBXMasterPasswordStore.shared
+    /// Which vault this PANE is editing, per vendor. Nothing to do with which one a
+    /// VPN reads — that is level 3, in the profile.
+    @State private var editingInstance: [LocalVaultVendor: SourceInstanceID] = [:]
+    /// The add / rename / remove asks. Each is an alert rather than an inline field:
+    /// naming a thing and destroying one both deserve a deliberate confirmation, and
+    /// the removal one has to be able to NAME the VPNs that would be orphaned.
+    @State private var addingTo: LocalVaultVendor?
+    @State private var newInstanceName = ""
+    @State private var renaming: SourceInstance?
+    @State private var renameText = ""
+    @State private var removing: SourceInstance?
     @Environment(SettingsRouter.self) private var router: SettingsRouter?
+    /// Optional: present in the app, absent in previews. Used ONLY to name the VPNs
+    /// that would be left without a vault — without it the warning still appears, it
+    /// just cannot list them.
+    @Environment(VPNController.self) private var vpn: VPNController?
 
     private var specs: EngineSettingCatalog { CredentialSourceSettings.catalog }
 
@@ -136,6 +151,101 @@ struct SignInSourcesSettings: View {
         }
         .onChange(of: router?.appSettingsGeneration ?? 0) { followRoute() }
         .task { await sources.deepScan() }
+        .alert("Add a \(addingTo?.instanceNoun ?? "vault")",
+               isPresented: Binding(get: { addingTo != nil },
+                                    set: { if !$0 { addingTo = nil } })) {
+            TextField("", text: $newInstanceName,
+                      prompt: Text(verbatim: addingTo.map { "\($0.instanceNoun.capitalized) 2" }
+                                   ?? "Name"))
+                .accessibilityLabel("Name")
+            Button("Add") { commitAdd() }
+            Button("Cancel", role: .cancel) { addingTo = nil }
+        } message: {
+            Text("Give it a name you will recognise \u{2014} \u{201C}Work\u{201D} or "
+                 + "\u{201C}Personal\u{201D}, say. You point SimpleVPN at its file next.")
+        }
+        .alert("Rename \u{201C}\(renaming?.name ?? "")\u{201D}",
+               isPresented: Binding(get: { renaming != nil },
+                                    set: { if !$0 { renaming = nil } })) {
+            TextField("", text: $renameText).accessibilityLabel("Name")
+            Button("Rename") { commitRename() }
+            Button("Cancel", role: .cancel) { renaming = nil }
+        } message: {
+            Text("Only the name changes. Every VPN that reads it keeps working \u{2014} they "
+                 + "remember it by an identity of its own, not by its name or its path.")
+        }
+        .alert("Remove \u{201C}\(removing?.name ?? "")\u{201D}?",
+               isPresented: Binding(get: { removing != nil },
+                                    set: { if !$0 { removing = nil } })) {
+            Button("Remove", role: .destructive) { commitRemove() }
+            Button("Cancel", role: .cancel) { removing = nil }
+        } message: {
+            // NAMES the VPNs that still use it. A silently orphaned profile fails at
+            // connect time, days later, with nothing to connect it to a setting
+            // changed here.
+            Text(removalWarning)
+        }
+    }
+
+    // MARK: Adding, renaming and removing a vault
+
+    private func commitAdd() {
+        guard let vendor = addingTo else { return }
+        let added = settings.instanceStore.add(named: newInstanceName, for: vendor)
+        addingTo = nil
+        newInstanceName = ""
+        guard let added else { return }
+        editingInstance[vendor] = added.id
+        sources.refresh()
+        AccessibilityAnnouncer.sayNow(
+            "Added \(added.name). Point SimpleVPN at its file below.")
+    }
+
+    private func commitRename() {
+        guard let instance = renaming else { return }
+        settings.instanceStore.rename(instance.id, to: renameText, for: instance.vendor)
+        renaming = nil
+        sources.refresh()
+        AccessibilityAnnouncer.sayNow("Renamed.")
+    }
+
+    private func commitRemove() {
+        guard let instance = removing else { return }
+        settings.instanceStore.remove(instance.id, for: instance.vendor)
+        if editingInstance[instance.vendor] == instance.id {
+            editingInstance[instance.vendor] = nil
+        }
+        removing = nil
+        sources.refresh()
+        AccessibilityAnnouncer.sayNow(
+            "Removed \(instance.name). SimpleVPN has forgotten where it was; the file itself is "
+            + "untouched.")
+    }
+
+    /// The removal warning, naming the VPNs that read this vault. Built from the
+    /// profiles' own stored sources, so it cannot claim a VPN uses one it doesn't.
+    private var removalWarning: String {
+        guard let instance = removing else { return "" }
+        return SignInSourceSteps.removalWarning(
+            vendor: instance.vendor, name: instance.name,
+            usedBy: profilesUsing(instance))
+    }
+
+    /// Which VPNs name this vault. A profile with no instance id at all counts as
+    /// using the DEFAULT one, because that is exactly what it resolves to — so
+    /// removing the migrated vault warns about every VPN that was set up before
+    /// instances existed, which is the whole point.
+    private func profilesUsing(_ instance: SourceInstance) -> [String] {
+        guard let vpn else { return [] }
+        let all = settings.instances(for: instance.vendor)
+        return vpn.profiles.compactMap { profile in
+            let source = vpn.credentialSource(for: profile.id)
+            guard LocalVaultRegistry.adapter(for: source.kind)?.vendor == instance.vendor
+            else { return nil }
+            let resolution = SourceInstanceResolver.resolve(
+                source.selection, vendor: instance.vendor, instances: all)
+            return resolution.instance?.id == instance.id ? profile.name : nil
+        }
     }
 
     /// The discovery map this pane draws from. `sources.discoveries` is the observable
@@ -208,15 +318,33 @@ struct SignInSourcesSettings: View {
             }
 
             if enabled {
-                ForEach(SignInSourceSettings.fields(for: vendor)) { field in
+                // LEVEL 1 — how SimpleVPN reaches this vendor at all. Per Mac, one
+                // per vendor: one `keepassxc-cli`, whichever database it opens.
+                ForEach(SignInSourceSettings.transportFields(for: vendor)) { field in
                     fieldRows(field)
                 }
-                // Controls that are not paths. Only the `.kdbx` row has any today
-                // (a password to type and whether macOS remembers it), and they are
-                // here rather than in the generic field loop because neither is
-                // stored where a field is stored — one is in memory, the other IS a
-                // keychain item's existence.
-                if vendor == .keePassFile { keePassUnlockRows(locked: lock != nil) }
+                // LEVEL 2 — WHICH vault, one or more. A vendor that declares itself
+                // singular gets neither the list nor the fields, because it has
+                // exactly one thing to talk to and a one-row list would be a
+                // question with no answer.
+                if vendor.cardinality.allowsSeveral {
+                    instanceRows(vendor)
+                    let chosen = chosenInstance(vendor)
+                    if let chosen {
+                        ForEach(SignInSourceSettings.instanceFields(for: vendor)) { field in
+                            fieldRows(field, instance: chosen)
+                        }
+                    }
+                    // Controls that are not paths. Only the `.kdbx` row has any today
+                    // (a password to type and whether macOS remembers it), and they are
+                    // here rather than in the generic field loop because neither is
+                    // stored where a field is stored — one is in memory, the other IS a
+                    // keychain item's existence. Per DATABASE, not per VPN: five VPNs
+                    // reading one database must not mean five copies of its password.
+                    if vendor == .keePassFile {
+                        keePassUnlockRows(locked: lock != nil, instance: chosen)
+                    }
+                }
                 // From `sources.discoveries` — the observable mirror of the ONE
                 // discovery map, so the version this pane prints is the version the
                 // banners and any report see, and it appears here as soon as the deep
@@ -226,6 +354,125 @@ struct SignInSourcesSettings: View {
                 }
             }
         }
+    }
+
+    // MARK: Level 2 — the named vaults
+
+    /// Which vault this pane is editing, per vendor. A choice about the SCREEN, not
+    /// about any VPN: which one a VPN reads is level 3 and lives in its profile.
+    private func chosenInstance(_ vendor: LocalVaultVendor) -> SourceInstance? {
+        let list = settings.instances(for: vendor)
+        if let wanted = editingInstance[vendor], let found = list.first(where: { $0.id == wanted }) {
+            return found
+        }
+        return list.first
+    }
+
+    /// The list itself: one row per vault, each with ITS OWN state sentence, plus
+    /// add / rename / remove. This is where "one database can be missing while
+    /// another is ready" becomes visible — the vendor's own row above answers "can
+    /// this vendor get me in at all", which is a different question.
+    @ViewBuilder private func instanceRows(_ vendor: LocalVaultVendor) -> some View {
+        let spec = specs[SignInSourceSettings.instanceListSettingID(vendor)]
+        let list = settings.instances(for: vendor)
+        let chosen = chosenInstance(vendor)
+        let editLock = settings.instanceStore.editLockReason(vendor)
+        let addLock = settings.instanceStore.addLockReason(vendor)
+        EngineSettingRow(
+            spec: spec,
+            // "Changed" for a list means more than the one you started with.
+            changed: list.count > 1,
+            disabledReason: editLock
+        ) {
+            VStack(alignment: .leading, spacing: 6) {
+                if list.isEmpty {
+                    Label("No \(vendor.instanceNounPlural) yet. Add one, then point SimpleVPN at "
+                          + "its file.", systemImage: "plus.circle")
+                        .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ForEach(list) { instance in
+                        instanceRow(vendor, instance, isChosen: instance.id == chosen?.id,
+                                    locked: editLock != nil)
+                    }
+                }
+                HStack(spacing: 8) {
+                    Button("Add \(vendor.instanceNoun.capitalized)\u{2026}") {
+                        addingTo = vendor
+                        newInstanceName = SourceInstanceMigration.suggestedName(
+                            vendor: vendor, existing: list)
+                    }
+                    .disabled(addLock != nil)
+                    .help(addLock ?? "Set up another \(vendor.instanceNoun) with a name of "
+                          + "its own")
+                    .accessibilityValue(addLock.map { "unavailable \u{2014} \($0)" } ?? "")
+                    .accessibilityIdentifier("creds-add-instance-\(vendor.settingSlug)")
+                    Button("Rename\u{2026}") {
+                        guard let chosen else { return }
+                        renaming = chosen
+                        renameText = chosen.name
+                    }
+                    .disabled(chosen == nil || editLock != nil)
+                    .help(editLock ?? "Change what this \(vendor.instanceNoun) is called")
+                    Button("Remove") {
+                        guard let chosen else { return }
+                        removing = chosen
+                    }
+                    .disabled(chosen == nil || editLock != nil)
+                    .help(editLock ?? "Forget where this \(vendor.instanceNoun) is. The file "
+                          + "itself is left as it is.")
+                    Spacer(minLength: 0)
+                }
+                .controlSize(.small)
+            }
+        }
+    }
+
+    /// One vault: pick it to edit, and read what it can do right now.
+    @ViewBuilder private func instanceRow(_ vendor: LocalVaultVendor, _ instance: SourceInstance,
+                                         isChosen: Bool, locked: Bool) -> some View {
+        let availability = sources.facts.rawAvailability(vendor, instance: instance.id)
+        let copy = LocalVaultCopyBook.copy(for: vendor)
+        let sentence: String = {
+            switch availability {
+            case .ready: return "Ready to use."
+            case .notInstalled: return "Nothing found for it on this Mac."
+            case .unchecked: return copy.uncheckedNote ?? "SimpleVPN checks this when you pick it."
+            case .blocked(let block): return copy.headline(for: block)
+            }
+        }()
+        Button {
+            editingInstance[vendor] = instance.id
+            AccessibilityAnnouncer.sayNow("\(instance.name). \(sentence)")
+        } label: {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: isChosen ? "largecircle.fill.circle" : "circle")
+                    .foregroundStyle(isChosen ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+                    .accessibilityHidden(true)      // selection rides the row's trait
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(instance.name)
+                        .font(.callout.weight(isChosen ? .semibold : .regular))
+                    // Colour is never the only carrier: the sentence says it, and a
+                    // symbol differs as well.
+                    Label(sentence, systemImage: availability.isReady
+                          ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(availability.isReady ? Color.secondary : Color.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(locked)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(instance.name)
+        .accessibilityValue(sentence)
+        .accessibilityHint("Shows this \(vendor.instanceNoun)\u{2019}s own file, key file and "
+                           + "security-key slot below.")
+        .accessibilityAddTraits(isChosen ? [.isButton, .isSelected] : .isButton)
+        .accessibilityIdentifier("creds-instance-\(vendor.settingSlug)-\(instance.id.rawValue)")
     }
 
     /// The vendor's live state in words. Never a status code, and never only a
@@ -279,8 +526,10 @@ struct SignInSourcesSettings: View {
     ///  • it is never written to `UserDefaults`. The only place it can be persisted
     ///    at all is the Touch ID keychain, by the toggle below it, and off is the
     ///    default.
-    @ViewBuilder private func keePassUnlockRows(locked: Bool) -> some View {
-        let configuration = KeePassFileConfiguration.current(store: settings)
+    @ViewBuilder private func keePassUnlockRows(locked: Bool,
+                                               instance: SourceInstance?) -> some View {
+        let configuration = KeePassFileConfiguration.current(store: settings,
+                                                            instance: instance?.id)
         let path = configuration.databasePath
         let hasDatabase = !path.trimmingCharacters(in: .whitespaces).isEmpty
         let passwordSpec = specs[SignInSourceSettings.keePassPasswordSettingID]
@@ -450,9 +699,13 @@ struct SignInSourcesSettings: View {
 
     // MARK: One field — the value/suggestion distinction, made visible AND audible
 
-    @ViewBuilder private func fieldRows(_ field: VendorConfigField) -> some View {
+    /// `instance` is the level-2 vault whose value this row edits, and is nil for a
+    /// level-1 field (a tool path, a socket, an endpoint) — which is per Mac and
+    /// belongs to no single vault.
+    @ViewBuilder private func fieldRows(_ field: VendorConfigField,
+                                        instance: SourceInstance? = nil) -> some View {
         let spec = specs[field.settingID]
-        let shown = settings.presentation(for: field)
+        let shown = settings.presentation(for: field, instance: instance)
         EngineSettingRow(
             spec: spec,
             changed: spec.isChanged(shown.value),
@@ -465,7 +718,7 @@ struct SignInSourcesSettings: View {
                 // label; the example or detection is `prompt:` and nothing else.
                 TextField("", text: Binding(
                     get: { shown.value },
-                    set: { settings.setValue($0, for: field) }),
+                    set: { settings.setValue($0, for: field, instance: instance) }),
                           prompt: Text(shown.prompt))
                     .autocorrectionDisabled()
                     .textContentType(nil)
@@ -478,14 +731,15 @@ struct SignInSourcesSettings: View {
                 EngineSettingLabel(spec: spec, value: shown.value)
             }
         }
-        validationRow(shown, field: field)
+        validationRow(shown, field: field, instance: instance)
     }
 
     /// The validation sentence, plus the detection as its own labelled row, plus
     /// the two keyboard-reachable ways back — so a user who has broken a path never
     /// has to retype one.
     @ViewBuilder private func validationRow(_ shown: VendorFieldPresentation,
-                                           field: VendorConfigField) -> some View {
+                                           field: VendorConfigField,
+                                           instance: SourceInstance? = nil) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             if let symbol = shown.validation.symbolName {
                 Label(shown.validation.sentence, systemImage: symbol)
@@ -520,7 +774,9 @@ struct SignInSourcesSettings: View {
                     // shoulder can follow), and a picker that was the ONLY way in
                     // would make an iCloud path impossible to paste. Both, always.
                     if let prompt = filePickerPrompt(field.kind) {
-                        Button(prompt.buttonTitle) { chooseFile(for: field, prompt: prompt) }
+                        Button(prompt.buttonTitle) {
+                            chooseFile(for: field, prompt: prompt, instance: instance)
+                        }
                             .help(prompt.help)
                     }
                     Button("Use What SimpleVPN Found") { settings.resetToDetected(field) }
@@ -532,7 +788,7 @@ struct SignInSourcesSettings: View {
                                  : "That is already what this is set to"))
                         .accessibilityValue(shown.canResetToDetected ? ""
                             : "unavailable \u{2014} \(shown.detectedPath == nil ? "nothing was found" : "already set to it")")
-                    Button("Clear") { settings.clear(field) }
+                    Button("Clear") { settings.setValue("", for: field, instance: instance) }
                         .disabled(!shown.isSet)
                         .help(shown.isSet
                               ? "Empty this field and let SimpleVPN decide"
@@ -573,7 +829,8 @@ struct SignInSourcesSettings: View {
     /// is a convenience rather than a permission grant — but a user-chosen path is
     /// also the thing macOS's own privacy controls treat most kindly.
     private func chooseFile(for field: VendorConfigField,
-                            prompt: (buttonTitle: String, help: String, extensions: [String])) {
+                            prompt: (buttonTitle: String, help: String, extensions: [String]),
+                            instance: SourceInstance? = nil) {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
@@ -593,7 +850,7 @@ struct SignInSourcesSettings: View {
             panel.allowsOtherFileTypes = true
         }
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        settings.setValue(url.path, for: field)
+        settings.setValue(url.path, for: field, instance: instance)
         AccessibilityAnnouncer.sayNow("Chose \(url.lastPathComponent).")
     }
 

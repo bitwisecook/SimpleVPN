@@ -485,10 +485,22 @@ nonisolated struct KeePassXCCommandLineChannel: KeePassFileChannel {
 
 // MARK: - The configured database
 
-/// Where the database, its key file and its security-key slot are set. Read from
-/// the same per-vendor settings surface every other vendor uses, so an MDM-pinned
-/// path and a locked pane work here for free.
+/// ONE CONFIGURED DATABASE — level 2 (`SourceInstance`, SignInSourceInstances
+/// .swift). Its file, its key file and its security-key slot, read from the same
+/// per-vendor settings surface every other vendor uses, so an MDM-pinned path and a
+/// locked pane work here for free.
+///
+/// It used to be THE database, singular, because its three fields were level-1
+/// app defaults. They are now an instance's fields, and this value names which
+/// instance it came from — so "the work database" and "the personal one" are two of
+/// these rather than one that keeps changing underneath every VPN.
 struct KeePassFileConfiguration: Sendable, Equatable {
+    /// Which instance this is, or nil when nothing is set up at all.
+    var instance: SourceInstanceID?
+    /// What the user calls it. Shown in the two-step chooser and in errors, because
+    /// "your database wouldn't open" is a different sentence from "Work wouldn't
+    /// open" the moment somebody has two.
+    var name = ""
     var databasePath = ""
     var keyFilePath = ""
     /// nil = this database does not use a security key. EMPTY MEANS NONE, which is
@@ -498,12 +510,21 @@ struct KeePassFileConfiguration: Sendable, Equatable {
 
     var isConfigured: Bool { !databasePath.trimmingCharacters(in: .whitespaces).isEmpty }
 
-    static func current(store: SignInSourceSettingsStore = .shared) -> KeePassFileConfiguration {
-        var out = KeePassFileConfiguration()
+    /// The configuration for ONE instance — the named one, or the default when the
+    /// caller has none in mind (which is what a profile written before instances
+    /// existed means).
+    static func current(store: SignInSourceSettingsStore = .shared,
+                        instance wanted: SourceInstanceID? = nil) -> KeePassFileConfiguration {
+        let resolution = store.instanceStore.resolve(wanted, for: .keePassFile)
+        // A named instance that is GONE resolves to nothing rather than to somebody
+        // else's database: reading the wrong vault because a list changed is the one
+        // outcome worse than failing to read at all.
+        guard let instance = resolution.instance else { return KeePassFileConfiguration() }
+        var out = KeePassFileConfiguration(instance: instance.id, name: instance.name)
         for field in SignInSourceSettings.fields(for: .keePassFile) {
             // `effectivePath` so an MDM-pinned value wins, exactly as it does for a
             // tool path.
-            let shown = store.presentation(for: field)
+            let shown = store.presentation(for: field, instance: instance)
             switch field.kind {
             case .vaultFile:
                 out.databasePath = shown.effectivePath ?? ""
@@ -577,6 +598,10 @@ struct KeePassFileProvider: CredentialProvider {
     /// Which login to take when the caller knows it. Matched against the entry's
     /// own username, same as Keeper's.
     var account: String = ""
+    /// WHICH DATABASE — the level-2 instance this VPN named (nil = the one SimpleVPN
+    /// set up). Carried here rather than read from a single app default, which is
+    /// what made two databases impossible.
+    var instance: SourceInstanceID?
     /// Injectable so tests drive the whole resolve path with no KeePass anywhere.
     var channel: any KeePassFileChannel = KeePassXCCommandLineChannel()
 
@@ -585,13 +610,13 @@ struct KeePassFileProvider: CredentialProvider {
     func isAvailable(for profile: String) async -> Bool {
         guard !entryPath.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
         guard channel.isReachable() else { return false }
-        let configuration = KeePassFileConfiguration.current()
+        let configuration = KeePassFileConfiguration.current(instance: instance)
         guard configuration.isConfigured else { return false }
         return KeePassDatabaseFile.classify(path: configuration.databasePath).isReadable
     }
 
     func resolve(profile: String, fields: Set<CredentialField>) async throws -> RawCredentials {
-        let configuration = KeePassFileConfiguration.current()
+        let configuration = KeePassFileConfiguration.current(instance: instance)
         guard configuration.isConfigured else { throw KeePassFileError.noDatabaseChosen }
         guard channel.isReachable() else { throw KeePassFileError.toolMissing }
 
@@ -615,9 +640,14 @@ struct KeePassFileProvider: CredentialProvider {
         }
 
         let name = (profile.isEmpty ? "this VPN" : profile)
+        // The prompt names the DATABASE as well as the VPN once there is more than
+        // one of them: "unlock your KeePass database" is ambiguous the moment a
+        // person has a work vault and a personal one.
+        let which = configuration.name.isEmpty ? "your KeePass database"
+                                               : "your KeePass database \u{201C}\(configuration.name)\u{201D}"
         let password = try await KDBXMasterPasswordStore.shared.password(
             database: configuration.databasePath,
-            reason: "unlock your KeePass database for \(name)")
+            reason: "unlock \(which) for \(name)")
         guard let password else { throw KeePassFileError.needsDatabasePassword }
         guard !password.containsNewline else { throw KeePassFileError.passwordHasLineBreak }
 
@@ -690,12 +720,24 @@ struct KeePassFileVaultAdapter: LocalVaultAdapter {
             || KeePassXCVaultAdapter.isAppInstalled
     }
 
-    func quickScan() -> LocalVaultAvailability {
-        let configuration = KeePassFileConfiguration.current()
+    func quickScan() -> LocalVaultAvailability { quickScan(instance: nil) }
+
+    /// ONE database's state. Called per instance, which is what lets the work
+    /// database be missing while the personal one is ready — and what makes both
+    /// sentences appear in the pane instead of one of them being averaged away.
+    /// `nil` means the default instance (a profile written before instances
+    /// existed).
+    func quickScan(instance: SourceInstance?) -> LocalVaultAvailability {
+        let configuration = KeePassFileConfiguration.current(instance: instance?.id)
         let toolHere = channel.isReachable()
 
-        // Nothing KeePass anywhere and nothing chosen: don't offer it.
-        guard toolHere || configuration.isConfigured || Self.isKeePassFormatAppInstalled else {
+        // Nothing KeePass anywhere and nothing chosen: don't offer it. A vault the
+        // user has DELIBERATELY ADDED counts as evidence too — having named a database
+        // is a clearer statement of intent than having an app installed, and telling
+        // somebody the row isn't available for a database they just created would be
+        // absurd.
+        guard toolHere || configuration.isConfigured || instance != nil
+                || Self.isKeePassFormatAppInstalled else {
             return .notInstalled
         }
         if !toolHere {
@@ -750,7 +792,10 @@ struct KeePassFileVaultAdapter: LocalVaultAdapter {
 
     func provider(for source: CredentialSource) -> (any CredentialProvider)? {
         guard !source.reference.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        // The profile says WHICH database as well as which entry — level 2 and
+        // level 3, kept apart.
         return KeePassFileProvider(entryPath: source.reference, account: source.account,
+                                   instance: source.selection.instance,
                                    channel: channel)
     }
 }

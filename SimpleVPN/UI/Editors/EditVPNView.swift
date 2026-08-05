@@ -32,6 +32,9 @@ struct EditVPNView: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(ProfileEvaluator.self) private var evaluator
+    /// Optional: present in the app, absent in previews. Used to send somebody to
+    /// Settings ▸ Sign-In Sources, where their vaults are set up.
+    @Environment(SettingsRouter.self) private var settingsRouter: SettingsRouter?
 
     /// Which tab is showing. A binding, so the cross-links below (Sign-In →
     /// Options ▸ Sign-In, Certificates → the private-key password, Traffic ↔
@@ -105,6 +108,10 @@ struct EditVPNView: View {
     /// own field; sharing one with `sourceAccount` is what left every 1Password
     /// fetch asking for an account nobody had ever been able to enter.
     @State private var sourceVault = ""
+    /// WHICH configured vault this VPN reads — level 2's id, chosen here at level 3
+    /// (SignInSourceInstances.swift). nil means the one SimpleVPN set up, which is
+    /// what every profile written before instances existed means.
+    @State private var sourceInstance: SourceInstanceID?
     @State private var sourceTest: SourceTestState = .idle
 
     // 1Password field mapping (which item field feeds which auth role)
@@ -136,10 +143,6 @@ struct EditVPNView: View {
     /// UNLOCKED vault, which is the only state a fetch works in. Same optimistic
     /// start, same reason.
     @State private var bitwardenAvailable = true
-    /// Why a `.kdbx` file source can't serve, in one sentence, or nil when it can.
-    /// From the adapter's own cheap scan — file checks only, no unlock, no prompt —
-    /// so the editor and the Settings pane can never disagree about what is wrong.
-    @State private var keePassFileProblem: String?
 
     // 1Password browsing (vault/item pickers). Every list is fetched ONLY on an
     // explicit click: the first one can raise 1Password's authorization prompt,
@@ -271,7 +274,6 @@ struct EditVPNView: View {
                 if SignInSourceSettingsStore.shared.isEnabled(.bitwarden) {
                     bitwardenAvailable = await BitwardenLocalChannel().state() == .unlocked
                 }
-                keePassFileProblem = Self.keePassFileProblemSentence()
                 // Prompt-free, so this much can be said without anyone asking:
                 // no 1Password on this Mac is a setup state, not a failure.
                 if !opAvailable { opPreflight.note(.notInstalled) }
@@ -778,44 +780,51 @@ struct EditVPNView: View {
                     .font(.callout).foregroundStyle(.secondary)
                 sourceTestRow
             case .keePassFile:
+                // TWO STEPS, because there are two questions: WHICH database (level
+                // 2 — a person may have a work one and a personal one) and WHICH
+                // entry inside it (level 3). Asking them as two numbered steps is
+                // the whole point — three fields in a row read as three unrelated
+                // boxes, and the one deciding which vault is read used to be
+                // invisible from here.
+                //
                 // An entry in a `.kdbx` is named by its PATH — its groups and its
                 // title, separated by slashes. Deliberately not an address: a file has
                 // no URL matching of its own, so offering an address field here would
                 // be a field that silently never matches.
-                TextField("Entry path in your database", text: $sourceReference,
-                          prompt: Text(verbatim: "VPN/Work"))
-                    .autocorrectionDisabled()
-                TextField("Username (optional \u{2014} only to confirm the right entry)",
-                          text: $sourceAccount)
-                    .autocorrectionDisabled()
-                if let keePassFileProblem {
-                    Label(keePassFileProblem, systemImage: "exclamationmark.triangle.fill")
-                        .font(.callout).foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Text("SimpleVPN opens your KeePass database and reads just this entry\u{2019}s username and password \u{2014} it never changes your database. Which database, its password, and any key file or security key it needs are set once for every VPN in Settings \u{25B8} Sign-In Sources. If a verification code is required, type it below.")
+                SignInInstanceEntryPicker(
+                    vendor: .keePassFile,
+                    instance: $sourceInstance,
+                    entry: $sourceReference,
+                    account: $sourceAccount,
+                    entryPrompt: "VPN/Work",
+                    accountLabel: "Username (optional)",
+                    onConfigure: { openSignInSourceSettings(for: .keePassFile) })
+                // NO SECOND OPINION about what is wrong. The picker above states the
+                // CHOSEN database's own state, per database — a sentence about "your
+                // KeePass database", singular, would contradict it the moment
+                // somebody has two.
+                Text("SimpleVPN opens the database you picked above and reads just this entry\u{2019}s username and password \u{2014} it never changes your database. Your databases, their passwords, and any key file or security key each one needs are set up in Settings \u{25B8} Sign-In Sources; this VPN just says which of them to read. If a verification code is required, type it below.")
                     .font(.callout).foregroundStyle(.secondary)
                 sourceTestRow
             }
         }
     }
 
-    /// The `.kdbx` row's problem in one sentence, taken from the adapter's own cheap
-    /// scan so there is one answer rather than a second opinion. nil = nothing to say.
-    private static func keePassFileProblemSentence() -> String? {
-        let availability = KeePassFileVaultAdapter().quickScan()
-        switch availability {
-        case .ready, .unchecked:
-            return nil
-        case .notInstalled:
-            return LocalVaultCopyBook.keePassFile.guidance(for: .toolMissing)?.benefit
-        case .blocked(let block):
-            let copy = LocalVaultCopyBook.keePassFile
-            let steps = copy.steps(for: block)
-            return steps.isEmpty ? copy.headline(for: block)
-                                 : copy.headline(for: block) + " " + steps.joined(separator: " ")
-        }
+    /// Open Settings ▸ Sign-In Sources at a vendor — the same `SettingsRouter`
+    /// intent a global search hit and the chooser's "Configure…" use, so there is one
+    /// way to be sent to a setting rather than a second one that can drift.
+    private func openSignInSourceSettings(for vendor: LocalVaultVendor) {
+        settingsRouter?.go(to: SignInSourceSettings.enabledSettingID(vendor))
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        AccessibilityAnnouncer.sayNow("Opening SimpleVPN settings for \(vendor.displayTitle).")
     }
+
+    // NOTE: this editor no longer computes its own "what is wrong with your KeePass
+    // database" sentence. It used to, from the adapter's cheap scan of THE database —
+    // and there is no longer one database. `SignInInstanceEntryPicker` states the
+    // chosen one's state, per database, from the same probe the Settings pane reads,
+    // so there is one answer rather than a vendor-level second opinion that would
+    // contradict it the moment somebody has two.
 
     /// 1Password source: reference/vault fields, a drop well for dragging an item
     /// straight in from 1Password, and the field-role mapping.
@@ -1414,6 +1423,24 @@ struct EditVPNView: View {
         source.vault = credentialKind == .onePassword
             ? sourceVault.trimmingCharacters(in: .whitespaces) : ""
         source.fieldMap = credentialKind == .onePassword ? fieldMap : [:]
+        // WHICH vault, written explicitly — and only for a vendor that can have
+        // several. Saving an id against a singular vendor would be storing an answer
+        // to a question it does not have. Writing it on save is also what BINDS a
+        // profile that arrived with none: "the one SimpleVPN set up" becomes a real
+        // id the first time somebody saves the VPN.
+        if let vendor = LocalVaultRegistry.adapter(for: credentialKind)?.vendor,
+           vendor.cardinality.allowsSeveral {
+            let resolution = SignInSourceSettingsStore.shared.instanceStore
+                .resolve(sourceInstance, for: vendor)
+            source.instanceID = resolution.instance?.id.rawValue
+                // A vault this VPN named that is no longer set up is KEPT, not
+                // quietly rewritten to another one: the chooser says it has gone, and
+                // the user picks. Silently repointing somebody at a different vault
+                // is the one outcome worse than failing to read.
+                ?? sourceInstance?.rawValue ?? ""
+        } else {
+            source.instanceID = ""
+        }
         try? await vpn.setCredentialSource(source, for: profileID)
     }
 
@@ -1528,6 +1555,7 @@ struct EditVPNView: View {
         sourceReference = source.reference
         sourceAccount = source.account
         sourceVault = source.vault
+        sourceInstance = source.selection.instance
         prefillRememberedAccount()
         fieldMap = source.fieldMap
         let prefs = vpn.uiPrefs(for: profileID)

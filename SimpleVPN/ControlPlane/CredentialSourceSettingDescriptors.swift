@@ -51,6 +51,24 @@ enum CredentialSourceSettings {
             default: true)
     }
 
+    /// THE LEVEL-2 LIST, for a vendor that can genuinely have several vaults.
+    /// Declared per vendor from `SourceCardinality`, so a singular vendor never
+    /// grows a list control it has no use for — and so the multi-instance vendor's
+    /// list is searchable, documented and MDM-addressable like everything else.
+    static let instanceLists: [EngineSettingSpec] = LocalVaultVendor.allCases
+        .filter { $0.cardinality.allowsSeveral }
+        .map { vendor in
+            EngineSettingSpec(
+                id: SignInSourceSettings.instanceListSettingID(vendor),
+                name: "Your \(vendor.displayTitle) \(vendor.instanceNounPlural)",
+                summary: "The \(vendor.instanceNounPlural) SimpleVPN can read, each with a name you "
+                    + "choose. Set up as many as you like \u{2014} a work one and a personal one, say "
+                    + "\u{2014} then pick which one a VPN uses when you set its sign-in up. Each is "
+                    + "checked on its own, so one being away doesn\u{2019}t stop the others working.",
+                group: .signIn,
+                default: "")
+        }
+
     /// One row per declared per-vendor field. The names and summaries live here
     /// rather than in `VendorConfigField` so all setting copy is reviewable in one
     /// place, next to every other engine's.
@@ -168,7 +186,18 @@ enum CredentialSourceSettings {
             }) {
                 specs.append(toggle)
             }
-            for field in SignInSourceSettings.fields(for: vendor) {
+            // Level 1 first (how SimpleVPN reaches this vendor at all), then the
+            // level-2 list, then the fields ONE of those vaults holds — the order
+            // somebody sets it up in, and the order the pane renders.
+            for field in SignInSourceSettings.transportFields(for: vendor) {
+                if let spec = fieldsByID[field.settingID] { specs.append(spec) }
+            }
+            if let list = instanceLists.first(where: {
+                $0.id == SignInSourceSettings.instanceListSettingID(vendor)
+            }) {
+                specs.append(list)
+            }
+            for field in SignInSourceSettings.instanceFields(for: vendor) {
                 if let spec = fieldsByID[field.settingID] { specs.append(spec) }
             }
             specs += extraSpecs(for: vendor)
@@ -188,6 +217,7 @@ enum CredentialSourceSettings {
     static func vendor(forSettingID id: String) -> LocalVaultVendor? {
         LocalVaultVendor.allCases.first { vendor in
             id == SignInSourceSettings.enabledSettingID(vendor)
+                || id == SignInSourceSettings.instanceListSettingID(vendor)
                 || SignInSourceSettings.fields(for: vendor).contains { $0.settingID == id }
                 || extraSpecs(for: vendor).contains { $0.id == id }
         }
