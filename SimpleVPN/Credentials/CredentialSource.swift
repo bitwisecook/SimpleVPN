@@ -29,6 +29,9 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
     /// KeePassFileProvider. Distinct from `.keePassXC`, which is the running app's
     /// own socket and stays the better answer whenever it is available.
     case keePassFile
+    /// A `pass` / `gopass` password store. One kind for both tools and for reading
+    /// the store with `gpg` alone — the store format is what we support, not a CLI.
+    case passwordStore
 
     // nonisolated for the same reason as `suppliesOTP` below: it is a pure function
     // of the case, and nonisolated rules (the security-key mutual exclusions in
@@ -42,6 +45,7 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
         case .keeper: "Keeper"
         case .bitwarden: "Bitwarden"
         case .keePassFile: "KeePass database file"
+        case .passwordStore: "pass / gopass"
         }
     }
     var systemImage: String {
@@ -53,6 +57,7 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
         case .keeper: "key.viewfinder"
         case .bitwarden: "shield.lefthalf.filled"
         case .keePassFile: "doc.badge.gearshape"
+        case .passwordStore: "terminal.fill"
         }
     }
 
@@ -89,7 +94,7 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
         // would turn every ordinary entry's fetch into a failed sign-in. This flag
         // is a PROMISE — true means "Connect works with nothing typed" — so it
         // stays false and the code is typed. See KeePassFileProvider's header.
-        case .manual, .applePasswords, .keeper, .bitwarden, .keePassFile: false
+        case .manual, .applePasswords, .keeper, .bitwarden, .keePassFile, .passwordStore: false
         case .onePassword, .keePassXC: true
         }
     }

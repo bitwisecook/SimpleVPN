@@ -155,6 +155,10 @@ nonisolated enum FeatureMaturityRegistry {
         // been unlocked: none of the three apps, and no keepassxc-cli, exists on
         // the machine this was built on.
         .vault(.keePassFile):       .untested,
+        // The GPG round trip IS proven — a throwaway key, a throwaway store and the
+        // real reader, in both pinentry modes — but no real store belonging to a real
+        // person has ever been read, and nobody has connected a VPN with it.
+        .vault(.passwordStore):     .untested,
     ]
 
     // MARK: Lookups

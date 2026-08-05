@@ -819,7 +819,12 @@ struct SignInSourcesSettings: View {
             // at all. Filtering would hide the very file somebody was told to pick.
             ("Choose Key File\u{2026}",
              "Pick your key file in the Finder instead of typing its path", [])
-        case .toolBinary, .unixSocket, .daemonEndpoint, .securityKeySlot, .pkcs11Module:
+        case .storeDirectory:
+            // A FOLDER, so the panel must offer directories — a document picker would
+            // refuse the very thing being chosen.
+            ("Choose Store Folder\u{2026}",
+             "Pick your password store folder in the Finder instead of typing its path", [])
+        case .entryFieldName, .toolBinary, .unixSocket, .daemonEndpoint, .securityKeySlot, .pkcs11Module:
             nil
         }
     }
@@ -832,8 +837,11 @@ struct SignInSourcesSettings: View {
                             prompt: (buttonTitle: String, help: String, extensions: [String]),
                             instance: SourceInstance? = nil) {
         let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
+        // A store is a FOLDER; every other field here is a file. Getting this the wrong
+        // way round makes the panel refuse the only thing worth choosing.
+        let wantsDirectory: Bool = { if case .storeDirectory = field.kind { true } else { false } }()
+        panel.canChooseFiles = !wantsDirectory
+        panel.canChooseDirectories = wantsDirectory
         panel.allowsMultipleSelection = false
         panel.message = prompt.help
         panel.prompt = "Use"

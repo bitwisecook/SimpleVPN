@@ -68,6 +68,7 @@ nonisolated extension LocalVaultVendor {
         // contract, and it must not become "strongbox" the day Strongbox is
         // mentioned on screen.
         case .keePassFile: "keepassfile"
+        case .passwordStore: "passwordstore"
         }
     }
 
@@ -116,6 +117,17 @@ nonisolated enum VendorConfigFieldKind: Sendable, Equatable {
     case securityKeySlot
     /// A PKCS#11 module (a `.so`/`.dylib`, loaded rather than executed).
     case pkcs11Module
+    /// A DIRECTORY holding a whole store, rather than one file — a `pass` /
+    /// `gopass` password store, whose entries are files inside it.
+    ///
+    /// Deliberately not `vaultFile`: it validates differently (a directory that
+    /// must contain `.gpg-id`, not a file with an extension), and the "choose"
+    /// affordance has to offer a folder rather than a document.
+    case storeDirectory
+    /// A FIELD NAME inside an entry, not a path — e.g. which line of a `pass`
+    /// entry holds the username. Free text with no filesystem meaning at all, so
+    /// it must never be validated or pre-filled as though it were a path.
+    case entryFieldName(suggestions: [String])
 
     // NOTE on `daemonEndpoint` and `pkcs11Module`: no shipped field declares them
     // yet. They are here because the adapters that need them are already designed —
@@ -204,6 +216,11 @@ nonisolated enum SignInSourceSettings {
     /// (KeePassUnlock.swift).
     static let keePassDatabaseKey = "signin.keepassfile.database"
     static let keePassKeyFileKey = "signin.keepassfile.keyfile"
+
+    /// `pass` / `gopass`, both INSTANCE level: someone with a work store and a
+    /// personal one has two of each of these, not one shared pair.
+    static let passwordStoreDirectoryKey = "signin.passwordstore.directory"
+    static let passwordStoreUsernameFieldKey = "signin.passwordstore.username-field"
     static let keePassSecurityKeySlotKey = "signin.keepassfile.securitykey-slot"
     /// The master switch for the whole local scan. Default ON — the scan is
     /// filesystem-only, needs no macOS permission, and every sign-in source
@@ -324,6 +341,35 @@ nonisolated enum SignInSourceSettings {
                 kind: .toolBinary(tool: "keepassxc-cli"),
                 defaultsKey: toolPathKey("keepassxc-cli"),
                 example: "/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli")]
+        case .passwordStore:
+            // Two instance-level rows and one transport-level row, and the split is
+            // exactly the three-level model: WHICH store (and how its entries are
+            // written) belongs to the store, while WHERE gpg lives belongs to the Mac.
+            //
+            // `gpg` and not `pass`: SimpleVPN decrypts the store itself, so the tool
+            // that has to exist is GnuPG. A row pointing at `pass` would let somebody
+            // carefully fix a path that is never used.
+            [VendorConfigField(
+                settingID: "creds.passwordstore.store-directory",
+                vendor: .passwordStore,
+                ownerTitle: LocalVaultVendor.passwordStore.displayTitle,
+                kind: .storeDirectory,
+                defaultsKey: passwordStoreDirectoryKey,
+                example: "/Users/you/.password-store"),
+             VendorConfigField(
+                settingID: "creds.passwordstore.username-field",
+                vendor: .passwordStore,
+                ownerTitle: LocalVaultVendor.passwordStore.displayTitle,
+                kind: .entryFieldName(suggestions: PasswordStoreEntry.conventionalUsernameKeys),
+                defaultsKey: passwordStoreUsernameFieldKey,
+                example: "login"),
+             VendorConfigField(
+                settingID: "creds.passwordstore.tool-path",
+                vendor: .passwordStore,
+                ownerTitle: LocalVaultVendor.passwordStore.displayTitle,
+                kind: .toolBinary(tool: "gpg"),
+                defaultsKey: toolPathKey("gpg"),
+                example: "/opt/homebrew/bin/gpg")]
         }
     }
 
@@ -820,6 +866,16 @@ final class SignInSourceSettingsStore {
             // produce a suggestion that is as likely to be the wrong database as the
             // right one. The field's placeholder shows the SHAPE of an answer instead.
             return nil
+        case .storeDirectory:
+            // ~/.password-store is `pass`'s own default and the overwhelmingly common
+            // answer, so unlike a .kdbx there IS a sane suggestion — and offering it
+            // reads no file tree: it is one fixed path, not a search.
+            return PasswordStoreLocation.default().directory
+        case .entryFieldName:
+            // Not a path and not discoverable: which line holds a username is a fact
+            // about how its owner writes their entries. The conventional names are
+            // offered as suggestions in the field itself, not as a detected value.
+            return nil
         case .securityKeySlot, .daemonEndpoint, .pkcs11Module:
             return nil
         }
@@ -884,6 +940,20 @@ final class SignInSourceSettingsStore {
             return (st.st_mode & S_IFMT) == S_IFSOCK ? .ok : .notASocket
         case .daemonEndpoint, .securityKeySlot:
             return .ok               // handled above
+        case .entryFieldName:
+            return .ok               // free text; not a path, so nothing on disk to check
+        case .storeDirectory:
+            // A store must be a DIRECTORY containing `.gpg-id`. Both halves matter:
+            // pointing at a file, and pointing at a folder that merely looks like a
+            // store, fail in ways that would otherwise surface as a decryption error.
+            guard (st.st_mode & S_IFMT) == S_IFDIR else { return .notAFile }
+            let gpgID = (path as NSString).appendingPathComponent(".gpg-id")
+            guard FileManager.default.fileExists(atPath: gpgID) else {
+                return .notAReadableDatabase(
+                    "that folder isn\u{2019}t a password store \u{2014} there\u{2019}s no .gpg-id "
+                    + "file in it. Choose the folder that has one, usually ~/.password-store.")
+            }
+            return .ok
         case .vaultFile:
             // The one field in this pane whose CONTENTS are checked, because the four
             // ways a chosen file can be the wrong file all look identical from a

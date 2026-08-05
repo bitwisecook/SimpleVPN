@@ -255,6 +255,9 @@ enum LocalVaultRegistry {
         // running app that owns its own unlock (the KeePassXC row above) is a better
         // answer than a file whose password has to reach us.
         KeePassFileVaultAdapter(),
+        // A folder of GPG-encrypted files, read with gpg alone — no app, no socket, no
+        // daemon, and neither `pass` nor `gopass` required.
+        PasswordStoreVaultAdapter(),
     ]
 
     static func adapter(for vendor: LocalVaultVendor) -> (any LocalVaultAdapter)? {

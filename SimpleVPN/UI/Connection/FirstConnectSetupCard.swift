@@ -214,6 +214,34 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                 Text("Your databases, and their passwords, are set up in Settings \u{25B8} Sign-In Sources; this VPN just says which of them to read. SimpleVPN only ever reads your database.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            case .passwordStore:
+                // One question in this compact card: which entry. WHICH store is a
+                // settings-level choice (and most people have exactly one), so it is
+                // pointed at rather than asked here — the editor's Sign-In tab shows
+                // the full two-step store-then-entry picker for anyone with several.
+                Text(SignInSourceSteps.stepTwoSummary(vendor: .passwordStore))
+                    .font(.caption.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
+                HStack {
+                    TextField("Entry", text: $apServer,
+                              prompt: Text("Entry name in your store, for example vpn/work"))
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        .onSubmit(savePasswordStore)
+                        .accessibilityLabel("Entry name in your password store")
+                        .accessibilityValue(apServer.isEmpty
+                            ? "Not set. For example, vpn slash work."
+                            : apServer)
+                    Button("Save", action: savePasswordStore)
+                        .disabled(apServer.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                .onAppear {
+                    apServer = source.reference.isEmpty ? profile.name : source.reference
+                }
+                Text("Your store folder is set up in Settings \u{25B8} Sign-In Sources; this VPN just says which entry to read. SimpleVPN reads your store with GnuPG and never writes to it.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(14)
@@ -392,6 +420,16 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
     private func saveApplePasswords() {
         var s = source
         s.kind = .applePasswords
+        s.reference = apServer.trimmingCharacters(in: .whitespaces)
+        Task { try? await vpn.setCredentialSource(s, for: profile.id) }
+    }
+
+    private func savePasswordStore() {
+        var s = source
+        s.kind = .passwordStore
+        // The entry NAME, which is its path inside the store without the `.gpg`.
+        // Trimmed only — never lower-cased or otherwise normalised, because a store's
+        // entries are files and the filesystem's case is the user's business.
         s.reference = apServer.trimmingCharacters(in: .whitespaces)
         Task { try? await vpn.setCredentialSource(s, for: profile.id) }
     }

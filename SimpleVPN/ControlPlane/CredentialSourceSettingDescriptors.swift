@@ -83,6 +83,27 @@ enum CredentialSourceSettings {
                     + "SimpleVPN doesn\u{2019}t look on its own \u{2014} that is what this is for.",
                 group: .signIn,
                 default: "")
+        case .storeDirectory:
+            EngineSettingSpec(
+                id: field.settingID,
+                name: "Password store folder",
+                summary: "The folder holding your password store \u{2014} usually ~/.password-store. "
+                    + "SimpleVPN reads one entry out of it when you connect, and never writes to it. "
+                    + "A store has a .gpg-id file in it; if the folder you pick doesn\u{2019}t, "
+                    + "SimpleVPN will say so rather than fail later with a decryption error.",
+                group: .signIn,
+                default: "")
+        case .entryFieldName(let suggestions):
+            EngineSettingSpec(
+                id: field.settingID,
+                name: "Username line in an entry",
+                summary: "Which line of an entry holds the username. By convention it is one of "
+                    + suggestions.joined(separator: ", ")
+                    + " \u{2014} SimpleVPN tries those in order, so leave this empty unless you use a "
+                    + "different name. This is a convention rather than part of the format, which is "
+                    + "why it is yours to set.",
+                group: .signIn,
+                default: "")
         case .unixSocket:
             EngineSettingSpec(
                 id: field.settingID,
@@ -152,7 +173,10 @@ enum CredentialSourceSettings {
     /// exactly why they cannot be fields.
     static func extraSpecs(for vendor: LocalVaultVendor) -> [EngineSettingSpec] {
         switch vendor {
-        case .onePassword, .keePassXC, .keeper, .bitwarden:
+        // A password store needs no extra spec: GnuPG owns the passphrase entirely, so
+        // there is nothing for SimpleVPN to hold, prompt for, or remember behind Touch
+        // ID — which is the whole reason this source has no secret of its own.
+        case .onePassword, .keePassXC, .keeper, .bitwarden, .passwordStore:
             []
         case .keePassFile:
             [EngineSettingSpec(

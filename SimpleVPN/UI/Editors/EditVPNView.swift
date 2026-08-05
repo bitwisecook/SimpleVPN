@@ -779,6 +779,23 @@ struct EditVPNView: View {
                 Text("SimpleVPN reads just this item using Bitwarden\u{2019}s own command-line tool, and reads only its username and password. It works best with Bitwarden\u{2019}s local service running (\u{201C}bw serve\u{201D}): the unlock stays in Bitwarden\u{2019}s own program, and SimpleVPN never sees your master password or the key that unlocks your vault. While that service is running, any program on this Mac can read your items \u{2014} stop it when you are done. If a verification code is required, type it below.")
                     .font(.callout).foregroundStyle(.secondary)
                 sourceTestRow
+            case .passwordStore:
+                // The same two steps as a .kdbx, and for the same reason: PASSWORD_STORE_DIR
+                // exists so a person can keep more than one store, so WHICH store is a
+                // real question and not a detail. An entry's name is its path inside the
+                // store without the `.gpg` — a filesystem path rather than a group path,
+                // which is why the example differs from KeePass's.
+                SignInInstanceEntryPicker(
+                    vendor: .passwordStore,
+                    instance: $sourceInstance,
+                    entry: $sourceReference,
+                    account: $sourceAccount,
+                    entryPrompt: "vpn/work",
+                    accountLabel: "Username (optional)",
+                    onConfigure: { openSignInSourceSettings(for: .passwordStore) })
+                Text("SimpleVPN decrypts one entry with GnuPG when you connect. It never writes to your store and never runs git in it. Your key\u{2019}s passphrase stays with GnuPG.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             case .keePassFile:
                 // TWO STEPS, because there are two questions: WHICH database (level
                 // 2 — a person may have a work one and a personal one) and WHICH

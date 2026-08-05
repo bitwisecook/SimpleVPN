@@ -470,6 +470,8 @@ struct SignInChooserPopover: View {
     private func entryPrompt(for vendor: LocalVaultVendor) -> String {
         switch vendor {
         case .keePassFile: "VPN/Work"
+        // A path inside the store, lower-case by habit and without the `.gpg`.
+        case .passwordStore: "vpn/work"
         case .onePassword, .keePassXC, .keeper, .bitwarden: "GR Lab VPN"
         }
     }

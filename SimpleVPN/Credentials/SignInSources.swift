@@ -63,6 +63,11 @@ nonisolated enum LocalVaultVendor: String, CaseIterable, Sendable, Hashable {
     /// it (see `KeePassFileProvider`). KeePassXC keeps its own row above, because a
     /// running app owning its own unlock is a better answer than a file on disk.
     case keePassFile
+    /// A `pass` / `gopass` PASSWORD STORE — a directory of GPG-encrypted files.
+    /// Like `.keePassFile` this is a FORMAT rather than a brand: `pass` and `gopass`
+    /// share the same layout, and SimpleVPN reads it with `gpg` directly, so neither
+    /// tool has to be installed for the source to work (see PasswordStoreReader).
+    case passwordStore
 }
 
 /// HOW a vendor is reached. Deliberately separate from the vendor, and named in
@@ -162,6 +167,11 @@ nonisolated enum LocalVaultBlock: String, Sendable, Equatable {
     /// A real KeePass database of a generation newer than the tool on this Mac can
     /// read. An update, not a credential problem.
     case vaultFileTooNew
+    /// The chosen folder is not a password store: no `.gpg-id` in it. Its own case
+    /// rather than reusing the KeePass one, whose name would be a lie, and rather
+    /// than folding into "missing", because "you pointed at the wrong folder" and
+    /// "the folder is gone" need different sentences.
+    case vaultNotAPasswordStore
     // NOTE: there is deliberately NO "the database needs its password" case here.
     // That is `vaultLocked` above, which the Bitwarden adapter named first and which
     // describes this exactly: the vault is here and something has to unlock it. The
@@ -184,6 +194,10 @@ nonisolated enum LocalVaultBlock: String, Sendable, Equatable {
         switch self {
         case .toolMissing, .integrationOff, .notSignedIn, .toolOutsideAllowList,
              .vaultLocked, .noVaultFile, .vaultPasswordRejected:
+            true
+        // "You pointed at the wrong folder" IS something to fix, with an exact fix
+        // (choose the folder with .gpg-id in it), so it earns a banner.
+        case .vaultNotAPasswordStore:
             true
         case .appNotRunning, .needsUpdate, .vaultFileMissing, .vaultFileNotDownloaded,
              .vaultFileNotReadable, .vaultFileNotAKeePassDatabase, .vaultFileTooNew:
@@ -454,6 +468,8 @@ nonisolated enum LocalVaultCopyBook {
         // Lives in KeePassFileCopy.swift — one line here, so a new vendor's block of
         // copy never collides with another's in this file.
         case .keePassFile: keePassFile
+        // Lives in PasswordStoreCopy.swift, same reason as KeePassFile's.
+        case .passwordStore: passwordStore
         }
     }
 
@@ -1363,6 +1379,16 @@ nonisolated enum SignInFlow {
             + "username or password field and macOS will offer what it can."
         case .manual:
             "SimpleVPN can\u{2019}t get your sign-in."
+        case .passwordStore:
+            // Names GnuPG rather than "pass", because GnuPG is what we actually need
+            // and telling someone to install pass would send them to do work that
+            // changes nothing.
+            // Names the source, as every other recovery sentence does — and names
+            // GnuPG as the thing that might be missing, because telling someone to
+            // install `pass` would send them to do work that changes nothing.
+            "SimpleVPN can\u{2019}t read your pass / gopass store right now \u{2014} GnuPG "
+            + "isn\u{2019}t available, or the store folder isn\u{2019}t where it expected. "
+            + "Check it in Settings \u{25B8} Sign-In Sources, which will say which."
         }
     }
 

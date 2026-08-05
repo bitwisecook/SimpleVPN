@@ -354,6 +354,11 @@
   <a href="#creds-keepassfile-tool-path">KeePassXC Tool Location</a>
   <a href="#creds-keepassfile-database-password">KeePass Database Password</a>
   <a href="#creds-keepassfile-remember-password">Remember the Database Password</a>
+  <a href="#creds-passwordstore-enabled">Use a Password Store</a>
+  <a href="#creds-passwordstore-stores">Your Password Stores</a>
+  <a href="#creds-passwordstore-store-directory">Password Store Folder</a>
+  <a href="#creds-passwordstore-username-field">Username Line in an Entry</a>
+  <a href="#creds-passwordstore-tool-path">GnuPG Location</a>
   <a href="#creds-ykman-tool-path">YubiKey Manager Location</a>
 </nav>
 
@@ -1625,6 +1630,36 @@ the device's protection intact at the cost of typing four to eight digits per co
 <p>SimpleVPN will not put your database password in the ordinary keychain, even though it could. There, macOS would hand it back to SimpleVPN silently whenever it asked, which would make this app able to decrypt everything you own without you knowing. Behind Touch ID it cannot: something has to happen at the keyboard first. That is the same bar KeePassXC and Strongbox apply to their own quick unlock.</p>
 <p><strong>Forget This Database&rsquo;s Password</strong> drops it from both places at once.</p>
 <p>On a Mac that can&rsquo;t ask for a fingerprint, an Apple Watch or your password, this is switched off and says so, rather than offering protection it can&rsquo;t provide.</p>
+
+<h2 id="creds-passwordstore-enabled">Use a Password Store</h2>
+<p class="default">Default: on.</p>
+<p>Offers a <code>pass</code> or <code>gopass</code> store as a way to sign in. SimpleVPN decrypts one entry out of the folder you point it at, using GnuPG on this Mac.</p>
+<p><strong>Neither <code>pass</code> nor <code>gopass</code> has to be installed.</strong> A store is a folder of GPG-encrypted files in a documented layout, so SimpleVPN reads it with GnuPG directly. If you have a store and have never installed either command, this still works.</p>
+<p><strong>SimpleVPN only ever reads your store.</strong> It never adds or edits an entry, and never runs <code>git</code> in it &mdash; a store is very often a git repository, and committing to somebody else&rsquo;s history is not SimpleVPN&rsquo;s business.</p>
+
+<h2 id="creds-passwordstore-stores">Your Password Stores</h2>
+<p class="default">One to begin with, pointing at <code>~/.password-store</code>. Add as many as you like.</p>
+<p>You can set up more than one store. A work one and a personal one is the ordinary case &mdash; it is what the <code>PASSWORD_STORE_DIR</code> variable exists for &mdash; and each gets a name you choose, its own folder, and its own idea of which line holds the username. Each VPN then picks which of them to read: first <em>which store</em>, then <em>which entry</em> inside it.</p>
+<p><strong>Each one is checked on its own.</strong> A work store on a drive that is not plugged in does not stop the personal one working, and the pane says which is which rather than averaging them into one answer.</p>
+<p>Removing a store <em>never touches the folder</em> &mdash; SimpleVPN only forgets where it was. If any of your VPNs read it, SimpleVPN names them first, and each will ask you to choose another store before it next connects.</p>
+
+<h2 id="creds-passwordstore-store-directory">Password Store Folder</h2>
+<p class="default">Nothing is chosen until you choose it; SimpleVPN suggests <code>~/.password-store</code>, which is where <code>pass</code> puts one by default.</p>
+<p>The folder holding your password store &mdash; the one with a <code>.gpg-id</code> file in it. Each sign-in inside it is a separate GPG-encrypted file, and SimpleVPN decrypts only the one entry a VPN names, only when you connect.</p>
+<p>You can have more than one store &mdash; a work one and a personal one is the usual reason, and that is exactly what the <code>PASSWORD_STORE_DIR</code> variable exists for. Each store you add here is configured separately, and each VPN says which of them to read.</p>
+<p>If the folder you choose has no <code>.gpg-id</code> in it, SimpleVPN says so straight away rather than letting it fail later as a decryption error &mdash; those look identical from the outside and need completely different fixes.</p>
+<p>SimpleVPN only ever reads your store. It never writes an entry, and never runs <code>git</code> in it.</p>
+
+<h2 id="creds-passwordstore-username-field">Username Line in an Entry</h2>
+<p class="default">Empty, which means SimpleVPN tries <code>login</code>, <code>username</code>, <code>user</code> and <code>email</code>, in that order.</p>
+<p>By long habit, the first line of an entry is the password and the lines after it are <code>name: value</code> pairs. That is a convention rather than part of the format &mdash; <code>pass</code> itself only promises that an entry is encrypted text &mdash; so if your entries use a different name for the username, put it here.</p>
+<p>It is worth knowing this is a convention, because it is the first thing to check if a sign-in comes back looking wrong.</p>
+
+<h2 id="creds-passwordstore-tool-path">GnuPG Location</h2>
+<p class="default">Empty, which means SimpleVPN uses the <code>gpg</code> it found.</p>
+<p>Where GnuPG is on this Mac. Set it only when your copy lives somewhere SimpleVPN does not look on its own &mdash; that is what this is for.</p>
+<p>GnuPG is the only thing this source needs: SimpleVPN decrypts your store itself, so neither <code>pass</code> nor <code>gopass</code> has to be installed. If GnuPG is missing, <code>brew install gnupg</code> is the whole fix.</p>
+<p>Your key&rsquo;s passphrase is GnuPG&rsquo;s business, not SimpleVPN&rsquo;s: it is never asked for here, never stored, and never seen. GnuPG asks for it through a PIN entry program and remembers it for a while afterwards. If no graphical PIN entry program is installed, GnuPG has no way to ask from inside an app &mdash; SimpleVPN can then read your store only while GnuPG still remembers the passphrase, and it says so rather than appearing to hang. <code>brew install pinentry-mac</code>, then a <code>pinentry-program</code> line in <code>~/.gnupg/gpg-agent.conf</code>, fixes that for good.</p>
 
 <h2 id="creds-ykman-tool-path">YubiKey Manager Location</h2>
 <p class="default">Optional. Empty means SimpleVPN uses the one it found.</p>

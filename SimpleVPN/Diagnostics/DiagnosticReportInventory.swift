@@ -135,6 +135,10 @@ nonisolated enum DiagnosticReportInventory {
         // app the person actually uses is exactly what a maintainer wants to know.
         case .keePassFile:
             ["org.keepassxc.keepassxc", "com.markmcguill.strongbox.mac", "com.keepassium.mac"]
+        // A password store has no app at all: it is a folder of files read with gpg.
+        // An empty list is the honest answer, and the tools section is where its real
+        // inventory (gpg, and whether `pass` happens to be installed) shows up.
+        case .passwordStore: []
         }
     }
 
@@ -362,6 +366,8 @@ nonisolated enum DiagnosticReportInventory {
             case .vaultFileNotAKeePassDatabase: "that file is not a KeePass database"
             case .vaultFileTooNew: "the database is a newer KeePass version than the installed tool reads"
             case .vaultPasswordRejected: "the database refused the password, key file or security key given"
+            case .vaultNotAPasswordStore:
+                "that folder is not a password store \u{2014} there is no .gpg-id file in it"
             }
         }
     }

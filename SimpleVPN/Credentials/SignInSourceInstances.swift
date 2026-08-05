@@ -124,7 +124,11 @@ nonisolated extension LocalVaultVendor {
     var cardinality: SourceCardinality {
         switch self {
         case .onePassword, .keePassXC, .keeper, .bitwarden: .single
-        case .keePassFile: .multiple
+        // MULTIPLE, for the same reason as a .kdbx and then some: PASSWORD_STORE_DIR
+        // exists precisely so one person can keep several stores, and "work" and
+        // "personal" stores are entirely ordinary. Each also carries its own username
+        // field convention, so they are configured separately, not just located.
+        case .keePassFile, .passwordStore: .multiple
         }
     }
 
@@ -134,6 +138,7 @@ nonisolated extension LocalVaultVendor {
     var instanceNoun: String {
         switch self {
         case .keePassFile: "database"
+        case .passwordStore: "store"
         case .onePassword, .keePassXC, .keeper, .bitwarden: "vault"
         }
     }
@@ -141,6 +146,7 @@ nonisolated extension LocalVaultVendor {
     var instanceNounPlural: String {
         switch self {
         case .keePassFile: "databases"
+        case .passwordStore: "stores"
         case .onePassword, .keePassXC, .keeper, .bitwarden: "vaults"
         }
     }
@@ -291,7 +297,10 @@ nonisolated extension VendorConfigFieldKind {
     var level: SignInConfigLevel {
         switch self {
         case .toolBinary, .unixSocket, .daemonEndpoint, .pkcs11Module: .transport
-        case .vaultFile, .keyFile, .securityKeySlot: .instance
+        // A store's directory and the field name to read inside its entries are both
+        // "which vault, and how it is laid out" — the same level as a .kdbx path,
+        // and both legitimately differ between a work store and a personal one.
+        case .vaultFile, .keyFile, .securityKeySlot, .storeDirectory, .entryFieldName: .instance
         }
     }
 }
@@ -908,6 +917,12 @@ nonisolated enum SignInSourceSteps {
         case .keePassFile:
             "An entry\u{2019}s path is its groups and its title, separated by slashes "
             + "\u{2014} for example VPN/Work."
+        case .passwordStore:
+            // Names the layout, because a store's entry name IS its path inside the
+            // folder — the same shape as a .kdbx entry path, but arrived at from a
+            // filesystem rather than from groups, and worth saying so once.
+            "An entry\u{2019}s name is its path inside the store, without the .gpg "
+            + "\u{2014} for example vpn/work."
         case .onePassword, .keePassXC, .keeper, .bitwarden:
             "Which entry SimpleVPN reads this VPN\u{2019}s sign-in from."
         }
