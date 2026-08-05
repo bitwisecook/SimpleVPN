@@ -345,6 +345,21 @@ struct AutoFillField<Focus: Hashable>: NSViewRepresentable {
     let focusValue: Focus
     var onSubmit: () -> Void = {}
 
+    /// Optional gate on this field's Return, and a synchronous view of its text.
+    ///
+    /// It exists for one specific hazard: a hardware security key is a USB
+    /// KEYBOARD, and it types its code and then presses Return. Left alone, that
+    /// Return fires `onSubmit` — connecting half-composed and burning a one-time
+    /// code on every single attempt. A policy object can watch the text as it
+    /// arrives and swallow the key's own Return; the user's own Return still
+    /// submits. See UI/Credentials/YubiKeyTouchPrompt.swift and
+    /// Credentials/YubiKeyTouchCapture.swift.
+    ///
+    /// The hook is deliberately vendor-neutral and OFF by default: nil means this
+    /// field behaves exactly as it always has, which is what every other call site
+    /// gets.
+    var returnPolicy: (any CredentialFieldReturnPolicy)? = nil
+
     func makeNSView(context: Context) -> NSTextField {
         let field: NSTextField = kind == .password ? NSSecureTextField() : NSTextField()
         field.placeholderString = placeholder
@@ -405,12 +420,23 @@ struct AutoFillField<Focus: Hashable>: NSViewRepresentable {
         func controlTextDidChange(_ note: Notification) {
             guard let field = note.object as? NSTextField else { return }
             parent.text = field.stringValue
+            // SYNCHRONOUSLY, before the binding write has been through SwiftUI: a
+            // security key types its whole code and its Return in one burst, so a
+            // policy that only saw the text after a view update would not have
+            // decided anything by the time the Return arrived.
+            parent.returnPolicy?.fieldTextChanged(field.stringValue)
         }
         func controlTextDidBeginEditing(_ note: Notification) {
             parent.focus = parent.focusValue
         }
         func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
             if selector == #selector(NSResponder.insertNewline(_:)) {
+                // A policy may swallow this Return — see `returnPolicy`. The
+                // keystroke is still consumed (`true`), so it never reaches the
+                // window's default button either; it simply does nothing.
+                if let policy = parent.returnPolicy, !policy.fieldShouldSubmitOnReturn() {
+                    return true
+                }
                 parent.onSubmit()
                 return true
             }

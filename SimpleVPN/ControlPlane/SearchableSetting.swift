@@ -63,7 +63,8 @@ extension EngineSettingSpec: @MainActor SearchableSetting {
 /// catalog nobody registered is a catalog search can't find.
 @MainActor
 enum SettingSurface: String, CaseIterable, Identifiable {
-    case openVPN, wireGuard, tailscale, proxyTunnel, native, ssh, sshNetworkTunnel, openConnect, customRouting
+    case openVPN, wireGuard, tailscale, proxyTunnel, native, ssh, sshNetworkTunnel, openConnect,
+         customRouting, securityKey
 
     nonisolated var id: String { rawValue }
 
@@ -81,6 +82,10 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         case .sshNetworkTunnel: "sshnet."
         case .openConnect: "oc."
         case .customRouting: "cr."
+        // Security keys (YubiKey and similar) supplying a verification code. Its own
+        // namespace because ids are global and bound 1:1 to a surface: these rows
+        // are per-VPN Sign-In settings that no engine owns.
+        case .securityKey: "yk."
         }
     }
 
@@ -97,6 +102,7 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         case .sshNetworkTunnel: "SSH Network Tunnel"
         case .openConnect: "SSL VPN (AnyConnect, FortiGate, GlobalProtect…)"
         case .customRouting: "Custom Routing"
+        case .securityKey: "Security Key"
         }
     }
 
@@ -114,6 +120,12 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         case .openConnect: [.fortinet, .f5apm, .ciscoAnyConnect, .globalProtect,
                             .juniper, .pulse, .arrayNetworks]
         case .customRouting: VPNKind.allCases
+        // Every kind whose sign-in can ask for a verification code. Not
+        // `allCases`: Tailscale, WireGuard and the Proxy Tunnel collect nothing
+        // typed at all, so a security key has nothing to contribute and offering
+        // the rows would be a promise we could not keep.
+        case .securityKey: [.openVPN, .fortinet, .f5apm, .ciscoAnyConnect, .globalProtect,
+                            .juniper, .pulse, .arrayNetworks, .ikev2, .ipsec, .l2tp]
         }
     }
 
@@ -124,6 +136,9 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         switch self {
         case .openVPN: .options
         case .customRouting: .customRouting
+        // The rows live in the OpenVPN editor's Sign-In tab, and in the canonical
+        // Sign-In group of every other editor's single Settings tab.
+        case .securityKey: .signIn
         default: .settings
         }
     }
@@ -139,6 +154,7 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         case .sshNetworkTunnel: SSHNetSettings.all
         case .openConnect: OpenConnectSettings.all
         case .customRouting: CustomRoutingSettings.all
+        case .securityKey: YubiKeySettings.all
         }
     }
 

@@ -36,6 +36,7 @@ struct ManualAnchorParityTests {
         ("px.", ProxyTunnelSettings.all),
         ("sshnet.", SSHNetSettings.all),
         ("cr.", CustomRoutingSettings.all),
+        ("yk.", YubiKeySettings.all),
     ]
 
     /// …and the table is TOTAL, checked against the app-wide surface registry
@@ -75,6 +76,10 @@ struct ManualAnchorParityTests {
         "problem-idle", "problem-captive",
         // Per-engine introductions
         "ts-what-is-it", "cr-what-is-it", "sshnet-what-is-it",
+        // What a security key is, and the difference between the code it types
+        // for you and the certificate its PIV applet holds. The settings live
+        // under "yk."; this is the chapter their help links into.
+        "yk-what-is-it",
         // Prose about a WAY of signing in rather than a setting: what an SSH
         // agent is, which agents work, what its three failures mean, and why
         // agent forwarding isn't offered. The setting itself is

@@ -81,6 +81,12 @@ struct EditVPNView: View {
     /// replaces the stored secret, leaving it empty keeps whatever is there.
     @State private var totpSecretInput = ""
     @State private var passwordTemplate = VPNAuthConfig.defaultTemplate
+    /// Security-key setup for this VPN (YubiKey and similar). Edited by
+    /// `YubiKeySignInSection`; saved with the rest of the auth shape.
+    @State private var yubiKey = YubiKeyAuthConfig()
+    /// What is plugged in, and whether Yubico's own tool is installed. IORegistry
+    /// reads plus one file check — no permission, no Input Monitoring.
+    @State private var yubiKeyPresence = SecurityKeyPresence()
     @State private var otpAdvancedExpanded = false
 
     // Custom Routing draft (Mediators/CustomRouting.swift) — owned here (not inside
@@ -189,6 +195,14 @@ struct EditVPNView: View {
     /// sends the code as the engine's own challenge response (SCRV1 framing), so
     /// the `{password}{otp}` assembly never runs — see `VPNController.connect`.
     private var templateInertReason: String? {
+        // A security key's "where the code goes" choice OWNS the join while one is
+        // in use, so the template must be visibly dead here rather than editable
+        // and silently overruled at save time. Checked first: it is the more
+        // specific reason, and it names a control the user can actually change.
+        if YubiKeyConflicts.templateIsOwnedByDelivery(yubiKeyInputs) {
+            return "Your security key setting \u{201C}\(YubiKeySettings.specs["yk.delivery"].name)\u{201D}"
+                + " decides this \u{2014} it is set to \u{201C}\(yubiKey.delivery.title)\u{201D}."
+        }
         guard staticChallenge != nil else { return nil }
         return "This VPN sends the code separately from the password (SCRV1), so the password isn't assembled from a template."
     }
@@ -541,6 +555,13 @@ struct EditVPNView: View {
                         }
                     }
                 }
+
+                // A security key supplying the code. Its own section, right after
+                // the code toggle it depends on, in the canonical Sign-In group.
+                YubiKeySignInSection(config: $yubiKey, inputs: yubiKeyInputs,
+                                     presence: yubiKeyPresence,
+                                     locked: ManagedPolicy.lockConfiguration,
+                                     rescan: rescanSecurityKeys)
             }
         }
         .formStyle(.grouped)
@@ -549,6 +570,33 @@ struct EditVPNView: View {
     private var templateValid: Bool {
         let t = passwordTemplate.trimmingCharacters(in: .whitespaces)
         return t.isEmpty || t.contains("{otp}")
+    }
+
+    // MARK: Security key
+
+    /// Everything the security-key mutual exclusions turn on, gathered from this
+    /// editor's live state. The rules themselves are pure and tested
+    /// (`YubiKeyConflicts`).
+    private var yubiKeyInputs: YubiKeyConflictInputs {
+        var inputs = YubiKeyConflictInputs()
+        inputs.config = yubiKey
+        inputs.requiresOTP = requiresOTP
+        inputs.staticChallenge = staticChallenge != nil
+        inputs.credentialKind = credentialKind
+        inputs.sourceSuppliesCode = credentialKind.suppliesOTP
+        inputs.keychainSuppliesCode = vpn.authConfig(for: profileID).protectWithBiometrics
+            && BiometricCredentialStore.info(profile: profileID).hasTOTP
+        inputs.passwordTemplate = passwordTemplate
+        inputs.managerToolInstalled = yubiKeyPresence.managerToolInstalled
+        inputs.typingKeyAttached = yubiKeyPresence.hasTypingKey
+        return inputs
+    }
+
+    private func rescanSecurityKeys() {
+        var next = SecurityKeyPresence()
+        next.keys = IORegistrySecurityKeyScanner().scan()
+        next.managerToolInstalled = YkmanRunner().locate() != nil
+        if next != yubiKeyPresence { yubiKeyPresence = next }
     }
 
     /// Whether the profile asks for the code to be echoed as it's typed — worth
@@ -1400,6 +1448,8 @@ struct EditVPNView: View {
         let auth = vpn.authConfig(for: profileID)
         requiresOTP = auth.requiresOTP
         passwordTemplate = auth.passwordTemplate
+        yubiKey = auth.yubiKey
+        rescanSecurityKeys()
         remember = auth.rememberCredentials
         let source = vpn.credentialSource(for: profileID)
         credentialKind = source.kind
@@ -1431,6 +1481,14 @@ struct EditVPNView: View {
             auth.requiresOTP = requiresOTP
             auth.passwordTemplate = passwordTemplate.trimmingCharacters(in: .whitespaces).isEmpty
                 ? VPNAuthConfig.defaultTemplate : passwordTemplate
+            auth.yubiKey = yubiKey
+            // ONE control, ONE meaning: while a security key supplies the code, its
+            // "where the code goes" choice OWNS the template, so the two can never
+            // disagree about the join. The template row is shown as unavailable to
+            // match (see YubiKeySignInSection), rather than left editable and inert.
+            if YubiKeyConflicts.templateIsOwnedByDelivery(yubiKeyInputs) {
+                auth.passwordTemplate = yubiKey.delivery.passwordTemplate
+            }
             auth.rememberCredentials = remember
             // The PROFILE has the last word on the auth shape: an autologin
             // profile stores no OTP requirement and no template (this form

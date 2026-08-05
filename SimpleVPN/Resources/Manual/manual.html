@@ -323,6 +323,17 @@
   <a href="#cr-proxy-manual-url">Manual Proxy Address</a>
   <a href="#cr-proxy-pac-url">PAC URL</a>
   <a href="#cr-proxy-auth">Proxy Sign-In</a>
+
+  <h2>Security Key</h2>
+  <a href="#yk-what-is-it">What This Is</a>
+  <a href="#yk-enabled">Use a Security Key</a>
+  <a href="#yk-mechanism">What the Key Supplies</a>
+  <a href="#yk-delivery">Where the Code Goes</a>
+  <a href="#yk-oath-account">Account on the Key</a>
+  <a href="#yk-slot">Key Slot</a>
+  <a href="#yk-serial">Security Key Serial Number</a>
+  <a href="#yk-wait-seconds">How Long to Wait for a Touch</a>
+  <a href="#yk-arm-automatically">Wait for a Touch Automatically</a>
 </nav>
 
 <main>
@@ -1426,6 +1437,57 @@ the device's protection intact at the cost of typing four to eight digits per co
 <p class="default">Optional.</p>
 <p>The username and password the proxy asks for, if it does. Used both for a proxy you configured here and for one this VPN pushed — a push never carries credentials, so if the pushed proxy wants a sign-in this is where it comes from.</p>
 <p>The pair is kept in your login keychain; the VPN&rsquo;s settings only ever carry a reference to it. Clearing both fields deletes the stored secret. Choosing &ldquo;Ignore (direct)&rdquo; keeps what you typed but drops the reference, so an unreferenced secret can never reach a connection.</p>
+
+<h2 id="yk-what-is-it">Security Keys — What This Is</h2>
+<p>A <strong>security key</strong> — a YubiKey or something like it — can supply this VPN&rsquo;s verification code, so you never type one. Four different things a key can do, and they are genuinely different:</p>
+<ul>
+  <li><strong>The code the key types.</strong> The key pretends to be a keyboard. Touch the gold disc and it types a long code beginning <code>cccc</code>, then presses Return. This is the factory setting on most keys.</li>
+  <li><strong>A verification code stored on the key</strong> — the ordinary six- or eight-digit kind, kept on the key instead of on your phone. SimpleVPN asks the key for it using <strong>Yubico&rsquo;s own command-line tool</strong>, <code>ykman</code>, which you install yourself.</li>
+  <li><strong>An answer to a challenge.</strong> Your VPN sends a challenge, the key answers it, and the answer is the code. The key&rsquo;s secret never leaves the key.</li>
+  <li><strong>A fixed password stored on the key.</strong> Not a one-time code — the same every time. SimpleVPN supports it so that it works rather than being mangled.</li>
+</ul>
+<p><strong>Because the key types, the cursor has to be in the right box.</strong> A security key types into whatever has keyboard focus, anywhere on the Mac — there is no way for it to aim. So SimpleVPN does not just show you a box and hope: when it is ready for your key it says <em>&ldquo;Touch your security key now&rdquo;</em>, puts the cursor in the right box for you, counts down, and gives you a Cancel button.</p>
+<p><strong>The Return your key presses will never connect on its own.</strong> Your key presses Return after the code, and in a sign-in form Return normally means &ldquo;connect&rdquo;. If that fired, SimpleVPN would try to connect the instant the code arrived — possibly before the rest of your sign-in was ready — and a one-time code that fails is <em>gone</em>. So SimpleVPN swallows the Return your key sends. You connect when you are ready, by pressing Return yourself or clicking Connect.</p>
+<p><strong>A code is used once and never re-sent.</strong> If a connection fails, SimpleVPN clears the code and asks for a fresh touch rather than trying the old one again. Retrying a spent code cannot succeed, and on some systems repeated failures lock the account.</p>
+<div class="warn">SimpleVPN cannot tell you whether a code is <em>valid</em>. It checks the shape and passes the code on; your VPN&rsquo;s server (or Yubico&rsquo;s validation service) decides. If a code is rejected, the usual causes are the wrong key, the wrong account on the key, or a keyboard layout that scrambled it — see below.</div>
+<p><strong>Keyboard layouts.</strong> The key sends key <em>presses</em>, and your Mac decides which letters they are. The code&rsquo;s alphabet was chosen to survive the common layouts, but Dvorak and non-Latin layouts scramble it. If the right number of characters arrives but they are the wrong ones, SimpleVPN says so and tells you to switch input source.</p>
+<p><strong>What SimpleVPN does not do.</strong> It never reads your keyboard. It never asks for <strong>Input Monitoring</strong>, and it never will — the key types into the box SimpleVPN has focused, so there is nothing to monitor. Detecting that a key is plugged in reads the list of attached devices macOS already publishes, which needs no permission at all.</p>
+
+<h2 id="yk-enabled">Use a Security Key</h2>
+<p class="default">Default: off.</p>
+<p>Turn this on and this VPN&rsquo;s verification code comes from your security key instead of being typed. Only available once this VPN is set to ask for a verification code — a key that supplies a code to a VPN that wants none has nothing to do.</p>
+<p>Unavailable when something else already supplies the code: a password app that computes it (1Password, KeePassXC), or a Touch ID-protected sign-in that holds your authenticator&rsquo;s setup key. Two sources for one code would send the wrong one, so pick whichever you want.</p>
+
+<h2 id="yk-mechanism">What the Key Supplies</h2>
+<p class="default">Default: the code my key types.</p>
+<p>Which of the four things above your key does for this VPN. The two &ldquo;typed&rdquo; kinds need nothing installed. The other two need <strong>Yubico&rsquo;s own command-line tool</strong>; SimpleVPN shows the command to install it and never installs it for you.</p>
+
+<h2 id="yk-delivery">Where the Code Goes</h2>
+<p class="default">Default: joined onto the end of my password.</p>
+<p>How the code reaches the gateway. <strong>Joined onto the end of my password</strong> sends your password and the code as one — what most VPN gateways expect, and the usual choice. <strong>Sent on its own</strong> answers the server&rsquo;s own prompt and never mixes the code into your password. <strong>The code is the whole sign-in</strong> sends no password at all.</p>
+<p>This choice decides this VPN&rsquo;s <strong>password template</strong> (under Verification Code &#9656; Advanced) while a security key is in use, so that row becomes unavailable rather than being silently overruled — one control, one meaning. This row is unavailable itself when this VPN&rsquo;s own configuration asks the server for the code separately; there is then nothing to join.</p>
+
+<h2 id="yk-oath-account">Account on the Key</h2>
+<p class="default">Optional — required for a code stored on the key.</p>
+<p>Which account on your key holds this VPN&rsquo;s code, named exactly as your key lists it (usually <code>Issuer:name</code>). Run <code>ykman oath accounts list</code> in Terminal to see them.</p>
+<p>The <em>name</em> is passed to Yubico&rsquo;s tool as an argument; the <em>code</em> comes back privately and never appears on a command line, in a log, or in this VPN&rsquo;s saved settings. If your key&rsquo;s code list is protected by a password, SimpleVPN will not pass that password on a command line where other programs could read it — run <code>ykman oath accounts code -r &lt;name&gt;</code> once in Terminal to let Yubico&rsquo;s tool remember it on this Mac.</p>
+
+<h2 id="yk-slot">Key Slot</h2>
+<p class="default">Default: Slot 2.</p>
+<p>Which of your key&rsquo;s two slots answers a challenge. Slot 2 is the usual one: slot 1 normally holds the code your key types, and overwriting it is a thing people regret. Slot 2 is reached with a long touch — hold for about three seconds.</p>
+<p>This is the same operation a KeePass database uses when it asks for a security key to unlock, so a slot that already works for your password database will work here.</p>
+
+<h2 id="yk-serial">Security Key Serial Number</h2>
+<p class="default">Default: empty — whichever key is plugged in.</p>
+<p>Only needed if you carry more than one key. The serial number is printed on the key, and it is digits only. Leave it empty and SimpleVPN uses whatever is plugged in, which is right for almost everybody.</p>
+
+<h2 id="yk-wait-seconds">How Long to Wait for a Touch</h2>
+<p class="default">Default: 30 seconds.</p>
+<p>How long SimpleVPN waits for your touch before giving up (5–120). Long enough to find a key in a bag; short enough that a prompt left open does not sit there all afternoon quietly catching your typing.</p>
+
+<h2 id="yk-arm-automatically">Wait for a Touch Automatically</h2>
+<p class="default">Default: on.</p>
+<p>Start waiting for your key as soon as the sign-in is ready, so the cursor is already in the right box when you reach for it. Turn it off to wait until you click — worth doing if you would rather nothing started listening on its own.</p>
 
 <hr style="border: none; border-top: 1px solid var(--border); margin-top: 48px">
 <p class="muted" style="font-size: 13px">SimpleVPN uses the OpenVPN 3, OpenConnect, libssh and Tailscale engines, the gVisor network stack, Sparkle for app updates, and the 1Password Go SDK for item lookup. <a href="https://db-ip.com">IP Geolocation by DB-IP</a>, licensed CC BY 4.0. Coastlines from Natural Earth. Every component and its licence is listed in <strong>SimpleVPN &#9656; About SimpleVPN</strong>.</p>

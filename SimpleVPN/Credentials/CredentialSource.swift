@@ -20,7 +20,10 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
     /// — the Keeper app itself exposes no local API). See KeeperProvider.
     case keeper
 
-    var displayName: String {
+    // nonisolated for the same reason as `suppliesOTP` below: it is a pure function
+    // of the case, and nonisolated rules (the security-key mutual exclusions in
+    // YubiKeyAuthConfig) name the source in their own explanations.
+    nonisolated var displayName: String {
         switch self {
         case .manual: "Manual / Saved"
         case .onePassword: "1Password"

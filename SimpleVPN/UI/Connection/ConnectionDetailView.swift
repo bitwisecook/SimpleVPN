@@ -76,6 +76,48 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     /// AutoFillFields, which SwiftUI focus can't reach.
     @State var focusedField: CredentialField?   // was private — internal for the file split
 
+    // MARK: Security key (YubiKey and similar)
+
+    /// The armed-capture state machine for this VPN's verification code. See
+    /// Credentials/YubiKeyTouchCapture.swift — the whole reason it exists is that a
+    /// security key types into whatever has focus, so arming has to be an explicit
+    /// state rather than a field the user aims at.
+    @State private var yubiKeyCapture = YubiKeyCapture()
+    /// What is plugged in, and whether `ykman` is here. IORegistry reads only — no
+    /// Input Monitoring, ever (Credentials/YubiKeyPresence.swift).
+    @State private var yubiKeyPresence = SecurityKeyPresence()
+    /// The object that swallows the key's own trailing Return. Held (not rebuilt
+    /// per frame) because `AutoFillField`'s coordinator consults it by reference.
+    @State private var yubiKeyReturnPolicy: YubiKeyFieldReturnPolicy?
+
+    private var yubiKeyConfig: YubiKeyAuthConfig { vpn.authConfig(for: profile.id).yubiKey }
+
+    /// Everything the mutual-exclusion rules turn on, gathered from this VPN.
+    private var yubiKeyInputs: YubiKeyConflictInputs {
+        var inputs = YubiKeyConflictInputs()
+        inputs.config = yubiKeyConfig
+        inputs.requiresOTP = requiresOTP
+        inputs.staticChallenge = hasStaticChallenge
+        inputs.credentialKind = credentialKind
+        inputs.sourceSuppliesCode = credentialKind.suppliesOTP
+        inputs.keychainSuppliesCode = isProtected && biometricInfo.hasTOTP
+        inputs.passwordTemplate = vpn.authConfig(for: profile.id).passwordTemplate
+        inputs.managerToolInstalled = yubiKeyPresence.managerToolInstalled
+        inputs.typingKeyAttached = yubiKeyPresence.hasTypingKey
+        return inputs
+    }
+
+    /// The profile declares the server's own code prompt (`static-challenge`), so
+    /// the code travels as the engine's challenge response rather than inside the
+    /// password — which makes the password template inert.
+    private var hasStaticChallenge: Bool {
+        vpn.ovpnText(id: profile.id)
+            .map { !evaluator.evaluation(for: $0).staticChallenge.isEmpty } ?? false
+    }
+
+    /// Will a security key be asked for this VPN's code on the next connect?
+    private var yubiKeyActive: Bool { YubiKeyConflicts.isActive(yubiKeyInputs) }
+
     private var requiresOTP: Bool { vpn.requiresOTP(for: profile.id) }
     private var allowPasswordSave: Bool {
         vpn.ovpnText(id: profile.id).map { evaluator.evaluation(for: $0).allowPasswordSave } ?? true
@@ -644,20 +686,161 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                                       allowsPasswordSave: allowPasswordSave, sources: sources)
             if managerNeedsTypedOTP {
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
-                    GridRow {
-                        Text("Code").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
-                        AutoFillField(kind: .oneTimeCode, placeholder: "Verification code",
-                                      text: otp, focus: $focusedField, focusValue: .otp,
-                                      onSubmit: attemptConnect)
-                            .requiredEmphasis(missing: otp.wrappedValue.isEmpty, attempted: submitAttempted, nudge: nudgeTick)
-                    }
+                    verificationCodeGridRow
                 }
                 .textFieldStyle(.roundedBorder)
                 .frame(maxWidth: 380)
+                securityKeyPrompt
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear { if managerNeedsTypedOTP { focusedField = .otp } }
+        .onAppear {
+            if managerNeedsTypedOTP { focusedField = .otp }
+            prepareSecurityKey()
+        }
+    }
+
+    // MARK: The verification-code row, and the security key behind it
+
+    /// ONE code row, shared by all three credential forms (typed, Touch
+    /// ID-protected, and password-app). It used to be copy-pasted three times,
+    /// which is how the security key's return policy would have reached two of
+    /// them and not the third.
+    ///
+    /// `returnPolicy` is what stops a security key's own trailing Return from
+    /// firing Connect — see UI/Credentials/YubiKeyTouchPrompt.swift. It is nil
+    /// unless a key is actually set up for this VPN, so every other VPN's code
+    /// field behaves exactly as it always has.
+    @ViewBuilder private var verificationCodeGridRow: some View {
+        GridRow {
+            Text("Code").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
+            AutoFillField(kind: .oneTimeCode, placeholder: "Verification code",
+                          text: otp, focus: $focusedField, focusValue: .otp,
+                          onSubmit: attemptConnect,
+                          returnPolicy: yubiKeyActive ? yubiKeyReturnPolicy : nil)
+                .requiredEmphasis(missing: otp.wrappedValue.isEmpty, attempted: submitAttempted, nudge: nudgeTick)
+        }
+    }
+
+    /// "Touch your key now", when this VPN is set up for one. Absent otherwise —
+    /// no dormant row, no hint of a feature nobody switched on.
+    @ViewBuilder private var securityKeyPrompt: some View {
+        if yubiKeyActive {
+            YubiKeyTouchPrompt(capture: yubiKeyCapture, config: yubiKeyConfig,
+                               presence: yubiKeyPresence, arm: armSecurityKey)
+                .frame(maxWidth: 380)
+        }
+    }
+
+    /// Arm the wait — and, crucially, put the cursor where the code must land.
+    /// FOCUS IS THE FEATURE: a key types into whatever has focus, so an armed state
+    /// that has not moved focus is a trap rather than a help.
+    private func armSecurityKey() {
+        yubiKeyCapture.mechanism = yubiKeyConfig.mechanism
+        yubiKeyCapture.delivery = yubiKeyConfig.delivery
+        // A stale code in the box would be indistinguishable from the fresh one
+        // about to arrive, and `observe` matches on the box's whole contents.
+        if !yubiKeyConfig.mechanism.capturesInPasswordField {
+            otp.wrappedValue = YubiKeyComposition.clearedCodeField()
+            focusedField = .otp
+        } else {
+            focusedField = .password
+        }
+        yubiKeyCapture.arm(wait: yubiKeyConfig.effectiveWait,
+                           passwordSoFar: password.wrappedValue)
+        if yubiKeyConfig.mechanism.needsManagerTool {
+            Task { await fetchSecurityKeyCode() }
+        }
+    }
+
+    /// The FETCHED mechanisms (an OATH code, a challenge-response answer): nothing
+    /// is typed, so SimpleVPN asks `ykman` and puts the answer in the box itself.
+    /// The armed state still exists, because both can need a physical touch.
+    private func fetchSecurityKeyCode() async {
+        let config = yubiKeyConfig
+        do {
+            let code: SingleUseCode
+            switch config.mechanism {
+            case .oathCode:
+                code = try await YubiKeyManagerTool().oathCode(
+                    account: config.oathAccount, serial: config.normalizedSerial)
+            case .challengeResponse:
+                // Nothing here has a gateway challenge to answer yet — that
+                // arrives from the engine, and wiring it is the engine side's
+                // work. Until then this mechanism is configurable and honest
+                // about needing a challenge rather than silently doing nothing.
+                yubiKeyCapture.cancel()
+                vpn.lastError = "Answering a challenge needs the challenge from your VPN\u{2019}s "
+                    + "server, which SimpleVPN doesn\u{2019}t have yet for this kind of VPN."
+                return
+            case .yubicoOTP, .staticPassword:
+                return
+            }
+            // Straight into the box, then straight out of the box object: the
+            // field is now the only holder, and it is cleared the moment the code
+            // is spent.
+            if let value = code.consume() {
+                otp.wrappedValue = value
+                _ = yubiKeyCapture.observe(fieldText: value)
+            }
+        } catch is CancellationError {
+        } catch {
+            yubiKeyCapture.cancel()
+            vpn.lastError = error.localizedDescription
+        }
+    }
+
+    /// Called as each credential form appears: gather what is plugged in, build the
+    /// return policy, and — when this VPN asks for it — arm the wait straight away
+    /// so the cursor is already in the right box when the user reaches for the key.
+    ///
+    /// Auto-arming is a SETTING (`yk.arm-automatically`, on by default) rather than
+    /// an assumption: an armed field that quietly swallows a Return is exactly the
+    /// behaviour some people will want to turn off.
+    private func prepareSecurityKey() {
+        refreshSecurityKeyPresence()
+        guard yubiKeyActive, yubiKeyConfig.armAutomatically,
+              yubiKeyCapture.state == .idle else { return }
+        armSecurityKey()
+    }
+
+    /// Re-read what is plugged in. Cheap (IORegistry plus one file check), so it is
+    /// safe on appear and on every window activation.
+    private func refreshSecurityKeyPresence() {
+        guard yubiKeyConfig.enabled else { return }
+        var next = SecurityKeyPresence()
+        next.keys = IORegistrySecurityKeyScanner().scan()
+        next.managerToolInstalled = YkmanRunner().locate() != nil
+        if next != yubiKeyPresence { yubiKeyPresence = next }
+        if yubiKeyReturnPolicy == nil {
+            yubiKeyReturnPolicy = YubiKeyFieldReturnPolicy(capture: yubiKeyCapture) { _ in
+                // A code has landed. Focus moves on to whatever is still empty, so
+                // the person who just touched their key is not left with a cursor
+                // in a box that is already full.
+                focusedField = firstMissingField
+            }
+        }
+        yubiKeyCapture.mechanism = yubiKeyConfig.mechanism
+        yubiKeyCapture.delivery = yubiKeyConfig.delivery
+    }
+
+    /// The code to send, taking it out of its single-use box on the way.
+    ///
+    /// THE no-retry guard, at the one point it matters: a second call gets nil,
+    /// the box is empty, the field is cleared, and `ConnectReadiness` therefore
+    /// reports `.needsCode` — so a retry asks for a fresh touch instead of
+    /// replaying a code the gateway has already burned.
+    private func typedOTPForConnect() -> String {
+        guard yubiKeyActive, yubiKeyCapture.state.hasUnspentCode else {
+            return vpn.transientCredentials(for: profile.id).otp
+        }
+        let taken = yubiKeyCapture.consumeCode() ?? ""
+        // Out of the visible box as well. A spent code left on screen is a code
+        // someone will believe in.
+        if !yubiKeyConfig.mechanism.capturesInPasswordField {
+            otp.wrappedValue = YubiKeyComposition.clearedCodeField()
+        }
+        return taken
     }
 
     /// What connecting will feel like, per password app — a wrong promise here
@@ -719,16 +902,11 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
 
             if requiresOTP && !biometricInfo.hasTOTP {
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
-                    GridRow {
-                        Text("Code").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
-                        AutoFillField(kind: .oneTimeCode, placeholder: "Verification code",
-                                      text: otp, focus: $focusedField, focusValue: .otp,
-                                      onSubmit: attemptConnect)
-                            .requiredEmphasis(missing: otp.wrappedValue.isEmpty, attempted: submitAttempted, nudge: nudgeTick)
-                    }
+                    verificationCodeGridRow
                 }
                 .textFieldStyle(.roundedBorder)
                 .frame(maxWidth: 380)
+                securityKeyPrompt
                 Text("Add your authenticator's setup key in Manage VPNs and the fingerprint will cover the code too.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -736,7 +914,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
         .frame(maxWidth: .infinity, alignment: .leading)
         // Same courtesy as the typed form: if a code is needed, the cursor is
         // already in the field that needs it.
-        .onAppear { focusedField = firstMissingField }
+        .onAppear { focusedField = firstMissingField; prepareSecurityKey() }
     }
 
     private var typedCredentialForm: some View {
@@ -762,17 +940,12 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                         .requiredEmphasis(missing: password.wrappedValue.isEmpty, attempted: submitAttempted, nudge: nudgeTick)
                 }
                 if requiresOTP {
-                    GridRow {
-                        Text("Code").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
-                        AutoFillField(kind: .oneTimeCode, placeholder: "Verification code",
-                                      text: otp, focus: $focusedField, focusValue: .otp,
-                                      onSubmit: attemptConnect)
-                            .requiredEmphasis(missing: otp.wrappedValue.isEmpty, attempted: submitAttempted, nudge: nudgeTick)
-                    }
+                    verificationCodeGridRow
                 }
             }
             .textFieldStyle(.roundedBorder)
             .frame(maxWidth: 380)
+            securityKeyPrompt
 
             if allowPasswordSave {
                 Toggle("Remember username & password", isOn: remember)
@@ -817,6 +990,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
         .onAppear {
             // Cursor lands in the first field that actually needs typing.
             focusedField = firstMissingField
+            prepareSecurityKey()
         }
     }
 
@@ -863,7 +1037,9 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
         do {
             try await vpn.connectUsingConfiguredSource(
                 id: profile.id,
-                typedOTP: vpn.transientCredentials(for: profile.id).otp)
+                // Not the raw field: `typedOTPForConnect` takes the code out of
+                // its single-use box, so a retry cannot replay it.
+                typedOTP: typedOTPForConnect())
         } catch is CancellationError {
             // The user backed out — that's an outcome, not an error to report.
         } catch {
