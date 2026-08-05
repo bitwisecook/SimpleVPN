@@ -679,28 +679,14 @@ nonisolated extension UserFacingError {
     /// 1Password failures don't carry secrets today — this is so they can't
     /// start to, and so a future error path can't leak a typed password by
     /// quoting the request back at us.
+    ///
+    /// The RULES are not here: they are `SecretScrubber`, shared with the debug
+    /// bundle and the diagnostic report, so a secret shape learned in one place
+    /// is known in all three. This entry point only chooses the policy —
+    /// `.errorDetail`, which keeps addresses and host-key fingerprints (an error
+    /// about a server is useless without them, and a fingerprint is public) and
+    /// bounds the result to one readable sentence.
     static func redact(_ raw: String, secrets: [String] = []) -> String {
-        var text = raw
-        // Exact values we know are secret (the live typed password / code).
-        for secret in secrets where secret.count >= 4 {
-            text = text.replacingOccurrences(of: secret, with: "\u{2022}\u{2022}\u{2022}\u{2022}")
-        }
-        // key=value / key: value where the key smells of a secret.
-        if let keyed = try? NSRegularExpression(
-            pattern: "\\b(pass(?:word|wd|phrase)?|secret|token|otp|totp|one[- ]?time[- ]?(?:code|password)|api[-_ ]?key|authorization|credentials?)\\b\\s*[:=]\\s*(\"[^\"]*\"|'[^']*'|\\S+)",
-            options: [.caseInsensitive]) {
-            text = keyed.stringByReplacingMatches(
-                in: text, range: NSRange(text.startIndex..., in: text),
-                withTemplate: "$1=\u{2022}\u{2022}\u{2022}\u{2022}")
-        }
-        // Anything shaped like a one-time code.
-        if let codes = try? NSRegularExpression(pattern: "\\b[0-9]{6,8}\\b") {
-            text = codes.stringByReplacingMatches(
-                in: text, range: NSRange(text.startIndex..., in: text),
-                withTemplate: "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}")
-        }
-        // A wall of text is nobody's idea of a detail.
-        if text.count > 2000 { text = String(text.prefix(2000)) + "\u{2026}" }
-        return text
+        SecretScrubber(policy: .errorDetail, literalSecrets: secrets).scrub(raw)
     }
 }

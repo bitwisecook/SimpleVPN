@@ -1,0 +1,68 @@
+# Copyright 2026 James Deucker (bitwisecook)
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# The guided report form. SimpleVPN ▸ Help ▸ "Report a Problem…" — and the
+# "Untested" banner's report link — open this form with `title` and
+# `what-happened` pre-filled, and put the assembled report on the clipboard for
+# the `report` box.
+#
+# FIELD IDS HERE ARE LOAD-BEARING. `DiagnosticReportSubmission` names them
+# (`what-happened`, `report`) and renaming one breaks the prefill silently. The
+# template filename is likewise named there, once.
+name: Report a problem (guided)
+description: Opened from inside SimpleVPN, with the details already gathered
+labels: ["report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this — for an untested VPN type or sign-in source, a
+        report is the only thing that ever moves it to tested, and that includes a
+        report that says it worked.
+
+        **Please read the report SimpleVPN put on your clipboard before you paste
+        it.** It is assembled from structured facts rather than raw log text, and
+        values shown as `<something:abc123>` have already been replaced with
+        placeholders — but it is yours, and you can delete anything from it.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What you were doing, and what went wrong
+      description: Pre-filled from the dialog in SimpleVPN. Change anything you like.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: How did it end up?
+      options:
+        - It worked
+        - It worked, but something was wrong with it
+        - It didn't connect
+        - It connected and then dropped
+        - I couldn't get as far as trying
+      multiple: false
+    validations:
+      required: false
+
+  - type: textarea
+    id: report
+    attributes:
+      label: SimpleVPN report
+      description: >
+        Paste the report SimpleVPN copied to your clipboard. It contains app,
+        extension and macOS versions, the VPN type, which command-line tools and
+        password managers are installed and where, what SimpleVPN had already
+        measured about the connection, which settings are switched off, and recent
+        log events of a few known kinds.
+      render: markdown
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Before you submit
+      options:
+        - label: I've read the report and it contains nothing I don't want public.
+          required: true
