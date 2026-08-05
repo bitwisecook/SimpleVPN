@@ -381,6 +381,10 @@ struct DiagnosticReportHost: ViewModifier {
             context.tunnels = tunnels
             context.reachability = reachability
             context.linkState = linkState
+            // The maturity registry owns this decision; the assembler only asks.
+            // Wired here rather than defaulted inside the assembler so there is
+            // still exactly one table deciding what is tested (FeatureMaturity).
+            context.maturity = { $0.maturity.badgeText }
             DiagnosticReportCoordinator.shared.context = context
         }
     }

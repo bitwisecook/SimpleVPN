@@ -212,7 +212,8 @@ struct WireGuardView: View {
             .tabItem { Label("Custom Routing", systemImage: "arrow.triangle.branch") }
         }
         .settingsEditor(search: search, tab: $tab,
-                        surfaces: [.wireGuard, .customRouting], profileID: profileID)
+                        surfaces: [.wireGuard, .customRouting], profileID: profileID,
+                        kind: .wireGuard)
         .padding(.top, 10)
         .navigationTitle(draft.name)
         .task { loadOnce() }

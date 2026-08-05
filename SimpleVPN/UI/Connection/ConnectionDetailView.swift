@@ -388,6 +388,20 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                                              : AnyTransition(.blurReplace))
                     .animation(reduceMotion ? nil : .snappy(duration: 0.3), value: warning)
                 }
+                // "Nobody has ever proven this VPN type works." Below the urgent
+                // banners on purpose — it is a standing fact, not something that
+                // just happened — but above the optional panels, because the
+                // moment before a connect is when it matters and the moment after
+                // is when a report is worth most. Shown whatever the status: a
+                // connect that SUCCEEDED against an untested kind is the single
+                // most valuable thing anyone can tell us. One line here serves
+                // all sixteen kinds; the claim itself lives in the maturity
+                // registry and nowhere else.
+                if let notice = profile.kind.maturityNotice {
+                    MaturityBanner(notice: notice,
+                                   request: .init(kind: profile.kind, profileID: profile.id,
+                                                  reason: .untestedKind))
+                }
                 if vpn.hasPendingSettings(id: profile.id) {
                     PendingSettingsNotice(vpn: vpn, profileID: profile.id)
                 }

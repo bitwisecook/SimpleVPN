@@ -73,31 +73,37 @@ struct ConnectionView: View {
         if !subs.isEmpty || nativeBackendActive {
             Section("Other Connections") {
                 ForEach(subs) { t in
-                    otherConnectionRow(name: t.name, kindLabel: t.kind.displayName,
+                    otherConnectionRow(name: t.name, kind: t.kind,
                                        dot: .from(subprocess: tunnelManager?.status(t.id) ?? .disconnected)) {
                         tunnelManager?.disconnect(t.id)
                     }
                 }
                 if nativeBackendActive, let n = nativeVPN,
                    let c = n.configs.first(where: { $0.id == n.activeConfigID }) {
-                    otherConnectionRow(name: c.name, kindLabel: c.kind.displayName,
+                    otherConnectionRow(name: c.name, kind: c.kind,
                                        dot: .from(status: n.status)) { n.disconnect() }
                 }
             }
         }
     }
 
-    private func otherConnectionRow(name: String, kindLabel: String, dot: DotState,
+    private func otherConnectionRow(name: String, kind: VPNKind, dot: DotState,
                                     stop: @escaping () -> Void) -> some View {
-        HStack(spacing: 8) {
+        let notice = kind.maturityNotice
+        return HStack(spacing: 8) {
             StatusDot(state: dot)
             VStack(alignment: .leading, spacing: 1) {
-                Text(name).lineLimit(1)
-                Text(kindLabel).font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 5) {
+                    Text(name).lineLimit(1)
+                    // A LIVE connection on a kind nobody has proven: the chip is
+                    // still true, and this is the moment a report is worth most.
+                    if let notice { MaturityBadge(notice: notice) }
+                }
+                Text(kind.displayName).font(.caption).foregroundStyle(.secondary)
             }
             // One sentence per row; the (hidden) dot's state rides in words.
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("\(name), \(kindLabel), \(dot.accessibilityDescription)")
+            .accessibilityLabel("\(name), \(kind.displayName), \(dot.accessibilityDescription)\(notice.map { ", \($0.spokenValue)" } ?? "")")
             Spacer(minLength: 8)
             Button(action: stop) {
                 Image(systemName: "stop.fill").frame(width: 22, height: 22).contentShape(Rectangle())

@@ -292,7 +292,8 @@ struct SSHNetworkTunnelView: View {
         .onAppear { search.visibility = SettingVisibility.sshNetworkTunnel(draft) }
         .onChange(of: SettingVisibility.sshNetworkTunnel(draft)) { _, new in search.visibility = new }
         .settingsEditor(search: search, tab: $tab,
-                        surfaces: [.sshNetworkTunnel, .customRouting], profileID: profileID)
+                        surfaces: [.sshNetworkTunnel, .customRouting], profileID: profileID,
+                        kind: .sshNetworkTunnel)
         .padding(.top, 10)
         .navigationTitle(name.isEmpty ? "SSH Network Tunnel" : name)
         .task { loadOnce() }

@@ -136,7 +136,29 @@ struct SignInSourceChooser: View {
     /// inside it (the wave-3 bug class in Docs/Accessibility.md rule 4). So a row
     /// with a Configure button becomes a `.contain` container with its own spoken
     /// sentence, while a plain row keeps the cheaper `.combine`.
+    ///
+    /// A row whose code has never been proven also carries its maturity: the full
+    /// notice (with the report link that is the only thing which clears it) where
+    /// there is room, and just the chip in the compact first-connect card, where a
+    /// paragraph per row would bury the question being asked. Either way the state
+    /// is on screen and in the row's spoken value — it is never only a chip and
+    /// never only a paragraph.
     @ViewBuilder private func fetchableRow(_ option: SignInSourceOption) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            fetchableRowBody(option)
+            if showsMaturityBanner, let notice = option.maturityNotice {
+                MaturityBanner(notice: notice,
+                               request: .init(kind: nil, profileID: nil,
+                                              reason: .untestedSource))
+            }
+        }
+    }
+
+    /// True where the row has room for the whole notice. The compact card shows
+    /// the chip instead (see `radioRow`).
+    private var showsMaturityBanner: Bool { !compact }
+
+    @ViewBuilder private func fetchableRowBody(_ option: SignInSourceOption) -> some View {
         if let vendor = option.configurableVendor, onConfigure != nil {
             HStack(alignment: .top, spacing: 8) {
                 radioRow(option)
@@ -152,7 +174,7 @@ struct SignInSourceChooser: View {
             // Holds two buttons: a container with its own sentence, never .combine.
             .accessibilityElement(children: .contain)
             .accessibilityLabel("\(option.title). \(option.summary)")
-            .accessibilityValue(option.accessibilityStateValue)
+            .accessibilityValue(option.spokenStateAndMaturity)
         } else {
             radioRow(option)
         }
@@ -173,7 +195,19 @@ struct SignInSourceChooser: View {
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)   // decorative; the title says what it is
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(option.title).font(.callout.weight(isSelected ? .semibold : .regular))
+                    // MATURITY SITS BESIDE THE TITLE, AND IT IS NOT AVAILABILITY.
+                    // The state note below says what this source can do on this Mac
+                    // right now; the chip says whether anyone has ever proven the
+                    // code that talks to it. A source can be ready to use AND
+                    // untested — that is the normal state of a new adapter, not a
+                    // contradiction — so the two are drawn in different places and
+                    // spoken as separate clauses.
+                    HStack(spacing: 6) {
+                        Text(option.title).font(.callout.weight(isSelected ? .semibold : .regular))
+                        if !showsMaturityBanner, let notice = option.maturityNotice {
+                            MaturityBadge(notice: notice)
+                        }
+                    }
                     Text(option.summary)
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -190,7 +224,9 @@ struct SignInSourceChooser: View {
         // explanation would be invisible to VoiceOver.
         .accessibilityElement(children: .combine)
         .accessibilityLabel(option.title)
-        .accessibilityValue(option.accessibilityStateValue)
+        // State first, maturity second — two facts, one sentence. The chip beside
+        // the title is hidden, so this is how it reaches VoiceOver.
+        .accessibilityValue(option.spokenStateAndMaturity)
         .accessibilityHint("\(option.summary) \(option.explanation)")
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
         .accessibilityIdentifier("signin-source-\(option.id.rawValue)")

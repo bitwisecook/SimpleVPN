@@ -108,6 +108,10 @@ struct SimpleVPNApp: App {
         WindowGroup("SimpleVPN", id: "main") {
             ConnectionView(vpn: vpn, ext: ext, labels: labels)
                 .opensSSOWindow()
+                // Fills the diagnostic report's context from the environment, so a
+                // report assembled from anywhere in the app can read live probe and
+                // reachability facts instead of reporting them as "not recorded".
+                .hostsDiagnosticReports()
                 .environment(control)
                 .environment(evaluator)
                 .environment(policy)

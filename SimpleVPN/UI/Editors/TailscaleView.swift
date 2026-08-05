@@ -249,7 +249,8 @@ struct TailscaleView: View {
         .onAppear { search.visibility = SettingVisibility.tailscale(draft) }
         .onChange(of: SettingVisibility.tailscale(draft)) { _, new in search.visibility = new }
         .settingsEditor(search: search, tab: $tab,
-                        surfaces: [.tailscale, .customRouting], profileID: profileID)
+                        surfaces: [.tailscale, .customRouting], profileID: profileID,
+                        kind: .tailscale)
         .padding(.top, 10)
         .navigationTitle(name.isEmpty ? "Tailscale" : name)
         .task { loadOnce() }
