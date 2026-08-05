@@ -71,13 +71,18 @@ enum SettingSurface: String, CaseIterable, Identifiable {
     /// and the MDM/CLI addressing total. See `isAppLevel`, which is what keeps
     /// Manage VPNs from trying to find "a Sign-In Sources VPN".
     case credentialSources
+    /// The second app-level surface: whether SimpleVPN looks for virtual machines
+    /// and containers on this Mac, and whether it warns before a VPN cuts their
+    /// networks off (Settings ▸ General ▸ Privacy). Not any VPN's editor, so it
+    /// belongs to no kind — see `isAppLevel`.
+    case virtualization
 
     nonisolated var id: String { rawValue }
 
     /// True for a surface that lives in the app's own Settings window rather than
     /// in a VPN's editor. Routing, "which VPN does this belong to" and the
     /// related-links reachability test all branch on this rather than on the case.
-    nonisolated var isAppLevel: Bool { self == .credentialSources }
+    nonisolated var isAppLevel: Bool { self == .credentialSources || self == .virtualization }
 
     /// The id prefix every setting on this surface carries (the CLI/MDM contract).
     nonisolated var namespace: String {
@@ -98,6 +103,7 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         // are per-VPN Sign-In settings that no engine owns.
         case .securityKey: "yk."
         case .credentialSources: "creds."
+        case .virtualization: "vm."
         }
     }
 
@@ -116,6 +122,7 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         case .customRouting: "Custom Routing"
         case .securityKey: "Security Key"
         case .credentialSources: "Sign-In Sources"
+        case .virtualization: "Virtual Machines & Containers"
         }
     }
 
@@ -143,6 +150,9 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         // empty list (rather than "all kinds") is what stops a global hit from
         // being routed into a VPN editor that has no such row.
         case .credentialSources: []
+        // App-level, same reasoning: a guest network is a fact about this Mac, not
+        // about any one VPN, so no kind's editor shows these rows.
+        case .virtualization: []
         }
     }
 
@@ -157,6 +167,11 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         // Sign-In group of every other editor's single Settings tab.
         case .securityKey: .signIn
         case .credentialSources: .signInSources
+        // The app's own Settings window, General tab (the Privacy group). There is
+        // no `SettingsTab` case of its own because `SettingsView.pane(for:)` sends
+        // everything that is not Sign-In Sources to the General pane, which is
+        // where these rows live.
+        case .virtualization: .general
         default: .settings
         }
     }
@@ -174,6 +189,7 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         case .customRouting: CustomRoutingSettings.all
         case .securityKey: YubiKeySettings.all
         case .credentialSources: CredentialSourceSettings.all
+        case .virtualization: VirtualizationSettings.all
         }
     }
 

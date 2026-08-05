@@ -44,6 +44,13 @@ struct ManualAnchorParityTests {
         // GENERATED from the vendor list, so a new vendor's settings fail this
         // test until the manual documents them — which is the point.
         ("creds.", CredentialSourceSettings.all),
+        // The SECOND app-level surface (Settings ▸ General ▸ Privacy): whether
+        // SimpleVPN looks for virtual machines and containers, and whether it warns
+        // before a VPN cuts their networks off. Registered for the same reason as
+        // every other catalog — a switch that changes what the app notices is a real
+        // user-facing setting, so it gets a real manual section and a real search
+        // entry.
+        ("vm.", VirtualizationSettings.all),
     ]
 
     /// …and the table is TOTAL, checked against the app-wide surface registry
@@ -91,6 +98,7 @@ struct ManualAnchorParityTests {
         // runs, and why it will still tell you where your tool is. The chapter the
         // "creds." settings' help links into.
         "creds-what-is-it",
+        "vm-what-is-it",
         // Prose about a WAY of signing in rather than a setting: what an SSH
         // agent is, which agents work, what its three failures mean, and why
         // agent forwarding isn't offered. The setting itself is

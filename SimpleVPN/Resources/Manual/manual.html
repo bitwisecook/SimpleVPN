@@ -373,6 +373,11 @@
   <a href="#creds-passbolt-passphrase">Passbolt Key Passphrase</a>
   <a href="#creds-passbolt-remember-passphrase">Remember the Passphrase with Touch ID</a>
   <a href="#creds-ykman-tool-path">YubiKey Manager Location</a>
+
+  <h2>Virtual Machines &amp; Containers</h2>
+  <a href="#vm-what-is-it">What This Is</a>
+  <a href="#vm-detect">Look for Virtual Machines on This Mac</a>
+  <a href="#vm-warn-on-connect">Warn Before a VPN Captures Them</a>
 </nav>
 
 <main>
@@ -1793,6 +1798,31 @@ the device's protection intact at the cost of typing four to eight digits per co
 <p>Where <code>ykman</code>, YubiKey&rsquo;s own command-line tool, is on this Mac. SimpleVPN uses it to read a verification code stored on a security key. Leave it empty and SimpleVPN uses whichever copy it found in a folder it will run from.</p>
 <p>You may already have it without knowing: the YubiKey Manager app carries the tool inside it, at <code>/Applications/YubiKey Manager.app/Contents/MacOS/ykman</code>, and Homebrew&rsquo;s <code>brew install ykman</code> puts a copy somewhere SimpleVPN already looks.</p>
 <p>This field follows exactly the same rules as the other tool paths above &mdash; a complete path starting with a slash, and never a program in a folder everyone using this Mac can write to.</p>
+
+<!-- ══════════════ Virtual Machines &amp; Containers ══════════════ -->
+
+<h2 id="vm-what-is-it">Virtual Machines &amp; Containers &mdash; What This Is</h2>
+<p class="default">Two ways a guest reaches the network, and only one of them can be fixed by routing.</p>
+<p>If you run virtual machines or containers on this Mac &mdash; Apple&rsquo;s <code>container</code>, UTM, Docker Desktop, Parallels, VMware Fusion, VirtualBox, OrbStack, QEMU &mdash; then a VPN that carries all of your traffic can cut them off. These settings live in <strong>SimpleVPN &#9656; Settings &#9656; General &#9656; Privacy</strong> and let SimpleVPN notice that before it happens, so it can tell you rather than leaving you to work out why a container stopped resolving names the moment you connected.</p>
+<p>The important thing to understand first is that <strong>there are two kinds of guest networking, and they need opposite fixes.</strong> Which kind you have is not a matter of taste; it is decided by the product, and sometimes by the individual virtual machine.</p>
+<p><strong>Guests on a network of their own.</strong> Apple Containers, UTM in <em>Shared</em>, <em>Bridged</em> or <em>Host</em> mode, VMware Fusion, Parallels Desktop, VirtualBox and OrbStack all give their guests a real subnet behind a real interface on this Mac &mdash; something like <code>192.168.64.0/24</code>. A tunnel that captures that subnet takes the guests&rsquo; traffic with it and they go quiet. For these, <strong>keeping the subnet out of the tunnel is the fix</strong>, and it is a fix that genuinely works.</p>
+<p><strong>Guests with no network of their own.</strong> Docker Desktop, and QEMU or UTM in <em>Emulated</em> mode, do something quite different: a program on this Mac translates the guest&rsquo;s traffic and sends it out as ordinary traffic of its own. There is no interface, there is no subnet, and there is therefore <strong>nothing to keep out of the tunnel</strong>. Routing settings cannot help these, and SimpleVPN will not pretend otherwise by offering you a routing change that would do nothing. When one of these breaks under a VPN, the two things that actually fix it are <strong>the guest&rsquo;s MTU</strong> &mdash; lower it to at or below the tunnel&rsquo;s, see <a href="#problem-mtu">Large transfers stall</a> &mdash; and <strong>the guest&rsquo;s DNS</strong>, which has to point at a resolver the guest can still reach.</p>
+<p>UTM and plain QEMU are in both lists because they support both, chosen per virtual machine. So &ldquo;UTM is installed&rdquo; does not decide anything: SimpleVPN reads each machine&rsquo;s own setting to know which kind it is.</p>
+<div class="warn">Keeping a subnet out of the tunnel is a <strong>split-tunnel</strong> decision: traffic to that subnet leaves the VPN and goes over your ordinary connection instead. That is exactly what a guest network needs, and it is still a hole in a full tunnel. SimpleVPN never does it silently and has no setting that would &mdash; it tells you, and you decide, per VPN, and the change appears in that VPN&rsquo;s own list of networks kept out where you can see and undo it.</div>
+
+<h2 id="vm-detect">Look for Virtual Machines on This Mac</h2>
+<p class="default">Default: on.</p>
+<p>Lets SimpleVPN find the virtualization products installed on this Mac, and the guest networks that are live right now, so it can warn you before a VPN captures them.</p>
+<p><strong>It only ever reads, and it only ever reads this Mac.</strong> Two things: files where a product&rsquo;s own installer puts them, and the list of network interfaces that any program on this Mac may read. Nothing is executed &mdash; not <code>docker</code>, not <code>container</code>, not <code>ifconfig</code>, not even a <code>--version</code>. No virtualization daemon is started or woken, no virtual machine is launched, nothing is sent anywhere, and nothing of yours is written or changed. No macOS permission is involved.</p>
+<p><strong>&ldquo;Installed&rdquo; and &ldquo;running on a subnet right now&rdquo; are different questions</strong>, and SimpleVPN answers them separately rather than blurring them. A guest subnet only comes into existence when a guest boots, so with nothing running there is no network to name &mdash; not even from the product&rsquo;s own saved settings, which record that it uses NAT without saying which addresses it will use. A machine with three virtualization products installed and none of them running therefore has no guest networks, and that is the honest answer rather than a gap.</p>
+<p>Off means SimpleVPN never looks and never warns. Nothing else changes: your virtual machines and containers carry on exactly as before, and a VPN connects exactly as before &mdash; you simply find out the hard way when a tunnel swallows a guest network. Turning it off also empties this part of a problem report you choose to send.</p>
+
+<h2 id="vm-warn-on-connect">Warn Before a VPN Captures Them</h2>
+<p class="default">Default: on.</p>
+<p>When you connect a VPN that would swallow a guest network that is live, SimpleVPN says so &mdash; naming the interface, the subnet and, where it honestly can, which product it belongs to &mdash; and offers to keep that subnet out of the tunnel.</p>
+<p><strong>SimpleVPN never changes routing on its own.</strong> The offer is an offer: accept it and the subnet joins that one VPN&rsquo;s list of networks kept out, where it stays visible and removable. Decline it and nothing is touched. There is deliberately no setting that would do this automatically for every VPN, because sending traffic outside a tunnel is not a decision to make on somebody&rsquo;s behalf.</p>
+<p><strong>The offer only appears where it could work.</strong> For a product whose guests have no network of their own there is no subnet to keep out, so instead of a routing offer you are told the two things that do help &mdash; the guest&rsquo;s MTU and the guest&rsquo;s DNS. A routing change offered there would look like a fix and be none.</p>
+<p>Off means SimpleVPN keeps looking but stops speaking up: the facts are still available in a problem report and in the connection details, and no banner appears when you connect. Turn off <a href="#vm-detect">Look for Virtual Machines on This Mac</a> instead if you would rather it did not look at all.</p>
 
 <hr style="border: none; border-top: 1px solid var(--border); margin-top: 48px">
 <p class="muted" style="font-size: 13px">SimpleVPN uses the OpenVPN 3, OpenConnect, libssh and Tailscale engines, the gVisor network stack, Sparkle for app updates, and the 1Password Go SDK for item lookup. <a href="https://db-ip.com">IP Geolocation by DB-IP</a>, licensed CC BY 4.0. Coastlines from Natural Earth. Every component and its licence is listed in <strong>SimpleVPN &#9656; About SimpleVPN</strong>.</p>

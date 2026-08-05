@@ -57,6 +57,46 @@ struct SettingsView: View {
     }
 }
 
+/// What the local scan found, and — the part that matters — a DIFFERENT sentence
+/// per class.
+///
+/// A product whose guests have no network of their own can never be helped by a
+/// routing setting, so this must not offer one. Saying "keep its network out of the
+/// tunnel" to a Docker Desktop user would send them to a checkbox that cannot
+/// possibly work, which is the exact failure this whole feature was written to
+/// avoid.
+private struct VirtualizationFoundRows: View {
+    /// Read once when the pane appears. A `stat` sweep is cheap, but it is not free
+    /// and nothing here changes while a settings pane is open.
+    @State private var found: [InstalledVirtualization] = []
+
+    var body: some View {
+        Group {
+            if found.isEmpty {
+                Text("No virtual machine or container software SimpleVPN knows about is installed.")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                ForEach(found) { product in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(product.title).font(.callout)
+                        Text(product.networking.routingExclusionCanHelp
+                             ? "Its guests can sit on their own network. If a VPN cuts one off, keeping that network out of the tunnel is the fix \u{2014} which sends traffic to it outside the VPN."
+                             : "Its guests have no network of their own, so there is nothing to keep out of the tunnel and routing settings cannot help it. Lower the guest's MTU and check its DNS instead.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    // One sentence per product rather than five fragments.
+                    .accessibilityElement(children: .combine)
+                }
+            }
+        }
+        .onAppear {
+            guard found.isEmpty else { return }
+            found = VirtualizationDiscovery.installed(env: .live())
+        }
+    }
+}
+
 private struct ExtensionsSettings: View {
     @Bindable var ext: ExtensionController
     var updater: SPUUpdater?
@@ -76,6 +116,10 @@ private struct ExtensionsSettings: View {
     @AppStorage(publicIPCustomV6DefaultsKey) private var ipCustomV6 = ""
     // Default false — the permission is only ever requested by flipping this on.
     @AppStorage(LocationAuthority.enabledKey) private var locationEnabled = false
+    // Both on by default: the scan reads only this Mac and a detection feature that
+    // defaults to not detecting is inert.
+    @AppStorage(VirtualizationSettings.detectDefaultsKey) private var vmDetect = true
+    @AppStorage(VirtualizationSettings.warnOnConnectDefaultsKey) private var vmWarnOnConnect = true
     @State private var location = LocationAuthority.shared
     @Environment(PublicIPMonitor.self) private var publicIP: PublicIPMonitor?
     @Environment(EndpointProbeStore.self) private var probes: EndpointProbeStore?
@@ -220,6 +264,27 @@ private struct ExtensionsSettings: View {
                 Text("Places you accurately on the maps, and lets SimpleVPN read the Wi-Fi network's name \u{2014} macOS withholds the network name from apps without this. This data never leaves this device. Off means macOS is never asked for your location.")
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                Divider()
+
+                // Virtual machines and containers. A local scan in the same sense as
+                // the sign-in-source one: filesystem and interface list only, nothing
+                // executed, no virtualization daemon woken, nothing sent anywhere.
+                EngineSettingRow(spec: VirtualizationSettings.detect, value: vmDetect) {
+                    Toggle(isOn: $vmDetect) {
+                        EngineSettingLabel(spec: VirtualizationSettings.detect, value: vmDetect)
+                    }
+                }
+                if vmDetect {
+                    EngineSettingRow(spec: VirtualizationSettings.warnOnConnect,
+                                     value: vmWarnOnConnect) {
+                        Toggle(isOn: $vmWarnOnConnect) {
+                            EngineSettingLabel(spec: VirtualizationSettings.warnOnConnect,
+                                               value: vmWarnOnConnect)
+                        }
+                    }
+                    VirtualizationFoundRows()
+                }
             }
             if ManagedPolicy.isManaged {
                 Section("Managed by Your Organization") {

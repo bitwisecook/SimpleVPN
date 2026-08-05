@@ -34,6 +34,19 @@ struct DiagnosticReportContext {
     var availability: SignInSourceAvailability = .shared
     var settings: SignInSourceSettingsStore = .shared
 
+    /// What virtualization was found, and which guest networks were live. A
+    /// CLOSURE for the same reason `maturity` is one: `VirtualizationDiscovery`
+    /// owns the answer, the report must not become a second scanner, and the
+    /// snapshot has to be taken from the live interface list the topology monitor
+    /// already holds. Left unset it yields an empty, detection-enabled snapshot,
+    /// which reads as "nothing was running" rather than as a lie.
+    ///
+    /// ONE-LINE WIRING: `context.virtualization = { VirtualizationDiscovery.snapshot(
+    ///     interfaces: topo.topology.interfaces,
+    ///     detectionEnabled: VirtualizationSettings.detectionEnabled,
+    ///     env: .live()) }`.
+    var virtualization: @MainActor () -> VirtualizationSnapshot = { VirtualizationSnapshot() }
+
     /// How mature a VPN kind is — "tested", "untested", "partly verified".
     ///
     /// A CLOSURE, and deliberately so: the maturity registry belongs to the
@@ -69,6 +82,12 @@ enum DiagnosticReportAssembler {
                     : "SimpleVPN isn\u{2019}t looking for password managers on this Mac (that setting is off)."),
             toolsAndAPIs(context: context, facts: facts),
             activeAndReachable(request, context: context),
+            DiagnosticReportSection(
+                id: .virtualMachines,
+                fields: DiagnosticReportInventory.virtualizationFields(
+                    snapshot: context.virtualization()),
+                emptyNote: "No virtual machine or container software SimpleVPN knows about was found "
+                    + "on this Mac."),
             DiagnosticReportSection(
                 id: .switchedOff,
                 fields: DiagnosticReportInventory.switchedOffFields(

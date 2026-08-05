@@ -297,6 +297,104 @@ nonisolated enum DiagnosticReportInventory {
         }
     }
 
+    // MARK: Virtual machines and containers
+
+    /// What virtualization this Mac runs, which guest networks were live, and — the
+    /// line that decides whether any of it is actionable — whether a routing
+    /// exclusion could help each one.
+    ///
+    /// Reported from a snapshot something else took (`VirtualizationDiscovery`),
+    /// never re-scanned here: the same rule as every other gatherer in this file.
+    ///
+    /// A maintainer reading "Docker Desktop is installed and my container has no
+    /// network" needs to be told, in the report itself, that no routing setting can
+    /// fix that — otherwise the first day goes on excluded routes that were never
+    /// going to do anything.
+    static func virtualizationFields(snapshot: VirtualizationSnapshot) -> [DiagnosticReportField] {
+        guard snapshot.detectionEnabled else {
+            return [DiagnosticReportField(
+                label: "Looking for virtual machines at all",
+                value: .flag(false),
+                detail: [.words("off, so this section is empty by design rather than because you run none")])]
+        }
+
+        var out: [DiagnosticReportField] = []
+
+        for product in snapshot.installed {
+            var detail: [ReportValue] = [
+                .state("networking: \(product.networking.title)"),
+                .words(classWords(product.networking)),
+            ]
+            if !product.verifiedLocally {
+                detail.append(.words(
+                    "nobody has run SimpleVPN against this product \u{2014} its behaviour here is "
+                    + "reasoned from the vendor\u{2019}s documentation, not measured"))
+            }
+            for evidence in product.evidence { detail.append(.path(evidence)) }
+            out.append(DiagnosticReportField(
+                label: "\(product.title) (installed)",
+                value: .state(product.networking.rawValue),
+                detail: detail))
+        }
+
+        // The live half. Separate rows, because "installed" and "running on
+        // 192.168.64.0/24" are different facts and a guest subnet only exists once a
+        // guest has booted.
+        if snapshot.guestNetworks.isEmpty {
+            out.append(DiagnosticReportField(
+                label: "Live guest networks",
+                value: .words("none \u{2014} nothing was running with a network of its own"),
+                detail: [.words(
+                    "a guest subnet is assigned when a guest boots, so this is expected when no "
+                    + "virtual machine or container was running")]))
+        } else {
+            for network in snapshot.guestNetworks {
+                var detail: [ReportValue] = [
+                    .path("host end: \(network.hostAddress) on \(network.interfaceName)"),
+                    .words("attributed to: \(network.attribution)"),
+                ]
+                if !network.attachedGuestInterfaces.isEmpty {
+                    detail.append(.count(network.attachedGuestInterfaces.count))
+                }
+                out.append(DiagnosticReportField(
+                    label: "Live guest network on \(network.interfaceName)",
+                    value: .path(network.subnet),
+                    detail: detail))
+            }
+        }
+
+        // UTM's per-VM modes. UTM is the product whose class cannot be read off
+        // "installed", so the report says it per machine or it says nothing useful.
+        for guest in snapshot.utmGuests {
+            out.append(DiagnosticReportField(
+                label: "UTM virtual machine: \(guest.name)",
+                value: .state(guest.mode),
+                detail: [
+                    .state("networking: \(guest.networking.title)"),
+                    .words(classWords(guest.networking)),
+                ]))
+        }
+
+        return out
+    }
+
+    /// What a guest-networking class MEANS for a fix. Exhaustive on purpose: a new
+    /// class must be given its sentence here, because the whole value of this
+    /// section is telling the two apart.
+    static func classWords(_ networking: GuestNetworkClass) -> String {
+        switch networking {
+        case .routedSubnet:
+            "a VPN that captures this subnet cuts its guests off, and keeping the subnet out of the "
+            + "tunnel is the fix"
+        case .userspace:
+            "there is no host interface and no subnet to keep out, so ROUTING SETTINGS CANNOT HELP "
+            + "this one \u{2014} look at the guest\u{2019}s MTU and its DNS instead"
+        case .perGuest:
+            "which of the two it is depends on each virtual machine\u{2019}s own setting, so the "
+            + "per-machine rows below are the ones that answer it"
+        }
+    }
+
     // MARK: Switched off, or decided for you
 
     /// Everything that could make a feature inert, in one place, so a maintainer
@@ -328,6 +426,15 @@ nonisolated enum DiagnosticReportInventory {
                                          value: .flag(LocationAuthority.shared.isEnabled)))
         out.append(DiagnosticReportField(label: "Automatic endpoint probing",
                                          value: .flag(EndpointProbeStore.isEnabled)))
+        out.append(DiagnosticReportField(
+            label: "Looking for virtual machines on this Mac",
+            value: .flag(VirtualizationSettings.detectionEnabled),
+            detail: VirtualizationSettings.detectionEnabled
+                ? []
+                : [.words("off, so the virtual-machine section is empty by design")]))
+        out.append(DiagnosticReportField(
+            label: "Warning before a VPN captures a guest network",
+            value: .flag(VirtualizationSettings.warningEnabled)))
 
         // --- What an administrator decided --------------------------------
         // Reported even when nothing is forced, because "no policy is in force"

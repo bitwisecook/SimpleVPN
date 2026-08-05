@@ -188,6 +188,7 @@ nonisolated enum DiagnosticReportSectionID: String, Sendable, CaseIterable, Iden
     case passwordManagers
     case toolsAndAPIs
     case activeAndReachable
+    case virtualMachines
     case switchedOff
     case logEvents
 
@@ -200,6 +201,7 @@ nonisolated enum DiagnosticReportSectionID: String, Sendable, CaseIterable, Iden
         case .passwordManagers: "Password managers on this Mac"
         case .toolsAndAPIs: "Command-line tools and local APIs"
         case .activeAndReachable: "What was active and reachable"
+        case .virtualMachines: "Virtual machines and containers"
         case .switchedOff: "Switched off, or decided for you"
         case .logEvents: "Recent log events"
         }
@@ -224,6 +226,11 @@ nonisolated enum DiagnosticReportSectionID: String, Sendable, CaseIterable, Iden
         case .activeAndReachable:
             "What SimpleVPN had already measured about this connection. Nothing is re-tested to "
             + "build this, so it can\u{2019}t change what you saw."
+        case .virtualMachines:
+            "Which virtual machines and containers this Mac runs, and which of their networks were "
+            + "live \u{2014} plus, for each, whether keeping a subnet out of the tunnel could help it "
+            + "at all. \u{201C}My container lost the network\u{201D} has two completely different "
+            + "causes and this is what tells them apart."
         case .switchedOff:
             "Settings you (or your organisation) have turned off. Without this, a maintainer spends "
             + "a day chasing a bug that is really a switch."
