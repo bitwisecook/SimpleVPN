@@ -88,6 +88,12 @@ struct DiagnosticsCommands: Commands {
             Divider()
             // Both reports live in About, where the guided sheets (and the "what
             // will be shared" review) already are.
+            // The guided report: asks what you were doing, gathers the tool
+            // inventory / what was reachable / what is switched off, and shows
+            // the whole payload before anything can be shared. This is the entry
+            // point the "Untested" banner's report link shares.
+            Button("Report a Problem…") { report() }
+            Divider()
             Button("Report an Issue…") {
                 ReportRequest.shared.request(.bug); openWindow(id: "about")
             }
@@ -97,7 +103,25 @@ struct DiagnosticsCommands: Commands {
             Button("My Reported Issues") {
                 if let url = IssueReport.myIssuesURL { openURL(url) }
             }
+            Button("Open the Issue Tracker") {
+                if let url = DiagnosticReportSubmission.trackerURL { openURL(url) }
+            }
         }
+    }
+
+    /// Open the guided report, wiring the coordinator to the objects this menu
+    /// already holds. The banner path wires the rest through
+    /// `hostsDiagnosticReports()`; what is missing degrades to "not recorded"
+    /// with its reason, never to a wrong answer.
+    private func report() {
+        var context = DiagnosticReportCoordinator.shared.context
+        context.vpn = vpn
+        context.tunnels = tunnels
+        DiagnosticReportCoordinator.shared.context = context
+        DiagnosticReportCoordinator.shared.presentReport(
+            DiagnosticReportRequest(kind: vpn.profiles.first(where: { $0.id == vpn.selectedID })?.kind,
+                                    profileID: vpn.selectedID,
+                                    reason: .userInitiated))
     }
 
     private func save(_ variant: DiagnosticBundle.Variant) {
