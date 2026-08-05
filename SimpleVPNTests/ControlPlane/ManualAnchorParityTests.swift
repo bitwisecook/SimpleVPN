@@ -36,6 +36,7 @@ struct ManualAnchorParityTests {
         ("px.", ProxyTunnelSettings.all),
         ("sshnet.", SSHNetSettings.all),
         ("cr.", CustomRoutingSettings.all),
+        ("yk.", YubiKeySettings.all),
     ]
 
     /// …and the table is TOTAL, checked against the app-wide surface registry
@@ -74,7 +75,7 @@ struct ManualAnchorParityTests {
         "problem-udp-blocked", "problem-otp-reneg", "problem-cipher", "problem-cert",
         "problem-idle", "problem-captive",
         // Per-engine introductions
-        "ts-what-is-it", "cr-what-is-it", "sshnet-what-is-it",
+        "ts-what-is-it", "cr-what-is-it", "sshnet-what-is-it", "yk-what-is-it",
     ]
 
     private func manualHTML() throws -> String {

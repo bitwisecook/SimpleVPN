@@ -37,6 +37,18 @@ struct VPNAuthConfig: Codable, Sendable, Equatable {
         set { biometricProtection = newValue ? true : nil }
     }
 
+    /// A security key (a YubiKey or similar) supplies this VPN's verification
+    /// code. Optional, and nil when unset, for the same reason as
+    /// `biometricProtection`: an older build's blob has no such key, and a
+    /// default-valued struct must not make an otherwise-default config look
+    /// changed (`isDefault` drives whether the blob is written at all). Holds no
+    /// secrets — see YubiKeyAuthConfig.
+    var securityKey: YubiKeyAuthConfig? = nil
+    var yubiKey: YubiKeyAuthConfig {
+        get { securityKey ?? YubiKeyAuthConfig() }
+        set { securityKey = newValue.isDefault ? nil : newValue }
+    }
+
     init() {}
 
     /// The credential request this configuration implies.
@@ -78,6 +90,11 @@ struct VPNAuthConfig: Codable, Sendable, Equatable {
         if autologin {
             out.requiresOTP = false
             out.passwordTemplate = defaultTemplate
+            // Same reasoning as the OTP requirement above, and the same bug if it
+            // is left behind: there is no code to collect, so a security-key setup
+            // is dead state that would go on arming a touch prompt at every
+            // connect for a sign-in that is already a certificate.
+            out.securityKey = nil
         } else if staticChallenge {
             out.requiresOTP = true
         }
