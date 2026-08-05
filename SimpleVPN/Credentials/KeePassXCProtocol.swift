@@ -150,13 +150,26 @@ nonisolated enum KeePassXCProtocol {
         return out
     }
 
+    /// An absolute socket path the user set in Settings ▸ Sign-In Sources. It wins
+    /// over discovery — someone whose KeePassXC listens somewhere our candidates
+    /// don't cover must be able to say so — but it is still only used when it really
+    /// IS a socket, because a stale setting must not stop the automatic path
+    /// working.
+    static func userConfiguredSocket(store: UserDefaults = .standard) -> String? {
+        guard let raw = store.string(forKey: SignInSourceSettings.keePassXCSocketKey)?
+            .trimmingCharacters(in: .whitespaces), raw.hasPrefix("/") else { return nil }
+        return raw
+    }
+
     /// The first candidate that exists as a socket — nil means KeePassXC isn't
     /// running with browser integration on (there is nothing to connect to).
-    static func discoverSocket() -> String? {
-        socketCandidates().first { path in
+    static func discoverSocket(store: UserDefaults = .standard) -> String? {
+        func isSocket(_ path: String) -> Bool {
             var st = stat()
             return stat(path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFSOCK
         }
+        if let explicit = userConfiguredSocket(store: store), isSocket(explicit) { return explicit }
+        return socketCandidates().first(where: isSocket)
     }
 
     // MARK: Wire shapes

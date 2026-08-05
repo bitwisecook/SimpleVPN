@@ -304,6 +304,9 @@ struct SimpleVPNApp: App {
             SettingsView(ext: ext, labels: labels, updater: updaterController.updater)
                 .environment(publicIP)
                 .environment(endpointProbes)
+                // So a route to an app-level setting (a `creds.*` global-search hit,
+                // or "Configure…" on a sign-in chooser row) can select the tab.
+                .environment(settingsRouter)
         }
 
         menuBarScene

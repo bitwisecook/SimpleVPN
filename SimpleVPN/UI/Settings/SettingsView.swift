@@ -16,14 +16,44 @@ struct SettingsView: View {
     /// Sparkle's updater (from the app-level controller); nil in previews.
     var updater: SPUUpdater?
 
+    /// This window's own tabs. Its own type, deliberately: `SettingsTab` names the
+    /// tabs of a VPN's EDITOR, and reusing its cases here would give one name two
+    /// meanings. The mapping from a route's `SettingsTab` is one line below.
+    enum Pane: Hashable { case general, signInSources, labels }
+
+    /// Which tab is showing. A binding rather than the default selection because a
+    /// route can ask for one — a global search hit on a `creds.*` setting, or
+    /// "Configure…" on a sign-in chooser row, both land here.
+    @State private var pane: Pane = .general
+    @Environment(SettingsRouter.self) private var router: SettingsRouter?
+
     var body: some View {
-        TabView {
+        TabView(selection: $pane) {
             ExtensionsSettings(ext: ext, updater: updater)
                 .tabItem { Label("General", systemImage: "gearshape") }
+                .tag(Pane.general)
+            SignInSourcesSettings()
+                .tabItem { Label("Sign-In Sources", systemImage: "person.badge.key") }
+                .tag(Pane.signInSources)
             LabelsSettings(labels: labels)
                 .tabItem { Label("Labels", systemImage: "tag") }
+                .tag(Pane.labels)
         }
-        .frame(width: 560, height: 480)
+        .frame(width: 620, height: 560)
+        // An app-level route selects the tab; the pane itself is what the user then
+        // reads. Re-checked on every generation, so asking twice for the same tab
+        // still works.
+        .onAppear { followRoute() }
+        .onChange(of: router?.appSettingsGeneration ?? 0) { followRoute() }
+    }
+
+    private func followRoute() {
+        guard let wanted = router?.appSettingsRoute?.tab else { return }
+        pane = Self.pane(for: wanted)
+    }
+
+    static func pane(for tab: SettingsTab) -> Pane {
+        tab == .signInSources ? .signInSources : .general
     }
 }
 

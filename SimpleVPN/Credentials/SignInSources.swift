@@ -36,6 +36,10 @@
 //
 
 import Foundation
+// For ASSettingsHelper only — opening the AutoFill pane. SimpleVPN ships no
+// credential-provider extension of its own and this file asks AuthenticationServices
+// nothing about one.
+import AuthenticationServices
 
 // MARK: - Vendors we can actually talk to
 
@@ -100,12 +104,28 @@ nonisolated enum LocalVaultBlock: String, Sendable, Equatable {
     case toolMissing
     /// The tool is here but nobody has signed in to it (no live session).
     case notSignedIn
+    /// THE TOOL IS INSTALLED — we can see it — but not in a location SimpleVPN
+    /// will execute from, and the user hasn't pointed at it explicitly.
+    ///
+    /// This state exists because the alternative is a lie. Execution resolves
+    /// against an allow-list of documented install directories and never consults
+    /// `PATH` (`LocalToolRunner`, and that is a security control). Discovery
+    /// searches far wider (`ToolDiscovery`). When the two disagree — `bw` in
+    /// `~/.bun/bin`, `keeper` in a virtualenv, anything reachable only through
+    /// `PATH` — "not installed" is simply false, and the person reading it goes off
+    /// to install a second copy of something they already have.
+    ///
+    /// The fix is one field: set the tool's path in Settings, which is the
+    /// sanctioned way to use a tool we would otherwise decline to run. So this is
+    /// an enablement state, not a failure.
+    case toolOutsideAllowList
 
-    /// The two states the enablement banner exists for: something to switch on or
-    /// install, as opposed to "your app isn't running" (which is not a setup
-    /// problem) or "it's too old" (which is an update, not an enablement).
+    /// The states the enablement banner exists for: something to switch on,
+    /// install, sign in to, or point at — as opposed to "your app isn't running"
+    /// (not a setup problem) or "it's too old" (an update, not an enablement).
     var wantsEnablementBanner: Bool {
         self == .toolMissing || self == .integrationOff || self == .notSignedIn
+            || self == .toolOutsideAllowList
     }
 }
 
@@ -153,13 +173,24 @@ nonisolated enum VendorDocs {
     // therefore the one that matters for us; the CLI app-integration page is
     // included because it is where 1Password documents the sibling toggle, and
     // people who use `op` land there first.
-    static let onePasswordSDKs = page("1Password SDKs", "https://developer.1password.com/docs/sdks/")
+    //
+    // FINAL URLs ONLY — measured WITHOUT following redirects. "It resolves in a
+    // browser" is not the bar: `curl -L` reports 200 for a chain of redirects, and
+    // three entries in this table were passing that way. 1Password moved its
+    // developer documentation off `developer.1password.com/docs/…` (301) and its new
+    // host 308s a trailing slash away (`/sdks/` → `/sdks`); Keeper 307s the `/en/`
+    // locale prefix off. A redirect works today and is somebody else's decision
+    // tomorrow, so what ships is the address the server actually serves. Re-check
+    // with:
+    //   curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' <url>
+    // and accept only a bare 200.
+    static let onePasswordSDKs = page("1Password SDKs", "https://www.1password.dev/sdks")
     static let onePasswordCLIIntegration = page("1Password CLI app integration",
-                                               "https://developer.1password.com/docs/cli/app-integration/")
+                                               "https://www.1password.dev/cli/app-integration")
 
     // Keeper Commander.
     static let keeperCommander = page("Keeper Commander",
-                                      "https://docs.keeper.io/en/keeperpam/commander-cli/overview")
+                                      "https://docs.keeper.io/keeperpam/commander-cli/overview")
     static let keeperCommanderLogin = page(
         "Keeper Commander sign-in",
         "https://docs.keeper.io/keeperpam/commander-cli/commander-installation-setup/logging-in")
@@ -246,6 +277,13 @@ nonisolated struct LocalVaultCopy: Sendable {
     var explanation: String
     var symbol: String
     var storedKind: CredentialSourceKind
+    /// The vendor's own page — the authority for anything our own short example
+    /// doesn't cover, and the fallback link for guidance built at runtime.
+    var primaryDoc: VendorDocs.Page
+    /// The one command that installs this vendor's tool into a location SimpleVPN
+    /// already searches. Latest release only, per the house rule. nil for a vendor
+    /// with no tool to install (1Password's channel is the app's own IPC).
+    var homebrewInstallCommand: String?
     /// Per-block headline and numbered steps. **bold** names a real thing on
     /// screen; `code` names something to type. Short: the banner's example and
     /// the vendor's own page carry the detail.
@@ -265,9 +303,54 @@ nonisolated struct LocalVaultCopy: Sendable {
     func guidance(for block: LocalVaultBlock) -> EnablementGuidance? {
         guidance[block]
     }
+
+    /// The same, but able to name a path this Mac actually has.
+    ///
+    /// `.toolOutsideAllowList` is the one block whose advice is worthless without
+    /// the specific path — "your tool is somewhere else" tells nobody anything,
+    /// while "it's at /Users/you/.bun/bin/bw, set that as its path or reinstall it
+    /// with Homebrew" is a two-second fix. So this block's guidance is BUILT rather
+    /// than declared, and the static table carries only the headline.
+    func guidance(for block: LocalVaultBlock, foundAt path: String?) -> EnablementGuidance? {
+        guard block == .toolOutsideAllowList, let path else { return guidance(for: block) }
+        return LocalVaultCopyBook.outsideAllowListGuidance(
+            title: title, foundAt: path, installCommand: homebrewInstallCommand, doc: primaryDoc)
+    }
 }
 
 nonisolated enum LocalVaultCopyBook {
+
+    /// "It's installed, just not where we look." Built at runtime because it has
+    /// to name THE path on THIS Mac — the whole value of the state is that it turns
+    /// a dead end into a two-second fix, and a sentence without the path does not.
+    ///
+    /// Two ways out, in the order most people should take them: point SimpleVPN at
+    /// the copy you already have (the sanctioned escape hatch), or install it
+    /// somewhere we search anyway. Neither is presented as an error, because
+    /// neither is one — nothing is broken, we are simply declining to guess which
+    /// binary on `PATH` gets handed a request for a password.
+    static func outsideAllowListGuidance(title: String, foundAt path: String,
+                                        installCommand: String?,
+                                        doc: VendorDocs.Page) -> EnablementGuidance {
+        var example: [EnablementGuidance.Command] = [
+            .init(text: path,
+                  caption: "Paste this into Settings \u{25B8} Sign-In Sources as the tool\u{2019}s path"),
+        ]
+        if let installCommand {
+            example.append(.init(text: installCommand,
+                                 caption: "Or install it where SimpleVPN already looks"))
+        }
+        return EnablementGuidance(
+            benefit: "\(title)\u{2019}s command-line tool is already on this Mac, at \(path). "
+                + "SimpleVPN only runs programs from the folders package managers install into, so it "
+                + "won\u{2019}t pick this one up on its own \u{2014} that check is what stops a stray "
+                + "program in your search path from being handed a request for a password. Tell "
+                + "SimpleVPN to use this copy and it can get your sign-in straight from \(title).",
+            example: example,
+            settingLocation: "In SimpleVPN: **Settings \u{25B8} Sign-In Sources**, then set "
+                + "**\(title)**\u{2019}s tool path.",
+            doc: doc)
+    }
 
     static func copy(for vendor: LocalVaultVendor) -> LocalVaultCopy {
         switch vendor {
@@ -286,6 +369,9 @@ nonisolated enum LocalVaultCopyBook {
             + "usually nothing left to type.",
         symbol: "key.fill",
         storedKind: .onePassword,
+        primaryDoc: VendorDocs.onePasswordSDKs,
+        // No tool to install: 1Password is reached over its app's own signed IPC.
+        homebrewInstallCommand: nil,
         blocks: [
             .appNotRunning: ("1Password isn\u{2019}t running",
                              ["Open **1Password** and sign in to it.",
@@ -317,6 +403,9 @@ nonisolated enum LocalVaultCopyBook {
             + "SimpleVPN.",
         symbol: "key.horizontal.fill",
         storedKind: .keePassXC,
+        primaryDoc: VendorDocs.keePassXC,
+        // The cask installs the app AND symlinks keepassxc-cli into Homebrew's bin.
+        homebrewInstallCommand: "brew install --cask keepassxc",
         blocks: [
             .integrationOff: ("KeePassXC isn\u{2019}t running, or its browser integration is off", []),
         ],
@@ -345,9 +434,15 @@ nonisolated enum LocalVaultCopyBook {
             + "yourself.",
         symbol: "key.viewfinder",
         storedKind: .keeper,
+        primaryDoc: VendorDocs.keeperCommander,
+        homebrewInstallCommand: "brew install keeper-commander",
         blocks: [
             .toolMissing: ("Keeper Commander isn\u{2019}t installed on this Mac", []),
             .notSignedIn: ("Keeper Commander isn\u{2019}t signed in on this Mac", []),
+            // Deliberately NOT "isn't installed": it demonstrably is, and we can
+            // see where. Saying otherwise sends someone to install a second copy.
+            .toolOutsideAllowList: (
+                "Keeper Commander is installed, but not somewhere SimpleVPN will run it from", []),
         ],
         guidance: [
             // SimpleVPN never installs anything: the command is shown, and the
@@ -457,6 +552,10 @@ nonisolated struct SignInSourceOption: Identifiable, Sendable, Equatable {
     /// the fields itself once switched on in System Settings. Detected from the
     /// app bundle, never assumed.
     var fillsThroughAutoFill = false
+    /// The vendor whose settings a "Configure…" affordance on this row opens. nil
+    /// for the rows that have nothing to configure (typing, the keychain, Apple
+    /// Passwords) and for pointers.
+    var configurableVendor: LocalVaultVendor?
 
     var isSelectable: Bool { role == .fetches }
 
@@ -494,9 +593,35 @@ nonisolated struct SignInSourceFacts: Sendable, Equatable {
     /// Password apps found installed that SimpleVPN has no way to read.
     var otherApps: [InstalledPasswordApp] = []
 
+    /// Vendors the user (or their organization) has switched off in Settings.
+    ///
+    /// THE FILTER IS APPLIED IN `availability(_:)`, not at each call site, and that
+    /// is the design: "disabled means not offered AND not hinted" is then true by
+    /// construction for the chooser, the readiness check, the connect-time recovery
+    /// notice and anything added later — rather than being three places somebody has
+    /// to remember. `rawAvailability(_:)` is the single deliberate exception, for the
+    /// Settings pane, which has to be able to say "installed, and you switched it
+    /// off".
+    var disabledVendors: Set<LocalVaultVendor> = []
+
+    /// A vendor whose tool discovery FOUND but the execution allow-list won't run:
+    /// the path, so the banner can name it. Keyed by vendor because that is what a
+    /// row is; the tool it belongs to is in the discovery map.
+    var toolsFoundOutsideAllowList: [LocalVaultVendor: String] = [:]
+
     func availability(_ vendor: LocalVaultVendor) -> LocalVaultAvailability {
+        guard !disabledVendors.contains(vendor) else { return .notInstalled }
+        return vaults[vendor] ?? .notInstalled
+    }
+
+    /// What was PROBED, ignoring the user's own switch. Only the Settings pane may
+    /// use this — everywhere else, a switched-off vendor must be indistinguishable
+    /// from an absent one.
+    func rawAvailability(_ vendor: LocalVaultVendor) -> LocalVaultAvailability {
         vaults[vendor] ?? .notInstalled
     }
+
+    func isEnabled(_ vendor: LocalVaultVendor) -> Bool { !disabledVendors.contains(vendor) }
 }
 
 /// A password app found on this Mac.
@@ -628,6 +753,18 @@ nonisolated enum SignInSourceCatalog {
     /// by the Apple Passwords row, every pointer and the footnote.
     static let autoFillSettingsPath = "System Settings \u{25B8} General \u{25B8} AutoFill & Passwords"
 
+    /// Open that pane. `ASSettingsHelper.openCredentialProviderAppSettings()` is
+    /// available to ANY app from macOS 14 — it is not restricted to apps that ship a
+    /// credential provider — and it lands on the AutoFill pane directly.
+    ///
+    /// The written path STAYS: it is what a VoiceOver user hears and what someone
+    /// reading over a shoulder follows, and a button whose destination is invisible is
+    /// the hover-only failure in another costume. So both, always — the sentence names
+    /// the place, the button saves the walk.
+    static func openAutoFillSettings() {
+        ASSettingsHelper.openCredentialProviderAppSettings()
+    }
+
     // MARK: The two rows that always work
 
     /// Type it every time. Always available — a Mac with nothing installed still
@@ -669,19 +806,47 @@ nonisolated enum SignInSourceCatalog {
             storedKind: .manual, remembers: true)
     }
 
-    /// Apple Passwords. Available on every Mac this app runs on; what varies is
-    /// only whether a matching sign-in has been saved, which the user can see
-    /// for themselves in the field's own AutoFill menu.
+    /// Apple Passwords — AN AUTOFILL ROW, NOT A PROVIDER, and the wording has to say
+    /// so.
+    ///
+    /// This row USED to promise fetch-like behaviour ("macOS fills the username and
+    /// password in for you"), and that promise was not ours to make. SimpleVPN cannot
+    /// read what Safari and the Passwords app manage: those items live in the
+    /// data-protection keychain under the `com.apple.cfnetwork` access group, which
+    /// this app's entitlement does not contain, so they are unreachable by
+    /// construction rather than merely missing (see ApplePasswordsProvider's header).
+    /// What actually works is AUTOFILL — the key in the field — which is macOS's own
+    /// affordance, driven by the user, needing no entitlement and no lookup from us.
+    ///
+    /// So the copy promises exactly that much and no more: click the key, and macOS
+    /// decides what it can offer. It deliberately does NOT claim the menu will
+    /// contain a match, because whether it does is macOS's business and nobody here
+    /// has watched it happen in OUR fields. Until a human confirms that, the honest
+    /// sentence is the modest one.
+    ///
+    /// Two further honesties the copy carries:
+    ///  • Verification codes stay in Apple Passwords — it exposes none of them to
+    ///    other apps, so the code is still typed (`suppliesOTP` is false, correctly).
+    ///  • NOTHING IS SAVED INTO APPLE PASSWORDS by picking this. SimpleVPN has no way
+    ///    to write there at all: the only public path needs associated domains plus a
+    ///    file served by the VPN operator, and it is deprecated with no macOS
+    ///    replacement. Saving is what the "Save it securely in SimpleVPN" row does,
+    ///    into the Apple keychain, which is a different place and already says so.
     static func applePasswords() -> SignInSourceOption {
         SignInSourceOption(
             id: .applePasswords, role: .fetches,
             title: "Apple Passwords",
-            summary: "Use a sign-in you have already saved in Apple Passwords.",
-            explanation: "macOS fills the username and password in for you, using the same AutoFill "
-                + "you get in Safari \u{2014} click the key in either field to pick the saved sign-in. "
-                + "macOS asks your permission the first time. Verification codes stay in Apple "
-                + "Passwords: it doesn\u{2019}t hand those to other apps, so you would still type the "
-                + "code yourself.",
+            summary: "Fill the fields yourself from Apple Passwords \u{2014} click the key in the "
+                + "username or password field.",
+            explanation: "This is macOS\u{2019}s own AutoFill, the same key you see in Safari: click it "
+                + "in the username or password field and macOS offers whatever it can for this VPN. "
+                + "SimpleVPN doesn\u{2019}t read Apple Passwords itself and can\u{2019}t \u{2014} macOS "
+                + "keeps Safari\u{2019}s and the Passwords app\u{2019}s entries where other apps "
+                + "can\u{2019}t reach them \u{2014} so what the menu offers is macOS\u{2019}s decision, "
+                + "not ours. Verification codes stay in Apple Passwords whatever happens: it "
+                + "doesn\u{2019}t hand those to other apps, so you type the code yourself. Picking "
+                + "this saves nothing anywhere; if you want your sign-in remembered, use "
+                + "\u{201C}Save it securely in SimpleVPN\u{201D}.",
             symbol: "person.badge.key.fill",
             storedKind: .applePasswords, remembers: nil)
     }
@@ -692,21 +857,26 @@ nonisolated enum SignInSourceCatalog {
     /// per-vendor branch here on purpose: a new adapter is a copy entry and a
     /// probe, never another `if`.
     static func vaultOption(_ vendor: LocalVaultVendor,
-                            availability: LocalVaultAvailability) -> SignInSourceOption? {
+                            availability: LocalVaultAvailability,
+                            foundOutsideAllowList: String? = nil) -> SignInSourceOption? {
         guard availability.isOffered else { return nil }
         let copy = LocalVaultCopyBook.copy(for: vendor)
         var option = SignInSourceOption(
             id: .vault(vendor), role: .fetches,
             title: copy.title, summary: copy.summary, explanation: copy.explanation,
             symbol: copy.symbol,
-            storedKind: copy.storedKind, remembers: nil)
+            storedKind: copy.storedKind, remembers: nil,
+            // Every vendor row is configurable — including the ready ones. Someone
+            // who wants to switch a working vendor off, or move to a different copy
+            // of its tool, should not have to go looking for where that lives.
+            configurableVendor: vendor)
         switch availability {
         case .notInstalled:
             return nil
         case .blocked(let block):
             option.state = .needsSetup(headline: copy.headline(for: block),
                                        steps: copy.steps(for: block))
-            option.guidance = copy.guidance(for: block)
+            option.guidance = copy.guidance(for: block, foundAt: foundOutsideAllowList)
         case .unchecked:
             if let note = copy.uncheckedNote { option.state = .unchecked(note: note) }
         case .ready:
@@ -780,7 +950,9 @@ nonisolated enum SignInSourceCatalog {
         out.append(applePasswords())
         // Vendor order is the enum's order — stable, and one place to change.
         for vendor in LocalVaultVendor.allCases {
-            if let option = vaultOption(vendor, availability: facts.availability(vendor)) {
+            if let option = vaultOption(
+                vendor, availability: facts.availability(vendor),
+                foundOutsideAllowList: facts.toolsFoundOutsideAllowList[vendor]) {
                 out.append(option)
             }
         }
@@ -790,12 +962,19 @@ nonisolated enum SignInSourceCatalog {
     /// The pointer rows on their own (the chooser gives them their own heading).
     /// An app we DO read never appears here — nor does one whose gated vendor row
     /// is already on offer, which is what keeps Keeper from being both at once.
+    ///
+    /// …and nor does an app belonging to a vendor the user has SWITCHED OFF. That
+    /// is the second half of "disabled means not offered and not hinted": without
+    /// this filter, turning Keeper off would move it from the sources list to the
+    /// "other password apps on this Mac" list, which is not off — it is the same
+    /// app still being advertised, in a worse place.
     static func pointers(_ facts: SignInSourceFacts) -> [SignInSourceOption] {
         facts.otherApps
             .filter { !PasswordAppCatalog.isIntegratedApp(bundleID: $0.bundleID) }
             .filter { app in
                 guard let vendor = PasswordAppCatalog.gatedVendor(forBundleID: app.bundleID)
                 else { return true }
+                guard facts.isEnabled(vendor) else { return false }
                 return !facts.availability(vendor).isOffered
             }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -924,7 +1103,11 @@ nonisolated enum SignInFlow {
         case .keeper:
             "Keeper Commander isn\u{2019}t available or isn\u{2019}t signed in, so SimpleVPN can\u{2019}t get your sign-in from Keeper."
         case .applePasswords:
-            "SimpleVPN doesn\u{2019}t know which saved sign-in to use from Apple Passwords."
+            // Not "Apple Passwords is unavailable" — it isn't, and SimpleVPN was never
+            // reading it. What is missing is the server to match, and the way that
+            // actually works is the key in the field.
+            "SimpleVPN doesn\u{2019}t know which saved sign-in to look for. Click the key in the "
+            + "username or password field and macOS will offer what it can."
         case .manual:
             "SimpleVPN can\u{2019}t get your sign-in."
         }

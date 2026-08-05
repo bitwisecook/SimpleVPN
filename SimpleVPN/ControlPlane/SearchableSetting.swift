@@ -65,8 +65,19 @@ extension EngineSettingSpec: @MainActor SearchableSetting {
 enum SettingSurface: String, CaseIterable, Identifiable {
     case openVPN, wireGuard, tailscale, proxyTunnel, native, ssh, sshNetworkTunnel, openConnect,
          customRouting, securityKey
+    /// The one surface that is NOT a VPN editor: which password apps SimpleVPN may
+    /// use and where their tools are (Settings ▸ Sign-In Sources). It belongs here
+    /// anyway — being registered is what makes app-wide search, the manual anchors
+    /// and the MDM/CLI addressing total. See `isAppLevel`, which is what keeps
+    /// Manage VPNs from trying to find "a Sign-In Sources VPN".
+    case credentialSources
 
     nonisolated var id: String { rawValue }
+
+    /// True for a surface that lives in the app's own Settings window rather than
+    /// in a VPN's editor. Routing, "which VPN does this belong to" and the
+    /// related-links reachability test all branch on this rather than on the case.
+    nonisolated var isAppLevel: Bool { self == .credentialSources }
 
     /// The id prefix every setting on this surface carries (the CLI/MDM contract).
     nonisolated var namespace: String {
@@ -86,6 +97,7 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         // namespace because ids are global and bound 1:1 to a surface: these rows
         // are per-VPN Sign-In settings that no engine owns.
         case .securityKey: "yk."
+        case .credentialSources: "creds."
         }
     }
 
@@ -103,6 +115,7 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         case .openConnect: "SSL VPN (AnyConnect, FortiGate, GlobalProtect…)"
         case .customRouting: "Custom Routing"
         case .securityKey: "Security Key"
+        case .credentialSources: "Sign-In Sources"
         }
     }
 
@@ -126,6 +139,10 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         // the rows would be a promise we could not keep.
         case .securityKey: [.openVPN, .fortinet, .f5apm, .ciscoAnyConnect, .globalProtect,
                             .juniper, .pulse, .arrayNetworks, .ikev2, .ipsec, .l2tp]
+        // App-level: it is not any VPN's editor, so it belongs to no kind. An
+        // empty list (rather than "all kinds") is what stops a global hit from
+        // being routed into a VPN editor that has no such row.
+        case .credentialSources: []
         }
     }
 
@@ -139,6 +156,7 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         // The rows live in the OpenVPN editor's Sign-In tab, and in the canonical
         // Sign-In group of every other editor's single Settings tab.
         case .securityKey: .signIn
+        case .credentialSources: .signInSources
         default: .settings
         }
     }
@@ -155,6 +173,7 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         case .openConnect: OpenConnectSettings.all
         case .customRouting: CustomRoutingSettings.all
         case .securityKey: YubiKeySettings.all
+        case .credentialSources: CredentialSourceSettings.all
         }
     }
 
@@ -263,6 +282,9 @@ enum SettingsTab: String, Hashable, CaseIterable {
     case settings
     /// Present in all six editors.
     case customRouting
+    /// The app's own Settings window, Sign-In Sources tab — the one tab that is
+    /// not part of a VPN's editor (see `SettingSurface.isAppLevel`).
+    case signInSources
 }
 
 /// "Open the editor for this setting and put the cursor on it." One intent, two
@@ -300,6 +322,16 @@ final class SettingsRouter {
     /// Bumped by the "Find a Setting…" command (⌘⇧F) and the Manage VPNs toolbar.
     private(set) var findGeneration = 0
 
+    /// A route to a setting in the app's own Settings window rather than in a VPN's
+    /// editor. Kept SEPARATE from `route` on purpose: Manage VPNs reacts to `route`
+    /// by hunting for a VPN whose editor shows the surface, and for an app-level
+    /// setting there is no such VPN — it would have said "there's no Sign-In Sources
+    /// VPN configured yet", which is nonsense dressed as an explanation.
+    private(set) var appSettingsRoute: SettingsRoute?
+    /// Bumped with each app-level route, so asking for the same tab twice still
+    /// moves the window.
+    private(set) var appSettingsGeneration = 0
+
     /// Set when a route named a kind with no VPN configured — Manage VPNs shows
     /// it rather than silently doing nothing.
     var unroutableMessage: String?
@@ -308,9 +340,23 @@ final class SettingsRouter {
     /// namespace, so callers never have to know either.
     func go(to settingID: String, profileID: String? = nil) {
         guard let surface = SettingSurface.owning(settingID) else { return }
-        route = SettingsRoute(settingID: settingID, surface: surface.rawValue,
-                              tab: surface.tab, profileID: profileID)
+        let wanted = SettingsRoute(settingID: settingID, surface: surface.rawValue,
+                                   tab: surface.tab, profileID: profileID)
+        // An app-level setting travels on its own channel — see `appSettingsRoute`.
+        if surface.isAppLevel {
+            appSettingsRoute = wanted
+            appSettingsGeneration += 1
+            return
+        }
+        route = wanted
         generation += 1
+    }
+
+    /// Whether a route for this id belongs in the app's Settings window rather than
+    /// in a VPN editor. The one question a caller has to ask before deciding which
+    /// window to open.
+    static func isAppLevel(settingID: String) -> Bool {
+        SettingSurface.owning(settingID)?.isAppLevel ?? false
     }
 
     func requestFind() { findGeneration += 1 }

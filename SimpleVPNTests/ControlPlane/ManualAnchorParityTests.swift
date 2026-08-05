@@ -37,6 +37,13 @@ struct ManualAnchorParityTests {
         ("sshnet.", SSHNetSettings.all),
         ("cr.", CustomRoutingSettings.all),
         ("yk.", YubiKeySettings.all),
+        // The one APP-LEVEL surface (Settings ▸ Sign-In Sources, not a VPN
+        // editor). Registered here for the same reason as every other catalog:
+        // the enable switches and path fields are real user-facing settings, so
+        // they get real manual sections and real search entries. The catalog is
+        // GENERATED from the vendor list, so a new vendor's settings fail this
+        // test until the manual documents them — which is the point.
+        ("creds.", CredentialSourceSettings.all),
     ]
 
     /// …and the table is TOTAL, checked against the app-wide surface registry
@@ -80,6 +87,10 @@ struct ManualAnchorParityTests {
         // for you and the certificate its PIV applet holds. The settings live
         // under "yk."; this is the chapter their help links into.
         "yk-what-is-it",
+        // What a sign-in source is, why SimpleVPN is fussy about which programs it
+        // runs, and why it will still tell you where your tool is. The chapter the
+        // "creds." settings' help links into.
+        "creds-what-is-it",
         // Prose about a WAY of signing in rather than a setting: what an SSH
         // agent is, which agents work, what its three failures mean, and why
         // agent forwarding isn't offered. The setting itself is

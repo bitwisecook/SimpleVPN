@@ -228,6 +228,14 @@ struct SettingRenderingTests {
         let sources = try Self.uiSources()
         var unrendered: [String] = []
         for surface in SettingSurface.allCases {
+            // A GENERATED catalog is rendered by iteration, not by literal id, so a
+            // literal-string scan can't see it. Skipped here and covered by
+            // `aGeneratedCatalogIsRenderedByIteration` below, which checks the
+            // stronger property: the pane walks the catalog, so a setting cannot be
+            // added to it WITHOUT appearing on screen. (A per-id literal scan would
+            // be the weaker check for such a surface — it would pass the moment
+            // someone pasted the id into a comment.)
+            if surface.isAppLevel { continue }
             for setting in surface.settings {
                 let needle = "\"\(setting.id)\""
                 if !sources.values.contains(where: { $0.contains(needle) }) {
@@ -237,6 +245,58 @@ struct SettingRenderingTests {
         }
         #expect(unrendered.isEmpty,
                 "declared but never rendered — searchable, documented, and on no screen: \(unrendered.sorted().joined(separator: ", "))")
+    }
+
+    /// The app-level surface's settings are generated per vendor and per declared
+    /// field, so what has to be proved is that its pane ITERATES those two lists —
+    /// then every generated setting is on screen by construction, including a future
+    /// vendor's.
+    @Test func aGeneratedCatalogIsRenderedByIteration() throws {
+        let sources = try Self.uiSources()
+        let pane = try #require(sources["SignInSourcesSettings.swift"],
+                                "the Sign-In Sources pane is missing")
+        // The two lists the catalog is generated from.
+        #expect(pane.contains("LocalVaultVendor.allCases"),
+                "the pane must walk every vendor, or a new vendor ships with no row")
+        #expect(pane.contains("SignInSourceSettings.fields(for: vendor)"),
+                "the pane must walk each vendor's declared fields")
+        // …and it must render them through the shared row idiom, which is what
+        // carries the label, summary, manual link and reveal.
+        #expect(pane.contains("EngineSettingRow"))
+        #expect(pane.contains("EngineSettingLabel"))
+        // Every generated id resolves in the catalog the pane subscripts, so no row
+        // can look one up and trap.
+        for spec in CredentialSourceSettings.all {
+            #expect(CredentialSourceSettings.catalog[spec.id].id == spec.id)
+        }
+    }
+
+    /// THE LANDMINE, checked in the source. `TextField("some example", text:)` passes
+    /// the example as the field's TITLE — which `LabeledContent` renders as visible
+    /// content and VoiceOver reads as the field's NAME. Twenty-six sites shipped that
+    /// way once. The pane pre-fills DETECTED paths, which makes it the most tempting
+    /// possible place to do it again, so: every `TextField` in it takes an EMPTY
+    /// title, and any example or detection travels as `prompt:`.
+    @Test func thePanesFieldsNeverPutAnExampleInTheTitle() throws {
+        let sources = try Self.uiSources()
+        let pane = try #require(sources["SignInSourcesSettings.swift"])
+        var offenders: [String] = []
+        for line in pane.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // Skip comments — the file's own header DESCRIBES the bug verbatim, and
+            // a scanner that can't tell prose from code would flag the warning
+            // against doing it.
+            if trimmed.hasPrefix("//") { continue }
+            guard let open = trimmed.range(of: "TextField(") else { continue }
+            let head = String(trimmed[open.upperBound...])
+            // The only sanctioned form: an empty title, with the name supplied by
+            // the spec's own label.
+            if !head.hasPrefix("\"\", text:") { offenders.append(head) }
+        }
+        #expect(offenders.isEmpty,
+                "a TextField in the Sign-In Sources pane passes a non-empty title, which becomes its VoiceOver name: \(offenders)")
+        // …and the pane really does use prompt: for the suggestion.
+        #expect(pane.contains("prompt: Text(shown.prompt)"))
     }
 
     /// THE undefended invariant. `commitCustomRouting` → `syncCustomRoutingProxyAuth`

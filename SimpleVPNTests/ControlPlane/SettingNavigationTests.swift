@@ -143,9 +143,32 @@ struct SettingSurfaceRegistryTests {
 
     /// Every setting reachable from at least one kind — a setting no editor shows
     /// cannot be routed to.
+    ///
+    /// …with the one deliberate exception: an APP-LEVEL surface belongs to no VPN
+    /// kind because it is not a VPN's editor (Settings ▸ Sign-In Sources). It is
+    /// still routable, on the router's own app-settings channel — which is asserted
+    /// just below, so "belongs to no kind" cannot become "reachable from nowhere".
     @Test func everySettingBelongsToAtLeastOneKind() {
-        for entry in AllSettings.everything {
+        for entry in AllSettings.everything where !entry.surface.isAppLevel {
             #expect(!entry.surface.kinds.isEmpty, "\(entry.id) belongs to no VPN kind")
+        }
+    }
+
+    /// An app-level setting IS routable — via `appSettingsRoute`, and never via the
+    /// VPN-editor `route` (which is what Manage VPNs reacts to by hunting for a VPN
+    /// whose editor shows the surface; for these there is no such VPN, and it would
+    /// have said "there's no Sign-In Sources VPN configured yet").
+    @MainActor
+    @Test func anAppLevelSettingRoutesToTheSettingsWindow() {
+        let appLevel = AllSettings.everything.filter { $0.surface.isAppLevel }
+        #expect(!appLevel.isEmpty, "no app-level surface is registered")
+        for entry in appLevel {
+            #expect(SettingsRouter.isAppLevel(settingID: entry.id))
+            let router = SettingsRouter()
+            router.go(to: entry.id)
+            #expect(router.appSettingsRoute?.settingID == entry.id)
+            #expect(router.appSettingsGeneration == 1)
+            #expect(router.route == nil, "an app-level route must not travel on the editor channel")
         }
     }
 

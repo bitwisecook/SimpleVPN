@@ -44,7 +44,28 @@ final class SignInSourceAvailability {
     private var deepScanned = false
     private var deepScanning = false
 
-    init() {}
+    /// Per-vendor enable/disable and the configured paths. Injectable so a test can
+    /// drive the filtering without touching the real defaults domain.
+    let settings: SignInSourceSettingsStore
+
+    init(settings: SignInSourceSettingsStore = .shared) {
+        self.settings = settings
+    }
+
+    /// Vendors whose tool discovery found but the execution allow-list declines to
+    /// run. One entry per vendor, carrying the path worth showing.
+    private static func toolsOutsideAllowList() -> [LocalVaultVendor: String] {
+        var out: [LocalVaultVendor: String] = [:]
+        for vendor in LocalVaultVendor.allCases {
+            for tool in ToolCatalog.tools(for: vendor) {
+                if let path = LocalVaultRegistry.toolFoundOutsideAllowList(tool.name) {
+                    out[vendor] = path
+                    break
+                }
+            }
+        }
+        return out
+    }
 
     /// This VPN's view of the facts: everything gathered, plus the one fact only
     /// the profile knows.
@@ -60,8 +81,23 @@ final class SignInSourceAvailability {
     /// poll; no subprocesses, no prompts, no network.
     func refresh() {
         var next = SignInSourceFacts()
-        next.vaults = LocalVaultRegistry.quickScanAll()
         next.biometricsAvailable = Self.cachedBiometrics()
+        // Which vendors the user (or their organization) has switched off.
+        next.disabledVendors = settings.disabledVendors
+        // THE MASTER SWITCH, honoured absolutely. Off means SimpleVPN does not look
+        // for password managers on this Mac at all — no vendor probes, no
+        // inventory, no discovery map — and the chooser is left with the ways in
+        // that need no detection: typing it, the Apple keychain, Apple Passwords.
+        // Anything less than that would be a scan wearing a different name.
+        guard settings.discoveryEnabled else {
+            if next != facts { facts = next }
+            scanned = true
+            return
+        }
+        next.vaults = LocalVaultRegistry.quickScanAll()
+        // For the vendors whose tool is installed somewhere we won't run from: the
+        // path, so the banner can name it instead of claiming it isn't installed.
+        next.toolsFoundOutsideAllowList = Self.toolsOutsideAllowList()
         // The pointer list is swept once, in the deep pass: it reads a few
         // hundred Info.plists, which is not something to do on a 2-second poll —
         // and apps are not installed twice a second. Carried across untouched.
@@ -133,12 +169,56 @@ final class SignInSourceAvailability {
         deepScanning = true
         defer { deepScanning = false }
         if !scanned { refresh() }
+        // The master switch again: this pass is the expensive one (an Applications
+        // sweep and a vendor subprocess), so it must not happen at all when the
+        // user has said not to look.
+        guard settings.discoveryEnabled else { return }
         if facts.otherApps.isEmpty { facts.otherApps = Self.installedApps() }
-        let refined = await LocalVaultRegistry.deepScanAll(quick: facts.vaults)
+        // A switched-off vendor is not probed. Spawning a vendor's tool — which may
+        // put ITS OWN approval or Touch ID dialog on screen — for a source we have
+        // been told not to offer would be an unexplained prompt out of nowhere.
+        let refined = await LocalVaultRegistry.deepScanAll(
+            quick: facts.vaults, skipping: facts.disabledVendors)
         facts.vaults = refined
+        // The version probe rides here too: it costs a subprocess, and it only ever
+        // runs against a path the execution allow-list already accepts.
+        await refreshToolVersions()
         deepScanned = true
         lastDeepScan = Date()
         Self.log.log("sign-in sources: \(Self.summary(refined), privacy: .public)")
+        ToolDiscovery.logSummary(discoveries)
+    }
+
+    // MARK: The discovery map
+
+    /// What was found for every tool in the catalogue — one answer, shared by the
+    /// Settings pane, the enablement banners and any diagnostic report, so there is
+    /// no second scan to drift from this one.
+    ///
+    /// Versions are filled in by `refreshToolVersions()` (deep pass only) and are
+    /// only ever asked of a binary the execution allow-list accepts.
+    private(set) var discoveries: [String: DiscoveredTool] = [:]
+
+    /// Ask each runnable tool its version. Sequential, and only for `chosen` paths —
+    /// a tool we would refuse to run keeps its `.unknown(why:)` and says why instead.
+    ///
+    /// A version is measured ONCE per path, not once per pass. `recheckIfDue` runs
+    /// this every fifteen seconds while a vendor is waiting on the user, and probing
+    /// the whole catalogue each time would spawn a dozen processes a minute for a
+    /// number that cannot have changed — one of which starts a Python interpreter.
+    /// `ToolDiscovery.cachedMap()` carries a known version forward while its path is
+    /// unchanged, so this loop finds nothing left to do on the second pass.
+    private func refreshToolVersions() async {
+        for tool in ToolCatalog.all {
+            let map = ToolDiscovery.cachedMap()
+            guard let entry = map[tool.name], entry.chosen != nil, !entry.versionProbed
+            else { continue }
+            let version = await ToolDiscovery.probeVersion(tool, discovered: entry)
+            ToolDiscovery.recordVersion(tool: tool.name, version: version)
+        }
+        // Republish so the pane redraws with whatever was learned. One map, read from
+        // the cache, so this can never disagree with what the banners see.
+        discoveries = ToolDiscovery.cachedMap()
     }
 
     /// One log line, vendor states only — never a path, an account or a secret.

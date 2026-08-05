@@ -1,0 +1,141 @@
+// Copyright 2026 James Deucker (bitwisecook)
+// SPDX-License-Identifier: GPL-3.0-only
+//
+//  CredentialSourceSettingDescriptors.swift
+//  The `creds.*` setting catalog: the sign-in-source pane's controls, declared the
+//  same way every engine's options are, so they get the same treatment for free —
+//  app-wide search finds them, the manual has a section per id, the help button
+//  beside each row lands somewhere real, and MDM and the CLI can address them.
+//
+//  WHY THESE ARE SPECS AND NOT JUST SWITCHES IN A VIEW. AGENTS.md is explicit:
+//  every user-facing control gets a spec, including the ones that look like
+//  plumbing. An unspec'd control is invisible to SettingsSearch, unaddressable by
+//  the CLI and MDM, and has no manual anchor behind its help button. "Which
+//  password managers may SimpleVPN use, and where are their tools" is exactly the
+//  kind of setting someone will go looking for by name.
+//
+//  THE CATALOG IS GENERATED, not hand-listed: one enabled switch per
+//  `LocalVaultVendor`, plus whatever fields that vendor declares in
+//  `SignInSourceSettings.fields(for:)`. So adding a vendor adds its settings
+//  automatically — and `ManualAnchorParityTests` then FAILS until the manual has a
+//  section for each, which is the pressure that keeps documentation from lagging a
+//  release behind.
+//
+//  Group: every one of these is **Sign-In** in the canonical taxonomy. They are
+//  about how you identify yourself, which is that group's definition.
+//
+
+import Foundation
+
+@MainActor
+enum CredentialSourceSettings {
+
+    /// The master switch for the local scan.
+    static let discovery = EngineSettingSpec(
+        id: SignInSourceSettings.discoverySettingID,
+        name: "Look for password apps on this Mac",
+        summary: "Lets SimpleVPN find the password apps and command-line tools you already have, so it "
+            + "can offer them and tell you where they are. It only reads this Mac \u{2014} nothing is "
+            + "sent anywhere, and nothing is installed or changed. Off means SimpleVPN never looks.",
+        group: .signIn,
+        default: true)
+
+    /// One switch per vendor, in the vendor enum's order.
+    static let vendorSwitches: [EngineSettingSpec] = LocalVaultVendor.allCases.map { vendor in
+        EngineSettingSpec(
+            id: SignInSourceSettings.enabledSettingID(vendor),
+            name: "Use \(vendor.displayTitle)",
+            summary: "Offer \(vendor.displayTitle) as a way to sign in to your VPNs. Off means "
+                + "SimpleVPN neither offers it nor mentions it \u{2014} even if it is installed.",
+            group: .signIn,
+            default: true)
+    }
+
+    /// One row per declared per-vendor field. The names and summaries live here
+    /// rather than in `VendorConfigField` so all setting copy is reviewable in one
+    /// place, next to every other engine's.
+    static let fieldSpecs: [EngineSettingSpec] = SignInSourceSettings.allFields.map { field in
+        switch field.kind {
+        case .toolBinary(let tool):
+            EngineSettingSpec(
+                id: field.settingID,
+                name: "\(ToolCatalog.tool(named: tool)?.title ?? tool) location",
+                summary: "Where \(vendorTitle(field)) \u{2019}s command-line tool is on this Mac. Leave "
+                    + "it empty and SimpleVPN uses the one it found. Set it when your copy is somewhere "
+                    + "SimpleVPN doesn\u{2019}t look on its own \u{2014} that is what this is for.",
+                group: .signIn,
+                default: "")
+        case .unixSocket:
+            EngineSettingSpec(
+                id: field.settingID,
+                name: "\(vendorTitle(field)) connection point",
+                summary: "The connection \(vendorTitle(field)) opens while it is running, which "
+                    + "SimpleVPN talks to. Leave it empty and SimpleVPN finds it. Set it only if you "
+                    + "have moved it.",
+                group: .signIn,
+                default: "")
+        case .daemonEndpoint:
+            EngineSettingSpec(
+                id: field.settingID,
+                name: "\(vendorTitle(field)) local service address",
+                summary: "The address and port of \(vendorTitle(field))\u{2019}s own local service on "
+                    + "this Mac, in the form host:port.",
+                group: .signIn,
+                default: "")
+        case .vaultFile:
+            EngineSettingSpec(
+                id: field.settingID,
+                name: "\(vendorTitle(field)) database file",
+                summary: "The \(vendorTitle(field)) database SimpleVPN should read from.",
+                group: .signIn,
+                default: "")
+        case .pkcs11Module:
+            EngineSettingSpec(
+                id: field.settingID,
+                name: "\(vendorTitle(field)) security module",
+                summary: "The security module (PKCS#11) SimpleVPN should load for "
+                    + "\(vendorTitle(field)).",
+                group: .signIn,
+                default: "")
+        }
+    }
+
+    private static func vendorTitle(_ field: VendorConfigField) -> String {
+        field.ownerTitle
+    }
+
+    /// Declaration order: the master switch, then each vendor's switch followed by
+    /// its own fields — the order the pane renders, so search results and the
+    /// screen agree.
+    static let catalog: EngineSettingCatalog = {
+        var specs: [EngineSettingSpec] = [discovery]
+        let fieldsByID = Dictionary(fieldSpecs.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        for vendor in LocalVaultVendor.allCases {
+            if let toggle = vendorSwitches.first(where: {
+                $0.id == SignInSourceSettings.enabledSettingID(vendor)
+            }) {
+                specs.append(toggle)
+            }
+            for field in SignInSourceSettings.fields(for: vendor) {
+                if let spec = fieldsByID[field.settingID] { specs.append(spec) }
+            }
+        }
+        // Tool paths belonging to no password app (ykman) come last, in their own
+        // section on screen.
+        for field in SignInSourceSettings.standaloneToolFields {
+            if let spec = fieldsByID[field.settingID] { specs.append(spec) }
+        }
+        return EngineSettingCatalog(specs)
+    }()
+
+    static var all: [EngineSettingSpec] { catalog.all }
+
+    /// The vendor a `creds.*` id belongs to, when one does. Used to open the pane
+    /// scrolled to the right vendor from a chooser row's "Configure…".
+    static func vendor(forSettingID id: String) -> LocalVaultVendor? {
+        LocalVaultVendor.allCases.first { vendor in
+            id == SignInSourceSettings.enabledSettingID(vendor)
+                || SignInSourceSettings.fields(for: vendor).contains { $0.settingID == id }
+        }
+    }
+}

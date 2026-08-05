@@ -16,6 +16,7 @@
 //
 
 import SwiftUI
+import AppKit
 
 struct GlobalSettingsSearchView: View {
     @Environment(\.dismiss) private var dismiss
@@ -38,7 +39,7 @@ struct GlobalSettingsSearchView: View {
                         subtitle: { AllSettings.byID[$0.id]?.breadcrumb ?? $0.summary },
                         autofocus: true)
                 } footer: {
-                    Text("Searches every setting in every VPN editor. Choosing one opens the VPN it belongs to and jumps to it.")
+                    Text("Searches every setting in every VPN editor, and SimpleVPN\u{2019}s own settings. Choosing one opens where it lives and jumps to it.")
                 }
             }
             .formStyle(.grouped)
@@ -57,5 +58,17 @@ struct GlobalSettingsSearchView: View {
     private func pick(_ setting: any SearchableSetting) {
         dismiss()
         router?.go(to: setting.id)
+        // An app-level hit lives in the Settings window, which nothing else here
+        // would open. The router has already recorded which tab it wants.
+        if SettingsRouter.isAppLevel(settingID: setting.id) {
+            openAppSettings()
+        }
+    }
+
+    /// Open SimpleVPN's own Settings window. There is no SwiftUI API for this that
+    /// works from an arbitrary view, so it goes through the AppKit action the
+    /// Settings scene installs.
+    private func openAppSettings() {
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
     }
 }

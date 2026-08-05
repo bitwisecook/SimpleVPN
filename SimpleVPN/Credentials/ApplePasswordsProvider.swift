@@ -2,12 +2,37 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 //  ApplePasswordsProvider.swift
-//  Fetch a username/password from Apple Passwords (the login + iCloud keychain)
-//  via a Security-framework internet-password lookup by server. Items the app
-//  didn't create trigger the standard system keychain-access prompt the first
-//  time — the correct, user-consented path; the vault password never reaches us.
-//  Apple Passwords stores verification codes (TOTP) but doesn't expose them via
-//  SecItem, so OTP still comes from the OTP field / another source.
+//  A BEST-EFFORT LOOKUP OF LEGACY INTERNET-PASSWORD ITEMS. Read the next paragraph
+//  before treating this as "the Apple Passwords integration", because it is not one.
+//
+//  WHAT THIS CAN AND CANNOT SEE. `SecItemCopyMatching` for
+//  `kSecClassInternetPassword` reaches the FILE keychain (`login.keychain`). It does
+//  NOT reach anything Safari or the Passwords app manages: those items live in the
+//  data-protection keychain under the `com.apple.cfnetwork` access group, and an app
+//  can only read an access group its entitlement lists. SimpleVPN's only keychain
+//  group is `$(AppIdentifierPrefix)com.bragi0.SimpleVPN.shared`, so those items are
+//  not merely absent from the result — they are unreachable by construction, and no
+//  amount of query tuning changes that. In practice this query returns the odd
+//  legacy item some other program wrote years ago and nothing else.
+//
+//  SO THE REAL PATH IS AUTOFILL, not this. macOS fills our fields through the
+//  AutoFill menu (the key in the field), which is a user-driven system affordance
+//  and needs no entitlement and no lookup. `SignInSourceCatalog.applePasswords()`
+//  describes the row that way. This provider stays as a fallback because when it
+//  DOES find a legacy item that is a genuinely useful answer — but it must never be
+//  the basis of a promise, and its failure is worded as "may well find nothing"
+//  rather than as something being broken.
+//
+//  WE ALSO CANNOT WRITE INTO APPLE PASSWORDS AT ALL. The only public path,
+//  `SecAddSharedWebCredential`, requires associated domains AND the VPN server's
+//  operator to serve an apple-app-site-association file naming SimpleVPN — and it is
+//  deprecated as of macOS 26.2 with a replacement that is unavailable on macOS. So no
+//  copy anywhere may imply saving into Apple Passwords. "Saved in the Apple
+//  keychain, protected by macOS" — what the SimpleVPN row already says — is the true
+//  version of that offer.
+//
+//  Verification codes: Apple Passwords stores them and exposes none of them through
+//  `SecItem`, so `suppliesOTP` is correctly false and the code is still typed.
 //
 
 import Foundation
@@ -71,15 +96,30 @@ struct ApplePasswordsProvider: CredentialProvider {
         return raw
     }
 
+    /// The failure wording is deliberately UNALARMED for the common case. Finding
+    /// nothing here is the EXPECTED outcome, not a fault: the items most people mean
+    /// by "Apple Passwords" are ones macOS does not let another app read at all, so a
+    /// message implying something is broken would send someone debugging a keychain
+    /// that is working exactly as designed. It names the way that does work instead.
     enum AppleError: LocalizedError {
         case noServer, notFound(String), ambiguous(String), denied, lookup(OSStatus)
         var errorDescription: String? {
             switch self {
-            case .noServer: "No website/server is configured to match in Apple Passwords."
-            case .notFound(let h): "No saved password in Apple Passwords for \u{201C}\(h)\u{201D}."
-            case .ambiguous(let h): "More than one saved login for \u{201C}\(h)\u{201D} — set the account so the right one is used."
-            case .denied: "Access to the saved password was denied."
-            case .lookup(let s): "Apple Passwords lookup failed (\(s))."
+            case .noServer:
+                "No website or server address is set, so there is nothing to match."
+            case .notFound(let h):
+                "SimpleVPN couldn\u{2019}t find a saved password it is allowed to read for "
+                + "\u{201C}\(h)\u{201D}. That is usually the case: macOS keeps Safari\u{2019}s and the "
+                + "Passwords app\u{2019}s entries where other apps can\u{2019}t reach them. Click the "
+                + "key in the username or password field to let macOS fill them in instead."
+            case .ambiguous(let h):
+                "More than one saved login for \u{201C}\(h)\u{201D} \u{2014} set the account so the "
+                + "right one is used."
+            case .denied:
+                "Access to the saved password was denied."
+            case .lookup(let s):
+                "Looking for a saved password didn\u{2019}t work (\(s)). Click the key in the username "
+                + "or password field to let macOS fill them in instead."
             }
         }
     }

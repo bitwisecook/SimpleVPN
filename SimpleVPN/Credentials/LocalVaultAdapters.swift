@@ -193,14 +193,25 @@ struct KeeperVaultAdapter: LocalVaultAdapter {
 
     func quickScan() -> LocalVaultAvailability {
         if KeeperCommanderChannel.isInstalled() { return .unchecked }
+        // Before saying "not installed", ASK. Discovery searches every location
+        // any package manager, version manager or vendor installer uses — plus
+        // `PATH`, which the execution side will never consult — so it can tell the
+        // difference between "you don't have Commander" and "you have Commander in
+        // a virtualenv". Only one of those two is a thing to install.
+        if LocalVaultRegistry.toolFoundOutsideAllowList("keeper") != nil {
+            return .blocked(.toolOutsideAllowList)
+        }
         return Self.isAppInstalled ? .blocked(.toolMissing) : .notInstalled
     }
 
     func deepScan(quick: LocalVaultAvailability) async -> LocalVaultAvailability {
         guard quick != .notInstalled else { return .notInstalled }
         // Nothing to probe when the tool itself is missing — spawning would be
-        // pointless, and "not signed in" would be the wrong thing to say.
-        guard quick != .blocked(.toolMissing) else { return quick }
+        // pointless, and "not signed in" would be the wrong thing to say. Same for
+        // a tool we can see but won't run: probing it would mean executing exactly
+        // the binary the allow-list declined.
+        guard quick != .blocked(.toolMissing),
+              quick != .blocked(.toolOutsideAllowList) else { return quick }
         return await KeeperCommanderChannel.hasLiveSession() ? .ready : .blocked(.notSignedIn)
     }
 
@@ -224,6 +235,21 @@ enum LocalVaultRegistry {
         all.first { $0.vendor == vendor }
     }
 
+    /// Where discovery found a tool the EXECUTION allow-list won't run, or nil.
+    ///
+    /// The one place adapters ask that question, so every CLI-backed vendor gets
+    /// the honest "it's installed, just not where we look" state from one line
+    /// instead of each one re-deriving it. Respects the master discovery switch:
+    /// with the scan off there is nothing to report and we say nothing, rather than
+    /// scanning anyway.
+    static func toolFoundOutsideAllowList(_ tool: String) -> String? {
+        guard SignInSourceSettingsStore.shared.discoveryEnabled else { return nil }
+        guard let found = ToolDiscovery.cachedMap()[tool], found.isFoundButUnusable else { return nil }
+        // The most useful path to name is one the user could sanction, not a
+        // world-writable one we would refuse even if they asked.
+        return found.choosablePaths.first?.path ?? found.paths.first?.path
+    }
+
     static func adapter(for kind: CredentialSourceKind) -> (any LocalVaultAdapter)? {
         all.first { $0.storedKind == kind }
     }
@@ -237,11 +263,17 @@ enum LocalVaultRegistry {
 
     /// The full pass. Sequential on purpose: each of these can put a vendor's own
     /// approval dialog on screen, and two at once is a mess.
+    ///
+    /// `skipping` is the vendors the user has switched off. They are not probed at
+    /// all — a vendor's tool can raise its own Touch ID or approval prompt, and
+    /// raising one for a source that has been turned off is an unexplained dialog
+    /// from nowhere.
     static func deepScanAll(
-        quick: [LocalVaultVendor: LocalVaultAvailability]
+        quick: [LocalVaultVendor: LocalVaultAvailability],
+        skipping: Set<LocalVaultVendor> = []
     ) async -> [LocalVaultVendor: LocalVaultAvailability] {
         var out = quick
-        for adapter in all {
+        for adapter in all where !skipping.contains(adapter.vendor) {
             let start = quick[adapter.vendor] ?? adapter.quickScan()
             out[adapter.vendor] = await adapter.deepScan(quick: start)
         }

@@ -145,6 +145,18 @@ enum KeychainCredentialStore {
         SecItemDelete(appQuery(service: service, account: account) as CFDictionary)
         var q = appQuery(service: service, account: account)
         q[kSecValueData as String] = data
+        // NOTE, and it is a note rather than a fix: on macOS `kSecAttrAccessible` is
+        // a NO-OP on this path. Accessibility classes only take effect for an item
+        // that is `kSecAttrSynchronizable` or that was written with
+        // `kSecUseDataProtectionKeychain` — this is a plain file-keychain item, and is
+        // neither. It is passed anyway so the intent is recorded and so the attribute
+        // is already correct if this item ever moves to the data-protection keychain.
+        //
+        // The item is NOT unprotected: a file-keychain item is guarded by the login
+        // keychain's own unlock state and by its ACL (only this app, code-signed,
+        // may read it without a prompt). What it does not have is the
+        // "…ThisDeviceOnly" class this line names, so do not read that guarantee off
+        // this call.
         q[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         let status = SecItemAdd(q as CFDictionary, nil)
         guard status == errSecSuccess else {
