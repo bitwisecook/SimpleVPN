@@ -25,6 +25,38 @@ final class ManualRouter {
     }
 }
 
+/// How the manual window moves to an anchor. Its own type because the OBVIOUS
+/// implementation is wrong in a way that only shows up on the SECOND click.
+///
+/// It used to be `location.hash = ''; location.hash = '#anchor'` — the empty
+/// assignment there to make a repeat of the same link re-trigger. Clearing the
+/// fragment scrolls the document to the TOP, and WebKit coalesces both assignments
+/// from one synchronous script, so the re-set produced no second scroll: the first
+/// click landed on the entry and every click after it landed at the top of the
+/// manual. Scrolling the ELEMENT instead is
+///
+///  • idempotent — the same anchor twice scrolls twice, with no clear-then-set trick,
+///  • centred, matching what a settings reveal does (Components/SettingReveal.swift),
+///    so the app's two "take me to that" navigations behave alike,
+///  • and free of history entries: fragment navigation pushes onto the web view's
+///    back/forward list and `scrollIntoView` does not, which matters now that the
+///    editors have a back button of their own.
+nonisolated enum ManualScroll {
+    /// JSON-encoded rather than hand-escaped: these are our own catalog ids, but
+    /// approximate escaping inside an `evaluateJavaScript` string is not worth
+    /// keeping around to be copied.
+    static func script(anchor: String) -> String {
+        let id = (try? JSONEncoder().encode(anchor))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
+        return """
+            (function () {
+              var el = document.getElementById(\(id));
+              if (el) { el.scrollIntoView({ block: 'center' }); }
+            })();
+            """
+    }
+}
+
 struct ManualWindow: View {
     @Environment(ManualRouter.self) private var router
 
@@ -74,8 +106,7 @@ private struct ManualWebView: NSViewRepresentable {
         var shownGeneration = 0
 
         func scroll(_ webView: WKWebView, to anchor: String) {
-            let escaped = anchor.replacingOccurrences(of: "'", with: "")
-            webView.evaluateJavaScript("location.hash = ''; location.hash = '#\(escaped)';")
+            webView.evaluateJavaScript(ManualScroll.script(anchor: anchor))
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

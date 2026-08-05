@@ -141,7 +141,10 @@ struct ManualLink: View {
         Button {
             showing = false
             if here {
-                search?.reveal(id: entry.setting.id)
+                // `from:` is what makes the editor's Back button able to return the
+                // user to the row they were READING when they followed the link,
+                // rather than only to the tab it was on.
+                search?.reveal(id: entry.setting.id, from: settingID)
             } else {
                 router?.go(to: entry.setting.id)
             }

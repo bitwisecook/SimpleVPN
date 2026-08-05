@@ -31,13 +31,36 @@ final class SettingsSearch {
 
     var query = ""
 
-    /// The row to pulse; cleared automatically after the pulse duration.
+    /// The row to highlight; cleared automatically once the reveal has finished.
     private(set) var highlightedID: String?
     /// Group that must expand to reveal the target (collapsed sections observe this).
     private(set) var revealGroup: SettingGroup?
     /// Target row for the scroll; bumping generation re-triggers even for the same row.
     private(set) var revealTargetID: String?
     private(set) var revealGeneration = 0
+
+    /// THE ARRIVAL — the reveal has LANDED: whatever container held the row is open,
+    /// and the scroll has stopped moving. Published by the scroll host
+    /// (`revealsSettings()`), and the only thing the row's blue highlight and its
+    /// keyboard focus key off.
+    ///
+    /// Separate from the reveal itself because the two are separated by a tab switch
+    /// and a disclosure animation, neither of which reports when it is done. A
+    /// highlight started with the reveal plays while the row is still travelling —
+    /// or, across a tab boundary, before the row is on screen at all, which is
+    /// exactly what a user saw as "it took me to the Options tab and did nothing".
+    private(set) var arrivedID: String?
+    private(set) var arrivedGeneration = 0
+
+    /// Called by the scroll host once its scroll has settled on `id`. Ignores a
+    /// stale generation, so a host still finishing a reveal that has been superseded
+    /// cannot light up a row for it.
+    func revealDidArrive(id: String, generation: Int) {
+        guard generation == revealGeneration, id == revealTargetID,
+              arrivedGeneration != generation else { return }
+        arrivedID = id
+        arrivedGeneration = generation
+    }
 
     /// The settings this instance can find — one editor's surfaces, or every
     /// surface in the app for the global search.
@@ -115,13 +138,78 @@ final class SettingsSearch {
             .map(\.0)
     }
 
-    /// Navigate to a setting: expand its section, unhide it, scroll to it, pulse
+    // MARK: Where the user came from
+
+    /// One step of history: the tab the user could see, and the row they were
+    /// reading when they followed a link away from it.
+    struct BackPoint: Equatable, Sendable {
+        let tab: SettingsTab?
+        /// The row to put back under the cursor. A help popover knows its own
+        /// setting; a plain `SettingJumpLink` doesn't, and then the tab is the whole
+        /// answer.
+        let settingID: String?
+    }
+
+    /// Which tab the editor showing this search is on. Published by
+    /// `SettingsEditorShell`; the history needs it and nothing else does.
+    var activeTab: SettingsTab?
+
+    private(set) var backStack: [BackPoint] = []
+    var canGoBack: Bool { !backStack.isEmpty }
+
+    /// What the back button says it will do — a setting's name where there is one,
+    /// otherwise the tab's.
+    var backDestination: String? {
+        guard let top = backStack.last else { return nil }
+        if let id = top.settingID, let setting = byID[id] { return setting.name }
+        return top.tab?.title
+    }
+
+    /// A tab the model wants selected. Back navigation can name a tab that holds no
+    /// setting to reveal (General, Configuration), which no reveal can express.
+    private(set) var requestedTab: SettingsTab?
+    private(set) var tabRequestGeneration = 0
+
+    func goBack() {
+        guard let point = backStack.popLast() else { return }
+        if let tab = point.tab {
+            requestedTab = tab
+            tabRequestGeneration += 1
+        }
+        // Going back RE-REVEALS the row we left, so "back" restores the scroll
+        // position and not just the tab. Recorded as history it is not: otherwise
+        // back and forward would be the same button.
+        if let id = point.settingID, let setting = byID[id] {
+            performReveal(setting, origin: nil, recordHistory: false)
+        }
+    }
+
+    private func pushBackPoint(origin: String?) {
+        let point = BackPoint(tab: activeTab, settingID: origin ?? arrivedID)
+        guard point.tab != nil || point.settingID != nil else { return }
+        guard backStack.last != point else { return }
+        backStack.append(point)
+        // A user who follows twenty links wants the last few, not a transcript.
+        if backStack.count > 16 { backStack.removeFirst() }
+    }
+
+    // MARK: Revealing
+
+    /// Navigate to a setting: expand its section, unhide it, scroll to it, highlight
     /// it, focus it, and say so.
     ///
     /// …or, when the editor has gated the row out of the form entirely, say THAT
     /// and stop. A jump that lands nowhere while announcing that it landed is the
     /// worst of the three possible outcomes.
-    func reveal(_ setting: any SearchableSetting) {
+    ///
+    /// `origin` is the setting the user was READING when they followed the link (a
+    /// help popover knows it), so the back button can return them to it.
+    func reveal(_ setting: any SearchableSetting, from origin: String? = nil) {
+        performReveal(setting, origin: origin, recordHistory: true)
+    }
+
+    private func performReveal(_ setting: any SearchableSetting,
+                               origin: String?, recordHistory: Bool) {
         query = ""
         if let why = hiddenReason(setting.id) {
             revealGroup = nil
@@ -140,8 +228,12 @@ final class SettingsSearch {
         }
         unavailableTask?.cancel()
         unavailable = nil
+        // BEFORE the state below is replaced: the back point is where we are
+        // LEAVING, and `arrivedID` is still the row the last reveal landed on.
+        if recordHistory { pushBackPoint(origin: origin) }
         revealGroup = setting.canonicalGroup
         revealTargetID = setting.id
+        arrivedID = nil
         revealGeneration += 1
         highlightedID = setting.id
         scheduleClear()
@@ -150,21 +242,26 @@ final class SettingsSearch {
     private func scheduleClear() {
         clearTask?.cancel()
         clearTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(1.8))
+            // Long enough for the whole choreography — select the tab, open the
+            // container, scroll, hold the highlight for its second and a half, fade
+            // — and no longer. It was 1.8s, which expired in the middle of a
+            // cross-tab reveal and took the target with it.
+            try? await Task.sleep(for: .seconds(4))
             guard !Task.isCancelled else { return }
             self?.highlightedID = nil
-            // Cleared together: a row that is unhidden much later must not pulse
+            // Cleared together: a row that is unhidden much later must not light up
             // for a reveal that already finished.
             self?.revealTargetID = nil
+            self?.arrivedID = nil
         }
     }
 
     /// Reveal by id. Returns false when this catalog doesn't hold it — the caller
     /// (a related-settings link) then routes to the editor that does.
     @discardableResult
-    func reveal(id: String) -> Bool {
+    func reveal(id: String, from origin: String? = nil) -> Bool {
         guard let setting = byID[id] else { return false }
-        reveal(setting)
+        reveal(setting, from: origin)
         return true
     }
 

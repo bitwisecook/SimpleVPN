@@ -375,3 +375,274 @@ struct SettingsRouteTests {
         #expect(router.route == nil)
     }
 }
+
+// MARK: - The reveal choreography
+
+/// THE BUG THESE GUARD. A related link (and the identical `SettingJumpLink`) to
+/// `openvpn.private-key-password` selected the Options tab and then stopped: the
+/// form sat at the top of its scroll showing the Connection section, with nothing
+/// marked. Every responder — the scroll, the highlight, the keyboard focus, the
+/// section that had to open — reacted to `onChange(of: revealGeneration)` and
+/// latched "handled". For a cross-tab reveal every one of them ran while the
+/// destination form was not the selected tab, where `scrollTo` does nothing and a
+/// highlight plays where nobody is looking; and because the generation was latched,
+/// the `onAppear` retry that runs when the tab comes up was guarded out.
+///
+/// So the ordering rules live in values (`SettingRevealScrollState`,
+/// `RevealContainerScope`) and in the model (`revealDidArrive`), where they can be
+/// asserted without a view hierarchy.
+@MainActor
+struct SettingRevealTests {
+
+    private func openVPNEditorSearch() -> SettingsSearch {
+        SettingsSearch(surfaces: [.openVPN, .securityKey, .customRouting], kind: .openVPN)
+    }
+
+    /// The regression test for the reported bug, end to end at model level: the
+    /// user is on Sign-In, the target lives on Options, and the form that has to
+    /// scroll does not exist (or is not on screen) when the reveal fires.
+    @Test func aRevealForAFormThatIsNotOnScreenYetStillScrollsWhenItAppears() {
+        let search = openVPNEditorSearch()
+        search.activeTab = .signIn
+
+        #expect(search.reveal(id: "openvpn.private-key-password"))
+        // The destination is NOT the tab the user is on, so the shell must switch —
+        // which is what leaves the scroll host arriving late.
+        #expect(SettingSurface.owning("openvpn.private-key-password")?.tab == .options)
+
+        // Hoisted out of `#expect`: these are mutating calls, and the macro captures
+        // its subexpressions immutably.
+        var host = SettingRevealScrollState()
+        // Off screen: the reveal must NOT be marked handled here. This single
+        // assertion is the bug.
+        let scrolledWhileOffScreen = host.revealed(generation: search.revealGeneration)
+        #expect(scrolledWhileOffScreen == false)
+        // The tab switch builds/shows the form, and the scroll is still owed.
+        let scrollsOnAppearing = host.appeared(pendingGeneration: search.revealGeneration)
+        #expect(scrollsOnAppearing)
+        // Once done, neither path fires again for the same reveal.
+        let appearsAgain = host.appeared(pendingGeneration: search.revealGeneration)
+        let revealedAgain = host.revealed(generation: search.revealGeneration)
+        #expect(appearsAgain == false)
+        #expect(revealedAgain == false)
+    }
+
+    /// The other flavour, which is what macOS actually does with a `TabView` whose
+    /// children are all alive: the host IS "on screen" when the reveal fires, so it
+    /// scrolls immediately — against a hierarchy the tab switch has not laid out
+    /// yet. The retry schedule is the only thing that saves it.
+    @Test func theScrollIsRetriedAcrossTheTabSwitch() {
+        var host = SettingRevealScrollState()
+        let nothingPending = host.appeared(pendingGeneration: 0)
+        #expect(nothingPending == false)
+        let scrollsNowOnScreen = host.revealed(generation: 1)
+        #expect(scrollsNowOnScreen)
+
+        #expect(SettingRevealScrollState.attempts.count >= 3,
+                "one scroll attempt cannot outlast a tab switch and a disclosure opening")
+        #expect(SettingRevealScrollState.scrollWindow >= .milliseconds(400))
+        // And the highlight's patience must outlast the whole schedule, or it gives
+        // up and fires early — which is the thing it exists to avoid.
+        #expect(SettingRevealScrollState.arrivalTimeout > SettingRevealScrollState.scrollWindow)
+    }
+
+    /// Leaving and coming back is a fresh chance to scroll: the state must forget
+    /// that it is on screen, or a reveal arriving while the tab is elsewhere is
+    /// latched all over again.
+    @Test func disappearingReopensTheOffScreenPath() {
+        var host = SettingRevealScrollState()
+        _ = host.appeared(pendingGeneration: 0)
+        host.disappeared()
+        let whileAway = host.revealed(generation: 4)
+        let onReturn = host.appeared(pendingGeneration: 4)
+        #expect(whileAway == false)
+        #expect(onReturn)
+    }
+
+    /// The HIGHLIGHT waits for the scroll. Nothing sets the arrival except the
+    /// scroll host saying it has landed, so a highlight keyed off it cannot play
+    /// while the row is still travelling or off screen.
+    @Test func theHighlightWaitsForTheScrollToLand() {
+        let search = openVPNEditorSearch()
+        #expect(search.reveal(id: "openvpn.private-key-password"))
+        #expect(search.arrivedID == nil)
+        #expect(search.arrivedGeneration != search.revealGeneration)
+
+        search.revealDidArrive(id: "openvpn.private-key-password",
+                               generation: search.revealGeneration)
+        #expect(search.arrivedID == "openvpn.private-key-password")
+        #expect(search.arrivedGeneration == search.revealGeneration)
+    }
+
+    /// A host still finishing a superseded reveal must not light up a row for it.
+    @Test func aStaleArrivalIsIgnored() {
+        let search = openVPNEditorSearch()
+        #expect(search.reveal(id: "openvpn.server"))
+        let stale = search.revealGeneration
+        #expect(search.reveal(id: "openvpn.compression"))
+
+        search.revealDidArrive(id: "openvpn.server", generation: stale)
+        #expect(search.arrivedID == nil, "a finished reveal's arrival lit up a row")
+
+        search.revealDidArrive(id: "openvpn.compression", generation: search.revealGeneration)
+        #expect(search.arrivedID == "openvpn.compression")
+    }
+
+    /// A new reveal must not inherit the previous one's arrival, or its highlight
+    /// fires instantly — before the tab switch, before the scroll.
+    @Test func aNewRevealDoesNotInheritThePreviousArrival() {
+        let search = openVPNEditorSearch()
+        #expect(search.reveal(id: "openvpn.server"))
+        search.revealDidArrive(id: "openvpn.server", generation: search.revealGeneration)
+        #expect(search.arrivedID == "openvpn.server")
+
+        #expect(search.reveal(id: "openvpn.compression"))
+        #expect(search.arrivedID == nil)
+    }
+
+    /// EXPANSION IS PART OF THE REVEAL. A row inside a collapsed group and a row
+    /// inside a disclosure nested in a section are both "hidden inside a container",
+    /// and one mechanism answers for both.
+    @Test func aContainerHoldingTheTargetKnowsToOpen() {
+        let search = openVPNEditorSearch()
+
+        // Security is COLLAPSED by default in the OpenVPN form.
+        #expect(search.reveal(id: "openvpn.compression"))
+        #expect(search.revealGroup == .security)
+        #expect(RevealContainerScope.group(.security)
+            .holds("openvpn.compression", group: search.revealGroup))
+        #expect(!RevealContainerScope.group(.advanced)
+            .holds("openvpn.compression", group: search.revealGroup))
+
+        // And the cipher strings live in a disclosure INSIDE that section, whose
+        // group says nothing about it — so it names its ids.
+        #expect(search.reveal(id: "openvpn.tls-cipher-list"))
+        let disclosure = RevealContainerScope.settings(["openvpn.tls-cipher-list",
+                                                        "openvpn.tls-ciphersuites"])
+        #expect(disclosure.holds("openvpn.tls-cipher-list", group: search.revealGroup))
+        #expect(!disclosure.holds("openvpn.compression", group: search.revealGroup))
+        // Both have to open: the outer section AND the disclosure.
+        #expect(RevealContainerScope.group(.security)
+            .holds("openvpn.tls-cipher-list", group: search.revealGroup))
+    }
+
+    // MARK: Back
+
+    @Test func thereIsNothingToGoBackToUntilAJumpHappens() {
+        let search = openVPNEditorSearch()
+        #expect(!search.canGoBack)
+        #expect(search.backDestination == nil)
+        search.goBack()          // must be a no-op, not a crash
+        #expect(search.requestedTab == nil)
+    }
+
+    /// Following a link records where the user was standing, and back puts them
+    /// there — the tab, and the row they were reading when they left it.
+    @Test func backReturnsToTheTabAndTheRowTheUserCameFrom() {
+        let search = openVPNEditorSearch()
+        search.activeTab = .signIn
+
+        #expect(search.reveal(id: "openvpn.private-key-password",
+                              from: "openvpn.autologin-sessions"))
+        #expect(search.canGoBack)
+        #expect(search.backDestination == OpenVPNSettings.byID["openvpn.autologin-sessions"]!.name)
+
+        search.goBack()
+        #expect(search.requestedTab == .signIn)
+        #expect(search.tabRequestGeneration == 1)
+        // …and the row we left is revealed again, so the scroll position comes back
+        // rather than only the tab.
+        #expect(search.revealTargetID == "openvpn.autologin-sessions")
+        // Back is not also forward: going back records no new history.
+        #expect(!search.canGoBack)
+    }
+
+    /// A jump link has no setting of its own to name, so the tab is the whole
+    /// answer — and the button still has to say where it goes.
+    @Test func backFromAJumpLinkKnowsOnlyTheTab() {
+        let search = openVPNEditorSearch()
+        search.activeTab = .signIn
+        #expect(search.reveal(id: "openvpn.private-key-password"))
+        #expect(search.backDestination == SettingsTab.signIn.title)
+        search.goBack()
+        #expect(search.requestedTab == .signIn)
+    }
+
+    /// Every tab can name itself, or the back button says nothing for the ones that
+    /// hold no settings.
+    @Test func everyTabHasATitle() {
+        for tab in SettingsTab.allCases {
+            #expect(!tab.title.isEmpty)
+        }
+    }
+
+    @Test func theHistoryIsBoundedAndDoesNotRepeatItself() {
+        let search = openVPNEditorSearch()
+        search.activeTab = .options
+        // The same departure twice in a row is one step back, not two.
+        #expect(search.reveal(id: "openvpn.server", from: "openvpn.port"))
+        #expect(search.reveal(id: "openvpn.compression", from: "openvpn.port"))
+        #expect(search.backStack.count == 1)
+
+        for id in OpenVPNSettings.all.prefix(24) {
+            _ = search.reveal(id: id.id, from: "openvpn.port")
+        }
+        #expect(search.backStack.count <= 16)
+    }
+
+    /// A reveal the editor gates out of the form records no history: nothing moved,
+    /// so there is nowhere to come back from.
+    @Test func anUnavailableRevealRecordsNoHistory() {
+        let search = SettingsSearch(surfaces: [.tailscale, .customRouting], kind: .tailscale)
+        search.activeTab = .settings
+        var c = TailscaleConfig()
+        c.useExitNode = false
+        search.visibility = SettingVisibility.tailscale(c)
+        #expect(search.reveal(id: "ts.exit-node-machine"))
+        #expect(search.unavailable != nil)
+        #expect(!search.canGoBack)
+    }
+}
+
+// MARK: - The manual window's own navigation
+
+/// "If I open the ? and click on something it will take me there; if I do it a
+/// second time the manual scrolls to the top, not the same entry." The cause was
+/// `location.hash = ''; location.hash = '#anchor'` — the clear scrolls the document
+/// to the top, and WebKit coalesces both assignments from one synchronous script, so
+/// the re-set produced no second scroll. These assert the ABSENCE of that trick,
+/// which is the part that regresses.
+struct ManualScrollTests {
+
+    @Test func theScrollDoesNotTouchTheFragment() {
+        let js = ManualScroll.script(anchor: "openvpn-compression")
+        #expect(!js.contains("location.hash"))
+        #expect(!js.contains("location.href"))
+    }
+
+    @Test func itScrollsTheElementItselfAndCentresIt() {
+        let js = ManualScroll.script(anchor: "openvpn-compression")
+        #expect(js.contains("getElementById"))
+        #expect(js.contains("scrollIntoView"))
+        // The same "as near the centre as it can get" the settings reveal uses.
+        #expect(js.contains("'center'"))
+        #expect(js.contains("\"openvpn-compression\""))
+    }
+
+    /// The anchor is JSON-encoded rather than hand-escaped, so a quote in an id
+    /// cannot end the string it is inside.
+    @Test func theAnchorIsEscapedRatherThanStripped() {
+        let js = ManualScroll.script(anchor: "a\"b\\c")
+        #expect(js.contains("\"a\\\"b\\\\c\""))
+    }
+
+    /// Every manual anchor an id resolves to has to survive the trip.
+    @Test func everySettingsAnchorProducesAScript() async {
+        await MainActor.run {
+            for entry in AllSettings.everything {
+                let js = ManualScroll.script(anchor: entry.setting.manualAnchor)
+                #expect(js.contains(entry.setting.manualAnchor))
+            }
+        }
+    }
+}

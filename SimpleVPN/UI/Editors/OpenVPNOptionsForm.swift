@@ -66,18 +66,14 @@ struct OpenVPNOptionsForm: View {
         .onChange(of: draft.proxyHost != nil) { _, hasHost in
             if hasHost { proxyOn = true }   // draft loaded/replaced externally
         }
-        // UNHIDE the target before the shared scroll runs: a row behind a toggle
-        // or a disclosure isn't in the hierarchy for scrollTo to find. Both of
-        // these are pure VIEW state (the proxy sub-form's master toggle mirrors
-        // `draft.proxyHost != nil`; the cipher disclosure holds nothing), which is
-        // the only kind of gate a reveal may flip — see `SettingRevealUnhide`.
-        // Shared modifier now, so it also fires for a CROSS-TAB reveal, where this
-        // form is created after the generation changed.
+        // UNHIDE the target before the shared scroll runs: a row behind a master
+        // TOGGLE isn't in the hierarchy for scrollTo to find, and a toggle is not a
+        // collapsible container, so `expandsForReveal` doesn't cover it. Pure VIEW
+        // state (this mirrors `draft.proxyHost != nil`), which is the only kind of
+        // gate a reveal may flip — see `SettingRevealUnhide`. The cipher disclosure
+        // used to be handled here too and is now declared on the disclosure itself.
         .unhidesRevealTarget { id in
             if id.hasPrefix("openvpn.proxy-") { proxyOn = true }
-            if id == "openvpn.tls-cipher-list" || id == "openvpn.tls-ciphersuites" {
-                cipherStringsExpanded = true
-            }
         }
     }
 
@@ -368,6 +364,13 @@ struct OpenVPNOptionsForm: View {
                     .contentShape(Rectangle())
                     .onTapGesture { withAnimation(.snappy) { cipherStringsExpanded.toggle() } }
             }
+            // A disclosure NESTED inside a section: the section's group says nothing
+            // about it, so it names the two ids it holds. Same shared mechanism the
+            // collapsible sections use, so a reveal never lands on a shut container
+            // anywhere in the app.
+            .expandsForReveal($cipherStringsExpanded,
+                              holding: .settings(["openvpn.tls-cipher-list",
+                                                  "openvpn.tls-ciphersuites"]))
         }
     }
 

@@ -313,6 +313,23 @@ enum SettingsTab: String, Hashable, CaseIterable {
     /// The app's own Settings window, Sign-In Sources tab — the one tab that is
     /// not part of a VPN's editor (see `SettingSurface.isAppLevel`).
     case signInSources
+
+    /// What the tab strip calls it. Needed because the back button has to be able to
+    /// say WHERE it goes when the destination holds no setting to name it by (the
+    /// General tab, the Configuration tab).
+    var title: String {
+        switch self {
+        case .general: "General"
+        case .servers: "Servers"
+        case .signIn: "Sign-In"
+        case .options: "Options"
+        case .certificates: "Certificates"
+        case .configuration: "Configuration"
+        case .settings: "Settings"
+        case .customRouting: "Custom Routing"
+        case .signInSources: "Sign-In Sources"
+        }
+    }
 }
 
 /// "Open the editor for this setting and put the cursor on it." One intent, two

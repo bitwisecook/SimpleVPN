@@ -687,51 +687,21 @@ struct EditVPNView: View {
         (evaluation?.staticChallengeEcho ?? false) ? " (shown as you type)" : ""
     }
 
-    /// Where the code actually comes from, stated in the OTP section itself.
+    /// Where the code comes from, for the sources that have something to say about
+    /// it AND nowhere else to say it.
     ///
-    /// Turning OTP on while credentials come from 1Password used to say nothing at all:
-    /// the app quietly fell back to the item's *standard* one-time-code field, so anyone
-    /// keeping their code in a custom field only found out at connect time, as a failed
-    /// sign-in with no explanation. The mapping belongs next to the toggle that needs it.
+    /// 1Password IS NOT ONE OF THEM, and used to be. Its code mapping is one of
+    /// three the Credential Source section already lists together ("Username →
+    /// username", "Password → password", "Verification code → one-time password")
+    /// with the "Change Fields…" button that edits all three; restating just the
+    /// third one here, a few rows below its own siblings, with a second button
+    /// leading to the same sheet, was one fact told twice. The unmapped-code nudge
+    /// went with it, to sit beside the button that fixes it — see
+    /// `onePasswordSource`. What is left in the Verification Code section is the
+    /// section's own job: the toggle, and where the code comes from when the chosen
+    /// source cannot supply one.
     @ViewBuilder private var managedOTPSourceRow: some View {
-        if credentialKind == .onePassword {
-            let mapped = fieldMap["otp"].flatMap { id -> String? in
-                id.isEmpty ? nil : (opFields.first { $0.id == id }?.label ?? id)
-            }
-            let noItemYet = sourceReference.trimmingCharacters(in: .whitespaces).isEmpty
-
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: mapped == nil ? "questionmark.circle.fill" : "arrow.right.circle")
-                    .foregroundStyle(mapped == nil ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
-                    .accessibilityHidden(true)   // the text states the same thing
-                VStack(alignment: .leading, spacing: 2) {
-                    if let mapped {
-                        Text("Verification code comes from the \u{201C}\(mapped)\u{201D} field in 1Password")
-                            .font(.callout)
-                    } else if noItemYet {
-                        Text("Choose a 1Password item below, then pick the field holding the code.")
-                            .font(.callout)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } else {
-                        Text("Which 1Password field holds the code?").font(.callout)
-                        Text("Until you pick one, SimpleVPN tries the field 1Password marks as a one-time password.")
-                            .font(.callout).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .accessibilityElement(children: .combine)
-                Spacer(minLength: 8)
-                if !noItemYet {
-                    Button(mapped == nil ? "Choose Field\u{2026}" : "Change\u{2026}") {
-                        Task { await loadOPFieldsAndShowSheet() }
-                    }
-                    .disabled(!opAvailable || loadingOPFields)
-                    // "Change…" alone answers nothing — change WHAT?
-                    .accessibilityLabel(mapped == nil ? "Choose the 1Password field holding the code"
-                                                      : "Change the 1Password field holding the code")
-                }
-            }
-        } else if credentialKind == .keePassXC {
+        if credentialKind == .keePassXC {
             // No mapping to configure: KeePassXC computes the code from the
             // matched entry's own TOTP settings — worth saying, so nobody goes
             // hunting for a field picker that doesn't exist.
@@ -744,7 +714,8 @@ struct EditVPNView: View {
     /// Flipping OTP on is exactly when to ask which 1Password field carries the code —
     /// the user is already thinking about it, and the alternative is finding out at
     /// connect time. Only auto-opens when we can genuinely populate the sheet; otherwise
-    /// `managedOTPSourceRow` carries the ask until an item has been chosen.
+    /// the unmapped-code nudge in `onePasswordSource` carries the ask until an item
+    /// has been chosen.
     private func promptForOTPFieldIfNeeded() {
         guard otpRequired, credentialKind == .onePassword,
               (fieldMap["otp"] ?? "").isEmpty,
@@ -1031,11 +1002,24 @@ struct EditVPNView: View {
         // Drop well — drag an item from the 1Password app onto here.
         onePasswordDropWell
 
-        // Field-role mapping summary + editor.
+        // Field-role mapping summary + editor. THE one place the mapping is stated:
+        // the Verification Code section below used to restate the code's own line
+        // here as well, with a second button onto the same sheet.
         if !fieldMap.isEmpty {
             ForEach(mappedRoleSummary, id: \.self) { line in
                 Label(line, systemImage: "arrow.right.circle").font(.callout).foregroundStyle(.secondary)
             }
+        }
+        // The one thing that summary CANNOT say: a role which is required and
+        // unmapped has no line to appear on. It belongs here, beside the button that
+        // fixes it, rather than three rows down in the OTP section.
+        if otpRequired, (fieldMap["otp"] ?? "").isEmpty {
+            Label(sourceReference.trimmingCharacters(in: .whitespaces).isEmpty
+                  ? "Choose an item above, then pick which of its fields holds the verification code."
+                  : "No field is mapped to the verification code yet \u{2014} SimpleVPN will try whichever field 1Password marks as a one-time password.",
+                  systemImage: "questionmark.circle")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         HStack {
             Button(fieldMap.isEmpty ? "Choose Fields…" : "Change Fields…") {

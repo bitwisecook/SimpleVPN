@@ -61,10 +61,12 @@ struct CollapsibleSettingsSection<Content: View, Footer: View>: View {
         } footer: {
             footer.font(.callout).foregroundStyle(.secondary)
         }
-        .onChange(of: search?.revealGeneration ?? 0) {
-            // A search hit inside this group must never land on a closed disclosure.
-            if search?.revealGroup == group { expanded = true }
-        }
+        // A hit inside this group must never land on a closed disclosure. The shared
+        // modifier (UI/Components/SettingReveal.swift) because it also has to fire on
+        // `onAppear` — a CROSS-TAB reveal creates this section after the generation
+        // changed, so an `onChange` alone never sees it, and the reveal then scrolled
+        // to a row inside a shut disclosure.
+        .expandsForReveal($expanded, holding: .group(group))
     }
 }
 

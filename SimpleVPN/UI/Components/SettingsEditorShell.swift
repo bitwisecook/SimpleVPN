@@ -31,7 +31,10 @@ private struct SettingsEditorShell: ViewModifier {
     func body(content: Content) -> some View {
         content
             .environment(search)
-            .onAppear { consume() }
+            .onAppear { search.activeTab = tab; consume() }
+            // WHERE THE USER IS. The back button's history is (tab, row), and the tab
+            // half is only knowable here — `SettingsSearch` has no view.
+            .onChange(of: tab) { _, new in search.activeTab = new }
             .onChange(of: router?.generation ?? 0) { consume() }
             .onChange(of: search.revealGeneration) {
                 // A reveal may name a setting on the OTHER tab (a Traffic ↔ Custom
@@ -40,6 +43,19 @@ private struct SettingsEditorShell: ViewModifier {
                 guard let id = search.revealTargetID,
                       let wanted = SettingSurface.owning(id)?.tab else { return }
                 if tab != wanted { tab = wanted }
+            }
+            // Back navigation asks for a TAB directly, because it can name one that
+            // holds no setting to reveal (General, Configuration) — which no reveal
+            // can express.
+            .onChange(of: search.tabRequestGeneration) {
+                guard let wanted = search.requestedTab else { return }
+                if tab != wanted { tab = wanted }
+            }
+            // The back button rides HERE, at the one container all seven editors
+            // share, so every editor has it — and so it is present for general
+            // navigation rather than appearing only after a jump.
+            .toolbar {
+                ToolbarItem(placement: .navigation) { SettingsBackButton(search: search) }
             }
     }
 
