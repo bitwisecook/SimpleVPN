@@ -50,6 +50,10 @@ appear.
 | Bitwarden | local daemon (`bw serve`) | username, password, TOTP code | single | The CLI **cannot** read without a session key — see below. |
 | KeePass file | file | username, password | **multiple** | Covers KeePassXC-as-file, Strongbox, KeePassium. |
 | pass / gopass | file | username, password, TOTP code | **multiple** | Read with `gpg`; neither tool required. |
+| Dashlane | CLI | username, password, TOTP code | single | Asked for JSON, because its console output can ask a question. |
+| LastPass | CLI | username, password | single | Best-effort; its tool can supply no code at all. |
+| Proton Pass | CLI | username, password, TOTP code | single | Needs a paid Proton plan — a first-class state, not a failure. |
+| Passbolt | CLI | username, password, TOTP sometimes | **multiple** | Server-based; the only source we prompt for. |
 
 ### Three findings that changed a design
 
@@ -71,6 +75,14 @@ the CLI is only the state transport. We do not prompt for a master password — 
 falsify the promise that the vendor does the unlocking — and we do not persist a vault
 key, so the CLI fetch path is **deliberately dormant** with its reasons stated.
 
+**Three tools write the password to the clipboard, and each needed a different answer.**
+Dashlane's `dcli` defaults to the pasteboard, so we ask for JSON instead — and JSON rather than
+its console mode, because console output runs an interactive picker when two entries match, which
+would hang against a closed stdin. LastPass prints to stdout by default, but its alias file can
+prepend a clipboard flag to our own argv — its own manual suggests doing so — and there is no
+counter-flag, so we read that file and *refuse to fetch*. Proton Pass has no clipboard code at
+all. `pass show -c` exists and is simply never called.
+
 **`pass` is read with `gpg`, not with `pass`.** `gpg` is far more likely to be installed
 (it is here; `pass` is not), the store layout is a decade-stable documented format while
 CLI output is not a contract, and it keeps us away from `pass show -c`, which puts a
@@ -84,6 +96,13 @@ fails immediately with what to install.
 It tells Connect that nothing will need typing. Being wrong costs a failed sign-in **and a
 burned one-time code**, which some gateways count toward a lockout. So it is `false`
 unless verified against a real vault: currently true only for 1Password and KeePassXC.
+
+Every other source is `false` for one of three distinct reasons, and the difference matters:
+*unproven* (Bitwarden, Dashlane, Proton Pass — the code arrives, nobody has watched it work),
+*unknowable in advance* (pass/gopass, Passbolt, Dashlane again — whether a given entry carries a
+seed cannot be known until the fetch has already happened, so a promise would be a claim about
+the user's data), and *impossible* (LastPass — its tool's own JSON has no field for a code, and
+Apple Passwords withholds codes from other apps by design). Only the last is permanent.
 Several sources still *use* a code when the entry has one — that is not the same as
 promising it.
 
