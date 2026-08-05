@@ -63,6 +63,11 @@ nonisolated extension LocalVaultVendor {
         case .keePassXC: "keepassxc"
         case .keeper: "keeper"
         case .bitwarden: "bitwarden"
+        // Named for the FORMAT, not for a brand — see `LocalVaultVendor
+        // .keePassFile`. Fixed forever: it is the MDM, CLI and manual-anchor
+        // contract, and it must not become "strongbox" the day Strongbox is
+        // mentioned on screen.
+        case .keePassFile: "keepassfile"
         }
     }
 
@@ -88,20 +93,38 @@ nonisolated enum VendorConfigFieldKind: Sendable, Equatable {
     case unixSocket
     /// `host:port` for a loopback daemon the vendor's own tool starts.
     case daemonEndpoint
-    /// A vault file on disk (a KeePass `.kdbx`, say).
+    /// A vault file on disk (a KeePass `.kdbx`, say). WIRED: the `.kdbx` adapter's
+    /// database path is this.
     case vaultFile(extensions: [String])
+    /// A KEY FILE — a second factor for a vault, whose CONTENTS are a secret we
+    /// never read (the vendor's own tool does) but whose PATH is not.
+    ///
+    /// Deliberately not `vaultFile`: it validates the same way but it is a
+    /// different question with different copy, and one field kind rendering as two
+    /// rows both called "database file" is how a user ends up putting their key file
+    /// where their database goes. Any extension (or none) is legitimate — KeePassXC
+    /// writes `.keyx`, older releases wrote `.key`, and a hand-made one is often a
+    /// plain file with no extension at all — so this case carries no extension list
+    /// to filter by, on purpose.
+    case keyFile
+    /// A security key's challenge-response SLOT. Not a path: a small number, 1 or 2.
+    ///
+    /// EMPTY MEANS NONE, and that is the design rather than an omission: a database
+    /// that needs a security key is told apart from one that doesn't by whether this
+    /// has a number in it. A separate "use a security key" switch would be a second
+    /// place for the same fact to live, and the two would fall out of step.
+    case securityKeySlot
     /// A PKCS#11 module (a `.so`/`.dylib`, loaded rather than executed).
     case pkcs11Module
 
-    // NOTE on the last three: no shipped field declares them yet. They are here
-    // because the two adapters that need them are already designed — Bitwarden's
-    // `bw serve` is a loopback endpoint and the kdbx adapter is a file — and each
-    // one's validation and its setting copy are written and tested. Their presence
-    // is what makes adding either a one-row declaration instead of a fourth branch
-    // in every switch. A field is only DECLARED when something reads it, which is
-    // why none of them appears on screen: a setting nothing consults is worse than
-    // a missing one, because someone will configure it and then wonder why their
-    // VPN still fails.
+    // NOTE on `daemonEndpoint` and `pkcs11Module`: no shipped field declares them
+    // yet. They are here because the adapters that need them are already designed —
+    // Bitwarden's `bw serve` is a loopback endpoint — and each one's validation and
+    // its setting copy are written and tested. Their presence is what makes adding
+    // either a one-row declaration instead of another branch in every switch. A
+    // field is only DECLARED when something reads it, which is why neither appears
+    // on screen: a setting nothing consults is worse than a missing one, because
+    // someone will configure it and then wonder why their VPN still fails.
 
     /// The tool whose discovery result pre-fills this field, if any.
     var detectionTool: String? {
@@ -176,6 +199,12 @@ nonisolated enum SignInSourceSettings {
     /// same reason the tool-path key is shared with `LocalToolRunner`: one notion of
     /// "what the user set", not a settings copy to keep in step.
     static let bitwardenEndpointKey = BitwardenSettings.endpointKey
+    /// The `.kdbx` adapter's three settings. Paths and a slot number — never the
+    /// database password, which is not a setting and never goes near `UserDefaults`
+    /// (KeePassUnlock.swift).
+    static let keePassDatabaseKey = "signin.keepassfile.database"
+    static let keePassKeyFileKey = "signin.keepassfile.keyfile"
+    static let keePassSecurityKeySlotKey = "signin.keepassfile.securitykey-slot"
     /// The master switch for the whole local scan. Default ON — the scan is
     /// filesystem-only, needs no macOS permission, and every sign-in source
     /// feature is inert without it. Off means SimpleVPN never looks for a password
@@ -188,6 +217,13 @@ nonisolated enum SignInSourceSettings {
         "creds.\(vendor.settingSlug).enabled"
     }
     static let discoverySettingID = "creds.discovery"
+    /// The two `.kdbx` controls that are not fields: a secret to type, and whether
+    /// macOS should remember it. They are real user-facing controls, so per AGENTS.md
+    /// they are real specs with real manual anchors — but neither is a path, and
+    /// neither is stored where `VendorConfigField` stores things (one is nowhere at
+    /// all, the other is a keychain item's existence).
+    static let keePassPasswordSettingID = "creds.keepassfile.database-password"
+    static let keePassRememberPasswordSettingID = "creds.keepassfile.remember-password"
 
     // MARK: Fields
 
@@ -239,6 +275,46 @@ nonisolated enum SignInSourceSettings {
                 // what SimpleVPN falls back to when the field is empty.
                 example: LoopbackEndpoint.bitwardenDefault.settingValue,
                 emptyMeansDefault: LoopbackEndpoint.bitwardenDefault.settingValue)]
+        case .keePassFile:
+            // Three rows, in the order somebody sets them up: the database, then
+            // the two things that some databases additionally need. No tool-path row
+            // — `keepassxc-cli`'s is the standalone one below, because the tool is
+            // KeePassXC's and is shared with that vendor's row rather than belonging
+            // to a file format.
+            [VendorConfigField(
+                settingID: "creds.keepassfile.database",
+                vendor: .keePassFile,
+                ownerTitle: LocalVaultVendor.keePassFile.displayTitle,
+                kind: .vaultFile(extensions: ["kdbx"]),
+                defaultsKey: keePassDatabaseKey,
+                example: "/Users/you/Documents/Passwords.kdbx"),
+             VendorConfigField(
+                settingID: "creds.keepassfile.key-file",
+                vendor: .keePassFile,
+                ownerTitle: LocalVaultVendor.keePassFile.displayTitle,
+                kind: .keyFile,
+                defaultsKey: keePassKeyFileKey,
+                example: "/Users/you/Documents/Passwords.keyx"),
+             VendorConfigField(
+                settingID: "creds.keepassfile.security-key-slot",
+                vendor: .keePassFile,
+                ownerTitle: LocalVaultVendor.keePassFile.displayTitle,
+                kind: .securityKeySlot,
+                defaultsKey: keePassSecurityKeySlotKey,
+                example: "2"),
+             // The tool that does the opening. It belongs to THIS row rather than to
+             // the KeePassXC row above, and `ToolCatalog` says the same: the
+             // KeePassXC row talks to the running app over a socket and needs no
+             // binary at all, while this row cannot work without one. Somebody whose
+             // copy lives somewhere SimpleVPN won't run from needs a field to point
+             // at it, and this is it.
+             VendorConfigField(
+                settingID: "creds.keepassfile.tool-path",
+                vendor: .keePassFile,
+                ownerTitle: LocalVaultVendor.keePassFile.displayTitle,
+                kind: .toolBinary(tool: "keepassxc-cli"),
+                defaultsKey: toolPathKey("keepassxc-cli"),
+                example: "/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli")]
         }
     }
 
@@ -389,6 +465,15 @@ nonisolated enum VendorFieldValidation: Sendable, Equatable {
     /// own sentence: a local service with no authentication of its own must never be
     /// addressed across a network, and "use 127.0.0.1" is the whole fix.
     case notLoopback
+    /// A path that points at a folder (or anything else that isn't a plain file)
+    /// where a file is wanted. Its own case because "there's nothing there" and
+    /// "that's a folder" send somebody to different places.
+    case notAFile
+    /// The file is there and it is not a KeePass database SimpleVPN can read. The
+    /// sentence comes from the classifier, so this case carries it.
+    case notAReadableDatabase(String)
+    /// A security-key slot that isn't 1 or 2.
+    case badSecurityKeySlot
 
     /// Whether this state stops the field working. `sanctioned` and `notSet`
     /// don't — they are statements, not faults.
@@ -396,7 +481,8 @@ nonisolated enum VendorFieldValidation: Sendable, Equatable {
         switch self {
         case .notSet, .notSetUsingDefault, .ok, .sanctioned: false
         case .notAbsolute, .missing, .notExecutable, .unsafeDirectory, .notASocket,
-             .badEndpoint, .notLoopback: true
+             .badEndpoint, .notLoopback, .notAFile, .notAReadableDatabase,
+             .badSecurityKeySlot: true
         }
     }
 
@@ -435,6 +521,13 @@ nonisolated enum VendorFieldValidation: Sendable, Equatable {
         case .notLoopback:
             "Problem: that address isn\u{2019}t on this Mac, and SimpleVPN only talks to this "
             + "one. Use 127.0.0.1 (or localhost) with the port the service is on."
+        case .notAFile:
+            "Problem: that\u{2019}s not a file. Pick the file itself, not the folder it is in."
+        case .notAReadableDatabase(let why):
+            "Problem: \(why)"
+        case .badSecurityKeySlot:
+            "Problem: a security key has two slots \u{2014} type 1 or 2, or leave this empty if your "
+            + "database doesn\u{2019}t use one."
         }
     }
 
@@ -445,7 +538,9 @@ nonisolated enum VendorFieldValidation: Sendable, Equatable {
         case .notSet, .notSetUsingDefault: nil
         case .ok: "checkmark.circle.fill"
         case .sanctioned: "hand.raised.circle.fill"
-        default: "exclamationmark.triangle.fill"
+        case .notAbsolute, .missing, .notExecutable, .unsafeDirectory, .notASocket, .badEndpoint,
+             .notLoopback, .notAFile, .notAReadableDatabase, .badSecurityKeySlot:
+            "exclamationmark.triangle.fill"
         }
     }
 }
@@ -683,7 +778,14 @@ final class SignInSourceSettingsStore {
             return entry.suggestedPath
         case .unixSocket:
             return KeePassXCProtocol.discoverSocket()
-        case .daemonEndpoint, .vaultFile, .pkcs11Module:
+        case .vaultFile, .keyFile:
+            // DELIBERATELY NO GUESS. A `.kdbx` lives wherever its owner put it, and
+            // sweeping the home directory for one would mean reading somebody's file
+            // tree to find their password database — a search nobody asked for, to
+            // produce a suggestion that is as likely to be the wrong database as the
+            // right one. The field's placeholder shows the SHAPE of an answer instead.
+            return nil
+        case .securityKeySlot, .daemonEndpoint, .pkcs11Module:
             return nil
         }
     }
@@ -720,15 +822,69 @@ final class SignInSourceSettingsStore {
             guard let endpoint = LoopbackEndpoint(parsing: path) else { return .badEndpoint }
             return endpoint.isLoopback ? .ok : .notLoopback
         }
+        // A slot number is not a path either, and telling somebody to start it with a
+        // slash would be nonsense.
+        if case .securityKeySlot = field.kind {
+            guard let number = Int(path), YubiKeySlot(rawValue: number) != nil else {
+                return .badSecurityKeySlot
+            }
+            return .ok
+        }
         guard path.hasPrefix("/") else { return .notAbsolute }
         var st = stat()
-        guard stat(path, &st) == 0 else { return .missing }
+        guard stat(path, &st) == 0 else {
+            // A `.kdbx` in iCloud Drive that hasn't come down yet is NOT missing, and
+            // it is the one "problem" here that fixes itself. Saying "there's nothing
+            // at that path" would send somebody looking for a file that is fine.
+            if case .vaultFile = field.kind,
+               KeePassDatabaseFile.hasICloudPlaceholder(for: path) {
+                return .notAReadableDatabase(
+                    "that database hasn\u{2019}t been downloaded to this Mac yet. Open its folder in "
+                    + "the Finder and wait for it to finish \u{2014} nothing else needs changing.")
+            }
+            return .missing
+        }
         switch field.kind {
         case .unixSocket:
             return (st.st_mode & S_IFMT) == S_IFSOCK ? .ok : .notASocket
-        case .daemonEndpoint:
+        case .daemonEndpoint, .securityKeySlot:
             return .ok               // handled above
-        case .vaultFile, .pkcs11Module:
+        case .vaultFile:
+            // The one field in this pane whose CONTENTS are checked, because the four
+            // ways a chosen file can be the wrong file all look identical from a
+            // failed unlock. This reads the plaintext outer header only — no
+            // decryption, no password, and a bounded prefix of the file.
+            guard (st.st_mode & S_IFMT) == S_IFREG else { return .notAFile }
+            switch KeePassDatabaseFile.classify(path: path) {
+            case .readable:
+                return .ok
+            case .notDownloaded:
+                return .notAReadableDatabase(
+                    "that database hasn\u{2019}t been downloaded to this Mac yet. Open its folder in "
+                    + "the Finder and wait for it to finish \u{2014} nothing else needs changing.")
+            case .permissionDenied:
+                // The app is not sandboxed and this STILL happens: macOS protects
+                // Desktop, Documents, Downloads and iCloud Drive from every app and
+                // asks once per app. Reported as its own sentence, because "there's
+                // nothing there" would send somebody looking for a file that is fine.
+                return .notAReadableDatabase(
+                    "macOS won\u{2019}t let SimpleVPN read that file. Allow SimpleVPN in System "
+                    + "Settings \u{25B8} Privacy & Security \u{25B8} Files and Folders, or keep your "
+                    + "database somewhere macOS doesn\u{2019}t protect.")
+            case .notADatabase(_, let reason):
+                return .notAReadableDatabase(reason.sentence)
+            case .tooNew(_, let version):
+                return .notAReadableDatabase(
+                    "that database is version \(version.displayName), which is newer than the "
+                    + "KeePassXC on this Mac can read. Update KeePassXC.")
+            case .missing:
+                return .missing
+            case .notConfigured:
+                return .notSet(detected: nil)
+            }
+        case .keyFile:
+            return (st.st_mode & S_IFMT) == S_IFREG ? .ok : .notAFile
+        case .pkcs11Module:
             return (st.st_mode & S_IFMT) == S_IFREG ? .ok : .missing
         case .toolBinary:
             guard (st.st_mode & S_IFMT) == S_IFREG,

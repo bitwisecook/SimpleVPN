@@ -85,8 +85,26 @@ enum CredentialSourceSettings {
         case .vaultFile:
             EngineSettingSpec(
                 id: field.settingID,
-                name: "\(vendorTitle(field)) database file",
-                summary: "The \(vendorTitle(field)) database SimpleVPN should read from.",
+                name: "KeePass database file",
+                summary: "The KeePass database (.kdbx) SimpleVPN reads your sign-in out of. The same "
+                    + "file whichever app looks after it \u{2014} KeePassXC, Strongbox or KeePassium. "
+                    + "SimpleVPN only ever reads it.",
+                group: .signIn,
+                default: "")
+        case .keyFile:
+            EngineSettingSpec(
+                id: field.settingID,
+                name: "KeePass key file",
+                summary: "The key file your database needs as well as its password, if it has one. "
+                    + "Leave it empty when it hasn\u{2019}t.",
+                group: .signIn,
+                default: "")
+        case .securityKeySlot:
+            EngineSettingSpec(
+                id: field.settingID,
+                name: "KeePass security key slot",
+                summary: "Which slot on your security key answers for this database \u{2014} 1 or 2. "
+                    + "Leave it empty when your database doesn\u{2019}t use a security key.",
                 group: .signIn,
                 default: "")
         case .pkcs11Module:
@@ -104,6 +122,40 @@ enum CredentialSourceSettings {
         field.ownerTitle
     }
 
+    /// Controls a vendor needs that are NOT paths, and so are not
+    /// `VendorConfigField`s. Declared per vendor, spliced in after that vendor's
+    /// fields, so the pane, app-wide search, the manual-anchor gate and MDM all see
+    /// them exactly as they see everything else.
+    ///
+    /// The `.kdbx` row is the first to need any: a database password (a secret to
+    /// type, kept nowhere by default) and whether macOS should remember it behind
+    /// Touch ID. Neither lives in `UserDefaults` — the password lives in memory or
+    /// in the keychain, and the toggle IS the keychain item's existence — which is
+    /// exactly why they cannot be fields.
+    static func extraSpecs(for vendor: LocalVaultVendor) -> [EngineSettingSpec] {
+        switch vendor {
+        case .onePassword, .keePassXC, .keeper, .bitwarden:
+            []
+        case .keePassFile:
+            [EngineSettingSpec(
+                id: SignInSourceSettings.keePassPasswordSettingID,
+                name: "KeePass database password",
+                summary: "The password that opens your KeePass database. SimpleVPN keeps it only until "
+                    + "it quits, unless you ask macOS to remember it. It is never written to a "
+                    + "settings file and never appears in a log.",
+                group: .signIn,
+                default: ""),
+             EngineSettingSpec(
+                id: SignInSourceSettings.keePassRememberPasswordSettingID,
+                name: "Remember the database password with Touch ID",
+                summary: "Lets macOS keep your database password and release it only when you give a "
+                    + "fingerprint, your Apple Watch, or this Mac\u{2019}s password. Off means you type "
+                    + "it once each time you open SimpleVPN.",
+                group: .signIn,
+                default: false)]
+        }
+    }
+
     /// Declaration order: the master switch, then each vendor's switch followed by
     /// its own fields — the order the pane renders, so search results and the
     /// screen agree.
@@ -119,6 +171,7 @@ enum CredentialSourceSettings {
             for field in SignInSourceSettings.fields(for: vendor) {
                 if let spec = fieldsByID[field.settingID] { specs.append(spec) }
             }
+            specs += extraSpecs(for: vendor)
         }
         // Tool paths belonging to no password app (ykman) come last, in their own
         // section on screen.
@@ -136,6 +189,7 @@ enum CredentialSourceSettings {
         LocalVaultVendor.allCases.first { vendor in
             id == SignInSourceSettings.enabledSettingID(vendor)
                 || SignInSourceSettings.fields(for: vendor).contains { $0.settingID == id }
+                || extraSpecs(for: vendor).contains { $0.id == id }
         }
     }
 }

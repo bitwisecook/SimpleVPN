@@ -39,6 +39,7 @@
 
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 struct SignInSourcesSettings: View {
 
@@ -50,6 +51,13 @@ struct SignInSourcesSettings: View {
     /// Which "where it was found" lists are open. Per tool, so opening one doesn't
     /// open them all.
     @State private var expandedTools: Set<String> = []
+    /// The KeePass database password being typed. Never committed to `UserDefaults`
+    /// and never stored here beyond the keystroke: pressing Use hands it to
+    /// `KDBXMasterPasswordStore` and empties this.
+    @State private var typedDatabasePassword = ""
+    @State private var securityKeyCheck: KDBXSecurityKeyCheckResult?
+    @State private var checkingSecurityKey = false
+    @State private var databasePasswordStore = KDBXMasterPasswordStore.shared
     @Environment(SettingsRouter.self) private var router: SettingsRouter?
 
     private var specs: EngineSettingCatalog { CredentialSourceSettings.catalog }
@@ -188,6 +196,12 @@ struct SignInSourcesSettings: View {
                 ForEach(SignInSourceSettings.fields(for: vendor)) { field in
                     fieldRows(field)
                 }
+                // Controls that are not paths. Only the `.kdbx` row has any today
+                // (a password to type and whether macOS remembers it), and they are
+                // here rather than in the generic field loop because neither is
+                // stored where a field is stored — one is in memory, the other IS a
+                // keychain item's existence.
+                if vendor == .keePassFile { keePassUnlockRows(locked: lock != nil) }
                 // From `sources.discoveries` — the observable mirror of the ONE
                 // discovery map, so the version this pane prints is the version the
                 // banners and any report see, and it appears here as soon as the deep
@@ -234,6 +248,189 @@ struct SignInSourcesSettings: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(copy.title) on this Mac")
         .accessibilityValue(sentence)
+    }
+
+    // MARK: The KeePass database's unlock — a secret, and where it may live
+
+    /// The three controls that open a `.kdbx`: its password, whether macOS should
+    /// remember it, and a way to check a security key BEFORE a connect depends on it.
+    ///
+    /// The password is the only secret this pane has ever held, so:
+    ///  • it is a `SecureField`, and the title argument is EMPTY like every other
+    ///    field here — the name comes from the spec (the placeholder landmine);
+    ///  • what is typed is handed straight to `KDBXMasterPasswordStore` and this
+    ///    view's copy is emptied, so it does not sit in SwiftUI state for the life
+    ///    of the window;
+    ///  • it is never written to `UserDefaults`. The only place it can be persisted
+    ///    at all is the Touch ID keychain, by the toggle below it, and off is the
+    ///    default.
+    @ViewBuilder private func keePassUnlockRows(locked: Bool) -> some View {
+        let configuration = KeePassFileConfiguration.current(store: settings)
+        let path = configuration.databasePath
+        let hasDatabase = !path.trimmingCharacters(in: .whitespaces).isEmpty
+        let passwordSpec = specs[SignInSourceSettings.keePassPasswordSettingID]
+        let rememberSpec = specs[SignInSourceSettings.keePassRememberPasswordSettingID]
+        let remembered = hasDatabase && databasePasswordStore.isRemembered(database: path)
+
+        EngineSettingRow(
+            spec: passwordSpec, changed: false,
+            disabledReason: locked ? "Your organization has locked SimpleVPN\u{2019}s settings."
+                : (hasDatabase ? nil : "Choose your KeePass database first.")
+        ) {
+            LabeledContent {
+                HStack(spacing: 6) {
+                    SecureField("", text: $typedDatabasePassword,
+                                prompt: Text("Your database\u{2019}s password"))
+                        .onSubmit { commitDatabasePassword(path: path, remember: remembered) }
+                        .accessibilityLabel(passwordSpec.name)
+                        // Never the value, and never a length: what is spoken is what
+                        // SimpleVPN is holding, which is the thing a user needs to know.
+                        .accessibilityValue(databasePasswordStore.heldDescription(database: path))
+                        .accessibilityIdentifier("creds-field-keepassfile-password")
+                    Button("Use") { commitDatabasePassword(path: path, remember: remembered) }
+                        .disabled(typedDatabasePassword.isEmpty || !hasDatabase || locked)
+                        .help(typedDatabasePassword.isEmpty
+                              ? "Type your database\u{2019}s password first"
+                              : "Let SimpleVPN open your database with this")
+                        .accessibilityValue(typedDatabasePassword.isEmpty
+                                            ? "unavailable \u{2014} nothing typed" : "")
+                }
+                .controlSize(.small)
+            } label: {
+                EngineSettingLabel(spec: passwordSpec, value: "")
+            }
+        }
+
+        Label(databasePasswordStore.heldDescription(database: path),
+              systemImage: remembered ? "touchid"
+                : (databasePasswordStore.isHeldForThisRun(database: path)
+                   ? "clock" : "keyboard"))
+            .font(.callout).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("What SimpleVPN is holding")
+            .accessibilityValue(databasePasswordStore.heldDescription(database: path))
+
+        EngineSettingRow(
+            spec: rememberSpec, changed: rememberSpec.isChanged(remembered),
+            disabledReason: locked ? "Your organization has locked SimpleVPN\u{2019}s settings."
+                : (databasePasswordStore.canRemember
+                   ? (hasDatabase ? nil : "Choose your KeePass database first.")
+                   : "This Mac can\u{2019}t ask for a fingerprint, an Apple Watch or your password.")
+        ) {
+            Toggle(isOn: Binding(
+                get: { remembered },
+                set: { on in setRememberDatabasePassword(on, path: path) })) {
+                    EngineSettingLabel(spec: rememberSpec, value: remembered)
+                }
+        }
+
+        if !remembered, databasePasswordStore.isHeldForThisRun(database: path) {
+            Text("Turning this on remembers what SimpleVPN is holding now. macOS won\u{2019}t hand it "
+                 + "back without a fingerprint, your Apple Watch, or this Mac\u{2019}s password.")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        if databasePasswordStore.isHeldForThisRun(database: path) || remembered {
+            Button("Forget This Database\u{2019}s Password") {
+                databasePasswordStore.forgetThisRun(database: path)
+                databasePasswordStore.forgetRemembered(database: path)
+                KeePassFileUnlockMemory.shared.clear(database: path)
+                sources.refresh()
+                AccessibilityAnnouncer.sayNow("Database password forgotten.")
+            }
+            .controlSize(.small)
+            .disabled(locked)
+            .help("Drop it from this run and from the keychain")
+        }
+
+        // The security-key check. Offered only when a slot is set, because that is
+        // what says this database uses one at all — and it is a BUTTON rather than
+        // something that happens on its own, because it may ask for a finger.
+        if let slot = configuration.slot, hasDatabase {
+            Button(checkingSecurityKey ? "Touch Your Security Key\u{2026}"
+                                       : "Check My Security Key") {
+                Task { await runSecurityKeyCheck(path: path, slot: slot,
+                                                 serial: configuration.serial) }
+            }
+            .controlSize(.small)
+            .disabled(checkingSecurityKey)
+            .help("Ask your key to answer this database\u{2019}s challenge, once")
+            .accessibilityValue(checkingSecurityKey
+                                ? "waiting for you to touch your security key" : "")
+            .accessibilityHint("Sends this database\u{2019}s own challenge to \(slot.displayName) and "
+                               + "says whether your key answered. It doesn\u{2019}t open the database.")
+            if let securityKeyCheck {
+                Label(securityKeyCheck.sentence,
+                      systemImage: securityKeyCheck.succeeded ? "checkmark.circle.fill"
+                                                              : "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(securityKeyCheck.succeeded ? Color.secondary : Color.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Security key check")
+                    .accessibilityValue(securityKeyCheck.sentence)
+            }
+        }
+    }
+
+    private func commitDatabasePassword(path: String, remember: Bool) {
+        guard !typedDatabasePassword.isEmpty, !path.isEmpty else { return }
+        let password = KDBXPassword(typedDatabasePassword)
+        // Emptied immediately: the secret belongs in the store, not in a view's state
+        // for as long as the window is open.
+        typedDatabasePassword = ""
+        if remember {
+            try? databasePasswordStore.remember(password, database: path)
+        } else {
+            databasePasswordStore.holdForThisRun(password, database: path)
+        }
+        // A new password retires "the database refused the last attempt": the row must
+        // go back to offering a try rather than repeating an accusation.
+        KeePassFileUnlockMemory.shared.clear(database: path)
+        sources.refresh()
+        AccessibilityAnnouncer.sayNow(databasePasswordStore.heldDescription(database: path))
+    }
+
+    private func setRememberDatabasePassword(_ on: Bool, path: String) {
+        guard !path.isEmpty else { return }
+        if on {
+            // Only possible when something is held: there is nothing to remember
+            // otherwise, and the row says so rather than silently doing nothing.
+            Task {
+                guard let held = try? await databasePasswordStore.password(
+                    database: path, reason: "remember your KeePass database\u{2019}s password")
+                else {
+                    AccessibilityAnnouncer.sayNow(
+                        "Type your database\u{2019}s password first, then turn this on.")
+                    return
+                }
+                try? databasePasswordStore.remember(held, database: path)
+                sources.refresh()
+                AccessibilityAnnouncer.sayNow("Remembered behind Touch ID.")
+            }
+        } else {
+            databasePasswordStore.forgetRemembered(database: path)
+            sources.refresh()
+            AccessibilityAnnouncer.sayNow("No longer remembered.")
+        }
+    }
+
+    private func runSecurityKeyCheck(path: String, slot: YubiKeySlot, serial: String) async {
+        checkingSecurityKey = true
+        defer { checkingSecurityKey = false }
+        securityKeyCheck = nil
+        AccessibilityAnnouncer.sayNow("Touch your security key now.")
+        guard let facts = KeePassDatabaseFile.classify(path: path).facts else {
+            securityKeyCheck = .noChallengeAvailable
+            AccessibilityAnnouncer.sayNow(KDBXSecurityKeyCheckResult.noChallengeAvailable.sentence)
+            return
+        }
+        let result = await KeePassSecurityKeyCheck.run(
+            facts: facts, slot: slot, serial: serial.isEmpty ? nil : serial)
+        securityKeyCheck = result
+        AccessibilityAnnouncer.sayNow(result.sentence)
     }
 
     // MARK: One field — the value/suggestion distinction, made visible AND audible
@@ -302,6 +499,15 @@ struct SignInSourcesSettings: View {
             }
             if !shown.isLockedByPolicy {
                 HStack(spacing: 8) {
+                    // A file-shaped field gets a picker as well as the text box. Not
+                    // instead of it: a typed path must always work (it is what MDM
+                    // pins, what a script sets and what someone reading over a
+                    // shoulder can follow), and a picker that was the ONLY way in
+                    // would make an iCloud path impossible to paste. Both, always.
+                    if let prompt = filePickerPrompt(field.kind) {
+                        Button(prompt.buttonTitle) { chooseFile(for: field, prompt: prompt) }
+                            .help(prompt.help)
+                    }
                     Button("Use What SimpleVPN Found") { settings.resetToDetected(field) }
                         .disabled(!shown.canResetToDetected)
                         .help(shown.canResetToDetected
@@ -323,6 +529,57 @@ struct SignInSourcesSettings: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: Picking a file rather than typing its path
+
+    /// What a file picker for this field kind should say, or nil for a field that
+    /// isn't a file.
+    private func filePickerPrompt(_ kind: VendorConfigFieldKind)
+        -> (buttonTitle: String, help: String, extensions: [String])? {
+        switch kind {
+        case .vaultFile(let extensions):
+            ("Choose Database\u{2026}",
+             "Pick your KeePass database in the Finder instead of typing its path",
+             extensions)
+        case .keyFile:
+            // Deliberately no extension filter: KeePassXC writes `.keyx`, older
+            // releases wrote `.key`, and a hand-made key file often has no extension
+            // at all. Filtering would hide the very file somebody was told to pick.
+            ("Choose Key File\u{2026}",
+             "Pick your key file in the Finder instead of typing its path", [])
+        case .toolBinary, .unixSocket, .daemonEndpoint, .securityKeySlot, .pkcs11Module:
+            nil
+        }
+    }
+
+    /// An `NSOpenPanel`, which is also how the path gets there for a file inside a
+    /// container the app has no standing access to: the app is not sandboxed, so this
+    /// is a convenience rather than a permission grant — but a user-chosen path is
+    /// also the thing macOS's own privacy controls treat most kindly.
+    private func chooseFile(for field: VendorConfigField,
+                            prompt: (buttonTitle: String, help: String, extensions: [String])) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = prompt.help
+        panel.prompt = "Use"
+        // Placeholders for a file kept in iCloud Drive must be selectable: choosing
+        // one is exactly how somebody points at a database that hasn't come down yet,
+        // and the state row then explains that it is on its way.
+        panel.canDownloadUbiquitousContents = true
+        if !prompt.extensions.isEmpty {
+            panel.allowedContentTypes = prompt.extensions.compactMap {
+                UTType(filenameExtension: $0)
+            }
+            // …and never ONLY those types: a database with a non-standard extension is
+            // legitimate and must still be choosable.
+            panel.allowsOtherFileTypes = true
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        settings.setValue(url.path, for: field)
+        AccessibilityAnnouncer.sayNow("Chose \(url.lastPathComponent).")
     }
 
     // MARK: Everywhere a tool was found

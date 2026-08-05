@@ -55,7 +55,15 @@ presented as a real one sends people looking in the wrong place.
   Do not document one.
 - The virtual-environment case is exactly why the explicit-path setting exists.
 
-### KeePassXC (`keepassxc-cli`) — adapter built (over the app's socket)
+### KeePassXC (`keepassxc-cli`) — two adapters, and the tool belongs to only one
+
+**The tool is recorded against `LocalVaultVendor.keePassFile`, not `.keePassXC`.** Both rows
+exist and both are built, but they need different things: the **KeePassXC** row talks to the
+*running app* over the socket below and needs no binary whatever, while the **KeePass
+database file** row (which also serves Strongbox and KeePassium — see
+`Docs/KeePassDatabaseFile.md`) cannot work without one. The vendor recorded here is what
+decides which row is told "found at …, but not somewhere SimpleVPN will run it from", so
+attaching it to the socket row would put that sentence on the one row it cannot help.
 
 | Install method | Path | Source |
 |---|---|---|

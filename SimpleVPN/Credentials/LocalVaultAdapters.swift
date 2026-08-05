@@ -236,6 +236,11 @@ enum LocalVaultRegistry {
         // one vendor is one file plus this one line, so several vendors landing at
         // once do not collide in the same switch.
         BitwardenVaultAdapter(),
+        // The `.file` transport — one adapter for KeePassXC-as-a-file, Strongbox and
+        // KeePassium, because all three store the same `.kdbx`. LAST on purpose: a
+        // running app that owns its own unlock (the KeePassXC row above) is a better
+        // answer than a file whose password has to reach us.
+        KeePassFileVaultAdapter(),
     ]
 
     static func adapter(for vendor: LocalVaultVendor) -> (any LocalVaultAdapter)? {
