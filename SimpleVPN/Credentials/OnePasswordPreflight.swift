@@ -67,6 +67,19 @@ nonisolated enum OnePasswordPreflight {
         store.removeObject(forKey: verifiedKey)
     }
 
+    /// The other half of the remembered answer: a real call has said the
+    /// developer-integration setting is OFF. Distinct from "not verified", which
+    /// only means nobody has looked yet — the sign-in chooser needs to tell those
+    /// apart, because one is a row that says "we'll check when you pick this" and
+    /// the other is a row that can show the exact setting to switch on.
+    /// Cleared the moment a call succeeds, so the chooser flips to ready on its
+    /// next refresh without the app being restarted.
+    static let integrationOffKey = "onePassword.sdkIntegrationOff"
+
+    static func isIntegrationKnownOff(in store: UserDefaults = .standard) -> Bool {
+        store.bool(forKey: integrationOffKey)
+    }
+
     /// Whether picking 1Password should run the check. A verified integration
     /// skips straight to ready — the check costs an authorization prompt, and
     /// asking for one on every visit is exactly the noise this app avoids.
@@ -78,8 +91,12 @@ nonisolated enum OnePasswordPreflight {
     @discardableResult
     static func remember(_ state: State, in store: UserDefaults = .standard) -> State {
         switch state {
-        case .ready: markVerified(in: store)
-        case .integrationOff: clearVerified(in: store)
+        case .ready:
+            markVerified(in: store)
+            store.removeObject(forKey: integrationOffKey)
+        case .integrationOff:
+            clearVerified(in: store)
+            store.set(true, forKey: integrationOffKey)
         default: break
         }
         return state
@@ -89,7 +106,7 @@ nonisolated enum OnePasswordPreflight {
     /// field read) rather than from the check — the only other way to learn the
     /// setting was turned back off.
     static func noteFailure(_ error: Error, in store: UserDefaults = .standard) {
-        if outcome(for: error) == .integrationOff { clearVerified(in: store) }
+        if outcome(for: error) == .integrationOff { remember(.integrationOff, in: store) }
     }
 
     // MARK: Mapping (pure)

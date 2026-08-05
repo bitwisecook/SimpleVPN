@@ -122,6 +122,10 @@ struct EditVPNView: View {
     /// (prompt-free stat, no connection). Same optimistic start as
     /// `opAvailable`, and for the same reason.
     @State private var kpAvailable = true
+    /// Whether Keeper Commander is present AND has a live session. Same
+    /// optimistic start as the two above: proving it costs a subprocess, and a
+    /// warning that flashes while the probe runs is worse than none.
+    @State private var keeperAvailable = true
 
     // 1Password browsing (vault/item pickers). Every list is fetched ONLY on an
     // explicit click: the first one can raise 1Password's authorization prompt,
@@ -231,6 +235,11 @@ struct EditVPNView: View {
                 load()
                 kpAvailable = KeePassXCProvider.probe()
                 opAvailable = await OnePasswordNative.probe()
+                // A live Keeper session is the only thing worth warning about:
+                // Commander missing entirely is covered by the row's own copy.
+                if KeeperCommanderChannel.isInstalled() {
+                    keeperAvailable = await KeeperCommanderChannel.hasLiveSession()
+                }
                 // Prompt-free, so this much can be said without anyone asking:
                 // no 1Password on this Mac is a setup state, not a failure.
                 if !opAvailable { opPreflight.note(.notInstalled) }
@@ -659,6 +668,24 @@ struct EditVPNView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Text("SimpleVPN asks the KeePassXC app for the entry whose URL matches this address — including its verification code, when the entry has one. The first request asks you to pair (name it \u{201C}SimpleVPN\u{201D}), and a locked database raises KeePassXC's own unlock.")
+                    .font(.callout).foregroundStyle(.secondary)
+                sourceTestRow
+            case .keeper:
+                // Keeper names a RECORD, not an address: Keeper Commander takes
+                // the record's title, its UID, or its folder path.
+                TextField("Record name, UID, or folder path", text: $sourceReference,
+                          prompt: Text(verbatim: "Work/VPN/GR Lab"))
+                    .autocorrectionDisabled()
+                TextField("Username (optional \u{2014} only to confirm the right record)",
+                          text: $sourceAccount)
+                    .autocorrectionDisabled()
+                if !keeperAvailable {
+                    Label("Keeper Commander isn\u{2019}t signed in on this Mac. In Terminal, run \u{201C}keeper shell\u{201D} and sign in once, then \u{201C}this-device register\u{201D} and \u{201C}this-device persistent-login on\u{201D}.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text("SimpleVPN asks Keeper Commander \u{2014} Keeper\u{2019}s own command-line tool \u{2014} for just this record, and reads only its username and password. Commander keeps your Keeper sign-in in this Mac\u{2019}s keychain, where macOS protects it; SimpleVPN never sees your Keeper master password and never changes Commander\u{2019}s own setup. If a verification code is required, type it below.")
                     .font(.callout).foregroundStyle(.secondary)
                 sourceTestRow
             }

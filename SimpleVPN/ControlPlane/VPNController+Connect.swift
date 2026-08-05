@@ -101,12 +101,23 @@ extension VPNController {
         try await mgr.saveToPreferences()
         try await mgr.loadFromPreferences()
         credentialSources[id] = source
+        // Changing the source retires any "type it this time" escape: the user
+        // has just answered the question that flag was standing in for.
+        setTypedSignInOnce(false, for: id)
         Self.log.log("credential source for \(id, privacy: .public): \(source.kind.rawValue, privacy: .public)")
     }
 
     /// The provider a profile's configured source implies. Manual returns nil —
-    /// the caller uses the typed/remembered credentials instead.
+    /// the caller uses the typed/remembered credentials instead, and so does an
+    /// active "type it this time".
+    ///
+    /// Every vendor-backed source resolves through `LocalVaultRegistry`, so a new
+    /// password app is one adapter rather than another case here (that switch is
+    /// exactly what had to be unpicked when Keeper turned out to have a local
+    /// path after all). Apple Passwords stays inline: it is macOS's own keychain,
+    /// not a vendor channel with an app to detect.
     func managerProvider(for id: String) -> CredentialProvider? {
+        guard !typedSignInOnce.contains(id) else { return nil }
         let source = credentialSource(for: id)
         switch source.kind {
         case .manual:
@@ -118,19 +129,42 @@ extension VPNController {
                 return BiometricCredentialProvider(reason: "unlock the sign-in for \(name)")
             }
             return nil
-        case .onePassword:
-            // A blank account falls back to the one that has worked before:
-            // 1Password refuses to answer without one, and the name belongs to
-            // the person, not to this VPN. What the VPN names still wins.
-            return OnePasswordProvider(
-                itemReference: source.reference, vault: source.vault,
-                account: OnePasswordAccountMemory.effectiveAccount(profile: source.account),
-                fieldMap: source.fieldMap)
         case .applePasswords:
+            guard !source.reference.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
             return ApplePasswordsProvider(server: source.reference, account: source.account)
-        case .keePassXC:
-            return KeePassXCProvider(reference: source.reference, account: source.account)
+        case .onePassword, .keePassXC, .keeper:
+            // The adapter owns the vendor's quirks (1Password's account
+            // fallback, Keeper's channel choice) — this seam only asks for a
+            // fetcher. A source that names nothing to fetch yields nil, which
+            // routes to the typed fields rather than a doomed lookup.
+            return LocalVaultRegistry.adapter(for: source.kind)?.provider(for: source)
         }
+    }
+
+    /// "Type it each time" means it. Choosing that row must actually remove what
+    /// was kept for this VPN — both stores — or the promise on screen ("nothing
+    /// is saved") is false the moment it is made. The transient (mid-typing)
+    /// copy stays: the user may be in the middle of connecting.
+    func forgetSavedSignIn(id: String) {
+        KeychainCredentialStore.deleteCredentials(profile: id)
+        BiometricCredentialStore.delete(profile: id)
+        var auth = authConfig(for: id)
+        guard auth.protectWithBiometrics else { return }
+        auth.protectWithBiometrics = false
+        Task { try? await setAuthConfig(auth, for: id) }
+    }
+
+    /// The source that will ACTUALLY be used, which is what every readiness
+    /// decision must gate on. It differs from the stored choice in two ways, and
+    /// both used to be places where a Connect button lit up for a lookup that
+    /// could not happen:
+    ///   • "type it this time" is on (the recovery path), or
+    ///   • the chosen password app has nothing linked to fetch, so the typed
+    ///     fields are what the connect will really use.
+    func effectiveCredentialKind(for id: String) -> CredentialSourceKind {
+        let stored = credentialSource(for: id).kind
+        guard stored != .manual else { return .manual }
+        return managerProvider(for: id) == nil ? .manual : stored
     }
 
     /// Whether the Touch ID store can satisfy this profile's whole sign-in
@@ -371,6 +405,10 @@ extension VPNController {
         try await connect(id: id, using: provider, request: auth.request,
                           remember: auth.rememberCredentials && allowsPasswordSave(id: id))
         transientCreds[id]?.otp = ""
+        // A typed connect that worked retires the "type it this time" escape:
+        // the next connect goes back to the source the user actually chose, and
+        // finds out for itself whether it is available again.
+        setTypedSignInOnce(false, for: id)
     }
 
     private func allowsPasswordSave(id: String) -> Bool {
@@ -453,7 +491,7 @@ extension VPNController {
         }
 
         inputs.autologin = isAutologin(id)
-        inputs.managerKind = credentialSource(for: id).kind
+        inputs.managerKind = effectiveCredentialKind(for: id)
         inputs.requiresOTP = effectiveAuthConfig(for: id).requiresOTP
         inputs.hasLockedUsername = !(profileEvaluation(for: id)?.userlockedUsername.isEmpty ?? true)
         let c = transientCredentials(for: id)
@@ -521,7 +559,7 @@ extension VPNController {
         // Touch ID store with a saved authenticator secret). Apple Passwords
         // can't provide an OTP, so an OTP profile still needs the form.
         if let provider = managerProvider(for: id) {
-            let canServeOTP = credentialSource(for: id).kind.suppliesOTP
+            let canServeOTP = effectiveCredentialKind(for: id).suppliesOTP
                 || biometricCanServe(id: id)
             guard !auth.requiresOTP || canServeOTP else { return false }
             do {

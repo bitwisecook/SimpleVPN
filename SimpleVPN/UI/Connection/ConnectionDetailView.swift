@@ -39,6 +39,12 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     /// baseline (persisted — survives restarts until the setup is PROVEN).
     @State private var neverConnected = false
     @State private var setupDismissed = false
+    /// The "change how you sign in" popover — the unobtrusive way back for a VPN
+    /// that is already set up, so nobody has to go to Manage VPNs to switch.
+    @State var showSignInChooser = false   // internal: the manager/typed forms open it
+    /// What this Mac can offer, shared app-wide (one set of probes for every
+    /// surface).
+    @State var sources = SignInSourceAvailability.shared   // internal: read by both forms
     /// The big green "Connected" banner shrinks to a compact chip beside the
     /// stop button 5s after connecting — the reassurance, then out of the way.
     @State var bannerCollapsed = false   // was private — internal for the file split
@@ -114,8 +120,45 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
         return snap
     }
     private var doctorFindings: [DoctorFinding] { ConnectionDoctor.findings(for: doctorSnapshot) }
-    var credentialKind: CredentialSourceKind { vpn.credentialSource(for: profile.id).kind }   // was private — internal for the file split
+    /// The source that will actually be used — which is not always the one
+    /// stored: "type it this time" (the recovery path) and a password app with
+    /// nothing linked both come out as manual, so the form on screen is the form
+    /// the connect will really use. See `VPNController.effectiveCredentialKind`.
+    var credentialKind: CredentialSourceKind { vpn.effectiveCredentialKind(for: profile.id) }   // was private — internal for the file split
     var usesManager: Bool { credentialKind != .manual }   // was private — internal for the file split
+
+    /// First time versus every other time, in one place. Everything it turns on
+    /// is a plain fact about this VPN; the decision itself is pure and tested
+    /// (SignInFlow.step).
+    var signInStep: SignInFlowStep {   // internal: read by the body
+        var inputs = SignInFlowInputs()
+        inputs.collectsNothing = profile.kind == .tailscale || profile.kind == .proxyTunnel
+            || profile.kind == .wireGuard || isAutologin
+        let source = vpn.credentialSource(for: profile.id)
+        inputs.chosenKind = source.kind
+        inputs.chosenSourceAvailable = sources.canServe(source)
+            // An in-force "type it this time" has already answered the recovery
+            // question — don't keep asking it.
+            || vpn.typedSignInOnce.contains(profile.id)
+        inputs.hasConnectedBefore = !neverConnected
+        inputs.hasStoredSignIn = hasStoredSignIn
+        inputs.dismissedForNow = setupDismissed
+        return SignInFlow.step(inputs)
+    }
+
+    /// Is there already a sign-in for this VPN? Saved credentials, a Touch
+    /// ID-protected item, or a password app with something linked — any of them
+    /// means the question has been answered once already.
+    private var hasStoredSignIn: Bool {
+        let source = vpn.credentialSource(for: profile.id)
+        if source.kind != .manual {
+            return !source.reference.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+        if BiometricCredentialStore.exists(profile: profile.id) { return true }
+        if let saved = KeychainCredentialStore.loadCredentials(profile: profile.id),
+           !saved.password.isEmpty { return true }
+        return false
+    }
     /// A manager source still needs a typed OTP only when the profile requires
     /// one AND the manager can't supply it (Apple Passwords can't; 1Password
     /// and KeePassXC can).
@@ -249,10 +292,29 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                             .font(.callout).foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
-                        if neverConnected, !setupDismissed {
+                        // First time versus every other time is ONE decision
+                        // (SignInFlow.step) rather than three views each guessing:
+                        // ask only when nothing is set up, never re-ask a VPN
+                        // that has connected, and when the chosen password app
+                        // has gone away say so HERE instead of letting the
+                        // connect discover it.
+                        switch signInStep {
+                        case .chooseHowToSignIn:
                             FirstConnectSetupCard(vpn: vpn, profile: profile,
+                                                  allowsPasswordSave: allowPasswordSave,
                                                   dismissed: $setupDismissed.animation(.snappy(duration: 0.25)))
                                 .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
+                        case .recoverUnavailableSource(let kind):
+                            SignInSourceRecoveryNotice(
+                                kind: kind,
+                                onTypeItOnce: {
+                                    vpn.setTypedSignInOnce(true, for: profile.id)
+                                    focusedField = firstMissingField
+                                },
+                                onChange: { showSignInChooser = true })
+                                .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
+                        case .connectStraightThrough, .nothingToCollect:
+                            EmptyView()
                         }
                         if usesManager { managerForm } else { credentialForm }
                     }
@@ -569,9 +631,17 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     /// supply one.
     private var managerForm: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("Credentials come from \(credentialKind.displayName).",
-                  systemImage: credentialKind.systemImage)
-                .foregroundStyle(.secondary)
+            // A statement, not a question — this VPN's sign-in is already
+            // decided. The Change button is the whole "unobtrusive way to change
+            // it" requirement: one click, right here, no trip to Manage VPNs.
+            SignInSourceSummary(
+                option: SignInSourceCatalog.option(
+                    for: credentialKind, remembers: true,
+                    facts: sources.facts(allowsPasswordSave: allowPasswordSave)),
+                footnote: managerFootnote,
+                onChange: { showSignInChooser = true })
+                .signInChooserPopover(isPresented: $showSignInChooser, vpn: vpn, profile: profile,
+                                      allowsPasswordSave: allowPasswordSave, sources: sources)
             if managerNeedsTypedOTP {
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
                     GridRow {
@@ -585,19 +655,18 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                 .textFieldStyle(.roundedBorder)
                 .frame(maxWidth: 380)
             }
-            Text(managerFootnote)
-                .font(.caption).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear { if managerNeedsTypedOTP { focusedField = .otp } }
     }
 
-    /// What connecting will feel like, per manager — a wrong promise here
-    /// ("Touch ID" for a manager that shows a different dialog) reads as a bug.
+    /// What connecting will feel like, per password app — a wrong promise here
+    /// ("Touch ID" for an app that shows a different dialog) reads as a bug.
     private var managerFootnote: String {
         switch credentialKind {
         case .onePassword: "1Password will ask for Touch ID when you connect."
         case .keePassXC: "KeePassXC will ask to allow access when you connect (and to unlock first, if the database is locked)."
+        case .keeper: "Keeper Commander answers without asking, as long as it is signed in on this Mac."
         default: "macOS will ask permission to read the saved password the first time."
         }
     }
@@ -627,6 +696,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                 }
                 Spacer(minLength: 8)
                 Menu {
+                    Button("Change How You Sign In\u{2026}") { showSignInChooser = true }
                     Button("Remove Touch ID Protection…") {
                         Task {
                             do { try await vpn.setBiometricProtection(false, for: profile.id) }
@@ -644,6 +714,8 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
             }
             .padding(12)
             .background(.pink.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+            .signInChooserPopover(isPresented: $showSignInChooser, vpn: vpn, profile: profile,
+                                  allowsPasswordSave: allowPasswordSave, sources: sources)
 
             if requiresOTP && !biometricInfo.hasTOTP {
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
@@ -722,10 +794,24 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                     .font(.caption).foregroundStyle(.secondary)
             }
 
+            // WHO holds the secret, in the same words the chooser's keychain row
+            // uses — one explanation of the keychain across the whole app.
             Text(requiresOTP
-                 ? "Credentials are stored in your Keychain. The verification code is used once and never stored."
-                 : "Credentials are stored in your Keychain. Manage this VPN in the Manage VPNs window.")
+                 ? "A remembered password is kept in the Apple keychain, where macOS protects it. The verification code is used once and never stored."
+                 : "A remembered password is kept in the Apple keychain, where macOS protects it \u{2014} SimpleVPN keeps no copy of its own.")
                 .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            // The quiet way to change your mind, for a VPN that is already set
+            // up: the first-run chooser is gone by then, and Manage VPNs is a
+            // long way to go to switch to 1Password.
+            Button("Change how you sign in\u{2026}") { showSignInChooser = true }
+                .buttonStyle(.link)
+                .font(.caption)
+                .help("Choose a different way to sign in to this VPN \u{2014} type it, save it securely, or use a password app")
+                .accessibilityHint("Choose a different way to sign in to this VPN: type it each time, save it securely, or use a password app.")
+                .signInChooserPopover(isPresented: $showSignInChooser, vpn: vpn, profile: profile,
+                                      allowsPasswordSave: allowPasswordSave, sources: sources)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear {

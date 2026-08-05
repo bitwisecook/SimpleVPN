@@ -48,3 +48,6 @@ Vendor/proxy-engine/*
 # Stray executables from `go build ./...` in the shim directory.
 Vendor/proxy-engine/src/pxengine
 Vendor/proxy-engine/src/carchive/carchive
+
+# Agent worktrees (transient, self-contained git repos)
+.claude/worktrees/

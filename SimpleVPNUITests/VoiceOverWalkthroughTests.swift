@@ -175,6 +175,72 @@ final class VoiceOverWalkthroughTests: XCTestCase {
         }
     }
 
+    // MARK: - Step 2b — The first-run sign-in chooser
+
+    /// Doc step 2, second half: a VPN that has never connected is asked HOW it
+    /// signs in, and that chooser must be as legible to a listener as to a
+    /// looker. Two classes of row live in it, and the whole design rests on
+    /// telling them apart:
+    ///   • the ones SimpleVPN can fetch from (type it / the keychain / Apple
+    ///     Passwords / a password app we really talk to), and
+    ///   • the ones we CANNOT read, listed as pointers to where a password
+    ///     probably is.
+    ///
+    /// Asserted here: every row is named, every row carries a non-empty value
+    /// (its state, in words — a row whose value is empty says what it is and then
+    /// refuses to say whether it works), and every POINTER row says in its own
+    /// words that SimpleVPN can't read that app. The last one is the load-bearing
+    /// assertion: the two classes differ in styling, and styling is invisible to
+    /// VoiceOver, so if the wording ever stops carrying the distinction a
+    /// listener could pick a signpost expecting an integration.
+    ///
+    /// SKIPS when no VPN on this machine is at its first connect — the chooser is
+    /// deliberately absent for a VPN that has already connected (that is the
+    /// "never re-ask a returning user" half of the same feature), and these tests
+    /// never edit the tester's own VPNs to make a surface appear.
+    ///
+    /// Still human: that Tab walks the rows, that the keyboard starts on the
+    /// choice already made, and that choosing one is SPOKEN (announcements leave
+    /// no trace in the tree).
+    @MainActor
+    func testStep02bSignInChooserRowsSayWhatTheyAreAndWhatTheyCanDo() throws {
+        let app = try launchOrSkip()
+        let nodes = flatten(try snapshot(of: app.windows.firstMatch, "the main window"))
+        let sources = nodes.filter { $0.identifier.hasPrefix("signin-source-") }
+        let pointers = nodes.filter { $0.identifier.hasPrefix("signin-hint-") }
+        try XCTSkipIf(sources.isEmpty, """
+            No sign-in chooser is on screen — every VPN on this machine has already \
+            connected (so it is never re-asked), or the selected VPN signs itself in. \
+            The human walkthrough needs a freshly imported VPN for this step.
+            """)
+
+        // The two rows that always exist, because a chooser that can be empty is
+        // a dead end.
+        let ids = Set(sources.map(\.identifier))
+        XCTAssertTrue(ids.contains("signin-source-type-each-time"),
+                      "The chooser offers no way to just type it: \(ids.sorted())")
+
+        for row in sources + pointers {
+            XCTAssertFalse(row.label.isEmpty, """
+                A sign-in choice has no name: \(describe(row))
+                """)
+            let value = (row.value as? String) ?? ""
+            XCTAssertFalse(value.isEmpty, """
+                \(describe(row)) has no value, so focusing it never says whether that way \
+                of signing in is ready, needs setting up, or can't be read at all
+                """)
+        }
+
+        for pointer in pointers {
+            let spoken = pointer.label + " " + ((pointer.value as? String) ?? "")
+            XCTAssertTrue(spoken.contains("can\u{2019}t read") || spoken.contains("can't read"), """
+                \(describe(pointer)) is a signpost to a password app SimpleVPN cannot read, \
+                but nothing it SAYS carries that — the styling difference is invisible to \
+                VoiceOver, so this row reads as an integration
+                """)
+        }
+    }
+
     // MARK: - Step 4 — Hear the state
 
     /// Doc step 4: "VO-focus the Connect area — the Disconnect/stop control

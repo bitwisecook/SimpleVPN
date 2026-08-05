@@ -8,8 +8,25 @@
 //  people at connect time — one-time code? and where does the sign-in live? —
 //  including the 1Password drag-in. ConnectionDetailView decides when it shows.
 //
+//  The "where does your sign-in live?" half used to be a four-item menu listing
+//  every manager whether or not it was installed. It is now
+//  `SignInSourceChooser`: the same question, but only over the sources that
+//  really exist on this Mac, with a plain sentence each, and with the password
+//  apps we CANNOT read listed separately as pointers rather than hidden (that
+//  list is the answer to "where is my password?", which is the question someone
+//  staring at an empty field is actually asking).
+//
+//  This card is deliberately the ONE first-run surface — extended, not joined by
+//  a competitor. It already appears exactly when the flow needs a chooser (no
+//  successful connect yet), it already owns the OTP question the chooser's
+//  wording refers to, and it already hosts the per-source detail (the 1Password
+//  drag-in well, the address a KeePassXC/Keeper/Apple Passwords lookup matches).
+//  A second sheet or window would have to duplicate all of that and then argue
+//  with this card about which of them was showing.
+//
 
 import SwiftUI
+import AppKit
 import UniformTypeIdentifiers
 
 /// First-connect hand-holding. An imported config describes the TRANSPORT, not
@@ -21,6 +38,10 @@ import UniformTypeIdentifiers
 struct FirstConnectSetupCard: View {   // was private — internal for the file split
     @Bindable var vpn: VPNController
     let profile: VPNController.Profile
+    /// The profile's own verdict on saving a password (`auth-nocache` says no) —
+    /// passed in rather than re-derived, so the card and the form below it can
+    /// never disagree about whether the keychain row is on offer.
+    var allowsPasswordSave = true
     @Binding var dismissed: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Marching-ants phase for the drop well (pure Shape drawing — safe).
@@ -34,9 +55,21 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
     @State private var preflight = OnePasswordPreflightModel()
     /// Collapses the several deliveries macOS makes of one drag into one apply.
     @State private var drops = OnePasswordDropCollector()
+    /// What this Mac can actually offer. Shared app-wide so one set of probes
+    /// serves every surface.
+    @State private var sources = SignInSourceAvailability.shared
 
     private var auth: VPNAuthConfig { vpn.authConfig(for: profile.id) }
     private var source: CredentialSource { vpn.credentialSource(for: profile.id) }
+    private var facts: SignInSourceFacts { sources.facts(allowsPasswordSave: allowsPasswordSave) }
+    /// The row that matches what this VPN is set to right now.
+    private var selectedID: SignInSourceID? {
+        switch source.kind {
+        case .manual: auth.rememberCredentials ? .saveInSimpleVPN : .typeEachTime
+        case .applePasswords: .applePasswords
+        default: LocalVaultRegistry.adapter(for: source.kind).map { .vault($0.vendor) }
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -64,14 +97,12 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
             }
             .toggleStyle(.checkbox)
 
-            Picker("My sign-in is kept", selection: sourceKindBinding) {
-                Text("I'll type it in").tag(CredentialSourceKind.manual)
-                Text("in 1Password").tag(CredentialSourceKind.onePassword)
-                Text("in Apple Passwords").tag(CredentialSourceKind.applePasswords)
-                Text("in KeePassXC").tag(CredentialSourceKind.keePassXC)
-            }
-            .pickerStyle(.menu)
-            .fixedSize()
+            SignInSourceChooser(
+                options: SignInSourceCatalog.options(facts),
+                selection: selectedID,
+                onChoose: { choose($0) },
+                onOpenApp: { open($0) },
+                compact: true)
 
             switch source.kind {
             case .manual:
@@ -116,11 +147,42 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                 Text("The first connect asks KeePassXC to pair \u{2014} give the connection a name (\u{201C}SimpleVPN\u{201D}) when it asks.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            case .keeper:
+                // Keeper names a RECORD, not an address: Commander takes the
+                // record's title, its UID, or its folder path.
+                HStack {
+                    TextField("Keeper record name, UID, or folder path", text: $apServer)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        .onSubmit(saveKeeper)
+                    Button("Use") { saveKeeper() }.buttonStyle(.glass)
+                        .disabled(apServer.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                .onAppear {
+                    apServer = source.reference.isEmpty ? profile.name : source.reference
+                }
+                Text("SimpleVPN asks Keeper Commander for just this record. It never changes Commander\u{2019}s own setup.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(14)
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
         .accessibilityElement(children: .contain)
+        // Cheap facts on appear, then the paid-for ones once. The poll is what
+        // makes a 1Password someone quits (or a KeePassXC they launch) show up
+        // in the list without the window being reopened.
+        .onAppear { sources.refresh() }
+        .task { await sources.deepScan() }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                sources.refresh()
+                // Following an enablement banner must flip the row without a
+                // restart; the throttle inside keeps this cheap.
+                await sources.recheckIfDue()
+            }
+        }
     }
 
     /// The drag-in target, with a quiet "things can be dropped here" rhythm:
@@ -193,17 +255,37 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                 })
     }
 
-    private var sourceKindBinding: Binding<CredentialSourceKind> {
-        Binding(get: { source.kind },
-                set: { kind in
-                    var s = source
-                    s.kind = kind
-                    Task { try? await vpn.setCredentialSource(s, for: profile.id) }
-                    // Choosing 1Password is the first genuine need for a
-                    // 1Password lookup — and the only moment this card is
-                    // allowed to raise its approval prompt.
-                    if kind == .onePassword { checkOnePassword(force: false) }
-                })
+    /// Apply a chosen row. Two things are stored, not one: WHERE the sign-in
+    /// comes from, and whether it is remembered — "type it each time" and "save
+    /// it securely in SimpleVPN" are the same source with opposite answers to the
+    /// second question, and a chooser that set only the first would silently
+    /// leave a saved password behind when someone picked "type it each time".
+    private func choose(_ option: SignInSourceOption) {
+        guard let kind = option.storedKind else { return }   // pointers aren't choices
+        var s = source
+        s.kind = kind
+        var a = auth
+        if let remembers = option.remembers { a.rememberCredentials = remembers }
+        Task {
+            try? await vpn.setCredentialSource(s, for: profile.id)
+            if a != auth { try? await vpn.setAuthConfig(a, for: profile.id) }
+            // Picking "type it each time" means it: whatever was saved for this
+            // VPN goes, rather than quietly still being there.
+            if option.id == .typeEachTime { vpn.forgetSavedSignIn(id: profile.id) }
+        }
+        // Choosing 1Password is the first genuine need for a 1Password lookup —
+        // and the only moment this card is allowed to raise its approval prompt.
+        if kind == .onePassword { checkOnePassword(force: false) }
+    }
+
+    /// A pointer row's button: open the app the user's password is probably in.
+    /// This changes no setting — the row is a signpost, and the wording says so.
+    private func open(_ option: SignInSourceOption) {
+        guard let bundleID = option.appBundleID,
+              let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
+        else { return }
+        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+        AccessibilityAnnouncer.sayNow("Opening \(option.title). Copy your password, then paste it below.")
     }
 
     /// The setup check. `force` is the Check Again button, which re-checks even
@@ -267,6 +349,13 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
     private func saveKeePassXC() {
         var s = source
         s.kind = .keePassXC
+        s.reference = apServer.trimmingCharacters(in: .whitespaces)
+        Task { try? await vpn.setCredentialSource(s, for: profile.id) }
+    }
+
+    private func saveKeeper() {
+        var s = source
+        s.kind = .keeper
         s.reference = apServer.trimmingCharacters(in: .whitespaces)
         Task { try? await vpn.setCredentialSource(s, for: profile.id) }
     }

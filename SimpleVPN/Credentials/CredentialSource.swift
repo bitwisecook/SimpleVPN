@@ -16,6 +16,9 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
     case onePassword
     case applePasswords
     case keePassXC
+    /// Keeper, reached through Keeper Commander (Keeper's own command-line tool
+    /// — the Keeper app itself exposes no local API). See KeeperProvider.
+    case keeper
 
     var displayName: String {
         switch self {
@@ -23,6 +26,7 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
         case .onePassword: "1Password"
         case .applePasswords: "Apple Passwords"
         case .keePassXC: "KeePassXC"
+        case .keeper: "Keeper"
         }
     }
     var systemImage: String {
@@ -31,6 +35,7 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
         case .onePassword: "key.fill"
         case .applePasswords: "person.badge.key.fill"
         case .keePassXC: "key.horizontal.fill"
+        case .keeper: "key.viewfinder"
         }
     }
 
@@ -43,9 +48,15 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
     /// kind would have half-worked.
     // nonisolated: read inside `ConnectInputs.readiness`, which is nonisolated
     // pure data (the app target defaults to MainActor isolation).
+    /// Keeper is deliberately `false`: Keeper Commander does have a `totp`
+    /// command, but nobody has proven it end-to-end against a live Keeper vault
+    /// from here — and this flag is a PROMISE (true means "Connect is enabled
+    /// with no code typed"). A broken promise costs an AUTH_FAILED and a
+    /// consumed code; asking for a code we then don't need costs one keystroke.
+    /// The fetch still USES a code when Commander hands one over.
     nonisolated var suppliesOTP: Bool {
         switch self {
-        case .manual, .applePasswords: false
+        case .manual, .applePasswords, .keeper: false
         case .onePassword, .keePassXC: true
         }
     }
@@ -56,7 +67,8 @@ struct CredentialSource: Codable, Sendable, Equatable {
 
     /// 1Password: item name or UUID (optionally "vault/item"). Apple Passwords
     /// and KeePassXC: the server/URL to match (e.g. "tig-vpn.grlab.co.uk" —
-    /// KeePassXC matches it against each entry's URL field). Unused for manual.
+    /// KeePassXC matches it against each entry's URL field). Keeper: the
+    /// record's UID or its folder path ("Work/VPN/GR Lab"). Unused for manual.
     var reference = ""
     /// 1Password: WHICH ACCOUNT to ask — the name shown at the top of
     /// 1Password's sidebar, or its UUID. Not cosmetic: the SDK's desktop-app

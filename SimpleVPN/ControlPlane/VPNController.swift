@@ -514,6 +514,18 @@ final class VPNController {
 
     var credentialSources: [String: CredentialSource] = [:]   // was private(set) — internal for the +File split
 
+    /// "Let me type it this time." The recovery path when a VPN's chosen password
+    /// app isn't available: the stored choice is left completely alone, and this
+    /// process-lifetime flag makes the readiness decision AND the connect path
+    /// behave as if the source were manual — both, from one flag, so a Connect
+    /// button can never be enabled on a promise the connect won't keep. Cleared
+    /// by a successful typed connect and by any change to the source.
+    private(set) var typedSignInOnce: Set<String> = []
+
+    func setTypedSignInOnce(_ on: Bool, for id: String) {
+        if on { typedSignInOnce.insert(id) } else { typedSignInOnce.remove(id) }
+    }
+
     /// Observable mirror of the persisted auth blobs — reads MUST go through this
     /// (not the manager's providerConfiguration) so SwiftUI re-renders on change.
     var authConfigs: [String: VPNAuthConfig] = [:]   // was private(set) — internal for the +File split
