@@ -150,7 +150,7 @@ struct SignInSourceCatalogTests {
     /// Never checked ⇒ offered, and honest that picking it may raise a prompt.
     @Test func anUncheckedOnePasswordWarnsAboutTheOneTimePrompt() throws {
         let option = try #require(
-            SignInSourceCatalog.vaultOption(.onePassword, availability: .unchecked))
+            SignInSourceCatalog.vaultOption(.onePassword, availability: .unchecked(.checkOwedOnUse)))
         guard case .unchecked(let note) = option.state else {
             Issue.record("expected an unchecked state"); return
         }
@@ -268,7 +268,7 @@ struct SignInSourceCatalogTests {
         #expect(!LocalVaultBlock.needsUpdate.wantsEnablementBanner)
         for vendor in LocalVaultVendor.allCases {
             #expect(SignInSourceCatalog.vaultOption(vendor, availability: .ready)?.guidance == nil)
-            #expect(SignInSourceCatalog.vaultOption(vendor, availability: .unchecked)?.guidance == nil)
+            #expect(SignInSourceCatalog.vaultOption(vendor, availability: .unchecked(.checkOwedOnUse))?.guidance == nil)
             for block in [LocalVaultBlock.toolMissing, .integrationOff, .notSignedIn] {
                 let option = SignInSourceCatalog.vaultOption(vendor, availability: .blocked(block))
                 // A vendor that cannot be in a state simply has no copy for it;
@@ -1228,12 +1228,12 @@ struct LocalVaultAdapterTests {
     /// Availability's own contract: only `.notInstalled` hides a row.
     @Test func onlyNotInstalledHidesARow() {
         #expect(!LocalVaultAvailability.notInstalled.isOffered)
-        for state: LocalVaultAvailability in [.ready, .unchecked, .blocked(.appNotRunning),
+        for state: LocalVaultAvailability in [.ready, .unchecked(.checkOwedOnUse), .blocked(.appNotRunning),
                                               .blocked(.integrationOff), .blocked(.needsUpdate),
                                               .blocked(.notSignedIn)] {
             #expect(state.isOffered)
         }
         #expect(LocalVaultAvailability.ready.isReady)
-        #expect(!LocalVaultAvailability.unchecked.isReady)
+        #expect(!LocalVaultAvailability.unchecked(.checkOwedOnUse).isReady)
     }
 }

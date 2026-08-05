@@ -660,7 +660,7 @@ struct PassboltAvailabilityTests {
         #expect(location.serverURL == "https://passbolt.example.com")
         #expect(location.configFile == "/Users/you/work.toml")
 
-        let quick = LocalVaultAvailability.unchecked
+        let quick = LocalVaultAvailability.unchecked(.wouldSignInToServer)
         #expect(await adapter.deepScan(quick: quick) == quick,
                 "the deep scan signed in to a server it was only asked about")
         let note = LocalVaultCopyBook.copy(for: .passbolt).uncheckedNote ?? ""
@@ -679,16 +679,16 @@ struct PassboltAvailabilityTests {
                            values: ["server": "https://passbolt.example.com"]),
             SourceInstance(id: bad, vendor: .passbolt, name: "Personal", values: [:]),
         ]
-        facts.vaultInstances[good] = .unchecked
+        facts.vaultInstances[good] = .unchecked(.wouldSignInToServer)
         facts.vaultInstances[bad] = .blocked(.noServerConfigured)
         // The vendor row is the BEST of them, exactly as the registry computes it.
-        facts.vaults[.passbolt] = .unchecked
+        facts.vaults[.passbolt] = .unchecked(.wouldSignInToServer)
 
-        #expect(facts.availability(.passbolt) == .unchecked)
-        #expect(facts.availability(.passbolt, instance: good) == .unchecked)
+        #expect(facts.availability(.passbolt) == .unchecked(.wouldSignInToServer))
+        #expect(facts.availability(.passbolt, instance: good) == .unchecked(.wouldSignInToServer))
         #expect(facts.availability(.passbolt, instance: bad) == .blocked(.noServerConfigured))
         // The row IS offered, and its state comes from the good one.
-        let row = SignInSourceCatalog.vaultOption(.passbolt, availability: .unchecked)
+        let row = SignInSourceCatalog.vaultOption(.passbolt, availability: .unchecked(.wouldSignInToServer))
         #expect(row?.isSelectable == true)
         // Switching the vendor off hides every server at once, including the good one.
         facts.disabledVendors = [.passbolt]

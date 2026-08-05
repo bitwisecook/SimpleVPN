@@ -46,7 +46,7 @@ import AuthenticationServices
 /// A password app SimpleVPN reaches over a LOCAL channel. Membership here is a
 /// claim we must be able to back with a working fetch.
 ///
-/// A VENDOR IS NOT A TRANSPORT — see `LocalVaultTransport`. Keeping the two
+/// A VENDOR IS NOT A TRANSPORT — see `AuthTransport`. Keeping the two
 /// separate is what lets one future file-backed adapter serve KeePassXC,
 /// Strongbox and KeePassium (all three store the same KeePass `.kdbx`) instead
 /// of three near-copies, and what lets Keeper's CLI and its local daemon be one
@@ -99,36 +99,13 @@ nonisolated enum LocalVaultVendor: String, CaseIterable, Sendable, Hashable {
     case passbolt
 }
 
-/// HOW a vendor is reached. Deliberately separate from the vendor, and named in
-/// each adapter, because the shape of the channel — not the brand — is what
-/// decides how detection, session liveness and failure behave:
-///
-///  • `.signedIPC` — a vendor library doing app-to-app IPC (1Password's SDK).
-///    Detection = the library is on disk AND the app is running.
-///  • `.appSocket` — a unix socket the running app listens on (KeePassXC's
-///    browser protocol). Detection = the socket exists. Nothing to spawn.
-///  • `.cli` — the vendor's own command-line tool (Keeper Commander today;
-///    Bitwarden's `bw`, Dashlane's `dcli`, LastPass's `lpass`, Proton Pass's CLI,
-///    Passbolt's `go-passbolt-cli`, and `pass`/`gopass` are all this shape).
-///    Detection = the tool is on disk; liveness = a session probe; failures come
-///    back on stderr and must be scrubbed (see LocalToolRunner).
-///  • `.localDaemon` — a loopback HTTP/REST server the vendor's tool starts
-///    (Keeper's Service Mode; Bitwarden's `bw serve` on 127.0.0.1:8087 is the
-///    same shape). Cheaper per fetch than spawning, so an adapter that has both
-///    prefers this and falls back to `.cli`.
-///  • `.file` — a vault FILE read directly, no vendor process at all. Not built:
-///    it is how Strongbox and KeePassium would be served, since both store
-///    KeePass `.kdbx` — the same format KeePassXC does. One adapter, three
-///    vendors, and the existing KeePassXC socket path stays exactly as it is
-///    (a running app with a live socket is a better answer than a file on disk,
-///    because the app owns the unlock).
-nonisolated enum LocalVaultTransport: String, CaseIterable, Sendable, Hashable {
-    case signedIPC
-    case appSocket
-    case cli
-    case localDaemon
-    case file
-}
+// THE TRANSPORT AXIS MOVED. `AuthTransport` — the five channel shapes a
+// vault is reached over — is now `AuthTransport` in `Shared/AuthKind.swift`, with
+// the same five raw values plus the four shapes that were always there and never
+// named: `.osKeychain`, `.osAutoFill`, `.agent` and `.hardware`. It sits beside the
+// kind axis because the two are read together, and because the mechanisms that are
+// not vaults (the SSH agent, a PKCS#11 token, a security key that types) need the
+// same vocabulary as the ones that are.
 
 /// Why a vendor that IS installed still can't answer. Each one has a fix the
 /// user can carry out, which is why none of them is ever a hidden row — and why
@@ -292,9 +269,21 @@ nonisolated enum LocalVaultAvailability: Sendable, Equatable {
     case notInstalled
     /// Here, but something must happen first. Offered WITH the fix.
     case blocked(LocalVaultBlock)
-    /// Here and reachable, but we have never proven the whole path. Offered;
-    /// picking it runs the one-time check.
-    case unchecked
+    /// Here, but the whole path has never been proven — AND THE CEILING SAYS WHY.
+    ///
+    /// The reason is not decoration. This case used to be bare, and it therefore said
+    /// the same thing about two states that need opposite handling: 1Password's "the
+    /// check is owed and picking the row pays it", and a Passbolt SERVER's "nothing
+    /// short of a real sign-in could prove this, and a real sign-in is an
+    /// authentication attempt against somebody else's machine, so it will never
+    /// happen". The first is a to-do. The second is the honest ceiling, for ever — and
+    /// a row promising "SimpleVPN checks this when you pick it" was making a promise
+    /// nothing would keep.
+    ///
+    /// `AuthProbeCeiling.willBeProbed` is the distinction, and it is what tells "set
+    /// up, deliberately not probed" from "probeable but unproven" without any caller
+    /// matching on the vendor.
+    case unchecked(AuthProbeCeiling)
     /// Proven working.
     case ready
 
@@ -1013,7 +1002,7 @@ nonisolated struct InstalledPasswordApp: Identifiable, Sendable, Equatable {
 ///     Pass's CLI). An adapter is a small addition, so the wording says "yet".
 ///   • `.keePassFormat` — Strongbox and KeePassium store KeePass `.kdbx`, the
 ///     same format SimpleVPN already reads through KeePassXC. One file-backed
-///     adapter would serve all three (`LocalVaultTransport.file`), so again:
+///     adapter would serve all three (`AuthTransport.file`), so again:
 ///     "yet". Neither needs a vendor API.
 ///   • `.none` — no local read path exists at all (NordPass, Enpass, RoboForm).
 ///     Here the honest answer is copy and paste, with no hint of a CLI that
@@ -1284,8 +1273,13 @@ nonisolated enum SignInSourceCatalog {
             option.state = .needsSetup(headline: copy.headline(for: block),
                                        steps: copy.steps(for: block))
             option.guidance = copy.guidance(for: block, foundAt: foundOutsideAllowList)
-        case .unchecked:
-            if let note = copy.uncheckedNote { option.state = .unchecked(note: note) }
+        case .unchecked(let ceiling):
+            // ALWAYS a note now, and that is a fix rather than tidying: a vendor with
+            // no `uncheckedNote` of its own used to fall through with `state` left at
+            // `.ready`, so an unproven row said "Ready to use" out loud — to the eye
+            // and to VoiceOver. The ceiling's own sentence is the floor, and a vendor's
+            // wording still wins where it has some, because it can be specific.
+            option.state = .unchecked(note: copy.uncheckedNote ?? ceiling.fallbackNote)
         case .ready:
             break
         }

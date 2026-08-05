@@ -1426,8 +1426,8 @@ struct EditVPNView: View {
     }
 
     /// The auth roles this VPN uses — the sheet renders exactly these.
-    private var applicableRoles: [CredentialRole] {
-        CredentialRole.forOpenVPN(evaluation: evaluation, requiresOTP: otpRequired)
+    private var applicableRoles: [AuthKind] {
+        AuthKind.forOpenVPN(evaluation: evaluation, requiresOTP: otpRequired)
     }
 
     private func loadOPFieldsAndShowSheet() async {
@@ -1560,18 +1560,39 @@ struct EditVPNView: View {
         }
     }
 
+    /// The editor's "Test" button — THROUGH THE SAME SEAM AS CONNECT.
+    ///
+    /// It used to reach for `managerProvider` and call `resolve` itself, which made it
+    /// the one surface in the app that could succeed where a connect would fail (or the
+    /// reverse): a source blocked at level 1 was spawned anyway, and a failure came back
+    /// as a bare `localizedDescription` with nothing saying where to fix it.
+    ///
+    /// `authPlan(for:)` refuses BEFORE spawning when the state says it cannot work, and
+    /// an `AuthFailure` carries its locus — so a test that fails now tells the user which
+    /// screen the problem is on, in the same words the connect row would use.
     private func testSource() async {
         sourceTest = .testing
-        // Persist the current source first so the controller builds the right provider.
+        // Persist the current source first so the controller plans against what is on
+        // screen rather than what was last saved.
         await saveCredentialSource()
-        guard let provider = vpn.managerProvider(for: profileID) else { sourceTest = .idle; return }
+        guard vpn.managerProvider(for: profileID) != nil else { sourceTest = .idle; return }
         do {
-            let raw = try await provider.resolve(profile: profileID, fields: [.username, .password, .otp])
+            guard case .value(let raw) = try await vpn.authPlan(for: profileID) else {
+                // A source whose plan is a NAME or an armed capture has nothing for this
+                // button to show, and saying so beats an empty success.
+                sourceTest = .failed("This sign-in isn\u{2019}t something SimpleVPN fetches "
+                                     + "\u{2014} it happens at connect time.")
+                return
+            }
             let user = raw.username.map { "as \($0)" } ?? "found"
             let hasOTP = (raw.otp?.isEmpty == false) ? " · verification code available" : ""
             sourceTest = raw.password?.isEmpty == false
                 ? .ok("Found \(user)\(hasOTP)")
                 : .failed("Item found but has no password.")
+        } catch let failure as AuthFailure {
+            // Names the level, so "it didn't work" becomes "it didn't work, and here is
+            // the screen".
+            sourceTest = .failed(failure.sentence)
         } catch {
             sourceTest = .failed(error.localizedDescription)
         }

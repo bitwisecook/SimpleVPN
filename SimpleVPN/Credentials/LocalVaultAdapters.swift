@@ -64,9 +64,9 @@ protocol LocalVaultAdapter: Sendable {
     /// both (Keeper: its local daemon, then its CLI) and its own code decides;
     /// this is here so the shape of a channel is a declared fact rather than
     /// something you infer by reading the implementation. See
-    /// `LocalVaultTransport` for why `.file` is the one that collapses three
+    /// `AuthTransport` for why `.file` is the one that collapses three
     /// KeePass-format vendors into one future adapter.
-    var transports: [LocalVaultTransport] { get }
+    var transports: [AuthTransport] { get }
     /// Cheap, prompt-free, no subprocesses. Safe to call on every refresh.
     /// May answer `.unchecked` when only a deep scan can tell.
     func quickScan() -> LocalVaultAvailability
@@ -106,7 +106,7 @@ struct OnePasswordVaultAdapter: LocalVaultAdapter {
     /// The SDK's signed IPC to the running app. NOT the `op` CLI — that path was
     /// retired, which is why the enablement banner points at 1Password's SDK
     /// setting and its SDK documentation rather than at the CLI's.
-    let transports: [LocalVaultTransport] = [.signedIPC]
+    let transports: [AuthTransport] = [.signedIPC]
 
     /// Every distribution of the app, plus the version-7 bundle id — the same
     /// list the failure sheet already resolves for "Open 1Password".
@@ -137,7 +137,7 @@ struct OnePasswordVaultAdapter: LocalVaultAdapter {
         // ready on the next poll — no restart.
         if OnePasswordPreflight.isIntegrationKnownOff() { return .blocked(.integrationOff) }
         // Otherwise the check is owed, and picking the row is what pays it.
-        return .unchecked
+        return .unchecked(.checkOwedOnUse)
     }
 
     func deepScan(quick: LocalVaultAvailability) async -> LocalVaultAvailability {
@@ -170,7 +170,7 @@ struct KeePassXCVaultAdapter: LocalVaultAdapter {
     /// The running app's own socket. A future `.file` adapter would read the same
     /// `.kdbx` directly (and would then also serve Strongbox and KeePassium) —
     /// this path stays first regardless, because a running app owns the unlock.
-    let transports: [LocalVaultTransport] = [.appSocket]
+    let transports: [AuthTransport] = [.appSocket]
 
     static let bundleIDs = ["org.keepassxc.keepassxc"]
 
@@ -212,7 +212,7 @@ struct KeeperVaultAdapter: LocalVaultAdapter {
     let storedKind = CredentialSourceKind.keeper
     /// Its local REST daemon when the user has created one, else its CLI. The
     /// order is the preference: a running daemon costs no Python start-up.
-    let transports: [LocalVaultTransport] = [.localDaemon, .cli]
+    let transports: [AuthTransport] = [.localDaemon, .cli]
 
     /// The Keeper desktop app, which is NOT a read path — it is only the signal
     /// that this person uses Keeper, and therefore that Commander is worth
@@ -224,7 +224,7 @@ struct KeeperVaultAdapter: LocalVaultAdapter {
     }
 
     func quickScan() -> LocalVaultAvailability {
-        if KeeperCommanderChannel.isInstalled() { return .unchecked }
+        if KeeperCommanderChannel.isInstalled() { return .unchecked(.checkOwedOnUse) }
         // Before saying "not installed", ASK. Discovery searches every location
         // any package manager, version manager or vendor installer uses — plus
         // `PATH`, which the execution side will never consult — so it can tell the

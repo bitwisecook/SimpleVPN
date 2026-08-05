@@ -266,7 +266,29 @@ extension VPNController {
 
     // MARK: Connect / disconnect
 
+    /// Connect from a PROVIDER — the shape every existing caller uses. Resolves it into
+    /// an `AuthPlan` and hands that to the real funnel below, so there is exactly one
+    /// place a plan is executed.
+    ///
+    /// A provider always resolves to `.value`: that is what `CredentialProvider` IS,
+    /// and it is why the other two deliveries could never be expressed through it. See
+    /// `AuthPlan`'s header.
     func connect(id: String, using provider: CredentialProvider,
+                 request: CredentialRequest, remember: Bool) async throws {
+        Self.log.log("connect: \(id, privacy: .public) source=\(provider.id, privacy: .public)")
+        let raw = try await provider.resolve(profile: id, fields: request.fields)
+        try await connect(id: id, plan: .value(raw), request: request, remember: remember)
+    }
+
+    /// THE ONE FUNNEL. Executes a plan.
+    ///
+    /// Taking a plan rather than a fetcher is what removed the double resolve:
+    /// `connectUsingConfiguredSource` used to resolve its provider, wrap the result in a
+    /// `ManualCredentialProvider` purely to satisfy this signature, and let this method
+    /// resolve THAT — a wrapper whose only job was smuggling a value through a protocol
+    /// that wanted a fetcher, and which silently dropped `passkeyAssertion` because it
+    /// had no field for it.
+    func connect(id: String, plan: AuthPlan,
                  request: CredentialRequest, remember: Bool) async throws {
         // The control-plane guard chain (MDM, future Tcl) — every connect path
         // funnels through this method, so this one check covers the detail pane,
@@ -276,7 +298,6 @@ extension VPNController {
               mgr.protocolConfiguration is NETunnelProviderProtocol else {
             throw err("no such profile")
         }
-        Self.log.log("connect: \(id, privacy: .public) source=\(provider.id, privacy: .public)")
 
         // First connect of an OpenVPN profile is the moment to ask macOS to approve the
         // system extension — not app launch. A brand-new user should meet the app, not a
@@ -286,7 +307,25 @@ extension VPNController {
         if let ensureExtensionReady, !(await ensureExtensionReady()) {
             throw err("SimpleVPN needs its network extension approved before it can connect. Open System Settings ▸ General ▸ Login Items & Extensions ▸ Network Extensions and allow SimpleVPN.")
         }
-        let raw = try await provider.resolve(profile: id, fields: request.fields)
+        let raw: RawCredentials
+        switch plan {
+        case .value(let values):
+            raw = values
+        // NEITHER of these reaches this method today, and that is a statement rather
+        // than an omission. A `.possession` plan is executed by the engine that owns
+        // the name — the SSH engine sets `SSH_OPTIONS_IDENTITY_AGENT` from its own
+        // stored socket path, `openconnect` resolves a `pkcs11:` URI through p11-kit —
+        // and neither goes anywhere near `startTunnel(options:)`. A `.typedByDevice`
+        // plan is executed by the connect FORM, which is the only place a focused field
+        // exists; by the time it gets here the code is already a typed value. The switch
+        // is exhaustive so that a future producer has to come and decide, rather than
+        // finding a `default` that quietly did the wrong thing.
+        case .possession(let possession):
+            throw err("This VPN signs in with \(possession.loggableSummary), which its "
+                      + "engine handles itself \u{2014} there is nothing for SimpleVPN to send.")
+        case .typedByDevice:
+            throw err("Waiting for your security key. Touch it, then connect.")
+        }
         let staticChallenge = hasStaticChallenge(id)
         let engine: EngineCredentials
         if staticChallenge {
@@ -560,9 +599,12 @@ extension VPNController {
         // Touch ID store with a saved authenticator secret). Apple Passwords
         // can't provide an OTP, so an OTP profile still needs the form.
         if let provider = managerProvider(for: id) {
-            let canServeOTP = effectiveCredentialKind(for: id).suppliesOTP
-                || biometricCanServe(id: id)
-            guard !auth.requiresOTP || canServeOTP else { return false }
+            // ONE answer to "can this source serve unattended?", read from the same
+            // method the connect form's warning reads. It used to be re-derived here
+            // from `effectiveCredentialKind(...).suppliesOTP || biometricCanServe(...)`
+            // — the same question with a different set of inputs, in a different file,
+            // free to disagree with the form the user was looking at.
+            guard authSatisfaction(for: id).connectsUnattended else { return false }
             do {
                 try await connect(id: id, using: provider, request: auth.request, remember: false)
                 return true
@@ -594,16 +636,15 @@ extension VPNController {
         if isWireGuard(id) { try await connectWireGuard(id: id); return }
         if isSSHNetworkTunnel(id) { try await connectSSHNetworkTunnel(id: id); return }
         let auth = effectiveAuthConfig(for: id)
-        guard let provider = managerProvider(for: id) else {
+        guard managerProvider(for: id) != nil else {
             try await connectWithTransientCredentials(id: id)
             return
         }
-        var raw = try await provider.resolve(profile: id, fields: auth.request.fields)
-        if auth.requiresOTP, (raw.otp ?? "").isEmpty, !typedOTP.isEmpty { raw.otp = typedOTP }
-        let composed = ManualCredentialProvider(username: raw.username ?? "",
-                                                password: raw.password ?? "", otp: raw.otp ?? "",
-                                                privateKeyPassphrase: raw.privateKeyPassphrase ?? "")
-        try await connect(id: id, using: composed, request: auth.request, remember: false)
+        // ONE resolve, and the plan crosses the seam. This used to resolve here, wrap
+        // the result in a `ManualCredentialProvider`, and let `connect` resolve the
+        // wrapper — see `VPNController+Auth.swift`'s header.
+        let plan = try await authPlan(for: id, typedOTP: typedOTP)
+        try await connect(id: id, plan: plan, request: auth.request, remember: false)
     }
 
     // MARK: Compositions (multiple VPNs connected together)

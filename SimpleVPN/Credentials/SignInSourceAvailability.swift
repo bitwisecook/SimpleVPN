@@ -239,7 +239,9 @@ final class SignInSourceAvailability {
             switch vaults[vendor] ?? .notInstalled {
             case .notInstalled: state = "absent"
             case .blocked(let block): state = "blocked:\(block.rawValue)"
-            case .unchecked: state = "unchecked"
+            // The ceiling rides the log line: "unchecked" alone cannot tell a
+            // maintainer whether a check is coming.
+            case .unchecked(let ceiling): state = "unchecked:\(ceiling.rawValue)"
             case .ready: state = "ready"
             }
             return "\(vendor.rawValue)=\(state)"
@@ -248,28 +250,92 @@ final class SignInSourceAvailability {
 
     // MARK: Is the source this VPN is SET to usable right now?
 
-    /// The recovery decision's input: can the configured source serve at all?
-    /// Manual is always yes. A manager needs its vendor offered AND something
-    /// linked for it to fetch — a source pointing at nothing is just as broken as
-    /// a quit app, and fails at exactly the same moment.
-    func canServe(_ source: CredentialSource) -> Bool {
-        guard source.kind != .manual else { return true }
-        if source.kind == .applePasswords {
-            // No vendor channel: what it needs is a server to match.
-            return !source.reference.trimmingCharacters(in: .whitespaces).isEmpty
+    /// THE LEVELS-1-2-3 HALF of the satisfaction decision: everything answerable from
+    /// this Mac's facts plus the profile's stored source, and nothing that needs the
+    /// profile itself.
+    ///
+    /// It replaced `canServe(_:) -> Bool`, and the change is not cosmetic. A Bool could
+    /// say "no" and nothing else, so every caller that wanted to help had to go back to
+    /// the block enum and match on it — and one caller did not bother, deriving its own
+    /// answer from different inputs instead (see `VPNController+Auth.swift`). An
+    /// `AuthSatisfaction` names the LEVEL, so the fix and its screen follow from the
+    /// type.
+    ///
+    /// `VPNController.authSatisfaction(for:)` is the whole answer: it adds the facts
+    /// only a profile knows — whether "type it this time" is in force, whether a Touch
+    /// ID item exists, and whether this VPN needs a verification code at all.
+    func satisfaction(for source: CredentialSource) -> AuthSatisfaction {
+        satisfaction(for: source, facts: facts)
+    }
+
+    /// The same, against a SNAPSHOT of the facts. A view holding one (and a test
+    /// driving fixtures) gets the same derivation rather than a second one — which is
+    /// the whole point of the type.
+    func satisfaction(for source: CredentialSource,
+                      facts live: SignInSourceFacts) -> AuthSatisfaction {
+        switch source.kind {
+        case .manual:
+            // Nothing at this layer to say: whether typing, the keychain or Touch ID
+            // will serve is entirely the profile's business.
+            return .typedInstead(.byChoice)
+        case .applePasswords:
+            // No vendor channel to probe. What it needs is a server to match, which is
+            // level 3.
+            guard !source.reference.trimmingCharacters(in: .whitespaces).isEmpty else {
+                return .typedInstead(.nothingLinked)
+            }
+            return .unproven(.checkOwedOnUse)
+        case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane, .keePassFile,
+             .passwordStore, .lastPass, .protonPass, .passbolt:
+            break
         }
-        guard let adapter = LocalVaultRegistry.adapter(for: source.kind) else { return false }
-        guard facts.availability(adapter.vendor).isOffered else { return false }
-        // WHICH VAULT, not just which vendor. A profile naming a database that is no
-        // longer set up cannot serve — and must say so here, before a connect
-        // discovers it, rather than being quietly pointed at a different one.
+        guard let adapter = LocalVaultRegistry.adapter(for: source.kind) else {
+            // A stored kind with no adapter can only mean a profile written by a build
+            // that had one. Nothing to fix at any level.
+            return .typedInstead(.nothingLinked)
+        }
+        let vendor = adapter.vendor
+
+        // LEVEL 1 — can we reach the vendor at all? The order matters: asking "is the
+        // entry named?" before "is the tool installed?" produces the wrong sentence for
+        // a Mac with neither.
+        switch live.availability(vendor) {
+        case .notInstalled:
+            return .broken(locus: .transport, block: .toolMissing)
+        case .blocked(let block):
+            return .broken(locus: block.locus, block: block)
+        case .unchecked, .ready:
+            break
+        }
+
+        // LEVEL 2 — WHICH vault, not just which vendor. A profile naming a database
+        // that is no longer set up must say so HERE, before a connect discovers it, and
+        // must never be quietly pointed at a different one.
         let selection = source.selection
-        guard SourceInstanceResolver.resolve(
-            selection, vendor: adapter.vendor,
-            instances: facts.instances(for: adapter.vendor)).isUsable else { return false }
-        guard facts.availability(adapter.vendor, instance: selection.instance).isOffered
-        else { return false }
-        return adapter.provider(for: source) != nil
+        switch SourceInstanceResolver.resolve(
+            selection, vendor: vendor, instances: live.instances(for: vendor)) {
+        case .noneConfigured:
+            return .broken(locus: .instance,
+                           block: vendor == .passbolt ? .noServerConfigured : .noVaultFile)
+        case .chosenIsGone:
+            return .broken(locus: .instance, block: .vaultFileMissing)
+        case .sole, .resolved:
+            break
+        }
+        let perInstance = live.availability(vendor, instance: selection.instance)
+        if case .blocked(let block) = perInstance {
+            return .broken(locus: block.locus, block: block)
+        }
+
+        // LEVEL 3 — is an entry named, and can the adapter build a fetcher for it?
+        guard adapter.provider(for: source) != nil else {
+            return .typedInstead(.nothingLinked)
+        }
+        if case .unchecked(let ceiling) = perInstance { return .unproven(ceiling) }
+        if case .unchecked(let ceiling) = live.availability(vendor) {
+            return .unproven(ceiling)
+        }
+        return .ready
     }
 
     // MARK: Caches

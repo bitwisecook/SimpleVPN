@@ -593,7 +593,7 @@ struct DashlaneAvailabilityTests {
         #expect(DashlaneVaultAdapter.availability(toolIsRunnable: true,
                                                  foundOutsideAllowList: false,
                                                  appIsInstalled: false,
-                                                 hasLocalDatabase: false) == .unchecked)
+                                                 hasLocalDatabase: false) == .unchecked(.checkOwedOnUse))
     }
 
     @Test func eachVaultStateHasItsOwnBlock() {
@@ -610,9 +610,9 @@ struct DashlaneAvailabilityTests {
         #expect(await adapter.deepScan(quick: .blocked(.toolMissing)) == .blocked(.toolMissing))
         #expect(await adapter.deepScan(quick: .blocked(.toolOutsideAllowList))
                 == .blocked(.toolOutsideAllowList))
-        #expect(await adapter.deepScan(quick: .unchecked) == .ready)
+        #expect(await adapter.deepScan(quick: .unchecked(.checkOwedOnUse)) == .ready)
         let silent = DashlaneVaultAdapter(channel: FixedChannel(state: nil))
-        #expect(await silent.deepScan(quick: .unchecked) == .unchecked)
+        #expect(await silent.deepScan(quick: .unchecked(.checkOwedOnUse)) == .unchecked(.checkOwedOnUse))
     }
 
     /// Every blocked state a Dashlane row can be in has copy AND a way out on screen.

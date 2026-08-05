@@ -389,7 +389,7 @@ struct MaturityVersusAvailabilityTests {
     /// character. Different axes, no coupling.
     @Test func availabilityNeverMovesAMaturityAnswer() {
         let states: [LocalVaultAvailability] =
-            [.ready, .unchecked, .blocked(.toolMissing), .blocked(.notSignedIn)]
+            [.ready, .unchecked(.checkOwedOnUse), .blocked(.toolMissing), .blocked(.notSignedIn)]
         for vendor in LocalVaultVendor.allCases {
             let expected = FeatureMaturityRegistry.maturity(ofSource: .vault(vendor))
             for state in states {

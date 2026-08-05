@@ -279,7 +279,7 @@ struct BitwardenProvider: CredentialProvider {
         return await channel.state() == .unlocked
     }
 
-    func resolve(profile: String, fields: Set<CredentialField>) async throws -> RawCredentials {
+    func resolve(profile: String, fields: Set<AuthKind>) async throws -> RawCredentials {
         let ref = reference.trimmingCharacters(in: .whitespaces)
         guard !ref.isEmpty else { throw BitwardenError.noItem }
         let item = try await channel.item(reference: ref,
@@ -805,7 +805,7 @@ struct BitwardenVaultAdapter: LocalVaultAdapter {
     /// Its own local service when the user has one running, else its CLI. The order
     /// is the preference, and here it is a security preference rather than a speed
     /// one — see BitwardenProvider's header.
-    let transports: [LocalVaultTransport] = [.localDaemon, .cli]
+    let transports: [AuthTransport] = [.localDaemon, .cli]
 
     /// The Bitwarden desktop app, which is NOT a read path — it is only the signal
     /// that this person uses Bitwarden, and therefore that `bw` is worth telling
@@ -825,7 +825,7 @@ struct BitwardenVaultAdapter: LocalVaultAdapter {
     static func availability(toolIsRunnable: Bool,
                              foundOutsideAllowList: Bool,
                              appIsInstalled: Bool) -> LocalVaultAvailability {
-        if toolIsRunnable { return .unchecked }
+        if toolIsRunnable { return .unchecked(.checkOwedOnUse) }
         // Before saying "not installed", ASK. Discovery searches every location any
         // package manager, version manager or vendor installer uses — plus `PATH`,
         // which the execution side will never consult — so it can tell "you don't

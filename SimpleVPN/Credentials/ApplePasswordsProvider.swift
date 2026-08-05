@@ -51,7 +51,7 @@ struct ApplePasswordsProvider: CredentialProvider {
         !server.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
-    func resolve(profile: String, fields: Set<CredentialField>) async throws -> RawCredentials {
+    func resolve(profile: String, fields: Set<AuthKind>) async throws -> RawCredentials {
         let host = server.trimmingCharacters(in: .whitespaces)
         guard !host.isEmpty else { throw AppleError.noServer }
 

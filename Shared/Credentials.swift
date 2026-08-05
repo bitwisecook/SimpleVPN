@@ -7,16 +7,18 @@
 //  assembles them into the username/password the engine actually uses. This keeps
 //  password-manager integrations (manual, 1Password, Apple Passwords, …) and future
 //  VPN types (OpenVPN/IPsec/WireGuard) decoupled from how credentials are sourced.
+//
+//  WHICH kinds a request names is `AuthKind` (Shared/AuthKind.swift) — axis 1 of the
+//  unified authentication abstraction. It used to be a separate `CredentialField`
+//  declared here, with a second overlapping enum (`CredentialRole`) in the app; one
+//  closed enum now serves both jobs.
+//
+//  `RawCredentials` below is the `.value` half of `AuthPlan` and nothing more. The
+//  other two deliveries have no fields here BY DESIGN: an SSH agent's key and a
+//  PKCS#11 token's certificate are never bytes we hold, so a field for them would be
+//  a field that is always nil. See `AuthPlan`.
 
 import Foundation
-
-/// A single kind of credential a backend may require.
-enum CredentialField: String, Sendable, CaseIterable {
-    case username
-    case password
-    case otp
-    case passkey   // future (WebAuthn-style auth for other VPN types)
-}
 
 /// Raw fields as supplied by a source; any may be absent if the source can't provide it.
 struct RawCredentials: Sendable {
@@ -36,7 +38,7 @@ struct EngineCredentials: Sendable {
 /// What a backend/profile needs to authenticate, and how to assemble the password field.
 struct CredentialRequest: Sendable {
     /// Fields the backend needs sourced.
-    var fields: Set<CredentialField>
+    var fields: Set<AuthKind>
     /// Template for the auth password, with `{password}` and `{otp}` tokens.
     /// GR Lab (LinOTP) expects `{password}{otp}`.
     var passwordTemplate: String

@@ -620,7 +620,7 @@ struct KeePassFileProvider: CredentialProvider {
         return KeePassDatabaseFile.classify(path: configuration.databasePath).isReadable
     }
 
-    func resolve(profile: String, fields: Set<CredentialField>) async throws -> RawCredentials {
+    func resolve(profile: String, fields: Set<AuthKind>) async throws -> RawCredentials {
         let configuration = KeePassFileConfiguration.current(instance: instance)
         guard configuration.isConfigured else { throw KeePassFileError.noDatabaseChosen }
         guard channel.isReachable() else { throw KeePassFileError.toolMissing }
@@ -710,7 +710,7 @@ struct KeePassFileVaultAdapter: LocalVaultAdapter {
     let storedKind = CredentialSourceKind.keePassFile
     /// The one adapter whose channel is a FILE. No socket, no daemon, no vendor
     /// process — which is exactly why one adapter covers three products.
-    let transports: [LocalVaultTransport] = [.file]
+    let transports: [AuthTransport] = [.file]
 
     /// Injectable so the whole state machine is testable with no tool present.
     var channel: any KeePassFileChannel = KeePassXCCommandLineChannel()

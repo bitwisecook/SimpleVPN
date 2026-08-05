@@ -410,8 +410,8 @@ struct SourceInstanceAvailabilityTests {
     /// comparison rather than a chain of ifs.
     @Test func theRankOrdersUselessToUsable() {
         #expect(LocalVaultAvailability.notInstalled.rank < LocalVaultAvailability.blocked(.noVaultFile).rank)
-        #expect(LocalVaultAvailability.blocked(.noVaultFile).rank < LocalVaultAvailability.unchecked.rank)
-        #expect(LocalVaultAvailability.unchecked.rank < LocalVaultAvailability.ready.rank)
+        #expect(LocalVaultAvailability.blocked(.noVaultFile).rank < LocalVaultAvailability.unchecked(.checkOwedOnUse).rank)
+        #expect(LocalVaultAvailability.unchecked(.checkOwedOnUse).rank < LocalVaultAvailability.ready.rank)
     }
 
     /// A switched-off vendor is `.notInstalled` at level 2 as well: off means not
@@ -456,7 +456,8 @@ struct SourceInstanceAvailabilityTests {
     }
 
     /// A profile naming a vanished database cannot serve — said HERE, before a
-    /// connect discovers it.
+    /// connect discovers it, AND AT A NAMED LEVEL so the user is sent to the right
+    /// screen rather than told "no".
     @Test func aSourceNamingAVanishedDatabaseCannotServe() {
         let sources = SignInSourceAvailability(
             settings: SignInSourceSettingsStore(
@@ -465,7 +466,14 @@ struct SourceInstanceAvailabilityTests {
         source.kind = .keePassFile
         source.reference = "VPN/Work"
         source.instanceID = "gone"
-        #expect(!sources.canServe(source))
+        let satisfaction = sources.satisfaction(for: source)
+        #expect(!satisfaction.connectsUnattended)
+        #expect(satisfaction.needsAttention)
+        // The LEVEL is the point. On a Mac with no `keepassxc-cli` this is level 1
+        // ("install the tool"); with the tool present it is level 2 ("that database
+        // isn't set up any more"). Either is a real fix on a real screen — and neither
+        // is `.reach` or `.entry`, which would send somebody to the wrong one.
+        #expect(satisfaction.locus == .transport || satisfaction.locus == .instance)
     }
 }
 

@@ -597,7 +597,7 @@ struct LastPassAvailabilityTests {
     @Test func signedInWithASocketIsUncheckedRatherThanReady() {
         #expect(LastPassAvailabilityRules.quick(
             toolIsRunnable: true, foundOutsideAllowList: false, appIsInstalled: false,
-            home: facts()) == .unchecked)
+            home: facts()) == .unchecked(.checkOwedOnUse))
     }
 
     /// Signed in and NO socket at all: the agent is gone, which is `vaultLocked` and
@@ -613,18 +613,18 @@ struct LastPassAvailabilityTests {
     @Test func anOnDiskKeyIsOfferedEvenWithNoAgent() {
         #expect(LastPassAvailabilityRules.quick(
             toolIsRunnable: true, foundOutsideAllowList: false, appIsInstalled: false,
-            home: facts(signedIn: false, agent: false, keyOnDisk: true)) == .unchecked)
+            home: facts(signedIn: false, agent: false, keyOnDisk: true)) == .unchecked(.checkOwedOnUse))
     }
 
     /// `lpass status` exit 0 is the only thing that makes this ready.
     @Test func aLiveSessionIsTheOnlyRoadToReady() {
         #expect(LastPassAvailabilityRules.deep(
-            quick: .unchecked, statusSaysSignedIn: true, home: facts()) == .ready)
+            quick: .unchecked(.checkOwedOnUse), statusSaysSignedIn: true, home: facts()) == .ready)
     }
 
     @Test func statusSayingNoResolvesToLockedOrNotSignedIn() {
         #expect(LastPassAvailabilityRules.deep(
-            quick: .unchecked, statusSaysSignedIn: false, home: facts()) == .blocked(.vaultLocked))
+            quick: .unchecked(.checkOwedOnUse), statusSaysSignedIn: false, home: facts()) == .blocked(.vaultLocked))
         #expect(LastPassAvailabilityRules.deep(
             quick: .blocked(.notSignedIn), statusSaysSignedIn: false,
             home: facts(signedIn: false, agent: false)) == .blocked(.notSignedIn))
@@ -636,13 +636,13 @@ struct LastPassAvailabilityTests {
     /// would send somebody to fix something that is not broken.
     @Test func statusIsNotBelievedWhenTheKeyIsOnDisk() {
         #expect(LastPassAvailabilityRules.deep(
-            quick: .unchecked, statusSaysSignedIn: false,
-            home: facts(signedIn: false, agent: false, keyOnDisk: true)) == .unchecked)
+            quick: .unchecked(.checkOwedOnUse), statusSaysSignedIn: false,
+            home: facts(signedIn: false, agent: false, keyOnDisk: true)) == .unchecked(.checkOwedOnUse))
     }
 
     /// "We couldn't ask" is not "you aren't signed in".
     @Test func anUnaskableToolLeavesTheCheapAnswerAlone() {
-        for quick in [LocalVaultAvailability.unchecked, .blocked(.vaultLocked),
+        for quick in [LocalVaultAvailability.unchecked(.checkOwedOnUse), .blocked(.vaultLocked),
                       .blocked(.notSignedIn)] {
             #expect(LastPassAvailabilityRules.deep(
                 quick: quick, statusSaysSignedIn: nil, home: facts()) == quick)
