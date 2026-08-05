@@ -413,6 +413,21 @@ nonisolated enum ToolCatalog {
         // own tool is right here and an adapter is the only missing piece" are very
         // different facts, and the second is what a bug report needs.
         DiscoverableTool(name: "lpass", title: "LastPass CLI", vendor: nil),
+
+        // GnuPG, and it BELONGS TO the password-store row — this is the tool that
+        // actually does the decrypting, because SimpleVPN reads a `pass` store itself
+        // rather than shelling to `pass`. Naming the vendor here is what puts "found
+        // at …, but not somewhere SimpleVPN will run it from" on that row instead of
+        // nowhere: without this entry, `toolFoundOutsideAllowList("gpg")` could never
+        // fire and the store's `.toolOutsideAllowList` branch was unreachable code.
+        // `gpg2` is the same program under the name some installs still use.
+        DiscoverableTool(name: "gpg", title: "GnuPG", vendor: .passwordStore),
+        DiscoverableTool(name: "gpg2", title: "GnuPG (gpg2)", vendor: .passwordStore),
+
+        // `pass` and `gopass` themselves are reported but own NO vendor: the store is
+        // read without them, so their absence blocks nothing and attributing a
+        // "missing tool" state to them would be wrong. They are here because knowing
+        // which one somebody uses is worth having in a report.
         DiscoverableTool(name: "pass", title: "pass (password-store)", vendor: nil),
         DiscoverableTool(name: "gopass", title: "gopass", vendor: nil),
         // Homebrew's formula is `go-passbolt-cli` but the BINARY it installs is
