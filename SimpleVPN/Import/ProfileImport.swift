@@ -47,6 +47,13 @@ extension VPNController {
         }
         // Validate with the engine's own parser before anything else.
         let eval = ProfileEvaluation(bridging: OVPNProfileEvaluator.evaluate(text), ovpnText: text)
+        // A `pkcs11-*` profile is refused HERE, with the smartcard explained, rather
+        // than by the engine parser — which rejects it as an unsupported option and
+        // says nothing about tokens. (The check is before `eval.error` for exactly
+        // that reason: the parser's own complaint is the less useful of the two.)
+        if let advice = eval.pkcs11Advice {
+            return .invalid(reason: advice)
+        }
         if eval.error {
             return .invalid(reason: eval.message.isEmpty
                             ? "This doesn't look like an OpenVPN configuration."

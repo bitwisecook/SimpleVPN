@@ -80,6 +80,12 @@ struct ManualAnchorParityTests {
         // agent forwarding isn't offered. The setting itself is
         // "ssh.agent-socket"; this is the chapter its row's help links into.
         "ssh-agent",
+        // Smartcards / security keys: one chapter, because the subject spans five
+        // settings plus facts that belong to none of them (installing a provider
+        // module, registering it with p11-kit, the PIN retry counter, and why an
+        // OpenVPN profile can't use a token here).
+        "oc-smartcards", "oc-smartcards-setup", "oc-smartcards-registration",
+        "oc-smartcards-pin-retries", "oc-smartcards-openvpn",
     ]
 
     private func manualHTML() throws -> String {

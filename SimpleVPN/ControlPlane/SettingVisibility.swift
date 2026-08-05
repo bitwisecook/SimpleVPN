@@ -205,6 +205,23 @@ extension SettingVisibility {
                 hidden["oc.key-password"] =
                     "Set a client certificate or key above \u{2014} the passphrase row appears with it."
             }
+            // The smartcard rows only exist under the Smartcard sign-in method: they
+            // are a whole sub-form, and rendering five dead rows under Password would
+            // bury the two controls that method actually uses.
+            if c.authMode != "token" {
+                let why = "Set Sign-in method to \u{201C}Smartcard or security key\u{201D} to reach the smartcard rows."
+                for id in ["oc.pkcs11-module", "oc.pkcs11-certificate", "oc.pkcs11-key",
+                           "oc.pkcs11-pin", "oc.pkcs11-remember-pin"] {
+                    hidden[id] = why
+                }
+            } else if (c.pkcs11ModulePath ?? "").trimmingCharacters(in: .whitespaces).isEmpty {
+                // Without a module there is nothing to read a certificate off, so the
+                // key and PIN rows have nothing to attach to yet.
+                let why = "Choose a smartcard provider module first \u{2014} the certificate, key and PIN rows follow it."
+                for id in ["oc.pkcs11-key", "oc.pkcs11-pin", "oc.pkcs11-remember-pin"] {
+                    hidden[id] = why
+                }
+            }
             // `oc.sso-browser` is deliberately NOT here: it is RENDERED and
             // disabled with its reason (`ssoBrowserUnused`), which is a row a
             // reveal can land on. Only a row that isn't in the hierarchy at all

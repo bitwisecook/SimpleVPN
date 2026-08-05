@@ -46,6 +46,25 @@ struct ProfileEvaluation: Equatable, Sendable {
     var requestsCompression = false          // comp-lzo / compress directive present
     var usesTLSAuth = false                  // tls-auth / tls-crypt present (key direction applies)
     var hasClientCert = false                // client cert/key or pkcs12 present
+    /// `pkcs11-*` directives found in the profile, in the order they appear.
+    ///
+    /// This is a HARD INCOMPATIBILITY, detected here so it can be explained rather
+    /// than discovered. SimpleVPN carries OpenVPN on the openvpn3 core, which does
+    /// not implement OpenVPN 2.x's `pkcs11-*` family at all — and openvpn3 does not
+    /// merely ignore an option it doesn't know: `ClientOptions::handle_unused_options`
+    /// puts anything untouched into its "UNKNOWN/UNSUPPORTED OPTIONS" bucket and
+    /// THROWS (`Error::UNUSED_OPTIONS`, fatal). So a profile with `pkcs11-providers`
+    /// in it doesn't sign in with a token: it fails to load, complaining about an
+    /// option, and the reason is nowhere near the smartcard the user is holding.
+    var pkcs11Directives: [String] = []
+    var usesPKCS11: Bool { !pkcs11Directives.isEmpty }
+
+    /// The one thing to say about a `pkcs11-*` profile, or nil. Names the directive
+    /// found, why it can't work here, and the two routes that do.
+    var pkcs11Advice: String? {
+        guard let first = pkcs11Directives.first else { return nil }
+        return "This configuration uses \u{201C}\(first)\u{201D} to sign in with a smartcard or security key. SimpleVPN's OpenVPN engine (the OpenVPN 3 core) has no smartcard support and refuses to load a profile containing it \u{2014} remove the pkcs11 lines to import the rest. For hardware-backed certificate sign-in, SimpleVPN supports PKCS#11 on the SSL VPN kinds (AnyConnect, GlobalProtect, FortiGate\u{2026}); ask your administrator whether the gateway offers one of those."
+    }
 
     /// Placeholder-friendly accessors (empty string → nil).
     var remoteHostOrNil: String? { remoteHost.isEmpty ? nil : remoteHost }
@@ -61,11 +80,20 @@ extension ProfileEvaluation {
     /// Scan for facts eval_config doesn't report: compression request, extra
     /// HMAC key (tls-auth/tls-crypt), client certificate. Lines are trimmed with
     /// .whitespacesAndNewlines so CRLF profiles scan identically to LF ones.
-    static func textFacts(in ovpn: String) -> (compression: Bool, tlsAuth: Bool, clientCert: Bool) {
+    static func textFacts(in ovpn: String)
+        -> (compression: Bool, tlsAuth: Bool, clientCert: Bool, pkcs11: [String]) {
         var compression = false, tlsAuth = false, clientCert = false
+        var pkcs11: [String] = []
         for rawLine in ovpn.split(separator: "\n", omittingEmptySubsequences: true) {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             if line.hasPrefix("#") || line.hasPrefix(";") { continue }
+            // The whole `pkcs11-*` family: providers, id, id-management, pin-cache,
+            // protected-authentication-path, cert-private, private-mode.
+            if line.hasPrefix("pkcs11-") {
+                let directive = line.split(separator: " ", maxSplits: 1)
+                    .first.map(String.init) ?? line
+                if !pkcs11.contains(directive) { pkcs11.append(directive) }
+            }
             if line == "comp-lzo" || line.hasPrefix("comp-lzo ")
                 || line == "compress" || line.hasPrefix("compress ") {
                 compression = true
@@ -79,11 +107,17 @@ extension ProfileEvaluation {
                 clientCert = true
             }
         }
-        return (compression, tlsAuth, clientCert)
+        return (compression, tlsAuth, clientCert, pkcs11)
     }
 
     static func requestsCompression(in ovpn: String) -> Bool {
         textFacts(in: ovpn).compression
+    }
+
+    /// The `pkcs11-*` directives in a profile — the import path's own check, which
+    /// runs before the engine parser can throw its opaque "unsupported options".
+    static func pkcs11Directives(in ovpn: String) -> [String] {
+        textFacts(in: ovpn).pkcs11
     }
 
     /// Stable content key for memoization/duplicate detection: SHA-256 of the
@@ -118,6 +152,7 @@ extension ProfileEvaluation {
         requestsCompression = facts.compression
         usesTLSAuth = facts.tlsAuth
         hasClientCert = facts.clientCert
+        pkcs11Directives = facts.pkcs11
     }
 }
 
