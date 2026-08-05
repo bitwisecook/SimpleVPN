@@ -116,8 +116,19 @@ nonisolated enum SettingRelations {
         // MARK: OpenConnect SSL VPNs
 
         ["oc.client-cert", "oc.client-key", "oc.key-password", "oc.cafile"],
-        // The three sign-in shapes are alternatives to each other.
-        ["oc.password", "oc.client-cert", "oc.sso-browser"],
+        // The four sign-in shapes are alternatives to each other. Smartcard belongs
+        // in this clique because "a certificate in a file" and "a certificate on a
+        // device" is the choice a user is actually making.
+        ["oc.password", "oc.client-cert", "oc.pkcs11-certificate", "oc.sso-browser"],
+        // The smartcard sub-form: the module that reads the device, the certificate
+        // on it, its key, and the PIN that unlocks them. Each row's caveat already
+        // named another member ("pick a module first", "the key is only needed
+        // when…") — the clique turns those sentences into links.
+        ["oc.pkcs11-module", "oc.pkcs11-certificate", "oc.pkcs11-key",
+         "oc.pkcs11-pin", "oc.pkcs11-remember-pin"],
+        // A smartcard tunnel can never run on the built-in engine, which is built
+        // without PKCS#11 — the honesty caveat on both rows, as a link.
+        ["oc.pkcs11-module", "oc.prefer-in-process"],
         ["oc.token-mode", "oc.token-secret", "oc.password"],
         // The AGENTS.md MTU split, stated as a link: one is the tunnel's, the
         // other the path underneath it.

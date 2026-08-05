@@ -278,6 +278,11 @@ struct EditVPNView: View {
                         .font(.callout).foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(10).background(.quaternary.opacity(0.5))
+                } else if let advice = evaluation?.pkcs11Advice {
+                    // Before the generic parse error: the engine rejects a pkcs11
+                    // profile as "unsupported options", which says nothing about the
+                    // smartcard the user is holding.
+                    EvaluationErrorBanner(message: advice)
                 } else if let eval = evaluation, eval.error {
                     EvaluationErrorBanner(message: eval.message)
                 } else if vpn.hasPendingSettings(id: profileID) {

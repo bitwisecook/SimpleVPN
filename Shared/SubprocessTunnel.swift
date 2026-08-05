@@ -110,10 +110,11 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
 
     // SSL-VPN (OpenConnect / openfortivpn). The --protocol value comes from
     // `kind.openconnectProtocol` — the kind IS the protocol, nothing stored here.
-    // How the SSL-VPN authenticates: password, a client certificate, or single
-    // sign-on in the browser (SAML/SSO — this is the passkey/WebAuthn path, since
-    // the identity provider's page does the passkey ceremony).
-    var authMode = "password"    // "password" | "certificate" | "sso"
+    // How the SSL-VPN authenticates: password, a client certificate, a certificate
+    // held on a smartcard/security key (PKCS#11), or single sign-on in the browser
+    // (SAML/SSO — this is the passkey/WebAuthn path, since the identity provider's
+    // page does the passkey ceremony).
+    var authMode = "password"    // "password" | "certificate" | "token" | "sso"
     var realm = ""               // optional auth realm/group (--authgroup)
     var trustedCertSHA256 = ""   // pin the server cert (openconnect --servercert)
     var caFile = ""              // --cafile <path>
@@ -162,6 +163,29 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     // extension) instead of the `openconnect` subprocess. Falls back to the
     // subprocess if the in-process path can't start. Default off.
     var preferInProcess = false
+
+    // MARK: PKCS#11 / smartcard sign-in (`authMode == "token"`)
+    //
+    // All Optional (the `proxyPasswordInArgv` precedent) so tunnels saved before
+    // these fields existed still decode. The token PIN is NOT here and never will
+    // be: it lives in the login keychain under "tunnel.<id>.pkcs11" when the user
+    // asks it to be remembered, and is typed at connect time otherwise. Either way
+    // it reaches openconnect on a private pipe — see
+    // `SubprocessTunnelManager.openconnectArgs`.
+
+    /// Absolute path to the PKCS#11 provider module (`libykcs11.dylib`,
+    /// `opensc-pkcs11.so`, …). Always absolute and always the user's choice: we do
+    /// not let the dynamic-loader search order decide which library reads the key.
+    var pkcs11ModulePath: String? = nil
+    /// RFC 7512 URI naming the CERTIFICATE on the token. openconnect derives the
+    /// matching private key from it (`--certificate=pkcs11:…`, no `--sslkey`).
+    var pkcs11CertificateURI: String? = nil
+    /// An explicit URI for the private key, for the tokens whose key is labelled
+    /// differently from its certificate and openconnect's heuristic misses.
+    var pkcs11KeyURI: String? = nil
+    /// Where the PIN comes from: nil/"ask" = typed at each connect (nothing stored),
+    /// "keychain" = the login keychain item saved by the editor.
+    var pkcs11PINSource: String? = nil
 
     var isDefault: Bool { self == SubprocessTunnelConfig(id: id) }
 
@@ -230,13 +254,19 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
         n.localHostname = clean(localHostname)
         n.userAgent = clean(userAgent)
         n.versionString = clean(versionString)
-        // Trimmed, and a path that is only whitespace collapses back to "use the
-        // inherited agent" — libssh rejects an empty IdentityAgent outright, so a
-        // blank must never reach it as a path.
-        if let socket = n.sshAgentSocket {
-            let cleaned = clean(socket)
-            n.sshAgentSocket = cleaned.isEmpty ? nil : cleaned
+        // Trim, and collapse an Optional field that is only whitespace back to nil so
+        // "not set" has exactly one representation. For the agent socket that matters
+        // twice over: libssh rejects an empty IdentityAgent outright, so a blank must
+        // never reach it as a path — nil means "use the inherited agent".
+        func cleanOptional(_ s: String?) -> String? {
+            guard let t = s?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
+            return t
         }
+        n.sshAgentSocket = cleanOptional(sshAgentSocket)
+        n.pkcs11ModulePath = cleanOptional(pkcs11ModulePath)
+        n.pkcs11CertificateURI = cleanOptional(pkcs11CertificateURI)
+        n.pkcs11KeyURI = cleanOptional(pkcs11KeyURI)
+        n.pkcs11PINSource = cleanOptional(pkcs11PINSource)
         n.forwards = forwards.map(clean).filter { !$0.isEmpty }
         n.sshExtraOptions = sshExtraOptions.map(clean).filter { !$0.isEmpty }
         n.extraArgs = extraArgs.map(clean).filter { !$0.isEmpty }
@@ -393,6 +423,46 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
         }
     }
 
+    // MARK: PKCS#11 sign-in (the token half of "who are you?")
+
+    /// Whether the PIN is remembered in the login keychain (`"keychain"`) rather
+    /// than typed at each connect. Absent/anything else means "ask every time",
+    /// which is the default and the safer one.
+    var pkcs11RemembersPIN: Bool { pkcs11PINSource == "keychain" }
+
+    /// Why this tunnel's token sign-in can't work as configured, or nil. BLOCKING
+    /// (the `serverCertPinProblem` treatment): every one of these fails inside
+    /// openconnect with a message about a certificate, a long way from the field
+    /// that was actually wrong.
+    static func pkcs11Problem(_ c: SubprocessTunnelConfig) -> String? {
+        guard c.authMode == "token" else { return nil }
+        let module = c.pkcs11ModulePath?.trimmingCharacters(in: .whitespaces) ?? ""
+        if module.isEmpty {
+            return "Choose the PKCS#11 provider module that reads your token — set it under Sign-In."
+        }
+        if !module.hasPrefix("/") && !module.hasPrefix("~") {
+            return "The provider module needs its full path, starting with \u{201C}/\u{201D}."
+        }
+        let cert = c.pkcs11CertificateURI?.trimmingCharacters(in: .whitespaces) ?? ""
+        if cert.isEmpty {
+            return "Pick the certificate on your token — use \u{201C}Find Certificates\u{201D} under Sign-In."
+        }
+        if let problem = PKCS11URI.problem(cert) { return problem }
+        if let key = c.pkcs11KeyURI?.trimmingCharacters(in: .whitespaces), !key.isEmpty,
+           let problem = PKCS11URI.problem(key) { return problem }
+        return nil
+    }
+
+    /// The value to hand `--certificate`. The URI's query is dropped (it can only
+    /// carry the two PIN attributes we refuse, or a module path that would fight the
+    /// one chosen above); the path attributes pass through UNTOUCHED, because
+    /// OpenConnect 7.01+ adds `type=cert`/`type=private` itself and strips the label
+    /// when it has to hunt for the key. Rewriting a user's URI to "help" is how a
+    /// working configuration stops working.
+    static func pkcs11Argument(_ raw: String) -> String {
+        PKCS11URI.parse(raw)?.withoutQuery ?? raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// The value to hand `--servercert`. A pin that already names its own hash
     /// form passes through untouched; a bare base64 digest gets the
     /// `pin-sha256:` prefix it means. Prefixing unconditionally (which is what
@@ -477,9 +547,9 @@ final class SubprocessTunnelStore {
     func remove(_ id: String) {
         tunnels.removeAll { $0.id == id }
         // Delete the tunnel's keychain secrets too — password, proxy/jump passwords,
-        // the OTP token seed and the client-key passphrase — or they'd linger in
-        // the keychain indefinitely after the tunnel itself is gone.
-        for suffix in ["", ".proxy", ".jump", ".token", ".privateKey"] {
+        // the OTP token seed, the client-key passphrase and the smartcard PIN — or
+        // they'd linger in the keychain indefinitely after the tunnel itself is gone.
+        for suffix in ["", ".proxy", ".jump", ".token", ".privateKey", ".pkcs11"] {
             KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(id)\(suffix)")
         }
         persist()
