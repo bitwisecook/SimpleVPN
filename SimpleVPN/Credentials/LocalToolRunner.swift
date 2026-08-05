@@ -15,9 +15,14 @@
 //   • NOTHING SECRET GOES IN ARGV. Arguments are visible to every process on the
 //     Mac (`ps`). Record names/UIDs ride argv; secrets never do, in either
 //     direction.
-//   • STDIN IS /dev/null. A vendor CLI that decides to prompt for a master
-//     password must hit EOF and fail fast, not wedge a connect behind an
-//     invisible prompt.
+//   • STDIN IS /dev/null BY DEFAULT. A vendor CLI that decides to prompt for a
+//     master password must hit EOF and fail fast, not wedge a connect behind an
+//     invisible prompt. A caller that genuinely HAS the answer may opt in with
+//     `stdin:` — and stdin is then the ONLY channel a secret may travel on,
+//     because argv is world-readable through `ps`. `keepassxc-cli` is the case
+//     that needed it: a `.kdbx` database password has to reach the tool somehow,
+//     and there is exactly one safe way. The default is unchanged, so nothing
+//     that does not ask for the pipe gets one.
 //   • A DEADLINE, ALWAYS, and cancellation kills the child. An unanswered vendor
 //     prompt must never outlive the connect that asked for it.
 //   • WE NEVER WRITE A VENDOR'S CONFIG. Keeper's own docs warn that reusing a
@@ -195,9 +200,16 @@ nonisolated enum LocalToolRunner {
     /// `executable` must be an absolute path that came from `locate` — this
     /// refuses anything else rather than letting a relative name be resolved by
     /// the child's own search rules.
+    ///
+    /// `stdin` is the ONE sanctioned way to hand a tool a secret: nil (the
+    /// default) keeps the historical `/dev/null`, and anything supplied is written
+    /// to the child's standard input and then the pipe is CLOSED, so a tool that
+    /// wants a second line hits EOF rather than waiting for ever. The bytes are
+    /// never logged, never echoed and never in argv. See the file header.
     static func run(executable: String, arguments: [String],
                     deadline: TimeInterval = 12,
-                    environment: [String: String]? = nil) async -> LocalToolResult {
+                    environment: [String: String]? = nil,
+                    stdin: Data? = nil) async -> LocalToolResult {
         guard executable.hasPrefix("/"), isSafeExecutable(atPath: executable) else {
             return LocalToolResult(exitCode: -1, stdout: Data(),
                                    stderr: "not an approved tool location", timedOut: false)
@@ -211,8 +223,11 @@ nonisolated enum LocalToolRunner {
                     let process = Process()
                     process.executableURL = URL(fileURLWithPath: executable)
                     process.arguments = arguments
-                    // A vendor CLI that wants to prompt gets EOF instead.
-                    process.standardInput = FileHandle.nullDevice
+                    // A vendor CLI that wants to prompt gets EOF instead — unless the
+                    // caller has an answer for it, in which case it gets exactly that
+                    // and then EOF.
+                    let inPipe: Pipe? = stdin == nil ? nil : Pipe()
+                    process.standardInput = inPipe ?? FileHandle.nullDevice
                     let outPipe = Pipe(), errPipe = Pipe()
                     process.standardOutput = outPipe
                     process.standardError = errPipe
@@ -237,6 +252,21 @@ nonisolated enum LocalToolRunner {
                             DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
                                 if process.isRunning { kill(process.processIdentifier, SIGKILL) }
                             }
+                        }
+                    }
+                    // Feed stdin on another queue and CLOSE it. On this queue the
+                    // write could block for ever against a child that never reads —
+                    // and closing is what turns "waiting for a password" into EOF for
+                    // a tool that wants a second line.
+                    if let inPipe, let stdin {
+                        DispatchQueue.global().async {
+                            let handle = inPipe.fileHandleForWriting
+                            // A child that exits before reading gives us EPIPE/SIGPIPE
+                            // as an error rather than a crash — Foundation raises, and
+                            // it is nothing to report: the exit code already says what
+                            // happened.
+                            try? handle.write(contentsOf: stdin)
+                            try? handle.close()
                         }
                     }
                     // Drain stderr on another queue: a chatty tool that fills the

@@ -368,8 +368,16 @@ nonisolated enum ToolCatalog {
         // symlinks it into the Homebrew bin directory. So "the app is installed"
         // already means "the CLI is available" — the class of fact that makes a
         // bare `locate` answer of "not installed" flatly wrong.
+        //
+        // It belongs to `.keePassFile`, NOT to `.keePassXC`. The KeePassXC row talks
+        // to the RUNNING APP over its browser socket and needs no binary whatever;
+        // the row that cannot work without this binary is the one that reads a
+        // `.kdbx` file directly (and so also serves Strongbox and KeePassium). The
+        // vendor recorded here is what decides which row gets told "found at …, but
+        // not somewhere SimpleVPN will run it from", so pointing it at the socket row
+        // would put that sentence on the one row it cannot help.
         DiscoverableTool(
-            name: "keepassxc-cli", title: "KeePassXC command-line tool", vendor: .keePassXC,
+            name: "keepassxc-cli", title: "KeePassXC command-line tool", vendor: .keePassFile,
             bundledCLIs: [
                 .init(appBundleName: "KeePassXC.app", relativePath: "Contents/MacOS/keepassxc-cli"),
             ]),

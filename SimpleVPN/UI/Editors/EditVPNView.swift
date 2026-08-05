@@ -136,6 +136,10 @@ struct EditVPNView: View {
     /// UNLOCKED vault, which is the only state a fetch works in. Same optimistic
     /// start, same reason.
     @State private var bitwardenAvailable = true
+    /// Why a `.kdbx` file source can't serve, in one sentence, or nil when it can.
+    /// From the adapter's own cheap scan — file checks only, no unlock, no prompt —
+    /// so the editor and the Settings pane can never disagree about what is wrong.
+    @State private var keePassFileProblem: String?
 
     // 1Password browsing (vault/item pickers). Every list is fetched ONLY on an
     // explicit click: the first one can raise 1Password's authorization prompt,
@@ -266,6 +270,7 @@ struct EditVPNView: View {
                 if SignInSourceSettingsStore.shared.isEnabled(.bitwarden) {
                     bitwardenAvailable = await BitwardenLocalChannel().state() == .unlocked
                 }
+                keePassFileProblem = Self.keePassFileProblemSentence()
                 // Prompt-free, so this much can be said without anyone asking:
                 // no 1Password on this Mac is a setup state, not a failure.
                 if !opAvailable { opPreflight.note(.notInstalled) }
@@ -771,7 +776,43 @@ struct EditVPNView: View {
                 Text("SimpleVPN reads just this item using Bitwarden\u{2019}s own command-line tool, and reads only its username and password. It works best with Bitwarden\u{2019}s local service running (\u{201C}bw serve\u{201D}): the unlock stays in Bitwarden\u{2019}s own program, and SimpleVPN never sees your master password or the key that unlocks your vault. While that service is running, any program on this Mac can read your items \u{2014} stop it when you are done. If a verification code is required, type it below.")
                     .font(.callout).foregroundStyle(.secondary)
                 sourceTestRow
+            case .keePassFile:
+                // An entry in a `.kdbx` is named by its PATH — its groups and its
+                // title, separated by slashes. Deliberately not an address: a file has
+                // no URL matching of its own, so offering an address field here would
+                // be a field that silently never matches.
+                TextField("Entry path in your database", text: $sourceReference,
+                          prompt: Text(verbatim: "VPN/Work"))
+                    .autocorrectionDisabled()
+                TextField("Username (optional \u{2014} only to confirm the right entry)",
+                          text: $sourceAccount)
+                    .autocorrectionDisabled()
+                if let keePassFileProblem {
+                    Label(keePassFileProblem, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text("SimpleVPN opens your KeePass database and reads just this entry\u{2019}s username and password \u{2014} it never changes your database. Which database, its password, and any key file or security key it needs are set once for every VPN in Settings \u{25B8} Sign-In Sources. If a verification code is required, type it below.")
+                    .font(.callout).foregroundStyle(.secondary)
+                sourceTestRow
             }
+        }
+    }
+
+    /// The `.kdbx` row's problem in one sentence, taken from the adapter's own cheap
+    /// scan so there is one answer rather than a second opinion. nil = nothing to say.
+    private static func keePassFileProblemSentence() -> String? {
+        let availability = KeePassFileVaultAdapter().quickScan()
+        switch availability {
+        case .ready, .unchecked:
+            return nil
+        case .notInstalled:
+            return LocalVaultCopyBook.keePassFile.guidance(for: .toolMissing)?.benefit
+        case .blocked(let block):
+            let copy = LocalVaultCopyBook.keePassFile
+            let steps = copy.steps(for: block)
+            return steps.isEmpty ? copy.headline(for: block)
+                                 : copy.headline(for: block) + " " + steps.joined(separator: " ")
         }
     }
 

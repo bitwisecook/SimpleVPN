@@ -24,6 +24,11 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
     /// unlock so SimpleVPN never handles the key that unlocks the vault. Covers
     /// self-hosted Bitwarden and Vaultwarden identically. See BitwardenProvider.
     case bitwarden
+    /// A KeePass `.kdbx` FILE, read directly — no vendor app involved, which is why
+    /// one case serves KeePassXC-as-a-file, Strongbox and KeePassium alike. See
+    /// KeePassFileProvider. Distinct from `.keePassXC`, which is the running app's
+    /// own socket and stays the better answer whenever it is available.
+    case keePassFile
 
     // nonisolated for the same reason as `suppliesOTP` below: it is a pure function
     // of the case, and nonisolated rules (the security-key mutual exclusions in
@@ -36,6 +41,7 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
         case .keePassXC: "KeePassXC"
         case .keeper: "Keeper"
         case .bitwarden: "Bitwarden"
+        case .keePassFile: "KeePass database file"
         }
     }
     var systemImage: String {
@@ -46,6 +52,7 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
         case .keePassXC: "key.horizontal.fill"
         case .keeper: "key.viewfinder"
         case .bitwarden: "shield.lefthalf.filled"
+        case .keePassFile: "doc.badge.gearshape"
         }
     }
 
@@ -73,7 +80,16 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
     /// watched work against a live vault is not one to make here.
     nonisolated var suppliesOTP: Bool {
         switch self {
-        case .manual, .applePasswords, .keeper, .bitwarden: false
+        // `.keePassFile` is deliberately `false`, and NOT because the format
+        // cannot carry a code — it can. `keepassxc-cli show -t` prints an entry's
+        // current verification code, but its own `Show.cpp` FAILS THE WHOLE RUN
+        // when the entry has not got one, and there is no way to ask whether an
+        // entry has one without unlocking the database (the expensive part, which
+        // may also want a finger on a security key). So passing `-t` speculatively
+        // would turn every ordinary entry's fetch into a failed sign-in. This flag
+        // is a PROMISE — true means "Connect works with nothing typed" — so it
+        // stays false and the code is typed. See KeePassFileProvider's header.
+        case .manual, .applePasswords, .keeper, .bitwarden, .keePassFile: false
         case .onePassword, .keePassXC: true
         }
     }

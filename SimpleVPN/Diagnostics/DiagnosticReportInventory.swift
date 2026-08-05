@@ -129,6 +129,12 @@ nonisolated enum DiagnosticReportInventory {
         case .keePassXC: ["org.keepassxc.keepassxc"]
         case .keeper: PasswordAppCatalog.entry(forBundleID: "com.callpod.KeeperDesktop")?.bundleIDs ?? []
         case .bitwarden: PasswordAppCatalog.entry(forBundleID: "com.bitwarden.desktop")?.bundleIDs ?? ["com.bitwarden.desktop"]
+        // A .kdbx file is not owned by one app: KeePassXC, Strongbox and
+        // KeePassium all read the same format, and the source works with none of
+        // them installed. So report every app that could be managing it — which
+        // app the person actually uses is exactly what a maintainer wants to know.
+        case .keePassFile:
+            ["org.keepassxc.keepassxc", "com.markmcguill.strongbox.mac", "com.keepassium.mac"]
         }
     }
 
@@ -301,6 +307,16 @@ nonisolated enum DiagnosticReportInventory {
             // telling someone they aren't signed in when they are is how they
             // conclude SimpleVPN can't see their vault at all.
             case .vaultLocked: "signed in, but the vault is locked"
+            // The kdbx file states. Each is a different fix, and each is
+            // indistinguishable from a wrong password unless it is named — which
+            // is the whole reason the header is read before any unlock.
+            case .noVaultFile: "no database has been chosen yet"
+            case .vaultFileMissing: "the database file is not where SimpleVPN was told to look"
+            case .vaultFileNotDownloaded: "the database is in iCloud or Dropbox and has not been downloaded yet"
+            case .vaultFileNotReadable: "the database file exists, but macOS will not let SimpleVPN open it"
+            case .vaultFileNotAKeePassDatabase: "that file is not a KeePass database"
+            case .vaultFileTooNew: "the database is a newer KeePass version than the installed tool reads"
+            case .vaultPasswordRejected: "the database refused the password, key file or security key given"
             }
         }
     }

@@ -180,6 +180,25 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                 Text("SimpleVPN reads just this item. Leave \u{201C}bw serve\u{201D} running and Bitwarden keeps the unlock \u{2014} SimpleVPN never sees the key that unlocks your vault.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            case .keePassFile:
+                // A `.kdbx` entry is named by its PATH in the database — its groups
+                // and its title, separated by slashes. Not an address: the file has no
+                // URL matching of its own, which is the one place this row differs
+                // from the KeePassXC row above it.
+                HStack {
+                    TextField("Entry path in your database, for example VPN/Work", text: $apServer)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        .onSubmit(saveKeePassFile)
+                    Button("Use") { saveKeePassFile() }.buttonStyle(.glass)
+                        .disabled(apServer.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                .onAppear {
+                    apServer = source.reference.isEmpty ? profile.name : source.reference
+                }
+                Text("Which database, and its password, are set once for every VPN in Settings \u{25B8} Sign-In Sources. SimpleVPN only ever reads your database.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(14)
@@ -379,6 +398,13 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
     private func saveBitwarden() {
         var s = source
         s.kind = .bitwarden
+        s.reference = apServer.trimmingCharacters(in: .whitespaces)
+        Task { try? await vpn.setCredentialSource(s, for: profile.id) }
+    }
+
+    private func saveKeePassFile() {
+        var s = source
+        s.kind = .keePassFile
         s.reference = apServer.trimmingCharacters(in: .whitespaces)
         Task { try? await vpn.setCredentialSource(s, for: profile.id) }
     }

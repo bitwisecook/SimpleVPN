@@ -56,6 +56,13 @@ nonisolated enum LocalVaultVendor: String, CaseIterable, Sendable, Hashable {
     case keePassXC
     case keeper
     case bitwarden
+    /// A KeePass `.kdbx` FILE, read directly — the `.file` transport, and the one
+    /// entry here that is not a brand. It is deliberately not called "Strongbox" or
+    /// "KeePassium": all three of those products plus KeePassXC store the same
+    /// format, so the vendor is the FORMAT and one adapter serves everyone who uses
+    /// it (see `KeePassFileProvider`). KeePassXC keeps its own row above, because a
+    /// running app owning its own unlock is a better answer than a file on disk.
+    case keePassFile
 }
 
 /// HOW a vendor is reached. Deliberately separate from the vendor, and named in
@@ -128,12 +135,60 @@ nonisolated enum LocalVaultBlock: String, Sendable, Equatable {
     /// an enablement state, not a failure.
     case toolOutsideAllowList
 
+    // MARK: The file-backed states
+    //
+    // A vendor reached through a FILE fails in ways a socket or a CLI cannot, and
+    // every one of these would otherwise be reported as "wrong password" — which
+    // sends somebody off to retype a password that was never the problem. They are
+    // separate cases because each has exactly one different fix.
+
+    /// No vault file has been chosen yet. An enablement state: one file picker.
+    case noVaultFile
+    /// The chosen file is not there any more. Moved, renamed, or on a volume that
+    /// isn't mounted.
+    case vaultFileMissing
+    /// It lives in iCloud Drive (or another file provider) and the contents are not
+    /// on this Mac yet. NOT an error and NOT a read failure — it fixes itself once
+    /// the download finishes, and saying "couldn't read your database" about it
+    /// would be actively misleading.
+    case vaultFileNotDownloaded
+    /// It is there and macOS will not let SimpleVPN read it. The app is NOT
+    /// sandboxed, and this still happens: macOS protects Desktop, Documents,
+    /// Downloads and iCloud Drive from every app and asks once per app. The fix is a
+    /// permission, so it is its own state rather than a file problem.
+    case vaultFileNotReadable
+    /// It is there and it is not a KeePass 2 database.
+    case vaultFileNotAKeePassDatabase
+    /// A real KeePass database of a generation newer than the tool on this Mac can
+    /// read. An update, not a credential problem.
+    case vaultFileTooNew
+    // NOTE: there is deliberately NO "the database needs its password" case here.
+    // That is `vaultLocked` above, which the Bitwarden adapter named first and which
+    // describes this exactly: the vault is here and something has to unlock it. The
+    // FIX differs per vendor (Bitwarden: unlock its own tool; a `.kdbx`: type the
+    // database password in Settings), and the fix is per-vendor copy — so a second
+    // case would have been the same state under two names.
+
+    /// The vault refused the last unlock. Distinct from `vaultLocked` because "you
+    /// haven't given me one" and "the one you gave me didn't work" are different
+    /// sentences and only one of them is a correction.
+    case vaultPasswordRejected
+
     /// The states the enablement banner exists for: something to switch on,
     /// install, sign in to, or point at — as opposed to "your app isn't running"
     /// (not a setup problem) or "it's too old" (an update, not an enablement).
     var wantsEnablementBanner: Bool {
-        self == .toolMissing || self == .integrationOff || self == .notSignedIn
-            || self == .toolOutsideAllowList || self == .vaultLocked
+        // A switch rather than a chain of `==`: with a dozen cases, "did anyone
+        // remember to add the new one" stops being answerable by reading, and an
+        // exhaustive switch makes the compiler ask.
+        switch self {
+        case .toolMissing, .integrationOff, .notSignedIn, .toolOutsideAllowList,
+             .vaultLocked, .noVaultFile, .vaultPasswordRejected:
+            true
+        case .appNotRunning, .needsUpdate, .vaultFileMissing, .vaultFileNotDownloaded,
+             .vaultFileNotReadable, .vaultFileNotAKeePassDatabase, .vaultFileTooNew:
+            false
+        }
     }
 }
 
@@ -208,6 +263,16 @@ nonisolated enum VendorDocs {
 
     // KeePassXC.
     static let keePassXC = page("KeePassXC documentation", "https://keepassxc.org/docs/")
+    /// The `keepassxc-cli` reference — the authority for what the tool the `.kdbx`
+    /// file adapter runs can and cannot do. Its own man page, which is where its
+    /// flags are defined.
+    static let keePassXCCLI = page("keepassxc-cli reference",
+                                   "https://keepassxc.org/docs/KeePassXC_UserGuide")
+    /// The two other products that store the same format. Named because a Strongbox
+    /// or KeePassium user arriving at this row has never heard of `keepassxc-cli` and
+    /// needs to know why a KeePassXC tool is what reads their file.
+    static let strongbox = page("Strongbox", "https://strongboxsafe.com")
+    static let keePassium = page("KeePassium", "https://keepassium.com")
 
     // Bitwarden. The CLI page is the authority for installing `bw`, signing in,
     // unlocking and `bw serve`; the Vault Management API page is what documents the
@@ -231,7 +296,7 @@ nonisolated enum VendorDocs {
     static let all: [Page] = [
         onePasswordSDKs, onePasswordCLIIntegration,
         keeperCommander, keeperCommanderLogin, keeperServiceMode,
-        keePassXC,
+        keePassXC, keePassXCCLI, strongbox, keePassium,
         bitwardenCLI, bitwardenVaultAPI,
         dashlaneCLI, protonPassCLI, passboltCLI,
         passwordStore, gopass, lastPassCLI, hashiCorpVaultCLI,
@@ -373,6 +438,9 @@ nonisolated enum LocalVaultCopyBook {
         case .keePassXC: keePassXC
         case .keeper: keeper
         case .bitwarden: bitwarden
+        // Lives in KeePassFileCopy.swift — one line here, so a new vendor's block of
+        // copy never collides with another's in this file.
+        case .keePassFile: keePassFile
         }
     }
 
@@ -835,6 +903,13 @@ nonisolated enum PasswordAppCatalog {
     /// app has no local API, so the app on its own is a pointer — but Keeper
     /// Commander turns it into a real source, and saying so is the single most
     /// useful thing this row can do.
+    ///
+    /// Strongbox and KeePassium are the same shape as Keeper and were added for the
+    /// same reason: neither app has a local API, but both keep their entries in a
+    /// KeePass `.kdbx`, and SimpleVPN now reads that file directly
+    /// (`LocalVaultVendor.keePassFile`). So the app on its own is a pointer, and the
+    /// file row turns it into a real source — which is the single most useful thing
+    /// that row can say to somebody who has never heard the words "KeePass format".
     static func gatedVendor(forBundleID id: String) -> LocalVaultVendor? {
         switch name(forBundleID: id) {
         case "Keeper": .keeper
@@ -843,6 +918,7 @@ nonisolated enum PasswordAppCatalog {
         // into a real source. So the app alone points at the way in rather than
         // appearing as a second, dead row.
         case "Bitwarden": .bitwarden
+        case "Strongbox", "KeePassium": .keePassFile
         default: nil
         }
     }
@@ -1017,10 +1093,14 @@ nonisolated enum SignInSourceCatalog {
                 + "own command-line tool (\(tool)) that could do it, and adding it is on the list. "
                 + "Until then this is a reminder of where to look, not something to pick."
         case .keePassFormat:
-            explanation += "\(app.name) keeps its entries in a KeePass database \u{2014} the same "
-                + "format SimpleVPN already reads through KeePassXC \u{2014} so reading it "
-                + "directly is on the list. Until then this is a reminder of where to look, not "
-                + "something to pick."
+            // NOT "on the list" any more: the file adapter is built. This row is now
+            // only reached when the file row is NOT on offer — no `keepassxc-cli` and
+            // no database chosen — so what it says is how to turn it on.
+            explanation += "\(app.name) keeps its entries in a KeePass database, and SimpleVPN can "
+                + "read one of those directly \u{2014} it just needs KeePassXC\u{2019}s command-line "
+                + "tool on this Mac (\u{201C}brew install --cask keepassxc\u{201D}) and to be pointed "
+                + "at the file. Then \u{201C}KeePass database file\u{201D} appears above as something "
+                + "to pick. Until then, open \(app.name) and copy your password across."
         }
 
         if app.shipsAutoFillExtension {
@@ -1215,6 +1295,14 @@ nonisolated enum SignInFlow {
             // local service.
             "Bitwarden isn\u{2019}t unlocked for SimpleVPN, so it can\u{2019}t get your sign-in "
             + "from it. Run \u{201C}bw unlock\u{201D} and then \u{201C}bw serve\u{201D} in Terminal."
+        case .keePassFile:
+            // Deliberately does NOT say "your database is missing": the same recovery
+            // notice covers a moved file, a file still downloading, a password that
+            // hasn't been typed this session and a tool that isn't installed. Naming
+            // one of those would be wrong three times out of four; the settings pane
+            // says which, in one sentence, right next to the fix.
+            "SimpleVPN can\u{2019}t read your KeePass database file right now. Check it in "
+            + "Settings \u{25B8} Sign-In Sources \u{2014} it will say which part is missing."
         case .applePasswords:
             // Not "Apple Passwords is unavailable" — it isn't, and SimpleVPN was never
             // reading it. What is missing is the server to match, and the way that
