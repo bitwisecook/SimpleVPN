@@ -397,6 +397,28 @@ nonisolated enum ToolCatalog {
         // documented one would send people looking in the wrong place.
         DiscoverableTool(name: "bw", title: "Bitwarden CLI", vendor: .bitwarden),
 
+        // LastPass's own tool, and the vendor row it serves. NO vendor installer path
+        // is asserted: Homebrew's `lastpass-cli` formula and MacPorts' port both land
+        // in prefixes the generic classes above already cover, and the project's own
+        // build is `make install` to a prefix the builder chooses — which is exactly
+        // the case that produces `toolOutsideAllowList` and is what
+        // `signin.tool.lpass.path` exists for. A guessed path presented as a
+        // documented one would send people looking in the wrong place.
+        DiscoverableTool(name: "lpass", title: "LastPass CLI", vendor: .lastPass),
+
+        // GnuPG, which is what the `pass` / `gopass` row actually runs — the store's
+        // own commands are optional and SimpleVPN decrypts with `gpg` directly (see
+        // PasswordStoreReader). It belongs here for two reasons that were both
+        // missing: `creds.passwordstore.tool-path` pre-fills from it, and
+        // `PasswordStoreVaultAdapter` asks `toolFoundOutsideAllowList("gpg")` /
+        // `("gpg2")` — a question that can only ever answer nil for a tool the
+        // catalogue does not carry, which silently made that row's
+        // `toolOutsideAllowList` state unreachable. Both spellings are searched:
+        // Homebrew's `gnupg` installs `gpg` and symlinks `gpg2`, and some
+        // distributions ship only the latter.
+        DiscoverableTool(name: "gpg", title: "GnuPG", vendor: .passwordStore),
+        DiscoverableTool(name: "gpg2", title: "GnuPG (gpg2)", vendor: .passwordStore),
+
         // --- Vendors on the seam, no adapter yet -------------------------
         // Reported anyway, on purpose: "we don't support Dashlane" and "Dashlane's
         // own tool is right here and an adapter is the only missing piece" are very
@@ -404,7 +426,6 @@ nonisolated enum ToolCatalog {
         // Dashlane's manual-install instructions also name /usr/local/bin outright.
         DiscoverableTool(name: "dcli", title: "Dashlane CLI", vendor: nil,
                          vendorInstallerPaths: ["/usr/local/bin/dcli"]),
-        DiscoverableTool(name: "lpass", title: "LastPass CLI", vendor: nil),
         DiscoverableTool(name: "pass", title: "pass (password-store)", vendor: nil),
         DiscoverableTool(name: "gopass", title: "gopass", vendor: nil),
         // Homebrew's formula is `go-passbolt-cli` but the BINARY it installs is

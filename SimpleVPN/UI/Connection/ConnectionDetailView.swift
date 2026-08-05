@@ -865,6 +865,10 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
         case .keePassXC: "KeePassXC will ask to allow access when you connect (and to unlock first, if the database is locked)."
         case .keeper: "Keeper Commander answers without asking, as long as it is signed in on this Mac."
         case .bitwarden: "Bitwarden answers without asking, as long as its local service (\u{201C}bw serve\u{201D}) is running with your vault unlocked."
+        // Named rather than left to the default, because what it feels like is
+        // genuinely different: silent while its helper still remembers, and a Terminal
+        // sign-in the moment it doesn't.
+        case .lastPass: "LastPass answers without asking, as long as its own tool still remembers your master password \u{2014} an hour, unless you have told it otherwise. You type the verification code yourself."
         default: "macOS will ask permission to read the saved password the first time."
         }
     }

@@ -121,9 +121,17 @@ nonisolated extension LocalVaultVendor {
     ///  • `.keePassFile` — MULTIPLE, and it is the case that named the problem: a
     ///    `.kdbx` is a FILE, with its own key file and its own security-key slot,
     ///    and "work" and "personal" databases are entirely ordinary.
+    ///  • `.lastPass` — SINGLE, and verified rather than assumed. `lpass` keeps ONE
+    ///    signed-in account per configuration directory: `agent_save` writes a single
+    ///    `username` value (`agent.c`), `cmd_status` reads that one value back, and
+    ///    `login` overwrites it — so there is no shape in which two LastPass accounts
+    ///    are signed in at once. A second account would mean a second `LPASS_HOME`,
+    ///    and SimpleVPN pins that to the directory it probes so the tool it runs and
+    ///    the files it looked at can never disagree (see LastPassProvider). Same
+    ///    answer as Bitwarden's, for the same structural reason.
     var cardinality: SourceCardinality {
         switch self {
-        case .onePassword, .keePassXC, .keeper, .bitwarden: .single
+        case .onePassword, .keePassXC, .keeper, .bitwarden, .lastPass: .single
         // MULTIPLE, for the same reason as a .kdbx and then some: PASSWORD_STORE_DIR
         // exists precisely so one person can keep several stores, and "work" and
         // "personal" stores are entirely ordinary. Each also carries its own username
@@ -139,7 +147,7 @@ nonisolated extension LocalVaultVendor {
         switch self {
         case .keePassFile: "database"
         case .passwordStore: "store"
-        case .onePassword, .keePassXC, .keeper, .bitwarden: "vault"
+        case .onePassword, .keePassXC, .keeper, .bitwarden, .lastPass: "vault"
         }
     }
 
@@ -147,7 +155,7 @@ nonisolated extension LocalVaultVendor {
         switch self {
         case .keePassFile: "databases"
         case .passwordStore: "stores"
-        case .onePassword, .keePassXC, .keeper, .bitwarden: "vaults"
+        case .onePassword, .keePassXC, .keeper, .bitwarden, .lastPass: "vaults"
         }
     }
 
@@ -923,6 +931,13 @@ nonisolated enum SignInSourceSteps {
             // filesystem rather than from groups, and worth saying so once.
             "An entry\u{2019}s name is its path inside the store, without the .gpg "
             + "\u{2014} for example vpn/work."
+        case .lastPass:
+            // The name has to match EXACTLY — SimpleVPN passes neither of the tool's
+            // loose-matching options, because a substring match can read a different
+            // entry. So the sentence has to say "including its folders", or somebody
+            // will type "GR Lab" for an entry that lives in Work/VPN.
+            "An entry\u{2019}s name has to match exactly, including its folders \u{2014} for "
+            + "example Work/VPN/GR Lab. Its numeric id works too."
         case .onePassword, .keePassXC, .keeper, .bitwarden:
             "Which entry SimpleVPN reads this VPN\u{2019}s sign-in from."
         }

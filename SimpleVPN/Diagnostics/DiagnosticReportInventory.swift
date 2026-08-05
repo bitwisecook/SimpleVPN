@@ -139,6 +139,12 @@ nonisolated enum DiagnosticReportInventory {
         // An empty list is the honest answer, and the tools section is where its real
         // inventory (gpg, and whether `pass` happens to be installed) shows up.
         case .passwordStore: []
+        // The LastPass app is not a read path — `lpass` is — but which app is
+        // installed is exactly the fact that tells a maintainer whether the person
+        // uses LastPass at all, so it is reported.
+        case .lastPass:
+            PasswordAppCatalog.entry(forBundleID: "com.lastpass.LastPass")?.bundleIDs
+                ?? ["com.lastpass.LastPass"]
         }
     }
 
@@ -368,6 +374,12 @@ nonisolated enum DiagnosticReportInventory {
             case .vaultPasswordRejected: "the database refused the password, key file or security key given"
             case .vaultNotAPasswordStore:
                 "that folder is not a password store \u{2014} there is no .gpg-id file in it"
+            // The one state that is a CONFIGURATION of the vendor's tool rather than a
+            // gap in it: the tool would write the password to the pasteboard, so
+            // SimpleVPN declines to run it. Worth spelling out in a report, because
+            // from the outside it looks like a fetch that simply returns nothing.
+            case .toolDivertsSecretToClipboard:
+                "its tool is set up to copy the password to the clipboard, so SimpleVPN will not run it"
             }
         }
     }

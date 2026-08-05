@@ -472,6 +472,10 @@ struct SignInChooserPopover: View {
         case .keePassFile: "VPN/Work"
         // A path inside the store, lower-case by habit and without the `.gpg`.
         case .passwordStore: "vpn/work"
+        // A FULL path, because `lpass` matches names exactly and an entry inside
+        // folders needs its folders typed. A bare title as the example would teach
+        // the one mistake that reads as "LastPass hasn't got my password".
+        case .lastPass: "Work/VPN/GR Lab"
         case .onePassword, .keePassXC, .keeper, .bitwarden: "GR Lab VPN"
         }
     }

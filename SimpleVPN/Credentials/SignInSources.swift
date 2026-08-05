@@ -68,6 +68,13 @@ nonisolated enum LocalVaultVendor: String, CaseIterable, Sendable, Hashable {
     /// share the same layout, and SimpleVPN reads it with `gpg` directly, so neither
     /// tool has to be installed for the source to work (see PasswordStoreReader).
     case passwordStore
+    /// LastPass, through `lpass` — LastPass's own command-line tool, and the only
+    /// local read path LastPass has. Reached over `.cli`, with the tool's own agent
+    /// holding the vault key (see LastPassProvider). Listed LAST on purpose: it is
+    /// the least capable of the sources SimpleVPN reads — it can never hand over a
+    /// verification code — and its own copy says so rather than letting somebody
+    /// find out at connect time.
+    case lastPass
 }
 
 /// HOW a vendor is reached. Deliberately separate from the vendor, and named in
@@ -184,6 +191,22 @@ nonisolated enum LocalVaultBlock: String, Sendable, Equatable {
     /// sentences and only one of them is a correction.
     case vaultPasswordRejected
 
+    /// THE VENDOR'S TOOL IS CONFIGURED TO PUT THE SECRET ON THE PASTEBOARD instead
+    /// of handing it to us, so SimpleVPN declines to run it at all.
+    ///
+    /// A new case rather than a reuse, because every existing one would be a lie:
+    /// nothing is missing, nothing is locked, nobody needs to sign in, and the
+    /// vendor's integration switch is not off. What is true is that a fetch WOULD
+    /// SUCCEED — at leaving a VPN password on the pasteboard for anything on this Mac
+    /// to read — and that must never happen.
+    ///
+    /// LastPass is the vendor that named it. `lpass` expands `$LPASS_HOME/alias.show`
+    /// into every `lpass show`, its own man page suggests putting `-c` there, and
+    /// there is no `--no-clip` to undo it. So the file is read and the row says the
+    /// one line to delete. It is an enablement state, not a failure: nothing is
+    /// broken, and the fix is one edit the user makes.
+    case toolDivertsSecretToClipboard
+
     /// The states the enablement banner exists for: something to switch on,
     /// install, sign in to, or point at — as opposed to "your app isn't running"
     /// (not a setup problem) or "it's too old" (an update, not an enablement).
@@ -198,6 +221,10 @@ nonisolated enum LocalVaultBlock: String, Sendable, Equatable {
         // "You pointed at the wrong folder" IS something to fix, with an exact fix
         // (choose the folder with .gpg-id in it), so it earns a banner.
         case .vaultNotAPasswordStore:
+            true
+        // "Take the -c out of that one file" is as exact a fix as this app has, and
+        // the banner is the only place it can be spelled out.
+        case .toolDivertsSecretToClipboard:
             true
         case .appNotRunning, .needsUpdate, .vaultFileMissing, .vaultFileNotDownloaded,
              .vaultFileNotReadable, .vaultFileNotAKeePassDatabase, .vaultFileTooNew:
@@ -470,6 +497,10 @@ nonisolated enum LocalVaultCopyBook {
         case .keePassFile: keePassFile
         // Lives in PasswordStoreCopy.swift, same reason as KeePassFile's.
         case .passwordStore: passwordStore
+        // Lives in LastPassCopy.swift, same reason again — and that file's header
+        // carries the argument for why this row's copy sets lower expectations than
+        // any other's without being unfair to the vendor.
+        case .lastPass: lastPass
         }
     }
 
@@ -937,6 +968,8 @@ nonisolated enum PasswordAppCatalog {
         .init(name: "Keeper", bundleIDs: ["com.callpod.KeeperDesktop", "com.keepersecurity.KeeperDesktop"],
               prefixes: ["com.callpod.", "com.keepersecurity."],
               localReadPath: .officialCLI("keeper")),
+        // LastPass's own CLI (`lpass`) IS built — see `gatedVendor`. This entry only
+        // matters when `lpass` isn't installed.
         .init(name: "LastPass", bundleIDs: ["com.lastpass.LastPass", "com.lastpass.lastpassmacdesktop"],
               prefixes: ["com.lastpass."], localReadPath: .officialCLI("lpass")),
         .init(name: "NordPass", bundleIDs: ["com.nordpass.macos", "com.nordpass.desktop"],
@@ -986,6 +1019,10 @@ nonisolated enum PasswordAppCatalog {
         // into a real source. So the app alone points at the way in rather than
         // appearing as a second, dead row.
         case "Bitwarden": .bitwarden
+        // LastPass is the same shape once more: the desktop app exposes nothing
+        // locally, and `lpass` is what turns it into a real source. So the app points
+        // at the way in rather than appearing as a second, dead row.
+        case "LastPass": .lastPass
         case "Strongbox", "KeePassium": .keePassFile
         default: nil
         }
@@ -1389,6 +1426,16 @@ nonisolated enum SignInFlow {
             "SimpleVPN can\u{2019}t read your pass / gopass store right now \u{2014} GnuPG "
             + "isn\u{2019}t available, or the store folder isn\u{2019}t where it expected. "
             + "Check it in Settings \u{25B8} Sign-In Sources, which will say which."
+        case .lastPass:
+            // Names the source, as every other recovery sentence does, and names the
+            // two things it is nearly always: nobody has signed the tool in, or its
+            // hour is up. No command here — this string is rendered as plain text, so
+            // a `code` span would show its backticks, and the settings pane gives the
+            // exact command next to the state it belongs to.
+            "SimpleVPN can\u{2019}t read your LastPass sign-in right now \u{2014} "
+            + "LastPass\u{2019}s own tool isn\u{2019}t signed in, or it has forgotten your master "
+            + "password. Check it in Settings \u{25B8} Sign-In Sources, which will say which and "
+            + "give you the one command that fixes it."
         }
     }
 

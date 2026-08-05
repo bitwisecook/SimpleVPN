@@ -176,7 +176,10 @@ enum CredentialSourceSettings {
         // A password store needs no extra spec: GnuPG owns the passphrase entirely, so
         // there is nothing for SimpleVPN to hold, prompt for, or remember behind Touch
         // ID — which is the whole reason this source has no secret of its own.
-        case .onePassword, .keePassXC, .keeper, .bitwarden, .passwordStore:
+        // LastPass needs no extra spec either: the master password goes to `lpass`,
+        // whose own agent holds the key it derives and hands it to no other program,
+        // so there is nothing for SimpleVPN to hold, prompt for or remember.
+        case .onePassword, .keePassXC, .keeper, .bitwarden, .passwordStore, .lastPass:
             []
         case .keePassFile:
             [EngineSettingSpec(

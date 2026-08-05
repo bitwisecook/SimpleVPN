@@ -242,6 +242,30 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                 Text("Your store folder is set up in Settings \u{25B8} Sign-In Sources; this VPN just says which entry to read. SimpleVPN reads your store with GnuPG and never writes to it.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            case .lastPass:
+                // ONE question, and the prompt has to carry the whole shape of an
+                // answer: `lpass` matches names EXACTLY, so an entry inside folders
+                // needs its folders typed. Getting that wrong reads as "LastPass
+                // doesn't have my password", which is the wrong conclusion entirely.
+                HStack {
+                    TextField("Entry", text: $apServer,
+                              prompt: Text(verbatim: "Work/VPN/GR Lab"))
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        .onSubmit(saveLastPass)
+                        .accessibilityLabel("LastPass entry name or id")
+                        .accessibilityValue(apServer.isEmpty
+                            ? "Not set. The name has to match exactly, including its folders \u{2014} for example Work slash VPN slash GR Lab."
+                            : apServer)
+                    Button("Save", action: saveLastPass)
+                        .disabled(apServer.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                .onAppear {
+                    apServer = source.reference.isEmpty ? profile.name : source.reference
+                }
+                Text("SimpleVPN reads just this entry with LastPass\u{2019}s own command-line tool, and reads only its username and password. You type the verification code yourself \u{2014} LastPass\u{2019}s tool has no way to give one.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(14)
@@ -458,6 +482,16 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
     private func saveKeePassFile() {
         var s = source
         s.kind = .keePassFile
+        s.reference = apServer.trimmingCharacters(in: .whitespaces)
+        Task { try? await vpn.setCredentialSource(s, for: profile.id) }
+    }
+
+    private func saveLastPass() {
+        var s = source
+        s.kind = .lastPass
+        // The entry's name, or its full path including groups, or its numeric id.
+        // Trimmed only: `lpass` matches names EXACTLY (SimpleVPN passes neither of its
+        // loose-matching options), so changing the case here would stop it matching.
         s.reference = apServer.trimmingCharacters(in: .whitespaces)
         Task { try? await vpn.setCredentialSource(s, for: profile.id) }
     }

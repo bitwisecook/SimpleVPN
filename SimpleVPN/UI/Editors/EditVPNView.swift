@@ -143,6 +143,9 @@ struct EditVPNView: View {
     /// UNLOCKED vault, which is the only state a fetch works in. Same optimistic
     /// start, same reason.
     @State private var bitwardenAvailable = true
+    /// Whether LastPass's own tool is signed in with a live session — the only state
+    /// a fetch works in. Same optimistic start as the three above, same reason.
+    @State private var lastPassAvailable = true
 
     // 1Password browsing (vault/item pickers). Every list is fetched ONLY on an
     // explicit click: the first one can raise 1Password's authorization prompt,
@@ -273,6 +276,16 @@ struct EditVPNView: View {
                 // spawns nothing unless there is a tool we may run.
                 if SignInSourceSettingsStore.shared.isEnabled(.bitwarden) {
                     bitwardenAvailable = await BitwardenLocalChannel().state() == .unlocked
+                }
+                // LastPass: only asked when the tool is here AND has state to ask
+                // about. `lpass` CREATES its own configuration directory on any
+                // invocation, so probing a Mac that has never used it would leave
+                // ~/.lpass behind to learn nothing — and a vendor the user has
+                // switched off is not probed at all, here as everywhere.
+                if SignInSourceSettingsStore.shared.isEnabled(.lastPass),
+                   LastPassCLIClient.locate() != nil,
+                   LastPassHomeProbe().facts().directoryExists {
+                    lastPassAvailable = await LastPassCLIClient().statusSaysSignedIn() == true
                 }
                 // Prompt-free, so this much can be said without anyone asking:
                 // no 1Password on this Mac is a setup state, not a failure.
@@ -821,6 +834,28 @@ struct EditVPNView: View {
                 // KeePass database", singular, would contradict it the moment
                 // somebody has two.
                 Text("SimpleVPN opens the database you picked above and reads just this entry\u{2019}s username and password \u{2014} it never changes your database. Your databases, their passwords, and any key file or security key each one needs are set up in Settings \u{25B8} Sign-In Sources; this VPN just says which of them to read. If a verification code is required, type it below.")
+                    .font(.callout).foregroundStyle(.secondary)
+                sourceTestRow
+            case .lastPass:
+                // ONE field for the entry, plus the optional username. `lpass` has one
+                // signed-in account at a time, so there is no "which vault" question
+                // and no two-step picker — the whole level-2 answer is "the one".
+                //
+                // The prompt shows a FULL path on purpose: matching is exact, so an
+                // entry that lives in folders needs them typed.
+                TextField("Entry name or id", text: $sourceReference,
+                          prompt: Text(verbatim: "Work/VPN/GR Lab"))
+                    .autocorrectionDisabled()
+                TextField("Username (optional \u{2014} only needed if several entries share a name)",
+                          text: $sourceAccount)
+                    .autocorrectionDisabled()
+                if !lastPassAvailable {
+                    Label("LastPass isn\u{2019}t signed in on this Mac, or has forgotten your master password. In Terminal, run \u{201C}lpass login you@example.com\u{201D} once \u{2014} and \u{201C}echo 'LPASS_AGENT_TIMEOUT=0' >> ~/.lpass/env\u{201D} if you would rather it stopped forgetting after an hour.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text("SimpleVPN reads just this entry using LastPass\u{2019}s own command-line tool, and reads only its username and password. Your LastPass master password goes to that tool and never to SimpleVPN \u{2014} its own helper holds the key and gives it to no other program. The name has to match exactly, including its folders. You always type the verification code yourself: LastPass\u{2019}s tool has no way to give one.")
                     .font(.callout).foregroundStyle(.secondary)
                 sourceTestRow
             }
