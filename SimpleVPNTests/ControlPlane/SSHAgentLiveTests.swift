@@ -152,7 +152,10 @@ nonisolated final class LiveSSHAgent: @unchecked Sendable {
 /// is evaluated in a nonisolated context, and this suite's members are not.
 nonisolated let sshAgentLiveTestsEnabled = LiveSSHFixture.isAvailable && LiveSSHAgent.isAvailable
 
-@Suite(.serialized)
+// Real ssh-agent, real sshd, real sockets — see the note on SSHLiveIntegrationTests.
+// An agent that never answers is indistinguishable from a slow one until a deadline
+// says otherwise.
+@Suite(.serialized, .timeLimit(.minutes(1)))
 struct SSHAgentLiveTests {
 
     private static var enabled: Bool { sshAgentLiveTestsEnabled }

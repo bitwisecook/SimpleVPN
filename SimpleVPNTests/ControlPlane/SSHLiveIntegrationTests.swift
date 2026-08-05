@@ -744,7 +744,15 @@ nonisolated struct Latencies: Sendable {
 
 // MARK: - The tests
 
-@Suite(.serialized)
+// Every test here talks to a real sshd over real sockets, so every one of them can
+// wait forever: a half-open connection, a server that accepts and never replies, a
+// forward that is never closed. One of these has already burned ~9 minutes of a run
+// that way. `.enabled(if:)` only decides whether they run at all — it cannot bound
+// one that has started, so the ceiling has to be a trait.
+//
+// A minute is far above anything healthy here (the whole suite runs in seconds
+// against a working fixture), so a trip means genuinely wedged, not merely slow.
+@Suite(.serialized, .timeLimit(.minutes(1)))
 nonisolated struct SSHLiveIntegrationTests {
 
     /// ALWAYS RUNS. Without it a fixture-less run looks identical to a proven one.

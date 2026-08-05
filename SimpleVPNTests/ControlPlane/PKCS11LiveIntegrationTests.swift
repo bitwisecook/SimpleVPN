@@ -57,6 +57,11 @@ private nonisolated let liveTokenScope = "pkcs11:token=SimpleVPN%20PKCS11%20Live
 
 private nonisolated func liveEnumerator() -> PKCS11Enumerator { .live() }
 
+// Shells out to real p11tool/pkcs11-tool against a real SoftHSM token. LocalToolRunner
+// already bounds each child, but the ceiling is repeated here so a wedge anywhere in
+// the suite — a token that never answers, a module that blocks on load — cannot hold a
+// whole run. See the note on SSHLiveIntegrationTests.
+@Suite(.timeLimit(.minutes(1)))
 struct PKCS11LiveIntegrationTests {
 
     /// Always runs. Its whole job is to make the run's honesty visible in the log:
