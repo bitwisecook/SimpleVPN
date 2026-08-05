@@ -226,7 +226,7 @@ as `{password}{otp}` (no `static-challenge`). No client cert → `ENABLE_EXTERNA
   failure-time diagnostics (DNS/reach/TLS/captive-portal, baseline comparison) — active probes ONLY on
   failure; live link health is judged passively from byte counters.
 
-## Config surfaces — group taxonomy & naming glossary (binding)
+## Config surfaces — group taxonomy (binding; naming lives in ONTOLOGY.md)
 
 ONE canonical group taxonomy across every config surface, so a user who learns one editor
 knows them all. Groups, in this order, in every editor (a kind that has nothing for a group
@@ -290,25 +290,17 @@ Not a full-width `.roundedBorder` field whose placeholder doubles as its name.
 hand-written string. A row that renders the spec name while its Toggle says something else
 gives one setting two names: search finds one, the screen shows the other.
 
-### Naming glossary (one term per concept — includes AX labels and the manual)
+### Naming glossary — MOVED to ONTOLOGY.md
 
-| Concept | House term | Never |
-|---|---|---|
-| The remote machine a VPN connects to | **server** / "Server address" | endpoint, gateway, host, target (except quoting a protocol's own key, e.g. wg-quick `Endpoint`, in a summary) |
-| A proxy on the way to the server | **connection proxy** / "Proxy Host" | egress proxy, upstream |
-| SSH bastion | **jump host** | bastion alone (parenthetical "(bastion)" once is fine) |
-| Authenticating | **sign in** (verb), **sign-in** (noun/adj) | log in, login, logon, authenticate (UI copy) |
-| OTP / one-time code | **verification code** (Apple's word) | one-time passcode/password, OTP alone (a parenthetical "(OTP)"/"(TOTP)" gloss is fine) |
-| Session keep-alive | **keepalive** (one word) | keep-alive, heartbeat |
-| Routing everything through the VPN | **"Send All Traffic"** (control), **full tunnel** (gloss) | default route, send everything |
-| Selective routing | **split tunnel** | policy tunnel |
-| Keeping LAN reachable | **"Allow local network access"** | local LAN, exclude local networks |
-| Credentials | **username / password** | user, login, account name |
-| Other products' own labels | keep their vocabulary (1Password "one-time password" field, GlobalProtect "portal/gateway", System Settings pane names) | translating another product's proper terms |
+The one-term-per-concept table, the vendor mappings it translates from, and the rules for
+writing help text now live in **`ONTOLOGY.md`** at the repo root. It is the same authority,
+in one place, and it covers what this table could not: what every VPN concentrator and
+password app calls the same thing, so a new kind or source is named by looking it up rather
+than by guessing.
 
-Stable descriptor/spec **ids never change** when a display name changes — ids are the
-CLI/MDM/manual-anchor contract (`openvpn.server`, `wg.endpoint`, …). Manual anchors key on
-ids, so renames only touch heading/link text.
+**Read `ONTOLOGY.md` before naming anything a user will read** — a label, a summary, an AX
+string, a manual heading, an error sentence.
+
 
 ### Adding a new engine's options (e.g. the libssh SSH engine)
 
