@@ -21,6 +21,96 @@ Two consequences worth stating plainly:
 - **Secrets travel on stdout, or on stdin, and nowhere else.** Never argv (world-readable
   through `ps`), never a log line, never an error string, never a diagnostic bundle.
 
+## The abstraction: three axes, and a plan rather than a secret
+
+Built last, deliberately — after all twelve sources — so it could be derived from what
+they converged on rather than guessed at. Three axes, and delivery is not one of them.
+
+| Axis | Type | Grows when |
+|---|---|---|
+| **Kind** — what is wanted | `AuthKind` (`Shared/AuthKind.swift`) | a **protocol** needs a new sort of thing. Closed; every switch exhaustive. |
+| **Transport** — the shape of the channel | `AuthTransport` | almost never. Nine shapes: five for vaults, plus keychain, AutoFill, agent, hardware. |
+| **Vendor / source** — who holds it | `LocalVaultVendor`, `AuthSourceID` | freely. A thirteenth vendor is one file and adds nothing to the other two axes. |
+
+`AuthKind` replaced **two** enums that overlapped by convention — `CredentialField` (four
+cases, "what a source is asked for") and `CredentialRole` (seven, "what slot a VPN needs
+filled"). The old header said the ids "reuse `CredentialField.rawValue` where they
+overlap", and every profile's stored `fieldMap` is keyed on those strings. One enum makes
+that structural; a test pins the raw values, because a rename would silently unmap
+somebody's 1Password fields.
+
+**The unified call returns a plan, not a secret** (`AuthPlan`). Three of the nine
+mechanisms never hand over bytes, and a `resolve() -> RawCredentials` seam could not
+express any of them — which is exactly why all three sat outside the credential seam
+with their own return shapes and error conventions:
+
+- `.value` → the bytes (`RawCredentials`, unchanged: it was right for this delivery);
+- `.possession` → a **name** — an agent socket path, a `pkcs11:` URI, a slot number;
+- `.typedByDevice` → an **armed capture**, because a security key *types* and focus
+  management is therefore the whole feature.
+
+`AuthSourceCatalog` declares all sixteen mechanisms in one table — supplies / proves /
+**withholds**, transport, cardinality, delivery, probe ceiling — reading each vault's
+transports and cardinality from the adapter that owns them, so the table cannot drift
+from the code.
+
+**Not modelled, and said so rather than fudged:** OpenConnect's conversational SSO and
+Tailscale's control-URL sign-in. In both the *engine* authenticates and our whole role is
+to open a browser; there is no credential to plan, name or arm. A `.conductedByEngine`
+case is the shape they would take, and it is not added until something produces one.
+
+### Where a failure lives
+
+`AuthLocus` × `AuthCause` replaced "every caller gets a `LocalizedError` string out of
+twelve different enums, and can do nothing with it". The locus is the three configuration
+levels **plus a fourth**:
+
+| Locus | Level | Example | Who fixes it |
+|---|---|---|---|
+| `.transport` | 1 | the binary is missing, nobody is signed in | Settings ▸ Sign-In Sources |
+| `.instance` | 2 | the database has moved, the vault is locked | choose or re-point it |
+| `.reach` | — | the server does not answer, TLS fails, its identity changed | **nobody** — it is the network |
+| `.entry` | 3 | that entry does not exist any more | this VPN's sign-in settings |
+
+`.reach` is the Passbolt finding. For a `.kdbx` the channel to the instance is free and
+`stat` settles it, so levels 1 and 2 describe everything; for a **server** the channel is
+a network, and reachability is none of "the tool", "the address" or "the entry". It
+deliberately has no `configLevel`: there is no field anybody can go and correct, and
+saying that is more useful than sending them to a screen where nothing would help.
+
+There is deliberately **no `.reach` block**. Reach problems are never *probed* — see the
+ceiling below — so they are learned at fetch time and arrive as an `AuthFailure`.
+
+### `.unchecked` now says why it is unchecked
+
+`AuthProbeCeiling` is the second Passbolt fix. The bare `.unchecked` said the same thing
+about two states needing opposite handling:
+
+- **the check is owed** (`.checkOwedOnUse`) — cheap, local, and picking the row pays it.
+  1Password, Keeper, Bitwarden, Dashlane, Proton Pass, LastPass.
+- **the check will never happen** — `.wouldSignInToServer` (Passbolt: a deeper probe is a
+  real authentication attempt against somebody else's machine, spending their rate
+  limiter from a background refresh nobody asked for), `.wouldPromptTheUser` (a `.kdbx`
+  passphrase, GnuPG's pinentry), `.wouldSpendSingleUseCode` (burning a code to find out
+  whether codes work).
+
+`willBeProbed` is the distinction, and it is what stops a row promising "SimpleVPN checks
+this when you pick it" about something nothing will ever check. A related bug went with
+it: a vendor with no `uncheckedNote` of its own used to fall through with its state left
+at `.ready`, so an unproven row announced itself to VoiceOver as "Ready to use".
+
+### One question, one answer
+
+`AuthSatisfaction` — `.ready` / `.unproven(ceiling)` / `.broken(locus:block:)` /
+`.typedInstead(reason)` — replaced a `canServe(_:) -> Bool` that the connect form read
+while the unattended reconnect path re-derived the same question its own way, from
+different inputs, in a different file. `SignInSourceAvailability.satisfaction(for:)` owns
+levels 1–3; `VPNController.authSatisfaction(for:)` adds only what a profile knows.
+
+Everything goes through the same two calls: connect, the connect form, the unattended
+reconnect, the editor's Test button — and the CLI and App Intents, which bottom out at
+`connectUsingConfiguredSource` and so were covered for free.
+
 ## Three levels of configuration
 
 Getting these confused is how "which vault" ends up unable to express "work and

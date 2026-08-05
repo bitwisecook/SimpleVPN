@@ -75,7 +75,7 @@ nonisolated enum DiagnosticReportInventory {
 
         for vendor in LocalVaultVendor.allCases {
             let copy = LocalVaultCopyBook.copy(for: vendor)
-            var detail: [ReportValue] = [.words("state: \(stateWords(facts.rawAvailability(vendor)))")]
+            var detail: [ReportValue] = [.words("state: \(stateWords(facts.rawAvailability(vendor), vendor: vendor))")]
             if !facts.isEnabled(vendor) {
                 detail.append(.words("switched off in SimpleVPN\u{2019}s settings"))
             }
@@ -241,7 +241,8 @@ nonisolated enum DiagnosticReportInventory {
             }
             return DiagnosticReportField(
                 label: "\(copy.title): \(instance.name)",
-                value: .state(stateWords(facts.rawAvailability(vendor, instance: instance.id))),
+                value: .state(stateWords(facts.rawAvailability(vendor, instance: instance.id),
+                                         vendor: vendor)),
                 detail: detail)
         }
     }
@@ -267,7 +268,7 @@ nonisolated enum DiagnosticReportInventory {
             }
             return DiagnosticReportField(
                 label: copy.title,
-                value: .state(stateWords(facts.rawAvailability(vendor))),
+                value: .state(stateWords(facts.rawAvailability(vendor), vendor: vendor)),
                 detail: detail)
     }
 
@@ -466,10 +467,36 @@ nonisolated enum DiagnosticReportInventory {
 
     /// The four-state availability, in the same words the chooser uses. One
     /// vocabulary, so a report and a screenshot of the app agree.
-    static func stateWords(_ availability: LocalVaultAvailability) -> String {
-        switch availability {
+    /// `vendor` supplies the vendor's OWN NOUN for the file-shaped states — "database",
+    /// "store", "server". Without it these sentences said "database" about everything,
+    /// which was true of every multi-instance vendor until one of them stopped being a
+    /// file: telling somebody their password STORE's "database file is not where
+    /// SimpleVPN was told to look" describes a thing that does not exist. Optional, and
+    /// falling back to "vault", so a caller with no vendor in hand still gets a sentence
+    /// rather than a placeholder.
+    static func stateWords(_ availability: LocalVaultAvailability,
+                           vendor: LocalVaultVendor? = nil) -> String {
+        let noun = vendor?.instanceNoun ?? "vault"
+        return switch availability {
         case .notInstalled: "not installed"
-        case .unchecked: "installed and reachable, never proven end to end"
+        // "installed and reachable, never proven end to end" was the old sentence, and
+        // for a SERVER-shaped source it claimed something nothing had established:
+        // reachability is exactly what was never checked. The ceiling says which of
+        // the two it is, so a maintainer reading a report can tell "the check is owed"
+        // from "the check would have been a sign-in attempt on somebody else's box".
+        case .unchecked(let ceiling):
+            switch ceiling {
+            case .checkOwedOnUse: "installed, and the one-time check hasn\u{2019}t run yet"
+            case .wouldSignInToServer:
+                "set up, and deliberately never probed \u{2014} asking would be a real sign-in "
+                + "attempt against the server"
+            case .wouldPromptTheUser:
+                "set up, and deliberately never probed \u{2014} checking further would have to "
+                + "ask the user for something"
+            case .wouldSpendSingleUseCode:
+                "set up, and deliberately never probed \u{2014} checking further would use up a "
+                + "verification code"
+            }
         case .ready: "ready to use"
         case .blocked(let block):
             switch block {
@@ -487,13 +514,16 @@ nonisolated enum DiagnosticReportInventory {
             // The kdbx file states. Each is a different fix, and each is
             // indistinguishable from a wrong password unless it is named — which
             // is the whole reason the header is read before any unlock.
-            case .noVaultFile: "no database has been chosen yet"
-            case .vaultFileMissing: "the database file is not where SimpleVPN was told to look"
-            case .vaultFileNotDownloaded: "the database is in iCloud or Dropbox and has not been downloaded yet"
-            case .vaultFileNotReadable: "the database file exists, but macOS will not let SimpleVPN open it"
+            case .noVaultFile: "no \(noun) has been chosen yet"
+            case .vaultFileMissing: "the \(noun) is not where SimpleVPN was told to look"
+            case .vaultFileNotDownloaded:
+                "the \(noun) is in iCloud or Dropbox and has not been downloaded yet"
+            case .vaultFileNotReadable:
+                "the \(noun) is there, but macOS will not let SimpleVPN open it"
             case .vaultFileNotAKeePassDatabase: "that file is not a KeePass database"
             case .vaultFileTooNew: "the database is a newer KeePass version than the installed tool reads"
-            case .vaultPasswordRejected: "the database refused the password, key file or security key given"
+            case .vaultPasswordRejected:
+                "the \(noun) refused the password, key file or security key given"
             case .vaultNotAPasswordStore:
                 "that folder is not a password store \u{2014} there is no .gpg-id file in it"
             // The one state that is a CONFIGURATION of the vendor's tool rather than a

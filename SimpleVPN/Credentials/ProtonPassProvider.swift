@@ -266,7 +266,7 @@ nonisolated struct ProtonPassProvider: CredentialProvider {
         return await channel.sessionState() == .ready
     }
 
-    func resolve(profile: String, fields: Set<CredentialField>) async throws -> RawCredentials {
+    func resolve(profile: String, fields: Set<AuthKind>) async throws -> RawCredentials {
         let address = try ProtonPassReference.parse(reference).get()
         // A name is resolved to IDs BY US, so nothing downstream can silently take
         // the first of several matches. An ID address skips this entirely — one
@@ -715,7 +715,7 @@ struct ProtonPassVaultAdapter: LocalVaultAdapter {
     /// One channel, and only one: Proton's own command-line tool. Its SSH agent is
     /// not a second way in — it serves keys to `ssh`, not usernames and passwords to
     /// us — so listing `.localDaemon` here would claim a channel that does not exist.
-    let transports: [LocalVaultTransport] = [.cli]
+    let transports: [AuthTransport] = [.cli]
 
     /// The Proton Pass desktop app, which is NOT a read path — it has no local API.
     /// It is only the signal that this person uses Proton Pass, and therefore that
@@ -753,7 +753,7 @@ struct ProtonPassVaultAdapter: LocalVaultAdapter {
         // on sign-in and deletes it on sign-out, so its absence cannot mean anything
         // else. Its presence proves only that a session existed, which is why that
         // way round is `.unchecked` rather than `.ready`.
-        return sessionFileExists ? .unchecked : .blocked(.notSignedIn)
+        return sessionFileExists ? .unchecked(.checkOwedOnUse) : .blocked(.notSignedIn)
     }
 
     /// The deep answer as a pure mapping. Each state has one fix, and each fix is a

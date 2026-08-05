@@ -563,7 +563,7 @@ nonisolated struct LastPassProvider: CredentialProvider {
         return await channel.statusSaysSignedIn() == true
     }
 
-    func resolve(profile: String, fields: Set<CredentialField>) async throws -> RawCredentials {
+    func resolve(profile: String, fields: Set<AuthKind>) async throws -> RawCredentials {
         let ref = reference.trimmingCharacters(in: .whitespaces)
         guard !ref.isEmpty else { throw LastPassError.noEntry }
         // Checked first, and before anything is spawned: with a diverting alias in
@@ -712,7 +712,7 @@ nonisolated enum LastPassAvailabilityRules {
         // "Not logged in" while reads work perfectly (`agent_start` returns early
         // when `plaintext_key` exists). That still cannot be PROVEN without a read,
         // so it is `.unchecked` too — with a different note.
-        return home.agentSocketExists || home.keyIsOnDisk ? .unchecked
+        return home.agentSocketExists || home.keyIsOnDisk ? .unchecked(.checkOwedOnUse)
                                                           : .blocked(.vaultLocked)
     }
 
@@ -737,7 +737,7 @@ nonisolated enum LastPassAvailabilityRules {
         // The tool said no. With the key on disk that answer is known to be wrong
         // about whether a READ would work, so the honest state is "reachable,
         // unproven" rather than "locked".
-        if home.keyIsOnDisk { return .unchecked }
+        if home.keyIsOnDisk { return .unchecked(.checkOwedOnUse) }
         return home.hasSignedInBefore ? .blocked(.vaultLocked) : .blocked(.notSignedIn)
     }
 }
@@ -771,7 +771,7 @@ nonisolated struct LastPassVaultAdapter: LocalVaultAdapter {
     /// `.cli`, and only `.cli`. LastPass has no other local channel: no loopback
     /// service, no documented socket for us, and an agent that refuses any peer
     /// whose executable is not `lpass` itself.
-    let transports: [LocalVaultTransport] = [.cli]
+    let transports: [AuthTransport] = [.cli]
 
     /// The LastPass desktop app, which is NOT a read path.
     static let appBundleIDs = ["com.lastpass.LastPass", "com.lastpass.lastpassmacdesktop"]

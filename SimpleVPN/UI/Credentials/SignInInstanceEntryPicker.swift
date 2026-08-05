@@ -41,8 +41,10 @@ struct SignInInstanceEntryPicker: View {
     /// record path for Keeper, an entry path for a `.kdbx`.
     var entryPrompt: String
     var accountLabel: String
-    /// "Set up databases…" — opens Settings ▸ Sign-In Sources at this vendor. nil in
-    /// a host with no way to open a window.
+    /// "Set Up Databases…" / "…Stores…" / "…Servers…" — the vendor's OWN plural, never
+    /// the word "instance" and never "database" for something that is not one. Opens
+    /// Settings ▸ Sign-In Sources at this vendor; nil in a host with no way to open a
+    /// window.
     var onConfigure: (() -> Void)?
 
     @State private var settings = SignInSourceSettingsStore.shared
@@ -129,7 +131,7 @@ struct SignInInstanceEntryPicker: View {
             switch availability {
             case .ready: return "Ready to use."
             case .notInstalled: return "Not found on this Mac."
-            case .unchecked: return copy.uncheckedNote ?? "SimpleVPN checks this when you connect."
+            case .unchecked(let ceiling): return copy.uncheckedNote ?? ceiling.fallbackNote
             case .blocked(let block): return copy.headline(for: block)
             }
         }()

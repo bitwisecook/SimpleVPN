@@ -445,7 +445,10 @@ struct SignInSourcesSettings: View {
             switch availability {
             case .ready: return "Ready to use."
             case .notInstalled: return "Nothing found for it on this Mac."
-            case .unchecked: return copy.uncheckedNote ?? "SimpleVPN checks this when you pick it."
+            // The vendor's wording when it has some, else the CEILING's — never a
+            // fourth copy of "SimpleVPN checks this when you pick it", which was
+            // wrong for a server nothing will ever probe.
+            case .unchecked(let ceiling): return copy.uncheckedNote ?? ceiling.fallbackNote
             case .blocked(let block): return copy.headline(for: block)
             }
         }()
@@ -497,7 +500,10 @@ struct SignInSourcesSettings: View {
             switch availability {
             case .notInstalled: return "Not found on this Mac."
             case .ready: return "Ready to use."
-            case .unchecked: return copy.uncheckedNote ?? "SimpleVPN checks this when you pick it."
+            // The vendor's wording when it has some, else the CEILING's — never a
+            // fourth copy of "SimpleVPN checks this when you pick it", which was
+            // wrong for a server nothing will ever probe.
+            case .unchecked(let ceiling): return copy.uncheckedNote ?? ceiling.fallbackNote
             case .blocked(let block): return copy.headline(for: block)
             }
         }()

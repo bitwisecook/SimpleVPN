@@ -100,7 +100,7 @@ nonisolated struct PassboltProvider: CredentialProvider {
         return reader.serverState() == .readyToTry
     }
 
-    func resolve(profile: String, fields: Set<CredentialField>) async throws -> RawCredentials {
+    func resolve(profile: String, fields: Set<AuthKind>) async throws -> RawCredentials {
         let config = await MainActor.run { PassboltConfiguration.current(instance: instance) }
         guard config.isResolved else {
             throw PassboltError.noServerConfigured("no server is set up yet")
@@ -149,7 +149,7 @@ nonisolated struct PassboltVaultAdapter: LocalVaultAdapter {
     let storedKind = CredentialSourceKind.passbolt
     /// `.cli`, and only `.cli`. There is no local daemon and no socket: Passbolt
     /// is a server, and its own command-line program is the whole local surface.
-    let transports: [LocalVaultTransport] = [.cli]
+    let transports: [AuthTransport] = [.cli]
 
     /// Without an instance there is no server to look at, so the vendor-level
     /// answer is the best of its configured servers (computed by the registry) or,
@@ -186,7 +186,17 @@ nonisolated struct PassboltVaultAdapter: LocalVaultAdapter {
             // whole difference between a file-shaped instance and a server-shaped
             // one: `stat` can prove a file is readable, and nothing short of a
             // login can prove a server is. The row's `uncheckedNote` says so.
-            return .unchecked
+            //
+            // AND THE CEILING SAYS WHY. `.wouldSignInToServer` is not "we haven't got
+            // round to it": it is "we never will, and here is the reason". A deeper
+            // probe would be a real authentication attempt against somebody else's
+            // machine, spending their rate limiter and their lockout budget, from a
+            // background refresh nobody asked for. Before the ceiling existed this
+            // state was indistinguishable from 1Password's "the check is owed and
+            // picking the row pays it", so the row could promise a check that would
+            // never happen — and `AuthProbeCeiling.willBeProbed` is now what tells the
+            // two apart, without any caller knowing the word "Passbolt".
+            return .unchecked(.wouldSignInToServer)
         case .needsPassphrase:
             // The key is there and nothing can unlock it. Bitwarden named this state
             // and it is the same one — and here its fix is one field on this Mac

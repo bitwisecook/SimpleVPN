@@ -17,7 +17,7 @@ struct OnePasswordFieldMapSheet: View {
     let fields: [OnePasswordProvider.OPField]
     /// The auth roles this VPN actually uses — computed from its configuration,
     /// so the sheet only offers slots that mean something for this connection.
-    let roles: [CredentialRole]
+    let roles: [AuthKind]
     @Binding var mapping: [String: String]
     @Environment(\.dismiss) private var dismiss
 

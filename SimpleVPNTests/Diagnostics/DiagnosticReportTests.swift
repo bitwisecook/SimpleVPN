@@ -390,7 +390,7 @@ struct DiagnosticReportInventoryTests {
     @Test func everyAvailabilityStateHasItsOwnSentence() {
         var seen = Set<String>()
         let states: [LocalVaultAvailability] = [
-            .notInstalled, .unchecked, .ready,
+            .notInstalled, .unchecked(.checkOwedOnUse), .ready,
             .blocked(.appNotRunning), .blocked(.needsUpdate), .blocked(.integrationOff),
             .blocked(.toolMissing), .blocked(.notSignedIn), .blocked(.toolOutsideAllowList),
         ]

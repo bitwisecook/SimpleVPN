@@ -491,7 +491,7 @@ struct DashlaneProvider: CredentialProvider {
         return await channel.state() == .unlocked
     }
 
-    func resolve(profile: String, fields: Set<CredentialField>) async throws -> RawCredentials {
+    func resolve(profile: String, fields: Set<AuthKind>) async throws -> RawCredentials {
         let ref = reference.trimmingCharacters(in: .whitespaces)
         guard !ref.isEmpty else { throw DashlaneError.noItem }
         // THE HANG GUARD, and the reason it is here rather than in the channel: a
@@ -607,7 +607,7 @@ struct DashlaneVaultAdapter: LocalVaultAdapter {
     /// `.cli`, and only `.cli`. Dashlane's desktop app exposes nothing local — no
     /// socket, no daemon, no signed IPC — and `dcli` has no serve mode of its own, so
     /// unlike Keeper and Bitwarden there is no second channel to prefer.
-    let transports: [LocalVaultTransport] = [.cli]
+    let transports: [AuthTransport] = [.cli]
 
     /// The Dashlane desktop app, which is NOT a read path — it is only the signal
     /// that this person uses Dashlane, and therefore that `dcli` is worth telling
@@ -633,7 +633,7 @@ struct DashlaneVaultAdapter: LocalVaultAdapter {
                              foundOutsideAllowList: Bool,
                              appIsInstalled: Bool,
                              hasLocalDatabase: Bool) -> LocalVaultAvailability {
-        if toolIsRunnable { return .unchecked }
+        if toolIsRunnable { return .unchecked(.checkOwedOnUse) }
         // Before saying "not installed", ASK. Discovery searches every location any
         // package manager, version manager or vendor installer uses — plus `PATH`,
         // which the execution side will never consult — so it can tell "you don't

@@ -24,7 +24,7 @@ protocol CredentialProvider: Sendable {
     func isAvailable(for profile: String) async -> Bool
     /// Resolve the requested fields, prompting/calling out as needed. May return
     /// fewer fields than requested; the caller assembles via `CredentialRequest`.
-    func resolve(profile: String, fields: Set<CredentialField>) async throws -> RawCredentials
+    func resolve(profile: String, fields: Set<AuthKind>) async throws -> RawCredentials
 }
 
 /// Credentials typed into the app's UI (or filled there by system AutoFill).
@@ -38,7 +38,7 @@ struct ManualCredentialProvider: CredentialProvider {
 
     func isAvailable(for profile: String) async -> Bool { true }
 
-    func resolve(profile: String, fields: Set<CredentialField>) async throws -> RawCredentials {
+    func resolve(profile: String, fields: Set<AuthKind>) async throws -> RawCredentials {
         RawCredentials(username: username.isEmpty ? nil : username,
                        password: password.isEmpty ? nil : password,
                        otp: otp.isEmpty ? nil : otp,
@@ -187,7 +187,7 @@ struct BiometricCredentialProvider: CredentialProvider {
         BiometricCredentialStore.exists(profile: profile)
     }
 
-    func resolve(profile: String, fields: Set<CredentialField>) async throws -> RawCredentials {
+    func resolve(profile: String, fields: Set<AuthKind>) async throws -> RawCredentials {
         // Evaluate the policy explicitly (rather than letting the keychain read
         // prompt implicitly) so cancellation surfaces as CancellationError and
         // the prompt carries the VPN's name.
@@ -227,13 +227,19 @@ struct BiometricCredentialProvider: CredentialProvider {
 //   - passkey: AuthenticationServices (ASAuthorizationController) for VPN types that
 //     authenticate with WebAuthn.
 
-/// Lists the credential providers usable for a profile, in preference order.
-/// Manual is always last (the fallback); managers slot in ahead of it as they land.
-enum CredentialProviderRegistry {
-    static func providers(for profile: String, manualFallback: ManualCredentialProvider) async -> [CredentialProvider] {
-        var out: [CredentialProvider] = []
-        // e.g. if await onePassword.isAvailable(for: profile) { out.append(onePassword) }
-        out.append(manualFallback)
-        return out
-    }
-}
+// DELETED: `CredentialProviderRegistry`.
+//
+// It listed "the credential providers usable for a profile, in preference order" and
+// had NO CALLERS — not one, anywhere, including tests. Its body still carried the
+// commented-out line that was going to add 1Password ("e.g. if await
+// onePassword.isAvailable(…)"), which never happened because the real dispatch grew up
+// elsewhere: `VPNController.managerProvider(for:)` resolving through
+// `LocalVaultRegistry`, which is the seam twelve vendors were actually built on.
+//
+// Deleted rather than adapted, deliberately. Two registries for one job is how the
+// wrong one gets extended by somebody who found it first — and a preference-ORDERED
+// list was the wrong model anyway: a profile names exactly one source (level 3), and
+// falling through to a second one would mean reading a vault the user did not choose.
+//
+// What answers "which sources could this Mac use?" is `AuthSourceCatalog.all`; what
+// answers "which one will THIS VPN use?" is `VPNController.authSatisfaction(for:)`.

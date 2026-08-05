@@ -55,7 +55,7 @@ struct KeeperProvider: CredentialProvider {
         return await channel.isReachable()
     }
 
-    func resolve(profile: String, fields: Set<CredentialField>) async throws -> RawCredentials {
+    func resolve(profile: String, fields: Set<AuthKind>) async throws -> RawCredentials {
         let ref = reference.trimmingCharacters(in: .whitespaces)
         guard !ref.isEmpty else { throw KeeperError.noRecord }
         let record = try await channel.record(reference: ref)

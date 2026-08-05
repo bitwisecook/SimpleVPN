@@ -831,7 +831,7 @@ struct BitwardenAvailabilityTests {
     /// READY: the service answering with an unlocked vault.
     @Test func unlockedIsReady() async {
         let adapter = BitwardenVaultAdapter(channel: StubChannel(stubbedState: .unlocked))
-        #expect(await adapter.deepScan(quick: .unchecked) == .ready)
+        #expect(await adapter.deepScan(quick: .unchecked(.checkOwedOnUse)) == .ready)
     }
 
     /// NEEDS ONE-TIME SETUP, part one: signed in but locked. Its own state, because
@@ -839,7 +839,7 @@ struct BitwardenAvailabilityTests {
     /// that they are not is how they conclude the app cannot see their vault.
     @Test func lockedIsItsOwnStateWithItsOwnFix() async throws {
         let adapter = BitwardenVaultAdapter(channel: StubChannel(stubbedState: .locked))
-        #expect(await adapter.deepScan(quick: .unchecked) == .blocked(.vaultLocked))
+        #expect(await adapter.deepScan(quick: .unchecked(.checkOwedOnUse)) == .blocked(.vaultLocked))
         let copy = LocalVaultCopyBook.bitwarden
         #expect(copy.headline(for: .vaultLocked).contains("locked"))
         let guidance = try #require(copy.guidance(for: .vaultLocked))
@@ -851,7 +851,7 @@ struct BitwardenAvailabilityTests {
     /// NEEDS ONE-TIME SETUP, part two: nobody signed in.
     @Test func unauthenticatedIsNotSignedIn() async throws {
         let adapter = BitwardenVaultAdapter(channel: StubChannel(stubbedState: .unauthenticated))
-        #expect(await adapter.deepScan(quick: .unchecked) == .blocked(.notSignedIn))
+        #expect(await adapter.deepScan(quick: .unchecked(.checkOwedOnUse)) == .blocked(.notSignedIn))
         let guidance = try #require(LocalVaultCopyBook.bitwarden.guidance(for: .notSignedIn))
         #expect(guidance.example.contains { $0.text == "bw login" })
     }
@@ -861,7 +861,7 @@ struct BitwardenAvailabilityTests {
     /// inventing a state — "we couldn't ask" is not "you aren't signed in".
     @Test func nothingAnsweringLeavesTheCheapAnswerAlone() async {
         let adapter = BitwardenVaultAdapter(channel: StubChannel(stubbedState: nil))
-        #expect(await adapter.deepScan(quick: .unchecked) == .unchecked)
+        #expect(await adapter.deepScan(quick: .unchecked(.checkOwedOnUse)) == .unchecked(.checkOwedOnUse))
         #expect(await adapter.deepScan(quick: .blocked(.toolMissing)) == .blocked(.toolMissing))
         #expect(await adapter.deepScan(quick: .notInstalled) == .notInstalled)
     }
@@ -894,7 +894,7 @@ struct BitwardenAvailabilityTests {
                 == .blocked(.toolMissing))
         #expect(BitwardenVaultAdapter.availability(toolIsRunnable: true,
                                                    foundOutsideAllowList: true,
-                                                   appIsInstalled: true) == .unchecked)
+                                                   appIsInstalled: true) == .unchecked(.checkOwedOnUse))
     }
 
     /// A cheap scan spawns nothing and asks the network nothing; the state of the

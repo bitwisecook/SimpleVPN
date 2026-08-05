@@ -51,7 +51,7 @@ struct OnePasswordProvider: CredentialProvider {
         return await OnePasswordNative.probe()
     }
 
-    func resolve(profile: String, fields: Set<CredentialField>) async throws -> RawCredentials {
+    func resolve(profile: String, fields: Set<AuthKind>) async throws -> RawCredentials {
         var ref = itemReference.trimmingCharacters(in: .whitespaces)
         guard !ref.isEmpty else { throw OPError.noReference }
         var vault = self.vault.trimmingCharacters(in: .whitespaces)
@@ -81,7 +81,7 @@ struct OnePasswordProvider: CredentialProvider {
             let refs = native.refs
             // The key passphrase isn't a CredentialField (it rides alongside),
             // but when the map names one, fetch it in the same authorization.
-            let passphraseRef = fieldMap[CredentialRole.privateKeyPassphrase.rawValue]
+            let passphraseRef = fieldMap[AuthKind.privateKeyPassphrase.rawValue]
                 .flatMap { $0.isEmpty ? nil : "op://\(vault)/\(ref)/\($0)" }
             do {
                 let values = try await OnePasswordNative.resolve(
@@ -136,17 +136,17 @@ struct OnePasswordProvider: CredentialProvider {
     /// the caller a wrong guess should quietly retry via the full-item read
     /// rather than surface an error. OTP refs ask for the computed code via
     /// `?attribute=otp` rather than the enrollment secret.
-    private func nativeSecretRefs(for fields: Set<CredentialField>, item: String,
+    private func nativeSecretRefs(for fields: Set<AuthKind>, item: String,
                                   vault v: String)
-        -> (refs: [CredentialField: String], usedDefaults: Bool)? {
+        -> (refs: [AuthKind: String], usedDefaults: Bool)? {
         guard !v.isEmpty, !item.contains("://") else { return nil }
         var usedDefaults = false
-        func fieldName(_ role: CredentialRole, default defaultName: String) -> String {
+        func fieldName(_ role: AuthKind, default defaultName: String) -> String {
             if let mapped = fieldMap[role.rawValue], !mapped.isEmpty { return mapped }
             usedDefaults = true
             return defaultName
         }
-        var out: [CredentialField: String] = [:]
+        var out: [AuthKind: String] = [:]
         for field in fields {
             switch field {
             case .username:
@@ -156,7 +156,21 @@ struct OnePasswordProvider: CredentialProvider {
             case .otp:
                 // Optional either way: an item without a TOTP field serves none.
                 out[field] = "op://\(v)/\(item)/\(fieldName(.otp, default: "one-time password"))?attribute=otp"
-            case .passkey:
+            // Everything else has no `op://` reference to build, for one of two
+            // reasons — and the switch is exhaustive rather than a `default` so a new
+            // `AuthKind` has to state which reason applies to it.
+            //
+            //  • Not asked for HERE. `.privateKeyPassphrase` IS mapped from a
+            //    1Password field, but by its own read above (it rides alongside the
+            //    sign-in rather than inside `fields`), so adding it here would fetch
+            //    it twice.
+            //  • Not something 1Password's secret-reference syntax can name at all:
+            //    `.passkey`, `.certificate` and `.sshKey` are objects rather than
+            //    field values, and the two possession kinds (`.keyInAgent`,
+            //    `.tokenPIN`) are never fetched from a vault by construction — an
+            //    agent signs and a token is unlocked, neither hands anything over.
+            case .passkey, .certificate, .privateKeyPassphrase, .sshKey,
+                 .keyInAgent, .tokenPIN:
                 continue
             }
         }
@@ -196,7 +210,7 @@ struct OnePasswordProvider: CredentialProvider {
     static func credentials(from item: OnePasswordNative.OPItem,
                             map: [String: String] = [:]) -> RawCredentials {
         let fields = item.fields
-        func mappedField(_ role: CredentialRole) -> OnePasswordNative.OPItemField? {
+        func mappedField(_ role: AuthKind) -> OnePasswordNative.OPItemField? {
             guard let key = map[role.rawValue], !key.isEmpty else { return nil }
             return fields.first { $0.id == key || $0.label == key }
         }

@@ -178,10 +178,13 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
             || profile.kind == .wireGuard || isAutologin
         let source = vpn.credentialSource(for: profile.id)
         inputs.chosenKind = source.kind
-        inputs.chosenSourceAvailable = sources.canServe(source)
-            // An in-force "type it this time" has already answered the recovery
-            // question — don't keep asking it.
-            || vpn.typedSignInOnce.contains(profile.id)
+        // ONE answer, shared with the unattended reconnect path — `canServe`'s Bool used
+        // to be derived here while `connectWithSavedCredentials` derived the same
+        // question its own way. `.typedInstead` counts as available: typing IS a way to
+        // sign in, and an in-force "type it this time" is one of its reasons, so the
+        // recovery question stops being re-asked without a second check for it.
+        inputs.chosenSourceAvailable = !vpn.authSatisfaction(
+            for: profile.id, facts: sources.facts).needsAttention
         inputs.hasConnectedBefore = !neverConnected
         inputs.hasStoredSignIn = hasStoredSignIn
         inputs.dismissedForNow = setupDismissed

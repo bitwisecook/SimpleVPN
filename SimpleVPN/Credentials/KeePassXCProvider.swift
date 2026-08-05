@@ -282,7 +282,7 @@ struct KeePassXCProvider: CredentialProvider {
         return Self.probe()
     }
 
-    func resolve(profile: String, fields: Set<CredentialField>) async throws -> RawCredentials {
+    func resolve(profile: String, fields: Set<AuthKind>) async throws -> RawCredentials {
         let ref = reference.trimmingCharacters(in: .whitespaces)
         guard !ref.isEmpty else { throw KeePassXCError.noLogins("") }
         let wantOTP = fields.contains(.otp)

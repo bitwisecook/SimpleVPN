@@ -90,7 +90,7 @@ nonisolated struct PasswordStoreProvider: CredentialProvider {
         }
     }
 
-    func resolve(profile: String, fields: Set<CredentialField>) async throws -> RawCredentials {
+    func resolve(profile: String, fields: Set<AuthKind>) async throws -> RawCredentials {
         let config = await MainActor.run { PasswordStoreConfiguration.current(instance: instance) }
         guard config.isResolved else { throw PasswordStoreError.notAStore }
         let entry = try await makeReader(config).read(entry: reference)
@@ -120,7 +120,7 @@ nonisolated struct PasswordStoreVaultAdapter: LocalVaultAdapter {
     /// `.file`, and only `.file`: a store is a directory of files and we read them
     /// ourselves. There is no app to talk to, no socket, and no daemon — which is why
     /// this source works for someone who has never installed `pass`.
-    let transports: [LocalVaultTransport] = [.file]
+    let transports: [AuthTransport] = [.file]
 
     /// Without an instance there is no store to look at, so the vendor-level answer is
     /// the best of its configured stores (computed by the registry) or, with none
@@ -155,7 +155,15 @@ nonisolated struct PasswordStoreVaultAdapter: LocalVaultAdapter {
             // Offered, with the caveat in the row's `uncheckedNote`. NOT blocked: a
             // great many people have their passphrase cached all day and this works
             // perfectly for them.
-            return .unchecked
+            //
+            // `.wouldPromptTheUser` is the honest ceiling, and naming it is what stops
+            // the row promising a check that will never come: the only way to find out
+            // whether the agent still remembers the passphrase is to attempt a decrypt,
+            // and an uncached one raises GnuPG's own pinentry. A dialog out of a
+            // two-second background refresh is exactly what teaches people to click
+            // through dialogs, so it is not done — see `deepScan` below, which returns
+            // the cheap answer unchanged for this reason.
+            return .unchecked(.wouldPromptTheUser)
         case .directoryMissing:
             return .blocked(.vaultFileMissing)
         case .notAStore:

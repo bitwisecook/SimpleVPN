@@ -545,11 +545,11 @@ struct ProtonPassAvailabilityTests {
     }
 
     /// A SESSION FILE IS NOT PROOF. It says a session existed, not that the API still
-    /// accepts it — so this way round is `.unchecked` and the deep scan earns `.ready`.
+    /// accepts it — so this way round is `.unchecked(.checkOwedOnUse)` and the deep scan earns `.ready`.
     @Test func aSessionFileIsUncheckedRatherThanReady() {
         #expect(ProtonPassVaultAdapter.availability(
             toolIsRunnable: true, foundOutsideAllowList: false,
-            appIsInstalled: false, sessionFileExists: true) == .unchecked)
+            appIsInstalled: false, sessionFileExists: true) == .unchecked(.checkOwedOnUse))
     }
 
     /// Each session state maps to the availability whose FIX is different — and the
@@ -580,7 +580,7 @@ struct ProtonPassAvailabilityTests {
         }
     }
 
-    /// From `.unchecked`, the deep scan asks once and reports what it heard.
+    /// From `.unchecked(.checkOwedOnUse)`, the deep scan asks once and reports what it heard.
     @Test func theDeepScanTurnsUncheckedIntoTheRealAnswer() async {
         let cases: [(LocalToolResult, LocalVaultAvailability)] = [
             (PP.ok(PP.info(hasLock: false)), .ready),
@@ -591,7 +591,7 @@ struct ProtonPassAvailabilityTests {
         ]
         for (reply, expected) in cases {
             let adapter = ProtonPassVaultAdapter(channel: runner(info: reply).channel())
-            #expect(await adapter.deepScan(quick: .unchecked) == expected)
+            #expect(await adapter.deepScan(quick: .unchecked(.checkOwedOnUse)) == expected)
         }
     }
 
@@ -600,7 +600,7 @@ struct ProtonPassAvailabilityTests {
     @Test func anUnanswerableProbeChangesNothing() async {
         for reply in [PP.timedOut, PP.fail("Error: something else entirely")] {
             let adapter = ProtonPassVaultAdapter(channel: runner(info: reply).channel())
-            #expect(await adapter.deepScan(quick: .unchecked) == .unchecked)
+            #expect(await adapter.deepScan(quick: .unchecked(.checkOwedOnUse)) == .unchecked(.checkOwedOnUse))
         }
     }
 
@@ -822,7 +822,7 @@ struct ProtonPassSecretHandlingTests {
         let provider = ProtonPassProvider(reference: "Work/GR Lab", channel: recorder.channel())
         _ = try await provider.resolve(profile: "p", fields: [.username, .password, .otp])
         let adapter = ProtonPassVaultAdapter(channel: recorder.channel())
-        _ = await adapter.deepScan(quick: .unchecked)
+        _ = await adapter.deepScan(quick: .unchecked(.checkOwedOnUse))
 
         for argument in recorder.allArguments {
             let lowered = argument.lowercased()
