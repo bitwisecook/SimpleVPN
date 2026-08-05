@@ -397,13 +397,21 @@ nonisolated enum ToolCatalog {
         // documented one would send people looking in the wrong place.
         DiscoverableTool(name: "bw", title: "Bitwarden CLI", vendor: .bitwarden),
 
+        // Dashlane's own tool, and the whole of SimpleVPN's Dashlane read path — so
+        // it names its vendor, which is what puts "found at …, but not somewhere
+        // SimpleVPN will run it from" on the Dashlane row rather than nowhere.
+        // Homebrew's tap (`brew install dashlane/tap/dashlane-cli`) lands in the
+        // Homebrew bin directory; Dashlane's own manual-install instructions move the
+        // standalone binary to /usr/local/bin/dcli verbatim; and its third documented
+        // route is Yarn, which is precisely the case that produces
+        // `toolOutsideAllowList`.
+        DiscoverableTool(name: "dcli", title: "Dashlane CLI", vendor: .dashlane,
+                         vendorInstallerPaths: ["/usr/local/bin/dcli"]),
+
         // --- Vendors on the seam, no adapter yet -------------------------
-        // Reported anyway, on purpose: "we don't support Dashlane" and "Dashlane's
+        // Reported anyway, on purpose: "we don't support LastPass" and "LastPass's
         // own tool is right here and an adapter is the only missing piece" are very
         // different facts, and the second is what a bug report needs.
-        // Dashlane's manual-install instructions also name /usr/local/bin outright.
-        DiscoverableTool(name: "dcli", title: "Dashlane CLI", vendor: nil,
-                         vendorInstallerPaths: ["/usr/local/bin/dcli"]),
         DiscoverableTool(name: "lpass", title: "LastPass CLI", vendor: nil),
         DiscoverableTool(name: "pass", title: "pass (password-store)", vendor: nil),
         DiscoverableTool(name: "gopass", title: "gopass", vendor: nil),

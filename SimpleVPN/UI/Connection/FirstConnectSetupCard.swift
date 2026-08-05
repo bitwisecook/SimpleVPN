@@ -180,6 +180,24 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                 Text("SimpleVPN reads just this item. Leave \u{201C}bw serve\u{201D} running and Bitwarden keeps the unlock \u{2014} SimpleVPN never sees the key that unlocks your vault.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            case .dashlane:
+                // Dashlane matches an ADDRESS or a TITLE, so the field's prompt names
+                // both — and the profile's server is the better pre-fill, because a
+                // Dashlane entry for a VPN almost always carries its address.
+                HStack {
+                    TextField("Dashlane entry\u{2019}s address or title", text: $apServer)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        .onSubmit(saveDashlane)
+                    Button("Use") { saveDashlane() }.buttonStyle(.glass)
+                        .disabled(apServer.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                .onAppear {
+                    apServer = source.reference.isEmpty ? profile.server : source.reference
+                }
+                Text("SimpleVPN asks Dashlane to print just this entry, never to copy it \u{2014} your password never lands on the clipboard.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             case .keePassFile:
                 // TWO QUESTIONS, in order, even in this small card: WHICH database
                 // (you may have a work one and a personal one) and WHICH entry in it.
@@ -451,6 +469,13 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
     private func saveBitwarden() {
         var s = source
         s.kind = .bitwarden
+        s.reference = apServer.trimmingCharacters(in: .whitespaces)
+        Task { try? await vpn.setCredentialSource(s, for: profile.id) }
+    }
+
+    private func saveDashlane() {
+        var s = source
+        s.kind = .dashlane
         s.reference = apServer.trimmingCharacters(in: .whitespaces)
         Task { try? await vpn.setCredentialSource(s, for: profile.id) }
     }

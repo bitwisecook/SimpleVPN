@@ -56,6 +56,12 @@ nonisolated enum LocalVaultVendor: String, CaseIterable, Sendable, Hashable {
     case keePassXC
     case keeper
     case bitwarden
+    /// Dashlane, reached through `dcli` — Dashlane's own command-line tool, and the
+    /// only local read path Dashlane has (the desktop app exposes no socket, no
+    /// daemon and no IPC). See DashlaneProvider, whose header explains the one flag
+    /// the whole source turns on: `--output json`, so the password is printed to us
+    /// instead of being copied to the pasteboard the way `dcli` does by default.
+    case dashlane
     /// A KeePass `.kdbx` FILE, read directly — the `.file` transport, and the one
     /// entry here that is not a brand. It is deliberately not called "Strongbox" or
     /// "KeePassium": all three of those products plus KeePassXC store the same
@@ -308,9 +314,17 @@ nonisolated enum VendorDocs {
     static let bitwardenVaultAPI = page("Bitwarden Vault Management API",
                                         "https://bitwarden.com/help/vault-management-api/")
 
+    // Dashlane. The CLI's own documentation site is the authority for installing
+    // `dcli`; the authentication page is where Dashlane documents registering a Mac,
+    // saving the master password in the OS keychain, and the biometrics switch —
+    // which are exactly the three things this app's Dashlane banners talk about.
+    // Both measured at a bare 200, no redirect.
+    static let dashlaneCLI = page("Dashlane CLI", "https://cli.dashlane.com/")
+    static let dashlaneAuthentication = page("Dashlane CLI sign-in",
+                                             "https://cli.dashlane.com/personal/authentication")
+
     // Vendors on the seam but not yet implemented — listed here so the next
     // adapter's author has the same auditable table rather than a fresh guess.
-    static let dashlaneCLI = page("Dashlane CLI", "https://cli.dashlane.com/")
     static let protonPassCLI = page("Proton Pass CLI", "https://protonpass.github.io/pass-cli/")
     static let passboltCLI = page("Passbolt CLI", "https://github.com/passbolt/go-passbolt-cli")
     static let passwordStore = page("pass", "https://www.passwordstore.org/")
@@ -325,7 +339,8 @@ nonisolated enum VendorDocs {
         keeperCommander, keeperCommanderLogin, keeperServiceMode,
         keePassXC, keePassXCCLI, strongbox, keePassium,
         bitwardenCLI, bitwardenVaultAPI,
-        dashlaneCLI, protonPassCLI, passboltCLI,
+        dashlaneCLI, dashlaneAuthentication,
+        protonPassCLI, passboltCLI,
         passwordStore, gopass, lastPassCLI, hashiCorpVaultCLI,
     ]
 }
@@ -465,6 +480,8 @@ nonisolated enum LocalVaultCopyBook {
         case .keePassXC: keePassXC
         case .keeper: keeper
         case .bitwarden: bitwarden
+        // Lives in DashlaneCopy.swift, same reason as the two below.
+        case .dashlane: dashlane
         // Lives in KeePassFileCopy.swift — one line here, so a new vendor's block of
         // copy never collides with another's in this file.
         case .keePassFile: keePassFile
@@ -925,6 +942,9 @@ nonisolated enum PasswordAppCatalog {
         // `gatedVendor`. This entry only matters when neither is installed.
         .init(name: "Bitwarden", bundleIDs: ["com.bitwarden.desktop"], prefixes: ["com.bitwarden."],
               localReadPath: .officialCLI("bw")),
+        // Dashlane's own CLI (`dcli`) IS built — see `gatedVendor`. This entry only
+        // matters when `dcli` isn't installed, and it names the tool so the pointer
+        // can say what would turn the app into a real source.
         .init(name: "Dashlane", bundleIDs: ["com.dashlane.Dashlane", "com.dashlane.dashlanephonefinal"],
               prefixes: ["com.dashlane."], localReadPath: .officialCLI("dcli")),
         // No local read path: no CLI, no documented socket, no file we can open.
@@ -986,6 +1006,10 @@ nonisolated enum PasswordAppCatalog {
         // into a real source. So the app alone points at the way in rather than
         // appearing as a second, dead row.
         case "Bitwarden": .bitwarden
+        // And Dashlane is the same shape again: the desktop app has no local API at
+        // all, and `dcli` is the whole read path — so the app alone points at the way
+        // in rather than appearing as a second, dead row.
+        case "Dashlane": .dashlane
         case "Strongbox", "KeePassium": .keePassFile
         default: nil
         }
@@ -1363,6 +1387,14 @@ nonisolated enum SignInFlow {
             // local service.
             "Bitwarden isn\u{2019}t unlocked for SimpleVPN, so it can\u{2019}t get your sign-in "
             + "from it. Run \u{201C}bw unlock\u{201D} and then \u{201C}bw serve\u{201D} in Terminal."
+        case .dashlane:
+            // Never "Dashlane isn't installed": the app and its tool may both be
+            // right there. What is missing is a signed-in, unlocked Dashlane, and the
+            // fix is one command that Dashlane — not SimpleVPN — asks the questions
+            // for.
+            "Dashlane isn\u{2019}t unlocked for SimpleVPN, so it can\u{2019}t get your sign-in "
+            + "from it. Run \u{201C}dcli sync\u{201D} in Terminal and answer Dashlane\u{2019}s "
+            + "questions."
         case .keePassFile:
             // Deliberately does NOT say "your database is missing": the same recovery
             // notice covers a moved file, a file still downloading, a password that

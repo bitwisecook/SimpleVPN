@@ -149,6 +149,15 @@ nonisolated enum FeatureMaturityRegistry {
         // covered by fixture tests, but no real vault has ever answered — Bitwarden
         // is not installed on the machine this was built on.
         .vault(.bitwarden):         .untested,
+        // Dashlane. WHAT WAS PROVEN: the argument list (`--output json`, never
+        // `clipboard`), the JSON reader against fixtures shaped from Dashlane's own
+        // `passwords.ts`, the picker, the `dcli status` parse for all three of its
+        // states, the four availability states, and the refusal to spawn a fetch
+        // against a locked vault. WHAT WAS NOT: anything at all involving a real
+        // Dashlane. `dcli` is not installed on the machine this was built on, no
+        // device has ever been registered, no vault has ever answered, no Touch ID
+        // sheet has ever been raised by it, and nobody has connected a VPN with it.
+        .vault(.dashlane):          .untested,
         // The KeePass file source, covering KeePassXC-as-a-file, Strongbox and
         // KeePassium. Header parsing is proven against real KDBX3 and KDBX4 bytes
         // built from KeePassXC's own format constants, but no database has ever

@@ -176,7 +176,11 @@ enum CredentialSourceSettings {
         // A password store needs no extra spec: GnuPG owns the passphrase entirely, so
         // there is nothing for SimpleVPN to hold, prompt for, or remember behind Touch
         // ID — which is the whole reason this source has no secret of its own.
-        case .onePassword, .keePassXC, .keeper, .bitwarden, .passwordStore:
+        // Dashlane needs none either, and for the same reason as a password store: the
+        // Dashlane password goes to Dashlane's own tool, which keeps what it needs in
+        // this Mac's keychain and decides for itself whether to ask for a fingerprint.
+        // There is nothing here for SimpleVPN to hold or prompt for.
+        case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane, .passwordStore:
             []
         case .keePassFile:
             [EngineSettingSpec(
