@@ -92,15 +92,24 @@ version-reported for diagnostics only; there is no path for a user to set.
   no-trailing-slash form; see the comment there.
 - **Unconfirmed:** the 1Password 7 bundle id, and the transport `op` ↔ app IPC uses.
 
-### Bitwarden (`bw`) — no adapter yet
+### Bitwarden (`bw`) — adapter built (`Docs/Bitwarden.md`)
 
 | Install method | Path | Source |
 |---|---|---|
 | `npm install -g @bitwarden/cli` | `$(npm prefix -g)/bin/bw` | <https://bitwarden.com/help/cli/> |
 | `brew install bitwarden-cli` | `$HOMEBREW_PREFIX/bin/bw` (the GPL `oss` build) | <https://github.com/Homebrew/homebrew-core/blob/main/Formula/b/bitwarden-cli.rb> |
 | standalone zip | **no destination documented** — "add the executable to your PATH" | <https://bitwarden.com/help/cli/> |
-| `bw serve` | port **8087**, bound to `localhost` | <https://bitwarden.com/help/cli/> |
+| `bw serve` | port **8087**, bound to `localhost`; `--port` / `--hostname` change it, and `--hostname all` removes the binding ("will allow any machine on the network to make API requests") | <https://bitwarden.com/help/cli/> |
 | CLI data | `~/Library/Application Support/Bitwarden CLI` (`BITWARDENCLI_APPDATA_DIR`) | <https://bitwarden.com/help/data-storage/> |
+| app | `/Applications/Bitwarden.app`, bundle id `com.bitwarden.desktop` | <https://bitwarden.com/help/getting-started-desktop/> |
+
+**No vendor path is asserted for `bw`**, deliberately: npm's global prefix is whatever the user's Node
+put it at (discovery has classes for npm, nvm, Bun, Volta, pnpm and Yarn), and the standalone zip
+documents no destination. A guessed path presented as a documented one is worse than none.
+
+There is **no discoverable artefact for `bw serve`** — no config file, no pid file, no socket — so
+"is the service running" cannot be a file check. It is one loopback `GET /status`, which is why it
+belongs to the deep scan rather than the cheap one. See `Docs/Bitwarden.md`.
 
 The standalone zip's "add it to your PATH" is precisely the case that produces
 `toolOutsideAllowList`: it works for the user's shell and not for us, and the fix is one field.

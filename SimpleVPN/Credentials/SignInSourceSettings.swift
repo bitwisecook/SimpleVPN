@@ -62,6 +62,7 @@ nonisolated extension LocalVaultVendor {
         case .onePassword: "onepassword"
         case .keePassXC: "keepassxc"
         case .keeper: "keeper"
+        case .bitwarden: "bitwarden"
         }
     }
 
@@ -133,6 +134,16 @@ nonisolated struct VendorConfigField: Sendable, Equatable, Identifiable {
     /// An EXAMPLE. It is shown as a `prompt:` placeholder and nowhere else — never
     /// as the field's title, never as its value, never as its VoiceOver name.
     var example: String
+    /// What SimpleVPN uses when this field is EMPTY, for a field whose empty state
+    /// is a working state rather than a gap. Only the vendor's own documented
+    /// default belongs here — never a guess of ours, and never a detection (that is
+    /// `detected(for:)`, which is measured on this Mac).
+    ///
+    /// `bw serve`'s 127.0.0.1:8087 is the case: nothing on disk can be found to
+    /// discover it, so "not set, and SimpleVPN hasn't found one" would be both true
+    /// and useless. Absent for every other field, which keeps their wording exactly
+    /// as it was.
+    var emptyMeansDefault: String? = nil
 
     var id: String { settingID }
 }
@@ -161,6 +172,10 @@ nonisolated enum SignInSourceSettings {
         "signin.vendor.\(vendor.settingSlug).enabled"
     }
     static let keePassXCSocketKey = "signin.keepassxc.socket"
+    /// Bitwarden's local-service address. The key `BitwardenSettings` reads, for the
+    /// same reason the tool-path key is shared with `LocalToolRunner`: one notion of
+    /// "what the user set", not a settings copy to keep in step.
+    static let bitwardenEndpointKey = BitwardenSettings.endpointKey
     /// The master switch for the whole local scan. Default ON — the scan is
     /// filesystem-only, needs no macOS permission, and every sign-in source
     /// feature is inert without it. Off means SimpleVPN never looks for a password
@@ -199,6 +214,31 @@ nonisolated enum SignInSourceSettings {
                 kind: .toolBinary(tool: "keeper"),
                 defaultsKey: toolPathKey("keeper"),
                 example: "/opt/homebrew/bin/keeper")]
+        case .bitwarden:
+            // TWO fields, because Bitwarden genuinely has two ways in and they are
+            // read by two different code paths: the binary (`BitwardenCLIClient
+            // .locate`, through `LocalToolRunner`) and the local service's address
+            // (`BitwardenSettings.configuredEndpoint`). Neither is a setting nothing
+            // consults.
+            [VendorConfigField(
+                settingID: "creds.bitwarden.tool-path",
+                vendor: .bitwarden,
+                ownerTitle: LocalVaultVendor.bitwarden.displayTitle,
+                kind: .toolBinary(tool: "bw"),
+                defaultsKey: toolPathKey("bw"),
+                example: "/opt/homebrew/bin/bw"),
+             VendorConfigField(
+                settingID: "creds.bitwarden.daemon-endpoint",
+                vendor: .bitwarden,
+                ownerTitle: LocalVaultVendor.bitwarden.displayTitle,
+                kind: .daemonEndpoint,
+                defaultsKey: bitwardenEndpointKey,
+                // Bitwarden's own documented default for `bw serve`. An EXAMPLE,
+                // shown as a placeholder — never as the value, so "not set" and
+                // "set to the default" stay distinguishable — and also, honestly,
+                // what SimpleVPN falls back to when the field is empty.
+                example: LoopbackEndpoint.bitwardenDefault.settingValue,
+                emptyMeansDefault: LoopbackEndpoint.bitwardenDefault.settingValue)]
         }
     }
 
@@ -326,6 +366,12 @@ nonisolated enum VendorFieldValidation: Sendable, Equatable {
     /// Nothing set. `detected` is what SimpleVPN will use instead — which may be
     /// nothing at all, and saying so is the honest answer.
     case notSet(detected: String?)
+    /// Nothing set, and there is nothing to detect — but the vendor documents a
+    /// default, and that is what SimpleVPN will use. An endpoint is the case:
+    /// `bw serve` listens on 127.0.0.1:8087 unless told otherwise, so "not set" is
+    /// a working state rather than a gap, and saying "SimpleVPN hasn't found one"
+    /// about an address nobody can find by looking would be nonsense.
+    case notSetUsingDefault(String)
     /// Set and good, inside the locations SimpleVPN searches anyway.
     case ok
     /// Set, good, and OUTSIDE those locations. Not a problem: this is the
@@ -339,13 +385,18 @@ nonisolated enum VendorFieldValidation: Sendable, Equatable {
     case unsafeDirectory
     case notASocket
     case badEndpoint
+    /// A well-formed `host:port` that is NOT on this Mac. A fault, and one worth its
+    /// own sentence: a local service with no authentication of its own must never be
+    /// addressed across a network, and "use 127.0.0.1" is the whole fix.
+    case notLoopback
 
     /// Whether this state stops the field working. `sanctioned` and `notSet`
     /// don't — they are statements, not faults.
     var isProblem: Bool {
         switch self {
-        case .notSet, .ok, .sanctioned: false
-        case .notAbsolute, .missing, .notExecutable, .unsafeDirectory, .notASocket, .badEndpoint: true
+        case .notSet, .notSetUsingDefault, .ok, .sanctioned: false
+        case .notAbsolute, .missing, .notExecutable, .unsafeDirectory, .notASocket,
+             .badEndpoint, .notLoopback: true
         }
     }
 
@@ -360,6 +411,8 @@ nonisolated enum VendorFieldValidation: Sendable, Equatable {
             } else {
                 "Not set, and SimpleVPN hasn\u{2019}t found one. Type a full path to use this."
             }
+        case .notSetUsingDefault(let fallback):
+            "Not set, so SimpleVPN uses the usual address: \(fallback)"
         case .ok:
             "Ready to use."
         case .sanctioned:
@@ -379,6 +432,9 @@ nonisolated enum VendorFieldValidation: Sendable, Equatable {
             + "is running."
         case .badEndpoint:
             "Problem: use the form host:port, for example 127.0.0.1:8087."
+        case .notLoopback:
+            "Problem: that address isn\u{2019}t on this Mac, and SimpleVPN only talks to this "
+            + "one. Use 127.0.0.1 (or localhost) with the port the service is on."
         }
     }
 
@@ -386,7 +442,7 @@ nonisolated enum VendorFieldValidation: Sendable, Equatable {
     /// sentence for the faults, so this is the SF Symbol half only.
     var symbolName: String? {
         switch self {
-        case .notSet: nil
+        case .notSet, .notSetUsingDefault: nil
         case .ok: "checkmark.circle.fill"
         case .sanctioned: "hand.raised.circle.fill"
         default: "exclamationmark.triangle.fill"
@@ -462,7 +518,11 @@ nonisolated struct VendorFieldPresentation: Sendable, Equatable {
         }
         let trimmed = setValue.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else {
-            let validation = VendorFieldValidation.notSet(detected: detected)
+            // Empty is a gap for a path (SimpleVPN uses what it found, or nothing)
+            // and a WORKING STATE for a field the vendor documents a default for.
+            // Both say which, in words, because a screen reader gets no other clue.
+            let validation = field.emptyMeansDefault.map(VendorFieldValidation.notSetUsingDefault)
+                ?? .notSet(detected: detected)
             return VendorFieldPresentation(
                 value: "",
                 // The suggestion lives HERE — in the placeholder — and nowhere
@@ -470,7 +530,7 @@ nonisolated struct VendorFieldPresentation: Sendable, Equatable {
                 prompt: detected ?? field.example,
                 accessibilityValue: validation.sentence,
                 isSet: false,
-                effectivePath: detected,
+                effectivePath: detected ?? field.emptyMeansDefault,
                 validation: validation,
                 isLockedByPolicy: false,
                 detectedPath: detected)
@@ -586,8 +646,17 @@ final class SignInSourceSettingsStore {
     }
 
     func pinnedValue(for field: VendorConfigField) -> String? {
-        guard let tool = field.kind.detectionTool else { return nil }
-        return ManagedSignInSourcePolicy.pinnedPaths(store)[tool]
+        if let tool = field.kind.detectionTool,
+           let pinned = ManagedSignInSourcePolicy.pinnedPaths(store)[tool] { return pinned }
+        // A field an administrator has FORCED as a managed preference is policy's
+        // too. This is the only way a non-path field can be pinned — the endpoint
+        // row's case — and without it the pane would show the user's stale value
+        // while SimpleVPN used the forced one, which is the silent-revert failure
+        // this file exists to avoid.
+        guard store.objectIsForced(forKey: field.defaultsKey),
+              let forced = store.string(forKey: field.defaultsKey), !forced.isEmpty
+        else { return nil }
+        return forced
     }
 
     func setValue(_ raw: String, for field: VendorConfigField) {
@@ -635,14 +704,21 @@ final class SignInSourceSettingsStore {
 
     func validate(_ raw: String, field: VendorConfigField) -> VendorFieldValidation {
         let path = raw.trimmingCharacters(in: .whitespaces)
-        guard !path.isEmpty else { return .notSet(detected: detected(for: field)) }
+        guard !path.isEmpty else {
+            // An endpoint cannot be "found" by looking at the filesystem, but the
+            // vendor documents where its service listens, and that is what SimpleVPN
+            // uses when this is empty (a test ties the field's declared default to
+            // `BitwardenSettings.configuredEndpoint` so the two cannot drift).
+            if let fallback = field.emptyMeansDefault { return .notSetUsingDefault(fallback) }
+            return .notSet(detected: detected(for: field))
+        }
         // An endpoint is `host:port`, not a path — it is checked before the
-        // absolute-path rule rather than being told to start with a slash.
+        // absolute-path rule rather than being told to start with a slash. Shape
+        // first, then WHERE: a well-formed address somewhere else on the network is
+        // a different mistake from a malformed one, and gets its own sentence.
         if case .daemonEndpoint = field.kind {
-            let parts = path.split(separator: ":")
-            guard parts.count == 2, !parts[0].isEmpty,
-                  let port = Int(parts[1]), (1...65535).contains(port) else { return .badEndpoint }
-            return .ok
+            guard let endpoint = LoopbackEndpoint(parsing: path) else { return .badEndpoint }
+            return endpoint.isLoopback ? .ok : .notLoopback
         }
         guard path.hasPrefix("/") else { return .notAbsolute }
         var st = stat()

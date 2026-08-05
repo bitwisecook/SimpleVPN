@@ -132,6 +132,10 @@ struct EditVPNView: View {
     /// optimistic start as the two above: proving it costs a subprocess, and a
     /// warning that flashes while the probe runs is worse than none.
     @State private var keeperAvailable = true
+    /// Whether Bitwarden can serve right now — its local service answering with an
+    /// UNLOCKED vault, which is the only state a fetch works in. Same optimistic
+    /// start, same reason.
+    @State private var bitwardenAvailable = true
 
     // 1Password browsing (vault/item pickers). Every list is fetched ONLY on an
     // explicit click: the first one can raise 1Password's authorization prompt,
@@ -253,6 +257,14 @@ struct EditVPNView: View {
                 // Commander missing entirely is covered by the row's own copy.
                 if KeeperCommanderChannel.isInstalled() {
                     keeperAvailable = await KeeperCommanderChannel.hasLiveSession()
+                }
+                // Bitwarden: an UNLOCKED vault is the only state that can serve. Not
+                // asked at all when the user has switched Bitwarden off — a vendor
+                // that is off is not probed, here as everywhere. When it is on, the
+                // cost is one loopback request to its local service; the tool half
+                // spawns nothing unless there is a tool we may run.
+                if SignInSourceSettingsStore.shared.isEnabled(.bitwarden) {
+                    bitwardenAvailable = await BitwardenLocalChannel().state() == .unlocked
                 }
                 // Prompt-free, so this much can be said without anyone asking:
                 // no 1Password on this Mac is a setup state, not a failure.
@@ -739,6 +751,24 @@ struct EditVPNView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Text("SimpleVPN asks Keeper Commander \u{2014} Keeper\u{2019}s own command-line tool \u{2014} for just this record, and reads only its username and password. Commander keeps your Keeper sign-in in this Mac\u{2019}s keychain, where macOS protects it; SimpleVPN never sees your Keeper master password and never changes Commander\u{2019}s own setup. If a verification code is required, type it below.")
+                    .font(.callout).foregroundStyle(.secondary)
+                sourceTestRow
+            case .bitwarden:
+                // Bitwarden names an ITEM: its own ID, or anything Bitwarden's search
+                // matches (name, username, or a saved address).
+                TextField("Item name or ID", text: $sourceReference,
+                          prompt: Text(verbatim: evaluation?.remoteHost ?? "GR Lab VPN"))
+                    .autocorrectionDisabled()
+                TextField("Username (optional \u{2014} only needed if several items match)",
+                          text: $sourceAccount)
+                    .autocorrectionDisabled()
+                if !bitwardenAvailable {
+                    Label("Bitwarden isn\u{2019}t unlocked for SimpleVPN. In Terminal, run \u{201C}export BW_SESSION=$(bw unlock --raw)\u{201D} and then \u{201C}bw serve\u{201D} \u{2014} that leaves Bitwarden\u{2019}s own local service holding the unlock, so SimpleVPN never needs the key.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text("SimpleVPN reads just this item using Bitwarden\u{2019}s own command-line tool, and reads only its username and password. It works best with Bitwarden\u{2019}s local service running (\u{201C}bw serve\u{201D}): the unlock stays in Bitwarden\u{2019}s own program, and SimpleVPN never sees your master password or the key that unlocks your vault. While that service is running, any program on this Mac can read your items \u{2014} stop it when you are done. If a verification code is required, type it below.")
                     .font(.callout).foregroundStyle(.secondary)
                 sourceTestRow
             }

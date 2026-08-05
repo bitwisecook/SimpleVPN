@@ -19,6 +19,11 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
     /// Keeper, reached through Keeper Commander (Keeper's own command-line tool
     /// — the Keeper app itself exposes no local API). See KeeperProvider.
     case keeper
+    /// Bitwarden, reached through Bitwarden's own command-line tool — preferably
+    /// through the local service that tool starts (`bw serve`), which holds the
+    /// unlock so SimpleVPN never handles the key that unlocks the vault. Covers
+    /// self-hosted Bitwarden and Vaultwarden identically. See BitwardenProvider.
+    case bitwarden
 
     // nonisolated for the same reason as `suppliesOTP` below: it is a pure function
     // of the case, and nonisolated rules (the security-key mutual exclusions in
@@ -30,6 +35,7 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
         case .applePasswords: "Apple Passwords"
         case .keePassXC: "KeePassXC"
         case .keeper: "Keeper"
+        case .bitwarden: "Bitwarden"
         }
     }
     var systemImage: String {
@@ -39,6 +45,7 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
         case .applePasswords: "person.badge.key.fill"
         case .keePassXC: "key.horizontal.fill"
         case .keeper: "key.viewfinder"
+        case .bitwarden: "shield.lefthalf.filled"
         }
     }
 
@@ -57,9 +64,16 @@ enum CredentialSourceKind: String, Codable, Sendable, CaseIterable {
     /// with no code typed"). A broken promise costs an AUTH_FAILED and a
     /// consumed code; asking for a code we then don't need costs one keystroke.
     /// The fetch still USES a code when Commander hands one over.
+    ///
+    /// Bitwarden is `false` for exactly the same reason, and it has a second one:
+    /// `bw get totp` answers "Premium status is required to use this feature." for
+    /// an account without premium, so the vendor's own code route is not
+    /// unconditionally available either. SimpleVPN computes the code locally from
+    /// the item's TOTP seed when the item carries one — but a promise nobody has
+    /// watched work against a live vault is not one to make here.
     nonisolated var suppliesOTP: Bool {
         switch self {
-        case .manual, .applePasswords, .keeper: false
+        case .manual, .applePasswords, .keeper, .bitwarden: false
         case .onePassword, .keePassXC: true
         }
     }

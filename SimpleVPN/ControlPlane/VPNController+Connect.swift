@@ -132,9 +132,9 @@ extension VPNController {
         case .applePasswords:
             guard !source.reference.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
             return ApplePasswordsProvider(server: source.reference, account: source.account)
-        case .onePassword, .keePassXC, .keeper:
+        case .onePassword, .keePassXC, .keeper, .bitwarden:
             // The adapter owns the vendor's quirks (1Password's account
-            // fallback, Keeper's channel choice) — this seam only asks for a
+            // fallback, Keeper's and Bitwarden's channel choice) — this seam only asks for a
             // fetcher. A source that names nothing to fetch yields nil, which
             // routes to the typed fields rather than a doomed lookup.
             return LocalVaultRegistry.adapter(for: source.kind)?.provider(for: source)

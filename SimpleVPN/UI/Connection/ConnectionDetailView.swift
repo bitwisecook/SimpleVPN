@@ -850,6 +850,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
         case .onePassword: "1Password will ask for Touch ID when you connect."
         case .keePassXC: "KeePassXC will ask to allow access when you connect (and to unlock first, if the database is locked)."
         case .keeper: "Keeper Commander answers without asking, as long as it is signed in on this Mac."
+        case .bitwarden: "Bitwarden answers without asking, as long as its local service (\u{201C}bw serve\u{201D}) is running with your vault unlocked."
         default: "macOS will ask permission to read the saved password the first time."
         }
     }
