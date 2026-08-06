@@ -11,6 +11,10 @@
 //  dropdown and the edit sheet can't drift into three different vocabularies for
 //  the same list.
 //
+//  Edit VPN ▸ Servers is NOT here: it is a table rather than a list, and it lives
+//  in ServersTable.swift. It shares this file's ranking, flag button and region
+//  sheet, so there is still one vocabulary and one ordering.
+//
 
 import SwiftUI
 
@@ -38,7 +42,11 @@ enum EndpointRegions {
             return RankedEndpoint(endpoint: e,
                                   geoCountry: l?.countryCode,
                                   geoPoint: point,
-                                  measurement: probes?.measurement(for: e.id))
+                                  measurement: probes?.measurement(for: e.id),
+                                  // Whatever this network last answered for the
+                                  // host. Already cached by the call above — no
+                                  // second lookup, and none on hover.
+                                  resolvedAddresses: l?.addresses ?? [])
         }
     }
 
@@ -75,7 +83,14 @@ enum EndpointRegions {
     ///   aren't coming.
     static func orderExplanation(_ groups: [RegionGroup], home: GeoPoint?,
                                  connected: Bool = false) -> String {
-        let measured = groups.flatMap(\.endpoints).contains { $0.measurement?.rttMS != nil }
+        orderExplanation(items: groups.flatMap(\.endpoints), home: home, connected: connected)
+    }
+
+    /// The same sentence for a flat list — the Servers table is ungrouped, because
+    /// a table has columns to carry what a region heading used to.
+    static func orderExplanation(items: [RankedEndpoint], home: GeoPoint?,
+                                 connected: Bool = false) -> String {
+        let measured = items.contains { $0.measurement?.rttMS != nil }
         if connected {
             return measured
                 ? "Fastest first, from the last check before you connected."
@@ -101,8 +116,10 @@ enum EndpointRowLabel {
     ///   a better answer about reaching it than any check could give.
     static func oneLine(_ item: RankedEndpoint, connected: Bool = false) -> String {
         var s = item.flag.isEmpty ? "" : item.flag + " "
-        s += item.endpoint.displayLabel
-        if item.endpoint.displayLabel != item.address { s += " (\(item.address))" }
+        // Name if the user set one, else the address — and never both when they
+        // are the same string (RankedEndpoint.primaryLabel is the rule).
+        s += item.primaryLabel
+        if item.primaryLabel != item.address { s += " (\(item.address))" }
         if let proto = item.endpoint.proto { s += " · \(proto.uppercased())" }
         if let country = item.countryName { s += " — \(country)" }
         if connected { s += " · Connected" }
@@ -239,156 +256,5 @@ struct EndpointFlagButton: View {
             return "You set this location. Click to change it."
         }
         return "SimpleVPN worked this location out from the address. Click to correct it."
-    }
-}
-
-// MARK: - The per-VPN endpoint list (Edit VPN ▸ Endpoints)
-
-/// Lists the addresses this VPN can be reached at, lets each one be named and
-/// placed, and lets a user add one their config doesn't mention. Saves as it
-/// goes — like the labels row, and unlike the tabs that hold a draft — so there
-/// is no way to lose a correction by closing the sheet.
-struct EndpointsEditor: View {
-    @Bindable var vpn: VPNController
-    let profileID: String
-
-    @Environment(EndpointLocator.self) private var locator: EndpointLocator?
-    @Environment(EndpointProbeStore.self) private var probes: EndpointProbeStore?
-    @Environment(PublicIPMonitor.self) private var publicIP: PublicIPMonitor?
-
-    @State private var newHost = ""
-    @State private var newPort = ""
-    @AppStorage(endpointProbeDefaultsKey) private var probingOn = true
-
-    private var endpoints: [VPNEndpoint] { vpn.endpoints(for: profileID) }
-    private var items: [RankedEndpoint] {
-        EndpointRanking.ordered(EndpointRegions.ranked(endpoints, locator: locator, probes: probes),
-                                home: EndpointRegions.home(publicIP: publicIP))
-    }
-
-    var body: some View {
-        Form {
-            Section("Servers") {
-                if items.isEmpty {
-                    Text("This VPN doesn't list any servers yet. Add one below, or import a configuration that names them.")
-                        .font(.callout).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if connected {
-                    Text("You're connected through this VPN, so its servers aren't being speed-checked right now — a check would go through the tunnel it's asking about. Disconnect to check them again.")
-                        .font(.callout).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                ForEach(items) { item in
-                    HStack(spacing: 8) {
-                        EndpointFlagButton(item: item) { save($0) }
-                        VStack(alignment: .leading, spacing: 2) {
-                            TextField("Name (optional)", text: labelBinding(item),
-                                      prompt: Text(item.endpoint.host))
-                            Text(detail(item)).font(.caption).foregroundStyle(.secondary)
-                        }
-                        if probes?.probing.contains(item.id) == true {
-                            Text("checking…").font(.caption).foregroundStyle(.secondary)
-                        } else if let rtt = item.measurement?.rttText {
-                            Text(rtt).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                                .accessibilityLabel("latency \(rtt)")
-                        }
-                        if item.endpoint.userAdded == true {
-                            Button(role: .destructive) { remove(item.endpoint) } label: {
-                                Image(systemName: "trash").frame(width: 22, height: 22).contentShape(Rectangle())
-                            }
-                            .buttonStyle(.borderless)
-                            .help("Remove this server (you added it by hand).")
-                        }
-                    }
-                    .padding(.vertical, 2)
-                    // A named container: the row announces which server it is
-                    // and everything known about it, while the flag button,
-                    // name field and remove button stay reachable children.
-                    .accessibilityElement(children: .contain)
-                    .accessibilityLabel("Server \(item.endpoint.displayLabel)")
-                    .accessibilityValue(detail(item))
-                }
-            }
-
-            Section("Add a Server") {
-                HStack(spacing: 8) {
-                    TextField("Address", text: $newHost, prompt: Text("vpn.example.com"))
-                        .autocorrectionDisabled()
-                    TextField("Port", text: $newPort, prompt: Text("optional"))
-                        .frame(width: 90)
-                    Button("Add") { add() }
-                        .disabled(newHost.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
-                Text("Servers listed in this VPN's configuration appear above automatically. Add one here only if you were given an extra address.")
-                    .font(.callout).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Section("Speed Checks") {
-                Toggle("Check how quick each server is", isOn: $probingOn)
-                    .onChange(of: probingOn) {
-                        if probingOn {
-                            probes?.refresh(endpoints, kind: kind, profile: profileID, force: true)
-                        } else { probes?.clear() }
-                    }
-                Text("When this is on, SimpleVPN measures each server when you open a server list, and puts the quickest first. Off means no checks are made and the list is ordered by which servers are nearest to you. This is the same switch as in Settings.")
-                    .font(.callout).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .formStyle(.grouped)
-        // User-initiated context: they opened this pane to look at the servers.
-        // Re-driven on a network change, because the numbers on screen were
-        // measured somewhere the user no longer is — and on disconnect, which is
-        // the moment this VPN's servers become measurable again.
-        .task(id: "\(NetworkMemory.shared.current?.key ?? "")\u{1F}\(connected)") {
-            probes?.refresh(endpoints, kind: kind, profile: profileID)
-        }
-    }
-
-    private var kind: VPNKind {
-        vpn.profiles.first { $0.id == profileID }?.kind ?? .openVPN
-    }
-
-    /// Up or coming up — see VPNController.isEngaged.
-    private var connected: Bool { vpn.isEngaged(id: profileID) }
-
-    private func detail(_ item: RankedEndpoint) -> String {
-        var bits = [item.address]
-        if let proto = item.endpoint.proto { bits.append(proto.uppercased()) }
-        bits.append(item.countryName ?? "location unknown")
-        bits.append(item.region.name)
-        if let d = item.measurement?.detail { bits.append(d) }
-        return bits.joined(separator: " · ")
-    }
-
-    private func labelBinding(_ item: RankedEndpoint) -> Binding<String> {
-        Binding(get: { item.endpoint.label ?? "" },
-                set: { text in
-                    var e = item.endpoint
-                    let trimmed = text.trimmingCharacters(in: .whitespaces)
-                    e.label = trimmed.isEmpty ? nil : trimmed
-                    save(e)
-                })
-    }
-
-    private func save(_ endpoint: VPNEndpoint) {
-        Task { await vpn.updateEndpoint(endpoint, for: profileID) }
-    }
-
-    private func remove(_ endpoint: VPNEndpoint) {
-        Task { await vpn.removeEndpoint(id: endpoint.id, for: profileID) }
-    }
-
-    private func add() {
-        let host = newHost.trimmingCharacters(in: .whitespaces)
-        guard !host.isEmpty else { return }
-        var e = VPNEndpoint(host: EndpointDiscovery.normalizedHost(host))
-        e.port = Int(newPort.trimmingCharacters(in: .whitespaces))
-            ?? EndpointDiscovery.portHint(from: host)
-        e.userAdded = true
-        newHost = ""; newPort = ""
-        save(e)
     }
 }

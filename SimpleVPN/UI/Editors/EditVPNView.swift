@@ -244,9 +244,11 @@ struct EditVPNView: View {
                 generalTab
                     .tag(SettingsTab.general)
                     .tabItem { Label("General", systemImage: "info.circle") }
-                // Saves as it goes (see EndpointsEditor) — no draft to reconcile
-                // with this sheet's Save button.
-                EndpointsEditor(vpn: vpn, profileID: profileID)
+                // Saves as it goes (see ServersTable) — no draft to reconcile with
+                // this sheet's Save button. Deliberately NOT a Form: it is a table
+                // and a table scrolls, so nesting it in a grouped Form would put
+                // one scroll view inside another (see ServersTable's header).
+                ServersTable(vpn: vpn, profileID: profileID)
                     .tag(SettingsTab.servers)
                     .tabItem { Label("Servers", systemImage: "mappin.and.ellipse") }
                 credentialsTab

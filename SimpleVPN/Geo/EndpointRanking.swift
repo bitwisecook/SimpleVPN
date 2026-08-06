@@ -65,13 +65,20 @@ nonisolated struct RankedEndpoint: Sendable, Equatable, Identifiable {
     /// GeoIP's coordinate for the address, when it had one.
     var geoPoint: GeoPoint?
     var measurement: EndpointMeasurement?
+    /// The addresses this host LAST resolved to on this network, primary first —
+    /// straight out of the locator's cache. Deliberately a remembered answer and
+    /// never a fresh lookup: it is read to draw a row (and its tooltip), so
+    /// resolving here would put DNS on the path of pointer movement. Empty means
+    /// "nothing remembered yet", which is a distinct and honest state.
+    var resolvedAddresses: [String] = []
 
     init(endpoint: VPNEndpoint, geoCountry: String? = nil, geoPoint: GeoPoint? = nil,
-         measurement: EndpointMeasurement? = nil) {
+         measurement: EndpointMeasurement? = nil, resolvedAddresses: [String] = []) {
         self.endpoint = endpoint
         self.geoCountry = geoCountry
         self.geoPoint = geoPoint
         self.measurement = measurement
+        self.resolvedAddresses = resolvedAddresses
     }
 
     var id: String { endpoint.id }
@@ -100,6 +107,19 @@ nonisolated struct RankedEndpoint: Sendable, Equatable, Identifiable {
     /// shown alongside (never instead of) the label.
     var address: String {
         endpoint.port.map { "\(endpoint.host):\($0)" } ?? endpoint.host
+    }
+
+    /// The one string that NAMES this server wherever there is room for only one:
+    /// the user's name when they gave it one, otherwise `host:port`.
+    ///
+    /// This is Mail's rule for an optional description, and it is here rather than
+    /// in each view because getting it wrong is how the Servers tab ended up with
+    /// an empty placeholder as its boldest text. A server's identity is its
+    /// address; the name is optional garnish. Callers that also show the address
+    /// must compare against this and not repeat it (see `EndpointRowLabel`).
+    var primaryLabel: String {
+        let named = endpoint.label?.trimmingCharacters(in: .whitespaces) ?? ""
+        return named.isEmpty ? address : named
     }
 }
 
