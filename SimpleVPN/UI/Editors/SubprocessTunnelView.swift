@@ -3,7 +3,7 @@
 //
 //  SubprocessTunnelView.swift
 //  Editor + live control for the command-line VPN kinds (SSH SOCKS / port
-//  forwards, FortiGate & F5 BIG-IP APM via OpenConnect/openfortivpn). Shows
+//  forwards, FortiGate & F5 BIG-IP APM via OpenConnect). Shows
 //  which CLI backs the kind and whether it's installed, edits the fields that
 //  kind needs, and runs it with a live status + rolling log. Password is stored
 //  per-tunnel in the login keychain (Remember) or typed at connect.
@@ -240,8 +240,10 @@ struct SubprocessTunnelView: View {
     private var requiredCLI: TunnelCLI {
         switch draft.kind {
         case .ssh: .ssh
-        case .fortinet: TunnelCLI.openconnect.isAvailable ? .openconnect : .openfortivpn
-        default: .openconnect  // the other OpenConnect SSL-VPN kinds
+        default: .openconnect  // all seven OpenConnect SSL-VPN kinds
+        // FortiGate used to fall back to `openfortivpn` here. That tool is gone —
+        // it drives pppd, so it needed administrator rights this app doesn't take,
+        // and the connect gate refused it before it could ever be spawned.
         }
     }
 
@@ -1336,7 +1338,7 @@ struct SubprocessTunnelView: View {
     /// products; describing them all as F5/FortiGate was misleading.
     private var gatewayFooter: String {
         switch draft.kind {
-        case .fortinet: "FortiGate SSL VPN via OpenConnect (or openfortivpn). With ocproxy it needs no admin rights."
+        case .fortinet: "FortiGate SSL VPN. SimpleVPN\u{2019}s built-in engine carries it as a full system tunnel; the openconnect tool with ocproxy is the fallback."
         case .f5apm: "F5 BIG-IP APM: OpenConnect performs the HTTPS sign-in then runs the PPP-over-TLS tunnel."
         case .ciscoAnyConnect: "Cisco AnyConnect / Secure Client (or an ocserv gateway) via OpenConnect. With ocproxy it needs no admin rights."
         // The setting's name is quoted exactly as the row spells it (oc.usergroup) —
@@ -1417,7 +1419,7 @@ struct SubprocessTunnelView: View {
         [Self.specs["oc.os"].isChanged(draft.spoofOS),
          Self.specs["oc.no-dtls"].isChanged(draft.disableDTLS),
          Self.specs["oc.disable-csd"].isChanged(draft.disableCSD),
-         Self.specs["oc.prefer-in-process"].isChanged(draft.preferInProcess),
+         Self.specs["oc.prefer-in-process"].isChanged(draft.runsInProcess),
          Self.specs["oc.csd-wrapper"].isChanged(draft.csdWrapper),
          Self.specs["oc.usergroup"].isChanged(draft.usergroup),
          Self.specs["oc.compression"].isChanged(draft.ocCompression),
@@ -1507,15 +1509,30 @@ struct SubprocessTunnelView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
-                toggleRow("oc.prefer-in-process", isOn: $draft.preferInProcess)
+                // The stored value is Optional (absent = "nobody chose", which now
+                // means in-process), so the toggle reads the EFFECTIVE transport and
+                // writing it records an explicit choice. Binding through
+                // `runsInProcess` rather than unwrapping here keeps "never chose"
+                // from quietly becoming "chose the old thing" in a second place.
+                toggleRow("oc.prefer-in-process",
+                          isOn: Binding(get: { draft.runsInProcess },
+                                        set: { draft.preferInProcess = $0 }))
                 Text("New — validate against your VPN server before relying on it.")
                     .font(.caption).foregroundStyle(.secondary)
+                // THE MIGRATION, made visible. A profile that existed before the
+                // default moved keeps the tool — silently switching a working tunnel
+                // and closing the SOCKS port something may be pointed at is worse
+                // than leaving it — so this is where it is told there is a better
+                // path one toggle away, and what turning it on costs.
+                if let offer = SubprocessTunnelManager.inProcessOfferReason(draft) {
+                    Text(offer).font(.caption).foregroundStyle(.secondary)
+                }
                 // Asking for the built-in engine is not the same as getting it:
                 // any option the bridge can't express sends the connection back
                 // to the tool. Say which, instead of letting the toggle look
                 // effective (SubprocessTunnelManager.willRunInProcess is the gate).
-                if draft.preferInProcess, !SubprocessTunnelManager.willRunInProcess(draft) {
-                    SettingCaveat("This VPN uses settings the built-in engine can't carry (a port, CA file, client certificate, verification-code token, host checker, connection proxy, compression, PFS, IPv6/keepalive override, reported identity, MTU, timeout or extra arguments), so the openconnect tool runs it instead.")
+                if draft.runsInProcess, !SubprocessTunnelManager.willRunInProcess(draft) {
+                    SettingCaveat("This VPN uses settings the built-in engine can't carry (smartcard sign-in, a verification-code token, a host-checker script, a base MTU, an HTTP-keepalive override, or extra arguments), so the openconnect tool runs it instead.")
                 }
 
                 // F5 APM / Cisco endpoint posture (host checker / EPA).
@@ -1526,15 +1543,27 @@ struct SubprocessTunnelView: View {
 
                 // Auth group / URL path (GlobalProtect portal-vs-gateway, Juniper/Pulse realm).
                 row("oc.usergroup", text: $draft.usergroup, prompt: "optional")
+                // The three modes `oc_compression_mode_t` has, and only those. This
+                // picker used to offer "Stateful", which is not one of them —
+                // `--compression=stateful` is refused by the tool at startup, and the
+                // built-in engine has nothing to map it to. A stored value is never
+                // rewritten (the spoofOS rule), so an existing profile carrying it is
+                // caveated below instead of being silently reinterpreted.
                 EngineSettingRow(spec: spec("oc.compression"), value: draft.ocCompression) {
                     Picker(selection: $draft.ocCompression) {
                         Text("Default").tag("")
-                        Text("Stateful").tag("stateful")
                         Text("None").tag("none")
+                        Text("Stateless").tag("stateless")
                         Text("All").tag("all")
+                        if SubprocessTunnelConfig.compressionProblem(draft.ocCompression) != nil {
+                            Text(draft.ocCompression).tag(draft.ocCompression)
+                        }
                     } label: {
                         EngineSettingLabel(spec: spec("oc.compression"), value: draft.ocCompression)
                     }
+                }
+                if let caveat = SubprocessTunnelConfig.compressionProblem(draft.ocCompression) {
+                    SettingCaveat(caveat)
                 }
                 toggleRow("oc.disable-ipv6", isOn: $draft.disableIPv6)
                 toggleRow("oc.no-http-keepalive", isOn: $draft.noHTTPKeepalive)

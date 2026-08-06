@@ -282,7 +282,34 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         s.realm = conf?["realm"] as? String
         s.serverCertSHA256 = conf?["serverCert"] as? String
         s.externalBrowser = conf?["samlBrowser"] as? String
-        s.userAgent = "SimpleVPN"
+        // Every key below is written by `SubprocessTunnelManager.inProcessConfiguration`
+        // and each one used to be a REFUSAL: a profile that set any of them ran as an
+        // `openconnect` subprocess under `ocproxy -D <port>` instead — a SOCKS port
+        // with no interface, no routes and no DNS. Absent ⇒ the engine's default.
+        s.caFile = conf?["caFile"] as? String
+        s.urlPath = conf?["urlPath"] as? String
+        s.reportedOS = conf?["reportedOS"] as? String
+        s.versionString = conf?["versionString"] as? String
+        s.localName = conf?["localName"] as? String
+        s.clientCertFile = conf?["clientCert"] as? String
+        s.clientKeyFile = conf?["clientKey"] as? String
+        s.proxy = conf?["proxy"] as? String
+        s.proxyUsername = conf?["proxyUsername"] as? String
+        s.compression = conf?["compression"] as? String
+        s.pfs = (conf?["pfs"] as? NSNumber)?.boolValue ?? false
+        s.disableIPv6 = (conf?["disableIPv6"] as? NSNumber)?.boolValue ?? false
+        s.disableDTLS = (conf?["disableDTLS"] as? NSNumber)?.boolValue ?? false
+        s.mtu = Int32((conf?["mtu"] as? NSNumber)?.intValue ?? 0)
+        s.dpd = Int32((conf?["dpd"] as? NSNumber)?.intValue ?? 0)
+        s.reconnectTimeout = conf?["reconnectTimeout"] as? NSNumber
+        // The two secrets among them ride startTunnel options, never
+        // providerConfiguration — the same invariant as `password` above, because
+        // providerConfiguration persists in NE preferences and options do not.
+        s.privateKeyPassword = options?["privateKeyPassword"] as? String
+        s.proxyPassword = options?["proxyPassword"] as? String
+        // A user agent the gateway may be admitting by name. "SimpleVPN" stays the
+        // default, and is NOT a value the user chose — so it must not look like one.
+        s.userAgent = (conf?["userAgent"] as? String) ?? "SimpleVPN"
         // SSO cookie handoff (ocauth-helper → app → here, all in memory): the
         // sign-in already happened in user context; connect to the exact URL it
         // authenticated against, accepting only the certificate it saw.

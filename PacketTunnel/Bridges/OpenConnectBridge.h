@@ -41,6 +41,58 @@ typedef NS_ENUM(NSInteger, OCStatus) {
 @property (nullable, copy) NSString *caFile;            // extra CA bundle path
 @property (nullable, copy) NSString *externalBrowser;   // SAML/SSO browser path ("" = default)
 @property (nullable, copy) NSString *userAgent;
+
+/// Everything below was a REFUSAL rather than a setting until now: each one is a
+/// single `openconnect_set_*` call, and because none of them was plumbed, a profile
+/// that set any of them was sent back to the `openconnect` subprocess under
+/// `ocproxy -D <port>` — a SOCKS listener with no interface, no routes and no DNS.
+/// The gate that used to name them is `SubprocessTunnelManager.inProcessOpenConnectSupports`,
+/// and it is now down to what libopenconnect genuinely cannot express here.
+///
+/// `nil` / `0` means "not set" throughout — the engine's own default stands. Nothing
+/// here is a secret except `privateKeyPassword` and `proxyPassword`, which arrive in
+/// `startTunnel(options:)` and never touch `providerConfiguration`.
+
+/// `--usergroup`: the URL PATH openconnect appends. GlobalProtect's
+/// portal-vs-gateway choice, and the path Juniper and Pulse expect.
+@property (nullable, copy) NSString *urlPath;
+/// `--os`: one of linux, linux-64, win, mac-intel, android, apple-ios.
+@property (nullable, copy) NSString *reportedOS;
+/// `--version-string`: the client version reported to the gateway.
+@property (nullable, copy) NSString *versionString;
+/// `--local-hostname`: the computer name reported instead of this Mac's own.
+@property (nullable, copy) NSString *localName;
+/// `--certificate` / `--sslkey`: client certificate sign-in from files on disk.
+/// A PKCS#11 URI is NOT accepted here — this libopenconnect is built
+/// `--with-openssl --without-gnutls` and has no PKCS#11 backend.
+@property (nullable, copy) NSString *clientCertFile;
+@property (nullable, copy) NSString *clientKeyFile;
+/// `--key-password`: the passphrase for an encrypted key / PKCS#12. SECRET.
+@property (nullable, copy) NSString *privateKeyPassword;
+/// `--proxy`: the web proxy the GATEWAY is reached through, resolved in the app
+/// (the root extension sees a different SystemConfiguration view). Credentials are
+/// separate rather than embedded, which the subprocess has no way to do.
+@property (nullable, copy) NSString *proxy;
+@property (nullable, copy) NSString *proxyUsername;
+@property (nullable, copy) NSString *proxyPassword;   // SECRET
+/// `--compression`: "none" | "stateless" | "all". Anything else is ignored here and
+/// refused by the gate, because guessing which of the three was meant is exactly the
+/// silent substitution the gate exists to prevent.
+@property (nullable, copy) NSString *compression;
+@property (assign) BOOL pfs;            // --pfs
+@property (assign) BOOL disableIPv6;    // --disable-ipv6
+@property (assign) BOOL disableDTLS;    // --no-dtls
+@property (assign) int mtu;             // --mtu (the TUNNEL's MTU; 0 = pushed)
+@property (assign) int dpd;             // --force-dpd, seconds (0 = protocol default)
+/// `--reconnect-timeout`, seconds. Not a setter at all: it is the second argument
+/// to `openconnect_mainloop`, which is why it is the one entry on the old refusal
+/// list that could not have been fixed by adding a call during setup.
+///
+/// An NSNumber and not an `int` because **0 is a legal value here** — the config's
+/// own range is `0...86400` and 0 means "give up immediately". Using 0 as the
+/// "unset" sentinel (which is right for `mtu`, whose floor is 576) would silently
+/// turn "give up at once" into "retry for five minutes". nil = the engine's 300s.
+@property (nullable, strong) NSNumber *reconnectTimeout;
 @end
 
 @class OpenConnectBridge;

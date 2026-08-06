@@ -3,13 +3,16 @@
 //
 //  SubprocessTunnel.swift
 //  Config for the "command-line" VPN kinds: SSH (dynamic SOCKS `-D`, or `-L/-R` port
-//  forwards) and the SSL-VPNs reachable through OpenConnect / openfortivpn (FortiGate,
+//  forwards) and the SSL-VPNs reachable through OpenConnect (FortiGate,
 //  F5 BIG-IP APM, and friends). "Command-line" is now about the CONFIG's origin, not
 //  the runtime: the same config drives an in-process path wherever the engine can
 //  express it — libssh for SOCKS (`inProcessSSHSupports`) and the packet-tunnel
-//  extension for OpenConnect (`preferInProcess`). Genuinely subprocess-only:
-//  `.netTunnel`, SSH configs with a jump host or raw extra-options, and SSL-VPNs that
-//  have not opted in. The no-root subprocess path exposes a local SOCKS proxy (ssh -D, or
+//  extension for OpenConnect, which is now the DEFAULT for a new SSL VPN
+//  (`preferInProcess` is Optional; absent means in-process). Genuinely
+//  subprocess-only: `.netTunnel`, SSH configs with a jump host or raw extra-options,
+//  SSH port forwards, smartcard sign-in, and the four settings
+//  `inProcessOpenConnectSupports` still can't carry.
+//  The no-root subprocess path exposes a local SOCKS proxy (ssh -D, or
 //  `openconnect --script-tun --script "ocproxy -D <port>"`), which SimpleVPN can
 //  optionally wire in as the system SOCKS proxy. Secrets live in the keychain
 //  (CredentialSource), never here.
@@ -108,7 +111,7 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     var sshPinnedHostKey: String? = nil
     var sshKexAlgorithms: String? = nil   // KexAlgorithms / SSH_OPTIONS_KEY_EXCHANGE list
 
-    // SSL-VPN (OpenConnect / openfortivpn). The --protocol value comes from
+    // SSL-VPN (OpenConnect). The --protocol value comes from
     // `kind.openconnectProtocol` — the kind IS the protocol, nothing stored here.
     // How the SSL-VPN authenticates: password, a client certificate, a certificate
     // held on a smartcard/security key (PKCS#11), or single sign-on in the browser
@@ -159,10 +162,44 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     var userAgent = ""           // --useragent
     var versionString = ""       // --version-string (spoof the client version)
 
+    // MARK: Which transport carries this SSL-VPN
+    //
     // Run the SSL-VPN through the in-process OpenConnect engine (packet-tunnel
-    // extension) instead of the `openconnect` subprocess. Falls back to the
-    // subprocess if the in-process path can't start. Default off.
-    var preferInProcess = false
+    // extension) instead of the `openconnect` subprocess. In-process is a FULL
+    // system tunnel — real interface, real routes, real DNS. The subprocess is
+    // `ocproxy -D <port>`: a SOCKS listener on the loopback with no interface, no
+    // routes and no DNS control at all.
+    //
+    // OPTIONAL, AND THAT IS THE WHOLE MIGRATION. `nil` means "nobody ever chose",
+    // and its EFFECTIVE value is `true` — a profile made from here on runs
+    // in-process, which is what the rest of this app is built around. A stored
+    // `false` means "this profile is on the tool", and it is honoured.
+    //
+    // Why not simply flip a `Bool` default: every config saved before today has
+    // `"preferInProcess": false` written into it, because a non-Optional Bool is
+    // encoded unconditionally whether or not the user ever saw the toggle. So the
+    // stored `false` cannot be told from a chosen `false` — and flipping the
+    // default would move every existing SSL VPN onto a different transport on the
+    // next launch. Anything pointed at that profile's SOCKS port (a browser
+    // profile, a `curl` alias, a colleague's script) would find it gone with
+    // nothing on screen explaining why. The same rule the SOCKS port itself
+    // follows: a stored value other things point at is not rewritten silently.
+    //
+    // So: absent ⇒ in-process (new profiles, and any imported/MDM config that
+    // doesn't mention a transport); present ⇒ exactly what it says. Existing
+    // profiles keep the tool, and `inProcessOfferReason` is how they are told
+    // there is something better one toggle away.
+    var preferInProcess: Bool? = nil
+
+    /// The transport this profile actually asks for. The ONE reader — nothing
+    /// should unwrap `preferInProcess` itself, or "never chose" starts meaning
+    /// "chose the old thing" again in a second place.
+    var runsInProcess: Bool { preferInProcess ?? true }
+
+    /// Whether a transport was ever chosen for this profile. False only for
+    /// profiles created after the default moved (and for configs imported without
+    /// the key), which is exactly when the modern default should apply.
+    var transportWasChosen: Bool { preferInProcess != nil }
 
     // MARK: PKCS#11 / smartcard sign-in (`authMode == "token"`)
     //
@@ -221,6 +258,16 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     static let spoofOSValues = ["linux", "linux-64", "win", "mac-intel", "android", "apple-ios"]
     /// Exactly what `--token-mode=` accepts, minus "" (= none).
     static let tokenModeValues = ["totp", "hotp", "oidc", "rsa", "yubioath"]
+    /// Exactly the three compression modes OpenConnect has, minus "" (= the
+    /// engine's own default). These are `oc_compression_mode_t`'s only members
+    /// (`Vendor/openconnect-include/openconnect.h`): NONE, STATELESS, ALL.
+    ///
+    /// "stateful" is NOT among them and never was — the picker used to offer it,
+    /// and `--compression=stateful` is refused by the tool at startup. Stored
+    /// values are not rewritten (the `spoofOS` rule), so an existing profile
+    /// carrying it is CAVEATED by `compressionProblem` instead, and the built-in
+    /// engine declines to guess what it meant.
+    static let compressionValues = ["none", "stateless", "all"]
 
     /// Whether a token mode needs a stored seed. `yubioath` reads the code off
     /// the YubiKey itself — requiring a seed for it would block a working
@@ -301,6 +348,15 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty, !spoofOSValues.contains(s) else { return nil }
         return "OpenConnect only reports one of \(spoofOSValues.joined(separator: ", ")) — it refuses \u{201C}\(s)\u{201D} at startup. Pick one above, or clear it to report this Mac as it is."
+    }
+
+    /// Why this compression mode isn't one OpenConnect has, or nil. Same
+    /// non-blocking treatment as `spoofOSProblem` — the value is the user's, and
+    /// blanking it on an unrelated save would lose it without a trace.
+    static func compressionProblem(_ raw: String) -> String? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty, !compressionValues.contains(s) else { return nil }
+        return "OpenConnect has three compression modes — \(compressionValues.joined(separator: ", ")) — and refuses \u{201C}\(s)\u{201D} at startup. Pick one above, or clear it to leave the engine's default."
     }
 
     /// Why this token mode isn't one `--token-mode=` accepts, or nil. Same
@@ -507,14 +563,21 @@ extension VPNKind {
 }
 
 /// The command-line tools a subprocess kind can use, and where to find them.
+/// `openfortivpn` USED TO BE HERE and is gone. It existed as a FortiGate-only
+/// fallback for when `openconnect` was absent — and it could never run: it drives
+/// `pppd`, so it needs administrator rights this app does not take, and
+/// `sslTransportBlockReason` refused that combination unconditionally *before* the
+/// dispatch that would have spawned it. The branch in `command(for:)` was therefore
+/// unreachable, and `libopenconnect` carries the `fortinet` protocol in-process
+/// anyway. A tool that cannot be reached and would not work if it were is not a
+/// fallback; it is a dependency in the credits and a case in every switch.
 nonisolated enum TunnelCLI: String, CaseIterable, Sendable {
-    case ssh, openconnect, openfortivpn, ocproxy, networksetup
+    case ssh, openconnect, ocproxy, networksetup
 
     var absolutePathCandidates: [String] {
         switch self {
         case .ssh:           ["/usr/bin/ssh"]
         case .openconnect:   ["/opt/homebrew/bin/openconnect", "/usr/local/bin/openconnect"]
-        case .openfortivpn:  ["/opt/homebrew/bin/openfortivpn", "/usr/local/bin/openfortivpn"]
         case .ocproxy:       ["/opt/homebrew/bin/ocproxy", "/usr/local/bin/ocproxy"]
         case .networksetup:  ["/usr/sbin/networksetup"]
         }
@@ -528,7 +591,6 @@ nonisolated enum TunnelCLI: String, CaseIterable, Sendable {
         switch self {
         case .ssh, .networksetup: "Built into macOS."
         case .openconnect: "Install with: brew install openconnect"
-        case .openfortivpn: "Install with: brew install openfortivpn"
         case .ocproxy: "Install with: brew install ocproxy (enables the no-root SOCKS path)"
         }
     }
@@ -541,7 +603,6 @@ nonisolated enum TunnelCLI: String, CaseIterable, Sendable {
         switch self {
         case .ssh, .networksetup: nil
         case .openconnect: "brew install openconnect"
-        case .openfortivpn: "brew install openfortivpn"
         case .ocproxy: "brew install ocproxy"
         }
     }

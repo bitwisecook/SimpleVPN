@@ -132,9 +132,15 @@ enum OpenConnectSettings {
         .init(id: "oc.disable-csd", name: "Skip Host Checker",
               summary: "Bypass the server's endpoint-posture/host-checker script. May be required to connect from an unmanaged Mac; some servers refuse without it.",
               group: .advanced, default: false),
+        // ON BY DEFAULT, and the default is the point: the built-in engine is a full
+        // system tunnel — real interface, real routes, real DNS — while the tool can
+        // only give you a SOCKS port on the loopback. A VPN made before this changed
+        // keeps whatever it had (see `SubprocessTunnelConfig.preferInProcess`), so the
+        // declared default here describes NEW profiles, which is what a "Changed"
+        // badge should measure against.
         .init(id: "oc.prefer-in-process", name: "Run In-Process",
-              summary: "Carry this VPN with SimpleVPN's own built-in OpenConnect engine, as a full system tunnel, instead of running the openconnect command-line tool. Falls back to the tool when a setting here needs it.",
-              group: .advanced, default: false),
+              summary: "Carry this VPN with SimpleVPN's own built-in OpenConnect engine, as a full system tunnel with its own routes and DNS, instead of running the openconnect command-line tool (which can only offer a SOCKS proxy on a local port). On for new VPNs. Falls back to the tool for the few settings the engine can't carry.",
+              group: .advanced, default: true),
         .init(id: "oc.csd-wrapper", name: "Host-Checker Wrapper",
               summary: "A script that answers the server's endpoint-posture (host checker / EPA) challenge. It runs instead of skipping the check, and takes precedence over Skip Host Checker.",
               group: .advanced, default: ""),

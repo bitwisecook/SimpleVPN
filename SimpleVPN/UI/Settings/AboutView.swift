@@ -186,9 +186,6 @@ enum Acknowledgements {
         // (credited above) and its program is also driven as a child process.
         // `ssh` is deliberately absent: /usr/bin/ssh ships with macOS, like the
         // `netstat`/`scutil` tools the diagnostics run, and nothing here is installed.
-        .init(name: "openfortivpn", license: "GPL-3.0-or-later",
-              role: "Invoked as the Fortinet SSL-VPN engine \u{2014} user-installed, not bundled",
-              url: "https://github.com/adrienverge/openfortivpn"),
         .init(name: "ocproxy", license: "BSD-3-Clause",
               role: "Invoked for the no-root SOCKS path beside openconnect \u{2014} user-installed, not bundled",
               url: "https://github.com/cernekee/ocproxy"),
@@ -228,7 +225,7 @@ enum Acknowledgements {
 
     The same is true of every sign-in source that reaches a password manager or a \
     smartcard, and of the tunnel engines driven as child processes (openconnect, \
-    openfortivpn, ocproxy). SimpleVPN never bundles or installs a vendor's tool: it \
+    ocproxy). SimpleVPN never bundles or installs a vendor's tool: it \
     runs a program you installed yourself, or speaks to one already running on your \
     Mac. A PKCS#11 module is the one variation, and it is a weaker link rather than a \
     stronger one — it is a library, and the process that loads it is openconnect's, \

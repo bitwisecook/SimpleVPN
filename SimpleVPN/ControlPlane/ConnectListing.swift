@@ -411,14 +411,15 @@ enum SubprocessTunnelReadiness {
         }
     }
 
-    /// The tool that would carry this kind, given what is installed. FortiGate has
-    /// two (openconnect preferred, openfortivpn as the fallback), which is why this
-    /// takes the installed set rather than being a property of the kind.
-    static func requiredCLI(for kind: VPNKind, installed: Set<TunnelCLI>) -> TunnelCLI {
+    /// The tool that would carry this kind. FortiGate used to have two (openconnect
+    /// preferred, `openfortivpn` as the fallback) and that is why this takes the
+    /// installed set at all — the fallback is gone, so the set is now unused and the
+    /// answer is a property of the kind again. The parameter is kept because both
+    /// callers pass `facts.installedTools` and a signature churn here buys nothing.
+    static func requiredCLI(for kind: VPNKind, installed: Set<TunnelCLI> = []) -> TunnelCLI {
         switch kind {
         case .ssh: .ssh
-        case .fortinet: installed.contains(.openconnect) ? .openconnect : .openfortivpn
-        default: .openconnect   // the other six OpenConnect SSL-VPN kinds
+        default: .openconnect   // all seven OpenConnect SSL-VPN kinds
         }
     }
 
@@ -487,8 +488,7 @@ enum SubprocessTunnelReadiness {
             if let reason = SubprocessTunnelManager.sslTransportBlockReason(
                 c,
                 inProcess: false,
-                ocproxyAvailable: facts.installedTools.contains(.ocproxy),
-                openconnectAvailable: facts.installedTools.contains(.openconnect)) {
+                ocproxyAvailable: facts.installedTools.contains(.ocproxy)) {
                 return ConnectNeed(.blocked, locus: .transport, reason)
             }
         }

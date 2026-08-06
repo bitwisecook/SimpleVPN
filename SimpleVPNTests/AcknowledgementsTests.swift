@@ -93,8 +93,10 @@ struct AcknowledgementsTests {
                          "p11-kit", "yubico-piv-tool (libykcs11)", "SoftHSM",
                          // The subprocess tunnel engines (`TunnelCLI`) are run the same
                          // way and were missing for longer than the vault tools.
-                         // `ssh` is not here on purpose: macOS ships it.
-                         "openfortivpn", "ocproxy"] {
+                         // `ssh` is not here on purpose: macOS ships it, and
+                         // `openfortivpn` is not here because it is GONE — an
+                         // unreachable FortiGate fallback that needed root.
+                         "ocproxy"] {
             #expect(names.contains(required), "\(required) is used but isn't credited")
         }
     }
@@ -111,7 +113,7 @@ struct AcknowledgementsTests {
                      "go-passbolt-cli", "GnuPG", "pass (password-store)", "gopass",
                      "yubikey-manager (ykman)", "GnuTLS p11tool", "OpenSC",
                      "yubico-piv-tool (libykcs11)", "SoftHSM",
-                     "openfortivpn", "ocproxy"] {
+                     "ocproxy"] {
             let row = components.first { $0.name == name }
             #expect(row?.role.contains("not bundled") == true,
                     "\(name)'s role doesn't say it isn't bundled")

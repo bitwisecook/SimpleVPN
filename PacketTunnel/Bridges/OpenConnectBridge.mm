@@ -146,9 +146,86 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
     if (pipe(_cancelPipe) == 0) openconnect_set_cancel_fd(_vpninfo, _cancelPipe[0]);
 
     if (_cfg.protocol.length) openconnect_set_protocol(_vpninfo, _cfg.protocol.UTF8String);
+
+    // WEB PROXY TO THE GATEWAY, before parse_url — the proxy is part of how the
+    // server is reached, and openconnect resolves nothing until it connects. The
+    // app resolved "use the system proxy" for us: it is unsandboxed and in the
+    // user's context, while this process is root in the system context and sees a
+    // different SystemConfiguration view.
+    //
+    // `openconnect_set_http_proxy` takes credentials only as URL userinfo — there is
+    // no separate setter (`openconnect_set_proxy_auth` chooses the auth *methods*,
+    // not the identity). So they are composed HERE, at the last moment, and that is
+    // the whole difference from the subprocess: on this path the URL is an in-memory
+    // string, not argv, so no local process can read the password with `ps`. The
+    // app's "include proxy password in process arguments" opt-in
+    // (`proxyPasswordInArgv`) exists only for the tool and is deliberately not
+    // consulted here — there is no argv to leak into.
+    if (_cfg.proxy.length) {
+        NSString *url = _cfg.proxy;
+        if (_cfg.proxyUsername.length) {
+            NSString *cred = _cfg.proxyPassword.length
+                ? [NSString stringWithFormat:@"%@:%@", _cfg.proxyUsername, _cfg.proxyPassword]
+                : _cfg.proxyUsername;
+            NSRange scheme = [url rangeOfString:@"://"];
+            url = scheme.location == NSNotFound
+                ? [NSString stringWithFormat:@"http://%@@%@", cred, url]
+                : [url stringByReplacingCharactersInRange:NSMakeRange(NSMaxRange(scheme), 0)
+                                               withString:[cred stringByAppendingString:@"@"]];
+        }
+        if (openconnect_set_http_proxy(_vpninfo, url.UTF8String) != 0) {
+            [self fail:@"That proxy address couldn't be used to reach the gateway."]; return;
+        }
+    }
+
     if (openconnect_parse_url(_vpninfo, _cfg.server.UTF8String) != 0) {
         [self fail:@"That server address couldn't be parsed."]; return;
     }
+
+    // `--usergroup`. Set AFTER parse_url, which writes urlpath itself from the
+    // address: setting it first would be silently overwritten, which is the whole
+    // class of bug this batch is about.
+    if (_cfg.urlPath.length) openconnect_set_urlpath(_vpninfo, _cfg.urlPath.UTF8String);
+
+    // WHAT THIS CLIENT CLAIMS TO BE. Each is a plain setter and each was a refusal
+    // until now. `set_reported_os` also selects the matching CSD trojan binary, so
+    // it is not purely cosmetic.
+    if (_cfg.reportedOS.length && openconnect_set_reported_os(_vpninfo, _cfg.reportedOS.UTF8String) != 0) {
+        [self fail:@"That reported operating system isn't one OpenConnect knows."]; return;
+    }
+    if (_cfg.versionString.length) openconnect_set_version_string(_vpninfo, _cfg.versionString.UTF8String);
+    if (_cfg.localName.length) openconnect_set_localname(_vpninfo, _cfg.localName.UTF8String);
+
+    // CLIENT CERTIFICATE SIGN-IN from files. Refused before this change, which is
+    // the most expensive of the old gates: a certificate profile could not have a
+    // system tunnel at all. A `pkcs11:` URI must never arrive here — the app's gate
+    // keeps smartcard sign-in on the tool, because this build has no PKCS#11
+    // backend and would report a confusing "no certificate found".
+    if (_cfg.clientCertFile.length) {
+        if (openconnect_set_client_cert(_vpninfo, _cfg.clientCertFile.UTF8String,
+                                        _cfg.clientKeyFile.length ? _cfg.clientKeyFile.UTF8String : NULL) != 0) {
+            [self fail:@"That client certificate couldn't be loaded."]; return;
+        }
+        if (_cfg.privateKeyPassword.length) {
+            openconnect_set_key_password(_vpninfo, _cfg.privateKeyPassword.UTF8String);
+        }
+    }
+
+    // TRANSPORT SHAPE. `compression` is mapped rather than parsed: the three modes
+    // in `oc_compression_mode_t` are all there are, and an unrecognised value is
+    // left alone here AND refused by the app's gate, so nothing is substituted.
+    if ([_cfg.compression isEqualToString:@"none"]) {
+        openconnect_set_compression_mode(_vpninfo, OC_COMPRESSION_MODE_NONE);
+    } else if ([_cfg.compression isEqualToString:@"stateless"]) {
+        openconnect_set_compression_mode(_vpninfo, OC_COMPRESSION_MODE_STATELESS);
+    } else if ([_cfg.compression isEqualToString:@"all"]) {
+        openconnect_set_compression_mode(_vpninfo, OC_COMPRESSION_MODE_ALL);
+    }
+    if (_cfg.pfs) openconnect_set_pfs(_vpninfo, 1);
+    if (_cfg.disableIPv6) openconnect_disable_ipv6(_vpninfo);
+    if (_cfg.disableDTLS) openconnect_disable_dtls(_vpninfo);
+    if (_cfg.mtu > 0) openconnect_set_reqmtu(_vpninfo, _cfg.mtu);
+    if (_cfg.dpd > 0) openconnect_set_dpd(_vpninfo, _cfg.dpd);
 
     // Cookie auth: the app already signed in (ocauth-helper SSO) and handed us
     // the session cookie — skip obtain_cookie (no forms, no credentials here).
@@ -167,8 +244,15 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
 
     // Pump the tunnel until asked to stop. mainloop returns 0 to be called again,
     // < 0 on a fatal error.
+    //
+    // `--reconnect-timeout` is HERE and nowhere else: it is mainloop's second
+    // argument, not a setter, which is why it was the one entry on the old refusal
+    // list that could not have been fixed by adding a call in setup. Absent keeps
+    // OpenConnect's own 300 seconds; a stored 0 means "give up at once" and must
+    // reach the library AS 0 — see the NSNumber note on the property.
+    const int reconnectTimeout = _cfg.reconnectTimeout ? _cfg.reconnectTimeout.intValue : 300;
     while (_running.load()) {
-        int r = openconnect_mainloop(_vpninfo, 300, 10);
+        int r = openconnect_mainloop(_vpninfo, reconnectTimeout, 10);
         if (r < 0) { if (_running.load()) [self fail:@"The VPN connection dropped."]; break; }
     }
     [self teardownTun];

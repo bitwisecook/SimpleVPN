@@ -208,16 +208,32 @@ struct ConnectListingTests {
         // `ocproxy -D <port>`: a SOCKS proxy on the loopback, no interface, no routes. So
         // it is a LOCAL PORT until "Run In-Process" is on AND honoured — and filing it
         // with the whole-Mac VPNs would promise protection it is not giving.
+        // THE REPORTED CASE, and its answer has changed twice. An F5 BIG-IP APM in
+        // the shape a user gets by default is now a WHOLE-MAC VPN: the built-in engine
+        // carries it, with its own interface, routes and DNS. It used to be a SOCKS
+        // port on the loopback, because `preferInProcess` defaulted to false — which
+        // is the defect this batch is about, and the reason the default moved.
         var f5 = freshTunnel(.f5apm)
         f5.server = "apm.example.com"
-        #expect(ConnectionScope.of(f5) == .localPort)
-        f5.preferInProcess = true
         #expect(ConnectionScope.of(f5) == .wholeMac,
-                "with the built-in engine carrying it, an F5 APM really is a whole-Mac VPN")
-        // …and asking for in-process is not the same as getting it. A setting the bridge
-        // cannot express sends the connection back to the tool, and the heading has to
-        // follow the connection rather than the toggle.
+                "a new F5 APM runs on the built-in engine, so it really is a whole-Mac VPN")
+
+        // A profile that EXISTED before the default moved carries a stored `false` and
+        // is left on the tool on purpose — something may be pointed at its SOCKS port,
+        // and moving a working tunnel silently is worse than leaving it. So the
+        // heading follows the connection, and for that profile it is still Local Ports.
+        f5.preferInProcess = false
+        #expect(ConnectionScope.of(f5) == .localPort)
+
+        // …and asking for in-process is still not the same as getting it. A CA file no
+        // longer moves the row — the bridge carries it now — so the setting that
+        // demonstrates the gate has to be one that genuinely cannot be carried:
+        // arbitrary extra arguments, which have no in-process form at all.
+        f5.preferInProcess = true
         f5.caFile = "/etc/ssl/corp.pem"
+        #expect(SubprocessTunnelManager.willRunInProcess(f5),
+                "a CA file is carried by the built-in engine now")
+        f5.extraArgs = ["--dump-http-traffic"]
         #expect(!SubprocessTunnelManager.willRunInProcess(f5))
         #expect(ConnectionScope.of(f5) == .localPort, """
             "Run In-Process" was asked for but will not be honoured, so this connection is \
@@ -275,8 +291,11 @@ struct ConnectListingTests {
             #expect(SubprocessTunnelManager.willRunInProcess(c) == kind.supportsExternalBrowserSSO
                     || !kind.supportsExternalBrowserSSO)
             // And a setting the bridge cannot express sends it back, whatever the kind.
+            // It must be one that genuinely cannot be carried: a CA file used to serve
+            // here and no longer does, because the bridge carries it. Arbitrary argv
+            // cannot be carried by construction, which is why it is the example now.
             c.authMode = ""
-            c.caFile = "~/ca.pem"
+            c.extraArgs = ["--dump-http-traffic"]
             #expect(!SubprocessTunnelManager.willRunInProcess(c))
         }
     }
@@ -356,12 +375,17 @@ struct ConnectListingTests {
         for kind in subprocessKinds where kind.isSSLVPN {
             var c = freshTunnel(kind)
             c.server = "vpn.example.com"
+            // ON THE TOOL, said explicitly. The default is the built-in engine now, so
+            // a config that leaves the toggle alone has no port to name — and a test
+            // that leaned on the default here would have silently stopped checking
+            // the thing it is named after.
+            c.preferInProcess = false
             #expect(ConnectListing.portSummary(c)?.contains("\(c.socksPort)") == true,
-                    "\(kind.displayName) runs under ocproxy, so its row must name the port")
+                    "\(kind.displayName) under ocproxy is a SOCKS port, so its row must name it")
             c.preferInProcess = true
-            if SubprocessTunnelManager.willRunInProcess(c) {
-                #expect(ConnectListing.portSummary(c) == nil)
-            }
+            #expect(SubprocessTunnelManager.willRunInProcess(c))
+            #expect(ConnectListing.portSummary(c) == nil,
+                    "\(kind.displayName) in-process has no port — the heading says what it does")
         }
     }
 
@@ -382,12 +406,28 @@ struct ConnectListingTests {
                 return c
             }
         default:
-            var tool = base
-            tool.id = "\(kind.rawValue)-tool"
+            // THE DEFAULT MOVED, and this population had to move with it. Leaving the
+            // toggle alone used to mean "the tool"; it now means the built-in engine,
+            // so a config that says nothing is a WHOLE-MAC row and this list would
+            // have reported the SSL kinds as whole-Mac-only — which would have made
+            // `everyKindLandsOnExactlyOneSideOfTheLine` fail rather than notice.
+            //
+            // Both remaining routes to Local Ports are genuinely reachable and both
+            // are here, because "it depends" has to be true of a live configuration:
+            //  • a profile that predates the default (stored `preferInProcess = false`,
+            //    kept deliberately so nothing pointed at its SOCKS port breaks), and
+            //  • a setting the bridge cannot carry at all — arbitrary extra arguments,
+            //    which have no in-process equivalent by construction.
+            var carriedForward = base
+            carriedForward.id = "\(kind.rawValue)-tool"
+            carriedForward.preferInProcess = false
+            var cannotCarry = base
+            cannotCarry.id = "\(kind.rawValue)-extra-args"
+            cannotCarry.extraArgs = ["--dump-http-traffic"]
             var inProcess = base
             inProcess.id = "\(kind.rawValue)-in-process"
             inProcess.preferInProcess = true
-            var out = [tool, inProcess]
+            var out = [carriedForward, cannotCarry, inProcess]
             // Browser sign-in is a SECOND in-process route, and for GlobalProtect and
             // Pulse it is the only one — so a population that left it out would report
             // those two as local-port-only and this suite's own partition check would
@@ -785,32 +825,40 @@ struct ConnectListingTests {
             for: ssh, facts: .init(installedTools: allTools)) == nil)
     }
 
-    /// FortiGate is the one kind with two possible tools, and which one is required
-    /// depends on what is installed — so the reason must name the one that is
-    /// actually missing.
-    @Test func fortiGateNamesWhicheverToolItWouldUse() {
+    /// FORTIGATE HAS ONE TOOL NOW, and this test used to assert it had two.
+    ///
+    /// `openfortivpn` was a FortiGate-only fallback for a missing `openconnect`, and
+    /// it could never run: it drives `pppd`, so it needs administrator rights this app
+    /// does not take, and `sslTransportBlockReason` refused exactly that combination
+    /// BEFORE the dispatch that would have spawned it — the branch in `command(for:)`
+    /// was unreachable. Meanwhile `libopenconnect` carries the `fortinet` protocol
+    /// in-process like the other six. A tool that cannot be reached, and would not
+    /// work if it were, is not a fallback.
+    ///
+    /// The half of this test worth keeping is the half about the *in-process* path,
+    /// which is what FortiGate actually uses now: nothing installed, nothing needed.
+    @Test func fortiGateNeedsOnlyOpenConnectOrNothingAtAll() {
         #expect(SubprocessTunnelReadiness.requiredCLI(for: .fortinet, installed: allTools)
                 == .openconnect)
-        #expect(SubprocessTunnelReadiness.requiredCLI(for: .fortinet, installed: [.openfortivpn])
-                == .openfortivpn)
+        #expect(SubprocessTunnelReadiness.requiredCLI(for: .fortinet, installed: [])
+                == .openconnect,
+                "there is no second tool for this kind to fall back to any more")
+
         var c = freshTunnel(.fortinet)
         c.server = "vpn.example.com"
         c.username = "alex"
+        // The built-in engine: no tool is executed, so no tool is required.
+        c.preferInProcess = true
+        #expect(SubprocessTunnelReadiness.need(
+            for: c, facts: .init(installedTools: [], hasPassword: true)) == nil)
+
+        // On the tool, with nothing installed, the reason names openconnect — and
+        // names the toggle first, because it needs no package manager at all.
         c.preferInProcess = false
-        // openfortivpn present, openconnect not. It is INSTALLED, so level 1's
-        // presence check passes — and the connection is still refused, because
-        // openfortivpn drives pppd, has no userspace mode, and therefore needs
-        // administrator rights this app does not take. Present is not the same as
-        // usable, and this test previously asserted the opposite: it required
-        // `need == nil` here, which is exactly the silent failure that shipped —
-        // a Connect that looked ready and then died with nothing explaining why.
         let need = SubprocessTunnelReadiness.need(
-            for: c, facts: .init(installedTools: [.openfortivpn], hasPassword: true))
+            for: c, facts: .init(installedTools: [], hasPassword: true))
         #expect(need?.locus == .transport)
-        #expect(need?.sentence.contains("administrator rights") == true,
-                "say that the tool cannot work without privileges we don't take")
-        #expect(need?.sentence.contains("Run In-Process") == true,
-                "and name the fix that needs no Homebrew at all")
+        #expect(need?.sentence.contains("openconnect") == true)
 
         // With openconnect and ocproxy both present the subprocess path is genuinely
         // usable, so nothing is withheld.

@@ -258,7 +258,7 @@ nonisolated enum EndpointDiscovery {
             engine: .sslVPN, kind: vendor ?? .ciscoAnyConnect, host: host, port: port, transport: "tls",
             confidence: vendor != nil ? .high : .low,
             title: vendorName,
-            detail: "TLS VPN gateway on port \(port)\(extra). Connects with OpenConnect/openfortivpn.",
+            detail: "TLS VPN gateway on port \(port)\(extra). Connects with OpenConnect.",
             facts: facts)
     }
 

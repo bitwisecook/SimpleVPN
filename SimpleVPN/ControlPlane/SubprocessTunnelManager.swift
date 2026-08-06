@@ -3,7 +3,7 @@
 //
 //  SubprocessTunnelManager.swift
 //  Owns the command-line VPN kinds (SSH SOCKS / port forwards, and the OpenConnect /
-//  openfortivpn SSL-VPNs — FortiGate, F5 BIG-IP APM, …) — but `start` no longer means
+//  SSL-VPNs — FortiGate, F5 BIG-IP APM, …) — but `start` no longer means
 //  "spawn a child" for all of them. Three cases are dispatched away from any subprocess:
 //    • SSH SOCKS            → the in-process libssh engine (`connectInProcessSSH`),
 //                             when `inProcessSSHSupports` accepts the config (no jump
@@ -283,28 +283,169 @@ final class SubprocessTunnelManager {
     /// protocol whose settings the bridge covers — and it is only reached for a kind whose
     /// `supportsExternalBrowserSSO` is already true.
     static func willRunInProcess(_ c: SubprocessTunnelConfig) -> Bool {
-        c.kind.isSSLVPN && c.preferInProcess && inProcessOpenConnectSupports(c)
+        c.kind.isSSLVPN && c.runsInProcess && inProcessOpenConnectSupports(c)
     }
 
+    /// The settings the bridge can't carry — and ONLY those. Eleven clauses used to
+    /// live here, and eight of them were not statements about libopenconnect at all:
+    /// they were settings nobody had plumbed through `OCClientSettings`. Each one
+    /// cost the whole routing story, because the fallback (`ocproxy -D <port>`) is a
+    /// SOCKS listener with no interface, no routes and no DNS. They are plumbed now
+    /// — `OpenConnectProfileStore.start` → `PacketTunnelProvider.startOpenConnect` →
+    /// `OpenConnectBridge.runSession`, one `openconnect_set_*` call each — and
+    /// `InProcessOpenConnectCoverageTests` proves every one reaches the bridge.
+    ///
+    /// FOUR REMAIN, and each is a real limit rather than unfinished work:
+    ///
+    ///  1. **Smartcard sign-in** (`authMode == "token"`, or a `pkcs11:` URI). Our
+    ///     libopenconnect is `--with-openssl --without-gnutls`
+    ///     (Tools/build-openconnect-xcframework.sh) and OpenConnect's PKCS#11
+    ///     support lives only in its GnuTLS/p11-kit backend. Rebuilding with GnuTLS
+    ///     would not help: p11-kit's whole job is to `dlopen` a third-party provider
+    ///     module, and that `dlopen` is what AMFI refuses inside a sysext-embedding
+    ///     app (commit a86046f · Docs/AuthSecPKCS11.md).
+    ///  2. **Host checker / endpoint posture** (`csdWrapper`, `disableCSD`).
+    ///     `openconnect_setup_csd` exists, but it works by *forking a child* — the
+    ///     gateway's trojan, or the wrapper standing in for it. The packet-tunnel
+    ///     extension is `com.apple.security.app-sandbox` AND runs as root, so this
+    ///     would mean executing a user-nominated script as root from inside the
+    ///     sandbox. Not a plumbing job; a decision with an entitlement attached.
+    ///  3. **Base MTU** (`baseMTU`) and **HTTP keepalive off** (`noHTTPKeepalive`).
+    ///     `--base-mtu` and `--no-http-keepalive` write `vpninfo->basemtu` /
+    ///     `->no_http_keepalive` directly from OpenConnect's own CLI. The library
+    ///     header exposes no setter for either (`openconnect_set_reqmtu` is `--mtu`,
+    ///     a different number — see the MTU pair in `SettingRelations`).
+    ///  4. **Extra arguments** (`extraArgs`). Arbitrary argv has no in-process
+    ///     equivalent by construction: the escape hatch's whole value is that it
+    ///     passes through un-interpreted, and parsing "a known subset" would mean
+    ///     silently ignoring the rest — the one thing this predicate exists to
+    ///     prevent. It stays a documented fallback to the tool.
+    ///
+    /// A clause may only be deleted once the setting is genuinely CARRIED. Dropping
+    /// a CA file, a client certificate or a proxy silently would connect with
+    /// weaker — or simply broken — settings than the profile asks for.
     private static func inProcessOpenConnectSupports(_ c: SubprocessTunnelConfig) -> Bool {
-        if c.port != nil { return false }               // the bridge gets the bare server string only
-        if !c.caFile.isEmpty || !c.usergroup.isEmpty || !c.spoofOS.isEmpty { return false }
-        if !c.clientCertFile.isEmpty || !c.clientKeyFile.isEmpty || !c.tokenMode.isEmpty { return false }
-        // Smartcard sign-in can NEVER run in-process. Our libopenconnect is built
-        // `--with-openssl --without-gnutls` (Tools/build-openconnect-xcframework.sh)
-        // and OpenConnect's PKCS#11 support lives only in its GnuTLS/p11-kit backend
-        // — the OpenSSL build answers a pkcs11: URI with "This binary built without
-        // PKCS#11 support". Nor could it: loading the provider dylib into the packet
-        // tunnel would need the library-validation relaxation AMFI forbids here.
         if c.authMode == "token" { return false }
         if c.pkcs11CertificateURI != nil || c.pkcs11KeyURI != nil { return false }
+        // The software-token seed (TOTP/HOTP/…) is a long-lived secret with no
+        // channel to the extension yet, and `yubioath`/`rsa` need libpcsclite /
+        // libstoken, which this build has not got.
+        if !c.tokenMode.isEmpty { return false }
         if c.disableCSD || !c.csdWrapper.isEmpty { return false }
-        if c.proxyMode == .manual { return false }
-        if !c.ocCompression.isEmpty || c.enablePFS || c.disableIPv6 || c.noHTTPKeepalive || c.disableDTLS { return false }
-        if !c.localHostname.isEmpty || !c.userAgent.isEmpty || !c.versionString.isEmpty { return false }
-        if c.reconnectTimeout != nil || c.forceDPD != nil || c.ocMTU != nil || c.baseMTU != nil { return false }
+        if c.baseMTU != nil || c.noHTTPKeepalive { return false }
+        // A compression mode OpenConnect hasn't got. The tool refuses it at startup
+        // too; the engine declines to guess which of the three it meant.
+        if SubprocessTunnelConfig.compressionProblem(c.ocCompression) != nil { return false }
+        // A reported OS the library would refuse — same reasoning.
+        if SubprocessTunnelConfig.spoofOSProblem(c.spoofOS) != nil { return false }
         if c.extraArgs.contains(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) { return false }
         return true
+    }
+
+    // MARK: What the in-process engine is told
+    //
+    // ONE PLACE that maps a config onto the bridge's settings, split by whether a
+    // value is a secret. Everything non-secret rides `providerConfiguration` (which
+    // PERSISTS in NE preferences, so it may hold paths, hostnames and usernames —
+    // the same class of thing `server` and `realm` already do, and nothing more);
+    // every secret rides `startTunnel(options:)` in memory only, because the
+    // extension is root and cannot read the user's keychain. That split is the
+    // invariant in Docs/Networking.md §1 and it is not negotiable per setting.
+    //
+    // Why here rather than in OpenConnectProfileStore: `inProcessOpenConnectSupports`
+    // decides which settings must be carried, and a mapping that lives beside it can
+    // be held to it by one test (`InProcessOpenConnectCoverageTests`). When the two
+    // were apart, the gate said "the bridge can't take a CA file" while the bridge
+    // had called `openconnect_set_cafile` for months — nobody had passed it one.
+
+    /// The non-secret half of an in-process session, as `providerConfiguration`.
+    /// Keys are consumed by `PacketTunnelProvider.startOpenConnect`.
+    static func inProcessConfiguration(_ c: SubprocessTunnelConfig) -> [String: Any] {
+        var conf: [String: Any] = ["profile": c.id,
+                                   "vpnType": c.kind.rawValue,
+                                   // The port lives INSIDE the address: the bridge
+                                   // hands this to `openconnect_parse_url`, which
+                                   // takes `host:port` (and `openconnect_get_port`
+                                   // reads it back). There is no separate setter.
+                                   "server": serverURL(c)]
+        func put(_ key: String, _ value: String) {
+            let t = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty { conf[key] = t }
+        }
+        func path(_ key: String, _ value: String) {
+            let t = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty { conf[key] = (t as NSString).expandingTildeInPath }
+        }
+        put("realm", c.realm)
+        put("serverCert", c.trustedCertSHA256)
+        put("samlBrowser", c.samlBrowser)
+        path("caFile", c.caFile)
+        // `--usergroup` is the URL PATH openconnect appends — GlobalProtect's
+        // portal-vs-gateway choice, the path Juniper and Pulse expect. Hence
+        // `openconnect_set_urlpath`, not a setting of its own.
+        put("urlPath", c.usergroup)
+        put("reportedOS", c.spoofOS)
+        put("versionString", c.versionString)
+        put("localName", c.localHostname)
+        put("userAgent", c.userAgent)
+        // Certificate sign-in only, exactly as the argv builder gates it: a stale
+        // path must not turn a password tunnel into certificate auth.
+        if openconnectAuthMode(c) == "certificate" {
+            path("clientCert", c.clientCertFile)
+            path("clientKey", c.clientKeyFile)
+        }
+        // The proxy the gateway is reached THROUGH. `.systemDefault` is resolved
+        // here, in the user's context, because the root extension sees a different
+        // SystemConfiguration view — and because leaving it unresolved is how the
+        // in-process path came to ignore the app's own default proxy mode entirely.
+        if let proxy = inProcessProxyURL(for: c) {
+            conf["proxy"] = proxy
+            put("proxyUsername", c.proxyUsername)
+        }
+        if !c.ocCompression.isEmpty { conf["compression"] = c.ocCompression }
+        if c.enablePFS { conf["pfs"] = true }
+        if c.disableIPv6 { conf["disableIPv6"] = true }
+        if c.disableDTLS { conf["disableDTLS"] = true }
+        if let m = c.ocMTU { conf["mtu"] = m }
+        if let d = c.forceDPD { conf["dpd"] = d }
+        if let t = c.reconnectTimeout { conf["reconnectTimeout"] = t }
+        return conf
+    }
+
+    /// The secret half, as `startTunnel(options:)`. Read from the keychain at
+    /// connect time and never retained.
+    ///
+    /// NOTE the asymmetry with the subprocess, and it is in the user's favour:
+    /// `openconnect`'s CLI can only take a proxy password embedded in the `--proxy`
+    /// URL, where `ps` reads it, which is why `proxyPasswordInArgv` is an explicit
+    /// opt-in. In-process there is no argv, so the password travels in memory and
+    /// the opt-in is simply not consulted.
+    static func inProcessSecrets(_ c: SubprocessTunnelConfig) -> [String: NSObject] {
+        var options: [String: NSObject] = [:]
+        if openconnectAuthMode(c) == "certificate",
+           let kp = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(c.id).privateKey")?.password,
+           !kp.isEmpty {
+            options["privateKeyPassword"] = kp as NSString
+        }
+        if inProcessProxyURL(for: c) != nil, !c.proxyUsername.isEmpty,
+           let pw = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(c.id).proxy")?.password,
+           !pw.isEmpty {
+            options["proxyPassword"] = pw as NSString
+        }
+        return options
+    }
+
+    /// The proxy URL for the in-process path — credentials NEVER inside it (they go
+    /// through `openconnect_set_proxy_auth`-adjacent fields separately), unlike
+    /// `proxyArgument(for:)` which has no choice.
+    private static func inProcessProxyURL(for c: SubprocessTunnelConfig) -> String? {
+        switch c.proxyMode {
+        case .none: return nil
+        case .manual:
+            let raw = c.proxyURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            return raw.isEmpty ? nil : raw
+        case .systemDefault: return systemProxyURL()
+        }
     }
 
     private func connectInProcessOpenConnect(_ config: SubprocessTunnelConfig, password: String?) {
@@ -986,8 +1127,7 @@ final class SubprocessTunnelManager {
 
         case _ where c.kind.isSSLVPN:
             // OpenConnect covers every SSL-VPN protocol (anyconnect / nc / gp /
-            // pulse / f5 / fortinet / array), no root via ocproxy. openfortivpn is
-            // the Fortinet-only fallback (needs root).
+            // pulse / f5 / fortinet / array), no root via ocproxy.
             if let oc = TunnelCLI.openconnect.resolvedPath {
                 // The password is written to stdin ONLY when the argv asked for
                 // it. In certificate mode nothing reads stdin, and that unread
@@ -1006,12 +1146,11 @@ final class SubprocessTunnelManager {
                 }
                 return (oc, openconnectArgs(for: c), stdin)
             }
-            if c.kind == .fortinet, let ofv = TunnelCLI.openfortivpn.resolvedPath {
-                var a = [serverURL(c), "--username=\(c.username)"]
-                if !c.trustedCertSHA256.isEmpty { a += ["--trusted-cert", c.trustedCertSHA256] }
-                a += c.extraArgs
-                return (ofv, a, password.map { Data(($0 + "\n").utf8) })   // openfortivpn reads pw on stdin
-            }
+            // No `openfortivpn` fallback for FortiGate any more, and it was never
+            // reachable: `sslTransportBlockReason` refuses that exact combination
+            // (pppd needs administrator rights this app doesn't take) *before* the
+            // dispatch that would have got here. `libopenconnect` carries the
+            // `fortinet` protocol in-process regardless — see the note on TunnelCLI.
             return nil
 
         default:
@@ -1070,12 +1209,11 @@ final class SubprocessTunnelManager {
         if c.clientCertFile.trimmingCharacters(in: .whitespaces).isEmpty {
             return "Certificate sign-in needs a client certificate file — set it under Sign-In."
         }
-        // The Fortinet-only openfortivpn fallback is driven with a password on
-        // stdin and carries no certificate flags — it would sign in with a
-        // password while the picker said certificate.
-        if c.kind == .fortinet, !TunnelCLI.openconnect.isAvailable {
-            return "Certificate sign-in needs openconnect — the openfortivpn fallback can't present a client certificate. \(TunnelCLI.openconnect.installHint)"
-        }
+        // FortiGate used to be refused here when only `openfortivpn` was installed,
+        // because that tool signs in with a password on stdin and carries no
+        // certificate flags — it would have authenticated one way while the picker
+        // said another. The fallback is gone, so every kind now reaches either
+        // `openconnect` or the built-in engine, and both present a certificate.
         return nil
     }
 
@@ -1085,7 +1223,7 @@ final class SubprocessTunnelManager {
     static func missingToolReason(_ c: SubprocessTunnelConfig) -> String {
         if c.kind == .ssh { return "/usr/bin/ssh is missing from this Mac — it ships with macOS, so reinstall the command line tools." }
         guard c.kind.isSSLVPN else { return "The command-line tool this VPN needs isn't installed." }
-        if inProcessOpenConnectSupports(c), !c.preferInProcess {
+        if inProcessOpenConnectSupports(c), !c.runsInProcess {
             return "openconnect isn't installed. Turn on Run In-Process under Advanced to carry this VPN with SimpleVPN's built-in engine instead — or install the tool with: brew install openconnect"
         }
         return "openconnect isn't installed. \(TunnelCLI.openconnect.installHint)"
@@ -1094,8 +1232,8 @@ final class SubprocessTunnelManager {
     /// Why an SSL VPN that is going to run as a **subprocess** can't carry traffic
     /// on this Mac, or nil — the transport twin of `sslAuthBlockReason`.
     ///
-    /// `openconnect` and `openfortivpn` both configure a real tun/ppp device, which
-    /// needs root, and SimpleVPN deliberately never takes root in the user's
+    /// `openconnect` configures a real tun device, which needs root, and SimpleVPN
+    /// deliberately never takes root in the user's
     /// context. The no-root subprocess path is `--script-tun --script "ocproxy -D
     /// <port>"`, appended by `openconnectArgs` only when ocproxy resolves — so with
     /// ocproxy absent the argv quietly omitted it and the tool went off to make a
@@ -1110,15 +1248,21 @@ final class SubprocessTunnelManager {
     /// a lie: `willRunInProcess` would still be false with it on.
     ///
     /// Availability is injected so this is testable on a Mac that happens to have
-    /// (or not have) the tools — the `pkcs11RegistrationBlockReason` precedent.
-    /// `inProcess: false` asks the question as the *fallback* would face it: the
-    /// in-process engine was chosen and then failed to start, so the answer must
-    /// ignore `willRunInProcess` and judge the subprocess on its own merits.
+    /// (or not have) the tool. `inProcess: false` asks the question as the *fallback*
+    /// would face it: the in-process engine was chosen and then failed to start, so
+    /// the answer must ignore `willRunInProcess` and judge the subprocess on its own
+    /// merits.
+    ///
+    /// `openconnectAvailable` USED TO BE A SECOND PARAMETER, for one FortiGate clause
+    /// about `openfortivpn` needing administrator rights. That tool is gone — it was
+    /// unreachable, because this very function refused the combination before anything
+    /// could spawn it — so FortiGate is now exactly like the other six kinds, a
+    /// missing `openconnect` is `missingToolReason`'s subject, and `ocproxy` is the
+    /// only tool this function has an opinion about.
     static func sslTransportBlockReason(
         _ c: SubprocessTunnelConfig,
         inProcess: Bool? = nil,
-        ocproxyAvailable: Bool = TunnelCLI.ocproxy.isAvailable,
-        openconnectAvailable: Bool = TunnelCLI.openconnect.isAvailable
+        ocproxyAvailable: Bool = TunnelCLI.ocproxy.isAvailable
     ) -> String? {
         guard c.kind.isSSLVPN else { return nil }
         // Going in-process: no tool, no tun of ours to make, nothing to install.
@@ -1127,22 +1271,14 @@ final class SubprocessTunnelManager {
         // answer: the bridge must be able to carry the config AND the toggle must
         // still be off. "Turn on the thing you already turned on" is the shape of
         // advice that makes people stop reading error messages.
-        let theToggleWouldFixIt = inProcessOpenConnectSupports(c) && !c.preferInProcess
-        // Fortinet with only openfortivpn: it drives pppd and has no userspace
-        // mode, so there is no ocproxy equivalent to reach for.
-        if !openconnectAvailable, c.kind == .fortinet {
-            let fix = theToggleWouldFixIt
-                ? "Turn on Run In-Process under Advanced to use SimpleVPN's built-in engine, which needs no administrator rights"
-                : "Install openconnect and ocproxy (brew install openconnect ocproxy)"
-            return "openfortivpn builds its own tunnel device and needs administrator rights, which SimpleVPN doesn't take. \(fix)."
-        }
+        let theToggleWouldFixIt = inProcessOpenConnectSupports(c) && !c.runsInProcess
         if ocproxyAvailable { return nil }
         if theToggleWouldFixIt {
             return "Running this VPN with the openconnect tool needs ocproxy to carry it without administrator rights, and ocproxy isn't installed. Turn on Run In-Process under Advanced to use SimpleVPN's built-in engine instead — or install ocproxy (brew install ocproxy)."
         }
         // The toggle is already on and the engine couldn't take it: `ocproxy` is
         // the only remaining way for the tool to carry traffic without root.
-        if c.preferInProcess, inProcessOpenConnectSupports(c) {
+        if c.runsInProcess, inProcessOpenConnectSupports(c) {
             return "The openconnect tool needs ocproxy to carry this VPN without administrator rights, and ocproxy isn't installed. Install it with: brew install ocproxy"
         }
         return "This VPN has to run with the openconnect tool — \(inProcessRefusalNoun(c)) — and that needs ocproxy to carry traffic without administrator rights. Install it with: brew install ocproxy"
@@ -1151,20 +1287,45 @@ final class SubprocessTunnelManager {
     /// The reason `inProcessOpenConnectSupports` said no, as a clause that fits
     /// mid-sentence. Named rather than generic because "some setting" sends the
     /// user hunting through five tabs.
+    /// Kept in step with `inProcessOpenConnectSupports` clause for clause — every
+    /// setting that still refuses the bridge names itself here, and nothing that no
+    /// longer refuses is named at all. When the gates moved, eight of these
+    /// sentences became lies (they described settings the bridge now carries), which
+    /// is why the two live next to each other.
     private static func inProcessRefusalNoun(_ c: SubprocessTunnelConfig) -> String {
         if openconnectAuthMode(c) == "token" || c.pkcs11CertificateURI != nil || c.pkcs11KeyURI != nil {
             return "SimpleVPN's built-in engine is built without smartcard support"
         }
-        if !c.clientCertFile.isEmpty || !c.clientKeyFile.isEmpty { return "the built-in engine can't present a client certificate from a file" }
-        if !c.caFile.isEmpty { return "the built-in engine can't take a CA file" }
-        if c.proxyMode == .manual { return "the built-in engine can't reach the gateway through a specific proxy" }
-        if !c.csdWrapper.isEmpty || c.disableCSD { return "the built-in engine can't answer a host-checker challenge" }
-        if !c.usergroup.isEmpty { return "the built-in engine can't take a user group or path" }
-        if c.port != nil { return "the built-in engine can't take an explicit port" }
+        if !c.tokenMode.isEmpty { return "the built-in engine can't hold a verification-code token seed" }
+        if !c.csdWrapper.isEmpty || c.disableCSD { return "the built-in engine can't run a host-checker script" }
+        if c.baseMTU != nil { return "the built-in engine can't take a base MTU" }
+        if c.noHTTPKeepalive { return "the built-in engine can't turn HTTP keepalive off" }
+        if let why = SubprocessTunnelConfig.compressionProblem(c.ocCompression), !why.isEmpty {
+            return "\u{201C}\(c.ocCompression)\u{201D} isn't a compression mode OpenConnect has"
+        }
+        if SubprocessTunnelConfig.spoofOSProblem(c.spoofOS) != nil {
+            return "\u{201C}\(c.spoofOS)\u{201D} isn't a reported OS OpenConnect has"
+        }
         if !c.extraArgs.filter({ !$0.trimmingCharacters(in: .whitespaces).isEmpty }).isEmpty {
             return "the built-in engine can't take extra arguments"
         }
         return "a setting on this VPN needs the tool (the Run In-Process row names which)"
+    }
+
+    /// Why this profile is being offered the built-in engine, or nil when there is
+    /// nothing to offer. THE OTHER HALF OF THE MIGRATION: a profile that predates
+    /// the default carries a stored `preferInProcess == false`, so it keeps the tool
+    /// — correct, because something may be pointed at its SOCKS port — but it is not
+    /// told, and the whole routing story stays switched off for it forever. This is
+    /// the sentence that tells it, on the toggle's own row.
+    ///
+    /// It cannot distinguish "carried forward from before the default moved" from
+    /// "deliberately turned off afterwards" — both store `false`, and adding a field
+    /// to tell them apart would be a third representation of one decision. So the
+    /// wording is an OFFER, true either way, never a correction.
+    static func inProcessOfferReason(_ c: SubprocessTunnelConfig) -> String? {
+        guard c.kind.isSSLVPN, !c.runsInProcess, inProcessOpenConnectSupports(c) else { return nil }
+        return "This VPN runs the openconnect tool, which can only give you a SOCKS proxy on port \(c.socksPort) — no interface, no routes and no DNS of its own. SimpleVPN's built-in engine carries it as a full system tunnel instead, and needs nothing installed. Turning this on closes port \(c.socksPort), so check nothing is pointed at it first."
     }
 
     /// Why the chosen PKCS#11 module can't be reached by `openconnect`, or nil.
@@ -1616,7 +1777,6 @@ nonisolated final class TunnelProcess: @unchecked Sendable {
         "Got CONNECT response: HTTP/1.0 200",     // openconnect (F5/PPP kinds use HTTP/1.0)
         "Established DTLS connection",            // openconnect
         "Session authentication will expire",     // openconnect, post-auth banner
-        "Tunnel is up and running",               // openfortivpn
     ]
 
     func start() {
@@ -1682,7 +1842,7 @@ nonisolated final class TunnelProcess: @unchecked Sendable {
     func stop() {
         process?.terminationHandler = nil
         process?.interrupt()
-        // SIGINT lets openconnect/openfortivpn log out of the gateway cleanly;
+        // SIGINT lets openconnect log out of the gateway cleanly;
         // give it a couple of seconds before the SIGTERM backstop. `process`
         // stays set until then so the escalation can find it (instances are
         // one-shot — nothing restarts on this object).

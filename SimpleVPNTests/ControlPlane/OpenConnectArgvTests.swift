@@ -112,13 +112,15 @@ struct OpenConnectArgvTests {
         #expect(SubprocessTunnelManager.sslAuthBlockReason(config {
             $0.kind = .ssh; $0.authMode = "certificate"
         }) == nil)
-        // The Fortinet fallback tool can't present a certificate, so certificate
-        // mode is refused rather than silently signing in with a password.
-        if !TunnelCLI.openconnect.isAvailable {
-            #expect(SubprocessTunnelManager.sslAuthBlockReason(config {
-                $0.kind = .fortinet; $0.authMode = "certificate"; $0.clientCertFile = "~/client.pem"
-            }) != nil)
-        }
+        // FortiGate used to be refused here when only `openfortivpn` was installed:
+        // that tool signs in with a password on stdin and carries no certificate
+        // flags, so it would have authenticated one way while the picker said another.
+        // The fallback is gone (it was unreachable, and needed root), so FortiGate now
+        // reaches either `openconnect` or the built-in engine, and both present a
+        // certificate — there is nothing left to refuse.
+        #expect(SubprocessTunnelManager.sslAuthBlockReason(config {
+            $0.kind = .fortinet; $0.authMode = "certificate"; $0.clientCertFile = "~/client.pem"
+        }) == nil)
     }
 
     // MARK: Host checker — the wrapper wins, and the UI says so
@@ -200,28 +202,108 @@ struct OpenConnectArgvTests {
         #expect(!args { _ in }.contains { $0.hasPrefix("--servercert=") })
     }
 
-    // MARK: In-process is asked for, not assumed
+    // MARK: In-process is the default now, and the gate is what qualifies it
 
-    /// The toggle only takes effect when the built-in engine can carry every
-    /// setting — otherwise the openconnect tool runs it and the editor says why.
-    /// The SOCKS rows' caveat hangs off this same gate.
-    @Test func inProcessIsOnlyHonouredWhenTheBridgeCanCarryTheConfig() {
-        #expect(!SubprocessTunnelManager.willRunInProcess(config { _ in }))
-        #expect(SubprocessTunnelManager.willRunInProcess(config { $0.preferInProcess = true }))
-        // Each of these is a knob the bridge can't express, so each sends it back.
-        #expect(!SubprocessTunnelManager.willRunInProcess(config {
-            $0.preferInProcess = true; $0.enablePFS = true
-        }))
-        #expect(!SubprocessTunnelManager.willRunInProcess(config {
-            $0.preferInProcess = true; $0.caFile = "~/vpn-ca.pem"
-        }))
-        #expect(!SubprocessTunnelManager.willRunInProcess(config {
-            $0.preferInProcess = true; $0.ocMTU = 1300
-        }))
+    /// THE DEFAULT MOVED, and this test used to assert the opposite. A profile with
+    /// nothing chosen runs in-process — a full system tunnel with its own routes and
+    /// DNS — because the alternative (`ocproxy -D <port>`) is a SOCKS listener with
+    /// none of that, and every routing feature in the app is switched off for it.
+    ///
+    /// `preferInProcess` is Optional precisely so that "nobody chose" (nil, the
+    /// modern default) is a different fact from "chose the tool" (stored false), which
+    /// is what lets an existing profile keep working while a new one gets the good
+    /// path. Both are asserted here because the pair IS the migration.
+    @Test func inProcessIsTheDefaultAndAStoredChoiceIsHonoured() {
+        let fresh = config { _ in }
+        #expect(fresh.preferInProcess == nil, "a new profile has chosen nothing")
+        #expect(fresh.runsInProcess, "and \"nothing chosen\" now means in-process")
+        #expect(SubprocessTunnelManager.willRunInProcess(fresh))
+
+        // An existing profile carries a stored `false` — written unconditionally by
+        // the encoder back when the field was a plain Bool, whether or not anyone
+        // ever saw the toggle. It keeps the tool, and that is deliberate: something
+        // may be pointed at its SOCKS port.
+        let carriedForward = config { $0.preferInProcess = false }
+        #expect(!carriedForward.runsInProcess)
+        #expect(!SubprocessTunnelManager.willRunInProcess(carriedForward))
+        // …and it is told there is something better, naming the cost of the change.
+        let offer = SubprocessTunnelManager.inProcessOfferReason(carriedForward)
+        #expect(offer?.contains("\(carriedForward.socksPort)") == true,
+                "the offer must name the port that would close")
+
+        // Nothing to offer when it is already in-process.
+        #expect(SubprocessTunnelManager.inProcessOfferReason(fresh) == nil)
         // SSH is a different engine entirely; the SSL toggle can't claim it.
-        #expect(!SubprocessTunnelManager.willRunInProcess(config {
-            $0.kind = .ssh; $0.preferInProcess = true
-        }))
+        #expect(!SubprocessTunnelManager.willRunInProcess(config { $0.kind = .ssh }))
+    }
+
+    /// EIGHT OF THE ELEVEN GATES ARE GONE, because they were never statements about
+    /// libopenconnect — they were settings nobody had plumbed through
+    /// `OCClientSettings`, and each one silently cost the user the entire routing
+    /// story. Every setting below is now carried (see
+    /// `InProcessOpenConnectCoverageTests`, which proves it reaches the bridge) and
+    /// therefore must NOT send the connection back to the tool.
+    @Test func theSettingsThatUsedToForceTheToolNoLongerDo() {
+        let carried: [(String, (inout SubprocessTunnelConfig) -> Void)] = [
+            ("explicit port",   { $0.port = 8443 }),
+            ("CA file",         { $0.caFile = "~/vpn-ca.pem" }),
+            ("usergroup",       { $0.usergroup = "gateway" }),
+            ("reported OS",     { $0.spoofOS = "win" }),
+            ("client cert",     { $0.authMode = "certificate"; $0.clientCertFile = "~/c.pem" }),
+            ("client key",      { $0.authMode = "certificate"; $0.clientCertFile = "~/c.pem"; $0.clientKeyFile = "~/c.key" }),
+            ("manual proxy",    { $0.proxyMode = .manual; $0.proxyURL = "http://proxy:8080" }),
+            ("compression",     { $0.ocCompression = "stateless" }),
+            ("PFS",             { $0.enablePFS = true }),
+            ("IPv6 off",        { $0.disableIPv6 = true }),
+            ("DTLS off",        { $0.disableDTLS = true }),
+            ("local hostname",  { $0.localHostname = "mac-01" }),
+            ("user agent",      { $0.userAgent = "AnyConnect/4.10" }),
+            ("version string",  { $0.versionString = "4.10.05085" }),
+            ("MTU",             { $0.ocMTU = 1300 }),
+            ("DPD",             { $0.forceDPD = 30 }),
+            ("reconnect timeout", { $0.reconnectTimeout = 60 }),
+        ]
+        for (name, mutate) in carried {
+            #expect(SubprocessTunnelManager.willRunInProcess(config(mutate)),
+                    "\(name) is carried by the bridge now — it must not force the tool")
+        }
+    }
+
+    /// …and the ones that still do, each for a reason that is not "unfinished".
+    /// A clause may only be deleted once the setting is genuinely CARRIED, so this
+    /// is the other half of the contract: these must keep refusing.
+    @Test func theSettingsThatGenuinelyCannotBeCarriedStillRefuse() {
+        let refused: [(String, (inout SubprocessTunnelConfig) -> Void)] = [
+            // Host checker: `openconnect_setup_csd` works by forking a child, and
+            // the packet-tunnel extension is app-sandboxed AND root — running a
+            // user-nominated script there is a decision with an entitlement
+            // attached, not a plumbing job.
+            ("host-checker wrapper", { $0.csdWrapper = "/usr/local/bin/csd.sh" }),
+            ("skip host checker",    { $0.disableCSD = true }),
+            // No public setter exists: OpenConnect's own CLI writes
+            // `vpninfo->basemtu` / `->no_http_keepalive` directly.
+            ("base MTU",             { $0.baseMTU = 9000 }),
+            ("HTTP keepalive off",   { $0.noHTTPKeepalive = true }),
+            // Arbitrary argv has no in-process equivalent by construction.
+            ("extra arguments",      { $0.extraArgs = ["--dump-http-traffic"] }),
+            // A value the library hasn't got. Guessing which of the three
+            // compression modes "stateful" meant is the silent substitution this
+            // whole predicate exists to prevent.
+            ("unknown compression",  { $0.ocCompression = "stateful" }),
+            ("unknown reported OS",  { $0.spoofOS = "solaris" }),
+        ]
+        for (name, mutate) in refused {
+            let c = config(mutate)
+            #expect(!SubprocessTunnelManager.willRunInProcess(c),
+                    "\(name) cannot be carried, so it must fall back rather than be dropped")
+            // And the refusal must NAME it — "some setting" sends the user hunting
+            // through five tabs.
+            let reason = SubprocessTunnelManager.sslTransportBlockReason(
+                c, ocproxyAvailable: false)
+            #expect(reason != nil, "\(name): on the tool with no ocproxy, this is blocked")
+            #expect(reason?.contains("Run In-Process") == false,
+                    "\(name): offering a toggle that cannot help is a lie")
+        }
     }
 
     /// Every SSL-VPN kind can go in-process, because the extension dispatches on
@@ -229,13 +311,14 @@ struct OpenConnectArgvTests {
     /// used to name only fortinet / f5apm / anyconnect while `willRunInProcess`
     /// promised all of them — the editor said "in-process", the connect quietly
     /// spawned `openconnect` and demanded ocproxy. One rule now, asserted per kind.
+    /// SETTINGS-ONLY, NO PER-KIND ALLOW-LIST: a three-kind list here is the exact
+    /// regression this asserts against.
     @Test func everySSLVPNKindCanRunInProcess() {
         let sslKinds = VPNKind.allCases.filter(\.isSSLVPN)
         #expect(sslKinds.count == 7, "the seven SSL-VPN kinds")
         for kind in sslKinds {
-            #expect(SubprocessTunnelManager.willRunInProcess(config {
-                $0.kind = kind; $0.preferInProcess = true
-            }), "\(kind.rawValue) should be able to run in-process")
+            #expect(SubprocessTunnelManager.willRunInProcess(config { $0.kind = kind }),
+                    "\(kind.rawValue) should be able to run in-process")
         }
     }
 
@@ -246,11 +329,13 @@ struct OpenConnectArgvTests {
     /// appended only when ocproxy resolves — so ocproxy is REQUIRED on the
     /// subprocess path, and its absence used to be a silent failure.
     @Test func aSubprocessSSLVPNWithoutOcproxyIsRefusedNotLeftToFail() {
-        let c = config { _ in }   // no in-process, password sign-in
+        // Explicitly on the tool: the default is in-process now, so a test that
+        // relied on the default to mean "subprocess" would silently stop testing it.
+        let c = config { $0.preferInProcess = false }
         #expect(SubprocessTunnelManager.sslTransportBlockReason(
-            c, ocproxyAvailable: true, openconnectAvailable: true) == nil)
+            c, ocproxyAvailable: true) == nil)
         let reason = SubprocessTunnelManager.sslTransportBlockReason(
-            c, ocproxyAvailable: false, openconnectAvailable: true)
+            c, ocproxyAvailable: false)
         #expect(reason != nil)
         // The fix it names is the bundled engine FIRST — Homebrew is the fallback,
         // not the answer (ONTOLOGY: failure text names the fix).
@@ -262,9 +347,9 @@ struct OpenConnectArgvTests {
     /// about ocproxy can block it — that is the whole point of the migration.
     @Test func anInProcessSSLVPNNeedsNoToolAtAll() {
         for kind in VPNKind.allCases.filter(\.isSSLVPN) {
-            let c = config { $0.kind = kind; $0.preferInProcess = true }
+            let c = config { $0.kind = kind }
             #expect(SubprocessTunnelManager.sslTransportBlockReason(
-                c, ocproxyAvailable: false, openconnectAvailable: false) == nil,
+                c, ocproxyAvailable: false) == nil,
                     "\(kind.rawValue) in-process must not require any tool")
         }
     }
@@ -275,61 +360,27 @@ struct OpenConnectArgvTests {
     /// already on, and advice that names a box the user already ticked is how
     /// people learn to stop reading error messages.
     @Test func theFallbackIsRefusedAndNeverToldToTickABoxAlreadyTicked() {
-        let c = config { $0.preferInProcess = true }
+        let c = config { _ in }
         // As the connect path sees it: in-process, so nothing to block.
         #expect(SubprocessTunnelManager.sslTransportBlockReason(
-            c, ocproxyAvailable: false, openconnectAvailable: true) == nil)
+            c, ocproxyAvailable: false) == nil)
         // As the fallback faces it: the subprocess needs ocproxy and hasn't got it.
         let reason = SubprocessTunnelManager.sslTransportBlockReason(
-            c, inProcess: false, ocproxyAvailable: false, openconnectAvailable: true)
+            c, inProcess: false, ocproxyAvailable: false)
         #expect(reason != nil)
         #expect(reason?.contains("brew install ocproxy") == true)
         #expect(reason?.contains("Turn on Run In-Process") == false)
         // With ocproxy present the fallback is legitimate again.
         #expect(SubprocessTunnelManager.sslTransportBlockReason(
-            c, inProcess: false, ocproxyAvailable: true, openconnectAvailable: true) == nil)
-    }
-
-    /// A smartcard tunnel can never run in-process (AMFI forbids `dlopen`ing the
-    /// provider module in the sysext, whatever TLS backend the xcframework is
-    /// built with), so ocproxy is a genuine requirement there — and the refusal
-    /// must NOT offer the toggle, which would still be false with it on.
-    @Test func aSmartcardTunnelIsToldTheToolIsRequiredNotOfferedTheToggle() {
-        let token = config {
-            $0.authMode = "token"
-            $0.pkcs11ModulePath = "/opt/homebrew/lib/libykcs11.dylib"
-            $0.pkcs11CertificateURI = "pkcs11:token=SimpleVPN;object=vpn"
-        }
-        #expect(!SubprocessTunnelManager.willRunInProcess(config {
-            $0.preferInProcess = true; $0.authMode = "token"
-            $0.pkcs11CertificateURI = "pkcs11:token=SimpleVPN;object=vpn"
-        }))
-        let reason = SubprocessTunnelManager.sslTransportBlockReason(
-            token, ocproxyAvailable: false, openconnectAvailable: true)
-        #expect(reason != nil)
-        #expect(reason?.contains("smartcard") == true)
-        #expect(reason?.contains("Run In-Process") == false,
-                "offering a toggle that cannot help is a lie")
-    }
-
-    /// The Fortinet-only `openfortivpn` fallback drives `pppd` — it has no
-    /// userspace mode, so there is no ocproxy equivalent and it simply needs
-    /// admin rights we don't take. Refuse it rather than let pppd fail.
-    @Test func theOpenfortivpnFallbackIsRefusedBecauseItNeedsRoot() {
-        let f = config { $0.kind = .fortinet }
-        let reason = SubprocessTunnelManager.sslTransportBlockReason(
-            f, ocproxyAvailable: true, openconnectAvailable: false)
-        #expect(reason?.contains("administrator rights") == true)
-        #expect(reason?.contains("Run In-Process") == true)
-        // With openconnect present it is the ordinary ocproxy story again.
-        #expect(SubprocessTunnelManager.sslTransportBlockReason(
-            f, ocproxyAvailable: true, openconnectAvailable: true) == nil)
+            c, inProcess: false, ocproxyAvailable: true) == nil)
     }
 
     /// A missing tool must name the tool and the fix. "The required command-line
     /// tool isn't installed" sent nobody anywhere.
     @Test func aMissingToolNamesTheToolAndTheFix() {
-        let reason = SubprocessTunnelManager.missingToolReason(config { _ in })
+        // Explicitly on the tool: the toggle is only offered when turning it ON would
+        // change the answer, and for a config that is already in-process it would not.
+        let reason = SubprocessTunnelManager.missingToolReason(config { $0.preferInProcess = false })
         #expect(reason.contains("openconnect"))
         #expect(reason.contains("Run In-Process"), "the bundled engine is the fix that needs no package manager")
         // SSH is a macOS tool — Homebrew is not the answer there.

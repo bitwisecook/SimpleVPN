@@ -4,9 +4,11 @@
 //  OpenConnectProfileStore.swift
 //  Bridges an SSL-VPN SubprocessTunnelConfig to an on-demand NETunnelProviderManager
 //  so it runs *in-process* through the packet-tunnel extension's OpenConnectBridge
-//  (Stage 2) instead of the `openconnect` subprocess. Creds ride startTunnel options
-//  (the root extension can't read the keychain). This is the opt-in in-process path;
-//  the subprocess remains the default and the fallback.
+//  instead of the `openconnect` subprocess. Creds ride startTunnel options
+//  (the root extension can't read the keychain). This is now the DEFAULT path for a
+//  new SSL VPN; the subprocess survives for the settings the bridge genuinely can't
+//  carry (`SubprocessTunnelManager.inProcessOpenConnectSupports`) and as the fallback
+//  when the extension refuses to start.
 //
 
 import Foundation
@@ -53,11 +55,12 @@ enum OpenConnectProfileStore {
             let proto = NETunnelProviderProtocol()
             proto.providerBundleIdentifier = providerBundleID
             proto.serverAddress = config.server
-            var conf: [String: Any] = ["profile": config.id, "vpnType": type, "server": config.server]
-            if !config.realm.isEmpty { conf["realm"] = config.realm }
-            if !config.trustedCertSHA256.isEmpty { conf["serverCert"] = config.trustedCertSHA256 }
-            if !config.samlBrowser.isEmpty { conf["samlBrowser"] = config.samlBrowser }
-            proto.providerConfiguration = conf
+            // EVERY non-secret setting the bridge carries, from the one mapping that
+            // `inProcessOpenConnectSupports` is held to. This used to be four keys
+            // written by hand here, which is how "the built-in engine can't take a CA
+            // file" came to be believed: the bridge had always called
+            // openconnect_set_cafile, and nothing had ever passed it a path.
+            proto.providerConfiguration = SubprocessTunnelManager.inProcessConfiguration(config)
             mgr.protocolConfiguration = proto
             mgr.localizedDescription = config.name
             mgr.isEnabled = true
@@ -69,6 +72,10 @@ enum OpenConnectProfileStore {
                 "username": config.username as NSString,
                 "password": (password ?? "") as NSString,
             ]
+            // The secret half: a client key's passphrase and a proxy password, read
+            // from the keychain here (the extension is root and cannot) and carried
+            // in memory only — never providerConfiguration, which persists.
+            options.merge(SubprocessTunnelManager.inProcessSecrets(config)) { current, _ in current }
             if let auth {
                 options["cookie"] = auth.cookie as NSString
                 options["servercert"] = auth.servercert as NSString
