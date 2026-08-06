@@ -86,6 +86,14 @@ authenticate in UI copy. `authenticate` is fine in code and in this file.
 **"Credential" is banned from UI copy** and asserted by test. It is fine in code
 (`CredentialSource`, `RawCredentials`), because code has different readers.
 
+**One deliberate exception to the security-key row: "smartcard".** SimpleVPN does *not* sign in with a
+certificate held on a card (`Docs/AuthSecPKCS11.md`), and the one place it says so has to use the word
+the reader arrived with — somebody sent by their IT department to "use your smartcard" will not search
+for "security key". So "smartcard" is allowed in exactly two places, both of which exist to state an
+absence and ask for a use case: the sign-in method option that reveals that notice, and the manual
+chapter `#oc-smartcards`. Everywhere else, and for any hardware we *can* use, the term is
+**security key**.
+
 ### Inside a password app
 
 Every vendor names its containers differently and they do not line up. Ours:
