@@ -63,8 +63,11 @@ typedef NS_ENUM(NSInteger, OCStatus) {
 /// `--local-hostname`: the computer name reported instead of this Mac's own.
 @property (nullable, copy) NSString *localName;
 /// `--certificate` / `--sslkey`: client certificate sign-in from files on disk.
-/// A PKCS#11 URI is NOT accepted here — this libopenconnect is built
-/// `--with-openssl --without-gnutls` and has no PKCS#11 backend.
+/// FILES ONLY. This libopenconnect is built `--with-openssl --without-gnutls` and has
+/// no PKCS#11 backend, so a `pkcs11:` URI here would fail with a confusing "no
+/// certificate found". Nothing produces one any more — SimpleVPN does not sign in with
+/// a certificate on a smartcard at all (Docs/AuthSecPKCS11.md) — and the note stays
+/// because the constraint on this property is what it always was.
 @property (nullable, copy) NSString *clientCertFile;
 @property (nullable, copy) NSString *clientKeyFile;
 /// `--key-password`: the passphrase for an encrypted key / PKCS#12. SECRET.

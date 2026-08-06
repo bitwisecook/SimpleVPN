@@ -98,15 +98,13 @@ struct SettingAlignmentTests {
     ///
     /// THE LIST IS THE POINT — the same device as
     /// `SettingRenderingTests.unrenderedByDesign`: being on it is a deliberate act
-    /// visible in a diff, not a silent exemption. Both entries are PKCS#11 rows in
-    /// `SubprocessTunnelView` (the module path and the certificate URI), which another
-    /// change in flight is DELETING outright. Fixing a title in code that is about to
-    /// be removed would have collided with that change for no benefit; when smartcard
-    /// support goes, these two lines go with it and this list is empty again.
-    static let titledFieldsAwaitingDeletion: Set<String> = [
-        "SubprocessTunnelView.swift:1015",
-        "SubprocessTunnelView.swift:1132",
-    ]
+    /// visible in a diff, not a silent exemption. IT IS NOW EMPTY, and that is the
+    /// point — its two entries were the PKCS#11 module-path and certificate-URI rows
+    /// in `SubprocessTunnelView`, deliberately left un-fixed because the change that
+    /// deleted smartcard support was in flight and would have collided. Smartcard is
+    /// gone, so they are gone. Anything added here must carry the same shape of
+    /// reason: a named change that will remove the code, not "we will get to it".
+    static let titledFieldsAwaitingDeletion: Set<String> = []
 
     @Test func noFieldInsideLabeledContentPassesATitle() throws {
         var offenders: [String] = []

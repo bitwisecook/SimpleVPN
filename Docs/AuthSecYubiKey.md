@@ -13,7 +13,11 @@ to "tested".
 ## What was built, and which YubiKey this is
 
 This is the **non-PIV** YubiKey: the secrets a key *types* or *computes*. It is not PKCS#11/PIV
-(certificates and a PIN) — that is a separate piece of work with a separate editor surface.
+(certificates and a PIN) — that was a separate piece of work with a separate editor surface, and it
+has since been **removed**: SimpleVPN does not sign in with a certificate held on a card or a PIV
+applet at all (`Docs/AuthSecPKCS11.md`). **Nothing on this page is affected.** The two shared a device
+and no code: the removal touched no `YubiKeyCapture`, `Presence`, `TouchCapture`, `Conflicts` or
+`YubiKeySlot`, and no `ykman` call site. What went was the *certificate* half.
 
 Four mechanisms, chosen per VPN in **Manage VPNs ▸ (a VPN) ▸ Sign-In ▸ Security Key**:
 

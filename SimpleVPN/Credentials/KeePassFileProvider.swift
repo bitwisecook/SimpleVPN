@@ -533,7 +533,7 @@ struct KeePassFileConfiguration: Sendable, Equatable {
             case .securityKeySlot:
                 out.slot = YubiKeySlot(rawValue: Int(shown.value.trimmingCharacters(
                     in: .whitespaces)) ?? 0)
-            case .toolBinary, .unixSocket, .daemonEndpoint, .pkcs11Module,
+            case .toolBinary, .unixSocket, .daemonEndpoint,
                  .storeDirectory, .entryFieldName, .serverURL, .toolConfigFile,
                  .accountIdentifier:
                 // Not kdbx fields. `storeDirectory` and `entryFieldName` belong to the

@@ -5,24 +5,29 @@
 //  THE UNIFIED CALL RETURNS A PLAN, NOT A SECRET.
 //
 //  This is the decision the whole abstraction turns on, and it was forced by the code
-//  rather than chosen: SimpleVPN already ships nine authentication mechanisms, and
-//  THREE OF THEM NEVER HAND OVER BYTES.
+//  rather than chosen: SimpleVPN ships a great many authentication mechanisms, and
+//  TWO OF THEM NEVER HAND OVER BYTES. (A third did — a PKCS#11 token — until smartcard
+//  sign-in was removed; see Docs/AuthSecPKCS11.md. The argument is unchanged: it only
+//  ever needed one mechanism that cannot return bytes, and the SSH agent is one.)
 //
 //    • The SSH agent SIGNS. `ssh_userauth_agent` asks the agent to sign a challenge;
 //      the private key never leaves it, and there is nothing for a fetch to return.
 //      What can be planned is the agent's SOCKET PATH.
-//    • The PKCS#11 module is loaded by `openconnect` ITSELF, through p11-kit.
-//      SimpleVPN cannot `dlopen` it at all (hardened runtime plus AMFI
-//      library-validation on a system-extension-embedding app), so there is no shape
-//      in which we hold the key. What can be planned is the `pkcs11:` URI.
 //    • A security key TYPES. It is a USB HID keyboard: it puts keystrokes into
 //      whatever field has focus, and the bytes never cross an API. What can be
 //      planned is an ARMED CAPTURE — the guarantee that the right field is focused,
 //      with a timeout and a cancel.
 //
-//  A `resolve() -> RawCredentials` seam cannot express any of those. It expressed the
-//  first two as "a private key we failed to fetch" and the third not at all, which is
-//  precisely why all three sat OUTSIDE the credential seam, each with its own return
+//  (A THIRD used to be listed here: a PKCS#11 module, which `openconnect` loads itself
+//  through p11-kit. SimpleVPN never could `dlopen` one — hardened runtime plus AMFI
+//  library-validation on a system-extension-embedding app — so what it planned was the
+//  `pkcs11:` URI rather than a key. Smartcard sign-in is gone, Docs/AuthSecPKCS11.md
+//  says why, and the SHAPE of the argument survives because the SSH agent still makes
+//  it.)
+//
+//  A `resolve() -> RawCredentials` seam cannot express either of those. It expressed the
+//  first as "a private key we failed to fetch" and the second not at all, which is
+//  precisely why both sat OUTSIDE the credential seam, each with its own return
 //  shape, its own error convention and its own waiting mechanism — the combinatorial
 //  explosion the abstraction exists to prevent, arriving through the back door.
 //
@@ -95,20 +100,11 @@ nonisolated enum AuthPossession: Sendable, Equatable {
     /// ssh has no flag for it).
     case agentSocket(path: String)
 
-    /// A PKCS#11 object, named by an RFC 7512 URI.
-    ///
-    /// THE QUERY IS ALWAYS STRIPPED before it gets here (`PKCS11URI.withoutQuery`),
-    /// and that is a security control rather than tidiness: `pin-value` and
-    /// `pin-source` are query attributes, and this URI reaches OpenConnect's ARGV,
-    /// where every process on the Mac can read it through `ps`. The PIN travels on
-    /// stdin and only on stdin — which is why `.tokenPIN` is a separate `AuthKind`
-    /// with a separate `.value` plan, and never part of this name.
-    ///
-    /// `module` is informational only. OpenConnect has no "use this module" option: it
-    /// resolves the URI through p11-kit, which loads only what a `.module` file
-    /// declares, so a path here is for telling the user what to register — never
-    /// something we pass.
-    case pkcs11Object(uri: String, module: String?)
+    // A `.pkcs11Object(uri:module:)` CASE USED TO BE HERE, naming a certificate on a
+    // smartcard. It is gone with smartcard sign-in itself (Docs/AuthSecPKCS11.md) —
+    // and note what is NOT gone: `AuthKind.tokenPIN`. Its raw value is an on-disk
+    // contract (`CredentialSource.fieldMap`), and it still names the PIN a hardware
+    // security key asks for, which is a live feature (Docs/AuthSecYubiKey.md).
 
     /// A security key's HMAC-SHA1 slot, which will answer a challenge without ever
     /// releasing the secret programmed into it. The slot number, and which key when
@@ -125,7 +121,6 @@ nonisolated enum AuthPossession: Sendable, Equatable {
     var loggableSummary: String {
         switch self {
         case .agentSocket: "ssh agent socket"
-        case .pkcs11Object: "pkcs11 object uri"
         case .securityKeySlot(let slot, _): "security key slot \(slot)"
         }
     }
@@ -189,8 +184,8 @@ nonisolated struct AuthCaptureTicket: Sendable, Equatable {
 ///
 /// Deliberately NOT `SignInSourceID`, and the difference is meaningful rather than
 /// bureaucratic: `SignInSourceID` names a ROW IN THE CHOOSER — the things a person
-/// picks when answering "where is my sign-in kept?" — and the SSH agent, a PKCS#11
-/// token and a security key are none of those. They are per-VPN authentication
+/// picks when answering "where is my sign-in kept?" — and the SSH agent and a
+/// security key are neither of those. They are per-VPN authentication
 /// methods configured in that VPN's editor, and putting them in the chooser would
 /// invite somebody to choose "SSH agent" as the place their OpenVPN password lives.
 ///
@@ -210,8 +205,9 @@ nonisolated enum AuthSourceID: Hashable, Sendable {
     case vault(LocalVaultVendor)
     /// An SSH agent that signs.
     case sshAgent
-    /// A PKCS#11 token whose module the engine loads.
-    case pkcs11Token
+    // `.pkcs11Token` USED TO BE HERE — a smartcard whose module `openconnect` loaded.
+    // Removed with the feature (Docs/AuthSecPKCS11.md). `.securityKey` below is a
+    // different mechanism on (sometimes) the same piece of plastic, and it stays.
     /// A security key that types or computes.
     case securityKey
 
@@ -223,7 +219,6 @@ nonisolated enum AuthSourceID: Hashable, Sendable {
         case .systemAutoFill: "system-autofill"
         case .vault(let vendor): vendor.rawValue
         case .sshAgent: "ssh-agent"
-        case .pkcs11Token: "pkcs11-token"
         case .securityKey: "security-key"
         }
     }
@@ -243,9 +238,8 @@ nonisolated enum AuthSourceID: Hashable, Sendable {
 ///
 ///   • `supplies`  — hands over the bytes. `.value`.
 ///   • `proves`    — will demonstrate it has the thing, without ever releasing it.
-///                   `.possession`. An `SSHAgentIdentity` is public-key metadata; a
-///                   PKCS#11 certificate is a name; a security-key slot answers a
-///                   challenge. Nothing crosses.
+///                   `.possession`. An `SSHAgentIdentity` is public-key metadata and a
+///                   security-key slot answers a challenge. Nothing crosses.
 ///   • `withholds` — HOLDS IT AND WILL NOT GIVE IT TO US. Apple Passwords is the case
 ///                   that makes this a first-class set rather than an omission: it
 ///                   stores verification codes and exposes none of them to other
@@ -357,20 +351,12 @@ nonisolated enum AuthSourceCatalog {
         proves: [.keyInAgent],
         delivery: .possession)
 
-    /// A PKCS#11 TOKEN. Two kinds, two deliveries, and this is the one source where
-    /// they differ — which is why the descriptor's single `delivery` is `.possession`
-    /// and the PIN is called out here rather than modelled as a second delivery:
-    ///
-    ///   • `.certificate` is PROVED. The URI is a name; `openconnect` resolves it
-    ///     through p11-kit and loads the module itself. SimpleVPN cannot load it.
-    ///   • `.tokenPIN` is SUPPLIED — on stdin, to the tool's first password prompt,
-    ///     and nowhere else. Never in the URI (`pin-value` is refused at parse time,
-    ///     because the URI reaches argv) and never in a log.
-    static let pkcs11Token = AuthSourceDescriptor(
-        id: .pkcs11Token, transports: [.hardware],
-        supplies: [.tokenPIN],
-        proves: [.certificate],
-        delivery: .possession)
+    // A `pkcs11Token` DESCRIPTOR STOOD HERE, declaring `proves: [.certificate]` and
+    // `supplies: [.tokenPIN]`. It is gone with the mechanism it described. Both KINDS
+    // are still declared by other sources — `.certificate` by the vaults that can hand
+    // over a certificate, `.tokenPIN` by `typed` — so `AuthKind` did not have to
+    // change at all, which is what a closed KIND axis beside an open VENDOR axis is
+    // for: removing a mechanism removes a row, not a case in every switch.
 
     /// A SECURITY KEY. Four mechanisms, and they split across two deliveries — which
     /// is the one place the "one delivery per source" simplification is genuinely
@@ -447,7 +433,7 @@ nonisolated enum AuthSourceCatalog {
     static var all: [AuthSourceDescriptor] {
         [typed, keychain, biometricKeychain, applePasswords]
             + LocalVaultVendor.allCases.map(vault)
-            + [sshAgent, pkcs11Token, securityKey]
+            + [sshAgent, securityKey]
     }
 
     @MainActor

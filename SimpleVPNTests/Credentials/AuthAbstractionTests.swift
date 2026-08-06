@@ -400,8 +400,6 @@ struct AuthPlanTests {
     @Test func aPossessionHasNothingSecretToLog() {
         let socket = AuthPossession.agentSocket(path: "/Users/someone/.ssh/agent.sock")
         #expect(!socket.loggableSummary.contains("someone"))
-        let uri = AuthPossession.pkcs11Object(uri: "pkcs11:token=Foo;object=Bar", module: nil)
-        #expect(!uri.loggableSummary.contains("Foo"))
         #expect(AuthPossession.securityKeySlot(slot: 2, serial: "123").loggableSummary
             .contains("slot 2"))
     }
@@ -447,8 +445,11 @@ struct AuthSourceCatalogTests {
         #expect(ids.contains(.appKeychain(biometric: true)))
         #expect(ids.contains(.systemAutoFill))
         #expect(ids.contains(.sshAgent))
-        #expect(ids.contains(.pkcs11Token))
         #expect(ids.contains(.securityKey))
+        // `.pkcs11Token` was asserted here and is GONE with smartcard sign-in
+        // (Docs/AuthSecPKCS11.md). Asserting its absence keeps the removal deliberate:
+        // a mechanism row must not come back without a mechanism behind it.
+        #expect(!AuthSourceCatalog.all.contains { $0.id.rawValue == "pkcs11-token" })
         for vendor in LocalVaultVendor.allCases {
             #expect(ids.contains(.vault(vendor)), "\(vendor.rawValue) is not in the table")
         }
@@ -509,22 +510,17 @@ struct AuthSourceCatalogTests {
         }
     }
 
-    /// THE THREE MECHANISMS THAT NEVER HAND OVER BYTES — the architectural reason the
+    /// THE MECHANISMS THAT NEVER HAND OVER BYTES — the architectural reason the
     /// unified call returns a plan. Each PROVES rather than SUPPLIES the thing that
-    /// matters, and none of them is `.value`.
+    /// matters, and neither is `.value`. (There were three; the PKCS#11 token is gone
+    /// with smartcard sign-in, and the shape of the argument survives without it
+    /// because the SSH agent still makes it.)
     @Test func theNonValueMechanismsProveRatherThanSupply() {
         let agent = AuthSourceCatalog.sshAgent
         #expect(agent.proves == [.keyInAgent])
         #expect(agent.supplies.isEmpty)
         #expect(agent.delivery == .possession)
         #expect(agent.transports == [.agent])
-
-        let token = AuthSourceCatalog.pkcs11Token
-        // The certificate is a NAME the engine resolves; the PIN is the one thing we do
-        // hand over, and only ever on stdin.
-        #expect(token.proves == [.certificate])
-        #expect(token.supplies == [.tokenPIN])
-        #expect(token.delivery == .possession)
 
         let key = AuthSourceCatalog.securityKey
         #expect(key.delivery == .typedByDevice)
@@ -541,6 +537,8 @@ struct AuthSourceCatalogTests {
         // The narrow `SecItem` path over the FILE keychain is real, which is why
         // username and password are supplied — but never a code.
         #expect(AuthSourceCatalog.applePasswords.supplies == [.username, .password])
+        // `.tokenPIN` outlived the PKCS#11 source that used to supply it: its raw value
+        // is an on-disk contract, and a security key still has a PIN somebody types.
         #expect(AuthSourceCatalog.typed.supplies.contains(.tokenPIN))
         #expect(AuthSourceCatalog.keychain.supplies.contains(.otp))
     }

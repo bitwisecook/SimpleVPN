@@ -124,12 +124,14 @@ struct ManualAnchorParityTests {
         // agent forwarding isn't offered. The setting itself is
         // "ssh.agent-socket"; this is the chapter its row's help links into.
         "ssh-agent",
-        // Smartcards / security keys: one chapter, because the subject spans five
-        // settings plus facts that belong to none of them (installing a provider
-        // module, registering it with p11-kit, the PIN retry counter, and why an
-        // OpenVPN profile can't use a token here).
-        "oc-smartcards", "oc-smartcards-setup", "oc-smartcards-registration",
-        "oc-smartcards-pin-retries", "oc-smartcards-openvpn",
+        // Smartcards / security keys: ONE chapter with no settings under it at all,
+        // which is exactly why it is prose. SimpleVPN does not sign in with a
+        // certificate on a card (Docs/AuthSecPKCS11.md), so the five `oc.pkcs11-*`
+        // settings and their four sub-chapters are gone; what remains is the page that
+        // says so, says what works instead, and asks anyone who needs it to describe
+        // their gateway and their card. It is reachable from the nav and from the
+        // banner the sign-in method picker shows.
+        "oc-smartcards",
     ]
 
     private func manualHTML() throws -> String {

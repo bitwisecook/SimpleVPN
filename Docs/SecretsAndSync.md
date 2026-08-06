@@ -44,8 +44,10 @@ Four stores, chosen by what the secret *is*:
 | **Memory** ✅ | a typed one-time code, a YubiKey OTP, a `BW_SESSION` | until quit | — |
 | **The vendor's** ✅ | 1Password's own unlock, `gpg-agent`'s cached passphrase, `lpass`'s agent key | vendor's rules | vendor's own |
 
-**The best outcome is the fourth row**: a secret we never hold. That is why the SSH agent and PKCS#11
-paths are preferred where they exist — see `.possession` in the architecture doc.
+**The best outcome is the fourth row**: a secret we never hold. That is why the SSH agent path is
+preferred where it exists — see `.possession` in the architecture doc. (A PKCS#11 token was the other
+example of the same virtue; smartcard sign-in has since been removed for reasons that have nothing to
+do with this argument — `Docs/AuthSecPKCS11.md`.)
 
 ### Touch ID, precisely ✅
 

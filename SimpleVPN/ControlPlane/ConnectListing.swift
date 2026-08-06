@@ -396,18 +396,16 @@ enum SubprocessTunnelReadiness {
         var installedTools: Set<TunnelCLI> = []
         /// A password saved for this tunnel (`tunnel.<id>`).
         var hasPassword = false
-        /// A verification-code token secret saved (`tunnel.<id>.token`).
-        var hasTokenSecret = false
-        /// A smartcard / security-key PIN in hand — stored, or typed into an open
-        /// editor.
-        var hasSmartcardPIN = false
+        // `hasTokenSecret` and `hasSmartcardPIN` USED TO BE HERE. Both are gone with
+        // the features they described: a profile that still asks for a smartcard, or
+        // for a verification code SimpleVPN generates, is now `.blocked` by
+        // `sslAuthBlockReason` — a LEVEL-2 "it cannot work as set up" — long before
+        // this level-3 question of "what has to be supplied" is reached. Keeping
+        // either fact would mean a keychain read per redraw to answer nothing.
 
-        init(installedTools: Set<TunnelCLI> = [], hasPassword: Bool = false,
-             hasTokenSecret: Bool = false, hasSmartcardPIN: Bool = false) {
+        init(installedTools: Set<TunnelCLI> = [], hasPassword: Bool = false) {
             self.installedTools = installedTools
             self.hasPassword = hasPassword
-            self.hasTokenSecret = hasTokenSecret
-            self.hasSmartcardPIN = hasSmartcardPIN
         }
     }
 
@@ -572,24 +570,13 @@ enum SubprocessTunnelReadiness {
         let mode = SubprocessTunnelManager.openconnectAuthMode(c)
 
         if c.kind.isSSLVPN {
-            // A verification-code token with no seed dies under `--non-inter`. Not
-            // under single sign-on (the identity provider asks for the code itself),
-            // and not for `yubioath` (the code comes off the YubiKey — requiring a
-            // seed would block a working setup).
-            if mode != "sso",
-               SubprocessTunnelConfig.tokenModeRequiresSecret(c.tokenMode),
-               !facts.hasTokenSecret {
-                return ConnectNeed(.needsCode, locus: .entry,
-                                   "This VPN gets its verification code from a \(c.tokenMode.uppercased()) token, and the token\u{2019}s secret hasn\u{2019}t been saved yet.",
-                                   setting: "oc.token-secret")
-            }
+            // Smartcard sign-in, and a verification code SimpleVPN generates, are
+            // refused earlier and as `.blocked` — see `sslAuthBlockReason`. There is
+            // nothing to ask for here, and the `"token"` arm is deliberately ABSENT
+            // rather than left to fall through to the password one: telling a
+            // smartcard profile to save a password would be advice to sign in a way
+            // its gateway may refuse.
             switch mode {
-            case "token":
-                if !facts.hasSmartcardPIN {
-                    return ConnectNeed(.needsSignIn, locus: .entry,
-                                       "This VPN signs in with a smartcard or security key, and its PIN isn\u{2019}t saved. Turn on \u{201C}Remember PIN\u{201D} to connect from here, or connect from this VPN\u{2019}s own settings and type it.",
-                                       setting: "oc.pkcs11-pin")
-                }
             case "password":
                 if c.username.trimmingCharacters(in: .whitespaces).isEmpty {
                     return ConnectNeed(.needsSignIn, locus: .entry,
@@ -621,16 +608,17 @@ enum SubprocessTunnelReadiness {
         return nil
     }
 
-    /// Which Sign-In row a blocked SSL-VPN sign-in method points at.
-    private static func sslAuthSettingID(_ c: SubprocessTunnelConfig) -> String {
-        switch SubprocessTunnelManager.openconnectAuthMode(c) {
-        case "token":
-            // The module is what a blocked token config is missing first; the
-            // certificate URI only becomes the fault once a module is chosen.
-            (c.pkcs11ModulePath ?? "").trimmingCharacters(in: .whitespaces).isEmpty
-                ? "oc.pkcs11-module" : "oc.pkcs11-certificate"
-        default: "oc.client-cert"
-        }
+    /// Which Sign-In row a blocked SSL-VPN sign-in method points at, or nil when the
+    /// refusal is not about a row at all.
+    ///
+    /// nil for the two shapes SimpleVPN no longer implements (smartcard, and a
+    /// verification code it generates). What those profiles need is the EXPLANATION on
+    /// the editor's Sign-In tab, and there is no row left to reveal — landing somebody
+    /// on `oc.client-cert` would be a link that lies about what is wrong.
+    private static func sslAuthSettingID(_ c: SubprocessTunnelConfig) -> String? {
+        if SubprocessTunnelManager.openconnectAuthMode(c) == "token" { return nil }
+        if !c.tokenMode.trimmingCharacters(in: .whitespaces).isEmpty { return nil }
+        return "oc.client-cert"
     }
 
     /// Whether this config exposes a local SOCKS listener whose port has to bind.
@@ -766,14 +754,7 @@ extension SubprocessTunnelReadiness {
         var facts = Facts(installedTools: installedTools)
         let mode = SubprocessTunnelManager.openconnectAuthMode(c)
         if c.kind.isSSLVPN {
-            if mode != "sso", SubprocessTunnelConfig.tokenModeRequiresSecret(c.tokenMode) {
-                facts.hasTokenSecret = saved("tunnel.\(c.id).token")
-            }
-            switch mode {
-            case "token": facts.hasSmartcardPIN = SubprocessTunnelManager.storedPKCS11PIN(c) != nil
-            case "password": facts.hasPassword = saved("tunnel.\(c.id)")
-            default: break
-            }
+            if mode == "password" { facts.hasPassword = saved("tunnel.\(c.id)") }
         } else if SubprocessTunnelManager.sshAuthMethod(c) == "password" {
             facts.hasPassword = saved("tunnel.\(c.id)")
         }

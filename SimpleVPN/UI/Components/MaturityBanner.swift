@@ -155,6 +155,103 @@ struct MaturityBadge: View {
     }
 }
 
+// MARK: - "We don't do this" — the same shape, a different claim
+
+/// The banner for a capability SimpleVPN does NOT implement
+/// (`FeatureRequestNotice`), asking for the use case.
+///
+/// WHY IT IS A SEPARATE VIEW rather than a `MaturityBanner` with different strings:
+/// `MaturityBanner` draws a `MaturityNotice`, and every `MaturityNotice` carries a
+/// maturity whose badge word says the code is THERE and merely unproven. Handing
+/// this subject to that view would put "nobody has confirmed smartcard sign-in
+/// working yet" on screen, which is a promise that there is something to confirm.
+/// (The registry that owns those words is deliberately not named here — this file
+/// draws notices and decides nothing.)
+///
+/// Everything else is deliberately identical — the same icon/bold-line/paragraph/
+/// action-on-the-right layout, the same 12pt padding and 10pt corner, the same quiet
+/// `.quaternary` register, the same collapse-but-never-dismiss rule, the same
+/// `.contain` accessibility container holding two buttons. A third visual idiom for
+/// "notice" would cost the recognition the other two already earn.
+///
+/// THE ACTION IS THE EXISTING FEEDBACK FLOW: the same `DiagnosticReportCoordinator`
+/// dialog, with a `Reason` that asks for the use case. There is no second submission
+/// path and nothing is sent without being read.
+struct FeatureRequestBanner: View {
+    let notice: FeatureRequestNotice
+    /// Which VPN this was reached from, so the report says which kind of gateway is
+    /// involved without the reporter having to describe it.
+    var kind: VPNKind?
+    var profileID: String?
+
+    @AppStorage private var collapsed: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(notice: FeatureRequestNotice, kind: VPNKind? = nil, profileID: String? = nil) {
+        self.notice = notice
+        self.kind = kind
+        self.profileID = profileID
+        // Per-subject, so putting the smartcard one away says nothing about the other.
+        _collapsed = AppStorage(wrappedValue: false, "featureRequestBannerCollapsed.\(notice.key)")
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: notice.symbolName)
+                .font(.title3).foregroundStyle(.secondary)
+                .accessibilityHidden(true)   // the words carry it
+            VStack(alignment: .leading, spacing: 3) {
+                if collapsed {
+                    // Collapsed still states the ABSENCE. Hiding the paragraph is
+                    // reasonable; hiding "SimpleVPN doesn't do this" is not, because
+                    // that is the fact somebody came to the row to learn.
+                    Text(notice.title).font(.callout)
+                } else {
+                    Text(notice.title).font(.callout.weight(.semibold))
+                    Text(notice.detail)
+                        .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 6) {
+                if !collapsed {
+                    // "Tell Us What You Need" rather than "Request This Feature": the
+                    // button asks for a situation, and its label should not read as a
+                    // queue somebody is joining.
+                    Button("Tell Us What You Need\u{2026}") {
+                        DiagnosticReportCoordinator.shared.presentReport(
+                            .init(kind: kind, profileID: profileID, reason: notice.reason))
+                    }
+                    .buttonStyle(.glass)
+                    .help("Describe what your gateway requires \u{2014} that is what this decision turns on")
+                    .accessibilityLabel("Describe what you need from \(notice.subject)")
+                    .accessibilityHint("Opens a report you can read and edit before sending. "
+                                       + "Nothing is promised in return.")
+                    .accessibilityIdentifier("feature-request-\(notice.key)")
+                }
+                Button(collapsed ? "Details\u{2026}" : "Hide") {
+                    collapsed.toggle()
+                    AccessibilityAnnouncer.sayNow(collapsed ? notice.title : notice.spokenSummary)
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help(collapsed ? "Show why, and how to ask for it"
+                                : "Keep the notice, hide the explanation")
+                .accessibilityLabel(collapsed ? "Show the details of this notice"
+                                              : "Hide the details of this notice")
+                .accessibilityIdentifier("feature-request-disclose-\(notice.key)")
+            }
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+        .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: collapsed)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(collapsed ? notice.title : notice.spokenSummary)
+        .accessibilityIdentifier("feature-request-banner-\(notice.key)")
+    }
+}
+
 // MARK: - The editor insertion point
 
 /// Puts the banner above an editor's whole `TabView`, keyed by the kind being

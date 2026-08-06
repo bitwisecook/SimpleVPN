@@ -89,15 +89,36 @@ struct OpenConnectArgvTests {
         #expect(args { $0.kind = .fortinet; $0.authMode = "sso" }.contains("--passwd-on-stdin"))
     }
 
-    /// A verification-code token belongs to password/certificate sign-in; under
-    /// SSO the identity provider asks for the code itself.
-    @Test func tokenFlagsFollowTheMethod() {
-        #expect(args { $0.authMode = "password"; $0.tokenMode = "totp" }
-            .contains("--token-mode=totp"))
-        #expect(args { $0.authMode = "certificate"; $0.clientCertFile = "~/c.pem"; $0.tokenMode = "totp" }
-            .contains("--token-mode=totp"))
-        #expect(!args { $0.authMode = "sso"; $0.tokenMode = "totp" }
-            .contains("--token-mode=totp"))
+    /// SIMPLEVPN NO LONGER GENERATES VERIFICATION CODES, and this test is the
+    /// structural half of that: `--token-mode` must never appear in an argv again,
+    /// whatever a stored `tokenMode` says. The profile keeps its stored value (it is
+    /// not silently rewritten) and is refused at connect with an explanation instead —
+    /// asserted just below. Docs/AuthSecPKCS11.md records why the gate stays closed.
+    @Test func aStoredTokenModeNeverReachesTheArgv() {
+        for mode in ["totp", "hotp", "oidc", "rsa", "yubioath"] {
+            for method in ["password", "certificate", "sso"] {
+                let a = args { $0.authMode = method; $0.clientCertFile = "~/c.pem"; $0.tokenMode = mode }
+                #expect(!a.contains { $0.hasPrefix("--token-mode") }, "\(method)/\(mode)")
+                #expect(!a.contains { $0.hasPrefix("--token-secret") }, "\(method)/\(mode)")
+            }
+        }
+    }
+
+    /// …and it is REFUSED rather than quietly signed in some other way. Same rule for
+    /// a smartcard profile: `authMode == "token"` is preserved as the marker of what
+    /// the profile is, and Connect says what happened.
+    @Test func aStoredTokenModeOrSmartcardIsRefusedWithAnExplanation() {
+        let token = SubprocessTunnelManager.sslAuthBlockReason(config {
+            $0.authMode = "password"; $0.tokenMode = "totp"
+        })
+        #expect(token != nil)
+        #expect(token?.contains("verification code") == true)
+        let smartcard = SubprocessTunnelManager.sslAuthBlockReason(config { $0.authMode = "token" })
+        #expect(smartcard != nil)
+        #expect(smartcard?.lowercased().contains("smartcard") == true)
+        // Neither sentence tells the user to switch to a password: the profile was set
+        // up by somebody who knew what the gateway wanted.
+        #expect(smartcard?.contains("Sign-In settings") == true)
     }
 
     /// A method missing its material is refused with its fix (the SSH rule),

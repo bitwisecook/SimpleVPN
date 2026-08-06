@@ -277,7 +277,7 @@ flowchart LR
 | SSH Network Tunnel | same | the user's config, on a fixed on-link utun address | `Shared/SSHNetworkTunnelNetworkSettings.swift` |
 | IKEv2 / IPsec / L2TP | **an OS-owned interface we never see** | macOS, from `NEVPNProtocol*` | — (`NativeVPNManager`) |
 | SSH (`.ssh`) | **no interface at all** | — a local SOCKS port or named forwards | — |
-| OpenConnect SSL VPNs, **subprocess** (smartcard, or a knob the bridge can't carry) | **no interface** in the shipped path | `ocproxy` gives a userspace SOCKS port — **required**, not optional | — |
+| OpenConnect SSL VPNs, **subprocess** (one of four knobs the bridge can't carry) | **no interface** in the shipped path | `ocproxy` gives a userspace SOCKS port — **required**, not optional | — |
 
 Three rows in that table are the ones that do not fit the pattern, and they are the ones a reader
 will otherwise assume away:
@@ -301,9 +301,7 @@ will otherwise assume away:
    not take. ✅ **`SubprocessTunnelManager.sslTransportBlockReason` now refuses that combination**
    before anything is spawned, and the first fix it names is *Run In-Process*, not Homebrew: the
    bundled engine has no privilege problem to solve. Homebrew is named only when the config uses
-   something the bridge genuinely cannot carry, because then the toggle would be a lie. The
-   Fortinet-only `openfortivpn` fallback is refused on the same grounds — it drives `pppd` and has no
-   userspace mode, so there is no ocproxy equivalent to reach for.
+   something the bridge genuinely cannot carry, because then the toggle would be a lie.
 
    The in-process alternative is the preferred path and the reason is quoted in the code: "That is a
    FULL-ROUTES path and needs no privileged helper — NetworkExtension is the privilege." **All seven
@@ -313,22 +311,33 @@ will otherwise assume away:
    in-process (`willRunInProcess` returns true for any `isSSLVPN`) and silently ran as a subprocess.
    That divergence is gone: `willRunInProcess` is the single rule and the dispatch calls it.
 
-   Whether a profile takes it is therefore `SubprocessTunnelManager.willRunInProcess`, and its
-   refusals are specific — an explicit port, a CA file, a usergroup, a client certificate on disk, a
-   manual proxy, a CSD wrapper, or **any smartcard sign-in**, which can never run in-process because
-   our `libopenconnect` is built against OpenSSL (PKCS#11 lives only in OpenConnect's GnuTLS/p11-kit
-   backend) and because loading a provider dylib into the packet tunnel would need a
-   library-validation relaxation AMFI forbids there.
+   **In-process is now the DEFAULT for a new SSL VPN** (`SubprocessTunnelConfig.preferInProcess` is
+   Optional; absent means in-process), so the subprocess is a fallback rather than the normal path.
+   Whether a profile takes it is `SubprocessTunnelManager.willRunInProcess`, and after the smartcard
+   removal its refusals are **exactly four ordinary settings**:
 
-   **Rebuilding the xcframework with GnuTLS + p11-kit would not change that**, and it is worth being
-   blunt about it because the reverse has been assumed: the TLS backend is the *lesser* of the two
-   obstacles. p11-kit's entire job is to `dlopen` a third-party provider module, and that `dlopen` is
-   what AMFI refuses inside the sysext-embedding app and its extension — with GnuTLS linked in, a
-   `pkcs11:` URI would stop saying "built without PKCS#11 support" and start failing to load the
-   module instead. So **the subprocess path cannot be retired for smartcard sign-in**, whatever the
-   xcframework is configured with, and `ocproxy` stays a real requirement for exactly that case.
-   `Docs/AuthSecPKCS11.md` records the AMFI constraint and the helper-process precedent
-   (`opnative-helper`) in full.
+   1. a **host checker / endpoint posture** wrapper (`csdWrapper`, `disableCSD`) —
+      `openconnect_setup_csd` works by forking a child, and the extension is sandboxed *and* root;
+   2. a **base MTU** (`baseMTU`) — the library header exposes no setter (`openconnect_set_reqmtu` is
+      `--mtu`, a different number);
+   3. **HTTP keepalive off** (`noHTTPKeepalive`) — likewise;
+   4. **extra arguments** (`extraArgs`) — arbitrary argv has no in-process equivalent by construction.
+
+   (Two further clauses refuse an *invalid* value rather than a capability: a compression mode or a
+   reported OS OpenConnect hasn't got. Both would be refused by the tool at startup too.)
+
+   **Smartcard sign-in used to head that list, and it was the load-bearing entry** — the one capability
+   the Homebrew tool had that the bundled engine structurally could not, whatever the xcframework was
+   configured with. It is *gone*: SimpleVPN no longer signs in with a certificate on a card at all
+   (`Docs/AuthSecPKCS11.md` is the record of why, including why rebuilding with GnuTLS + p11-kit would
+   not have helped — AMFI refuses the very `dlopen` p11-kit exists to perform). A profile that still
+   asks for one is refused by `sslAuthBlockReason` with an explanation and a request for the use case;
+   it is never quietly converted into a password sign-in. `tokenMode` (OpenConnect's own TOTP/HOTP code
+   generator) went the same way, for its own reasons, and is refused in the same place.
+
+   **`willRunInProcess` stays settings-only, with no per-kind allow-list.** A three-kind list has been
+   removed twice; re-adding one is a regression, and it is what made GlobalProtect, Juniper, Pulse and
+   Array demand Homebrew for nothing.
 
 ### 3.4 Addresses and MTU
 
@@ -471,7 +480,8 @@ re-applies the MDM gate (`ForceKeepInsideVPN` drops the list, and forces
 | Proxy Tunnel | `px.local-lan` | `extraExcludedRoutes`, beside the upstream proxy's own address |
 | SSH Network Tunnel | `sshnet.local-lan` | `extraExcludedRoutes`, beside the SSH server's own address |
 | Tailscale | — | the engine's `localRoutes`, plus `ts.exit-node-lan` while an exit node is on |
-| OpenConnect (in-process) | ❓ **none yet** | the mechanism is ready (the plan reaches the bridge the same way); the kind has no `oc.*` setting for it |
+| OpenConnect SSL VPNs (in-process) | `oc.local-lan` | `OpenConnectBridge.setDivertedDestinations:` — the **same** excluded-route seam the diverts use (`_extraV4Excluded` / `_extraV6Excluded`), so one list re-applies on every gateway/proxy/DNS re-apply |
+| OpenConnect SSL VPNs (subprocess) | `oc.local-lan`, **inert** | nothing to apply: `ocproxy -D <port>` is a SOCKS listener with no interface and no routes, so the LAN was never captured. The row says so rather than looking effective |
 | native IKEv2/IPsec/L2TP | `native.exclude-local` | `excludeLocalNetworks`, where the platform honours it |
 
 **OpenVPN's control existed and did nothing.** `openvpn.local-lan` →
@@ -481,6 +491,20 @@ openvpn3 obtains the prefixes *from the tun builder*, `TunBuilderBase`'s default
 returns an empty vector, and `OpenVPN3Bridge` did not override it — so the engine asked, got
 nothing, added no exclude route, and the LAN stayed captured. The setting, its documentation and the
 Doctor's fix were all silently inert. That override is now implemented.
+
+**The SSL VPNs' control was missing, and the reason it was missed is worth recording.** `be5045d`
+added the carve-out and wired it to WireGuard, the Proxy Tunnel and the SSH Network Tunnel — the three
+kinds that were whole-Mac tunnels at the time. The SSL VPNs were not: they were `ocproxy` SOCKS
+ports, where "keep the LAN reachable" is meaningless because the LAN was never taken away. `51a067a`
+then made in-process the **default** for a new SSL VPN, which turned them into whole-Mac tunnels
+carrying a default route — and the setting that keeps the printer working did not exist for the kinds
+most people run. `oc.local-lan` closes that, through the seam above and no other: the toggle rides
+`providerConfiguration["localLan"]`, the prefixes ride `startTunnel(options:)`, and the extension
+combines them with `divert.outside` into the ONE `setDivertedDestinations:` call. Two consequences are
+deliberate: each prefix is re-validated by `RoutingRule.routeDest` (which refuses a malformed address
+and any `/0`, so a "local network" can never be a whole-tunnel bypass), and
+`OpenConnectProfileStore.start` now passes `policyKeepInside` — without it `ForceKeepInsideVPN` would
+have been unenforceable on this path, because the extension is where it is enforced.
 
 Local prefixes can still leave a tunnel for the older reasons, and those are unchanged: the engine's
 own local routes (Tailscale's `localRoutes`), the user's own `excludedRoutes` in a

@@ -10,13 +10,11 @@ deliberately (we say "password app", not "vendor adapter").
 
 ## The problem the shape solves
 
-A naive design has one method — *give me the credentials* — returning bytes. That works for nine of
-the sixteen mechanisms and cannot express the other seven at all:
+A naive design has one method — *give me the credentials* — returning bytes. That works for most of
+the mechanisms this app ships and cannot express two of them at all:
 
 - **The SSH agent never hands over a key.** It signs a challenge. The key stays in 1Password or the
   Secure Enclave.
-- **A PKCS#11 token never hands over its key either.** `openconnect` loads the module itself; we pass
-  a `pkcs11:` URI and a PIN.
 - **A YubiKey in OTP mode types into the focused field.** Nothing is returned to anybody; the keyboard
   emits characters.
 
@@ -30,7 +28,7 @@ flowchart LR
     end
     A --> P{AuthPlan}
     P -->|".value"| V["RawCredentials<br/><i>bytes we hold briefly</i>"]
-    P -->|".possession"| N["AuthPossession<br/><i>a NAME: agent socket,<br/>pkcs11: URI, slot</i>"]
+    P -->|".possession"| N["AuthPossession<br/><i>a NAME: agent socket,<br/>security-key slot</i>"]
     P -->|".typedByDevice"| T["AuthCaptureTicket<br/><i>an armed field</i>"]
     V --> S["startTunnel(options:)"]
     N --> E["engine loads it itself"]
@@ -49,12 +47,12 @@ manager without either being a special case.
 | | Through `authPlan` | Runs on its own path |
 |---|---|---|
 | The twelve password apps, typed, keychain, Touch ID keychain, Apple Passwords | ✅ | |
-| SSH agent, PKCS#11 token, security key (OTP) | | ⚠️ expressible, not routed |
+| SSH agent, security key (OTP) | | ⚠️ expressible, not routed |
 | OpenConnect SSO, Tailscale browser sign-in | | ❌ not modelled at all |
 
-This was deliberate, not an oversight. The three non-`.value` mechanisms are executed correctly by
-the code that owns the context — the engine's own configuration for a `pkcs11:` URI, the connect form
-for a focused field, `SSHAgent` for a socket — and routing them through the controller would have
+This was deliberate, not an oversight. The non-`.value` mechanisms are executed correctly by
+the code that owns the context — the connect form for a focused field, `SSHAgent` for a socket — and
+routing them through the controller would have
 relocated working code for no behavioural gain. The value delivered was making them **expressible**,
 which the exhaustive `switch` over `AuthPlan` now enforces: a fourth delivery cannot be added without
 every consumer acknowledging it.
@@ -216,10 +214,12 @@ strictly better than reading a key *out* of a vault. One catch established by me
 Dock-launched app inherits **macOS's own** ssh-agent, never the vendor socket a shell profile points
 at, so the socket is an explicit setting.
 
-**PKCS#11.** We pass a `pkcs11:` URI; `openconnect` loads the module. We never `dlopen` a provider —
-the library-validation relaxation that needs is the one AMFI forbids for an app embedding a system
-extension, so enumeration shells out instead, and **never logs in**, because filling a picker must
-not spend a PIN counter whose exhaustion destroys the key.
+**PKCS#11 — REMOVED.** SimpleVPN used to name a `pkcs11:` URI and let `openconnect` load the module,
+because we can never `dlopen` a provider ourselves: the library-validation relaxation that needs is
+the one AMFI forbids for an app embedding a system extension. Smartcard sign-in is gone
+(`Docs/AuthSecPKCS11.md` records why, including why a GnuTLS/p11-kit rebuild would not have helped),
+so `.possession` has one producer shape left rather than two. The `.possession` case itself is
+unaffected — the SSH agent is what makes it necessary.
 
 **Security key, OTP mode.** The key is a USB keyboard; **focus management is the feature**. The plan
 is an armed capture, and the single-use code lives in `SingleUseCode` — read-once, no getter, no

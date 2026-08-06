@@ -195,33 +195,17 @@ extension SettingVisibility {
         } else {
             hide(SSHSettings.all.map(\.id),
                  "It belongs to the SSH kind \u{2014} this tunnel is \(c.kind.displayName).")
-            if !SubprocessTunnelConfig.tokenModeRequiresSecret(c.tokenMode) {
-                hidden["oc.token-secret"] = c.tokenMode.isEmpty
-                    ? "Choose a verification-code token type above to enter its secret."
-                    : "A YubiKey generates the code on the key itself, so no secret is stored."
-            }
             if c.clientCertFile.trimmingCharacters(in: .whitespaces).isEmpty,
                c.clientKeyFile.trimmingCharacters(in: .whitespaces).isEmpty {
                 hidden["oc.key-password"] =
                     "Set a client certificate or key above \u{2014} the passphrase row appears with it."
             }
-            // The smartcard rows only exist under the Smartcard sign-in method: they
-            // are a whole sub-form, and rendering five dead rows under Password would
-            // bury the two controls that method actually uses.
-            if c.authMode != "token" {
-                let why = "Set Sign-in method to \u{201C}Smartcard or security key\u{201D} to reach the smartcard rows."
-                for id in ["oc.pkcs11-module", "oc.pkcs11-certificate", "oc.pkcs11-key",
-                           "oc.pkcs11-pin", "oc.pkcs11-remember-pin"] {
-                    hidden[id] = why
-                }
-            } else if (c.pkcs11ModulePath ?? "").trimmingCharacters(in: .whitespaces).isEmpty {
-                // Without a module there is nothing to read a certificate off, so the
-                // key and PIN rows have nothing to attach to yet.
-                let why = "Choose a smartcard provider module first \u{2014} the certificate, key and PIN rows follow it."
-                for id in ["oc.pkcs11-key", "oc.pkcs11-pin", "oc.pkcs11-remember-pin"] {
-                    hidden[id] = why
-                }
-            }
+            // THE FIVE `oc.pkcs11-*` ROWS AND THE TWO `oc.token-*` ROWS USED TO BE
+            // GATED HERE, and there is nothing left to gate: the settings are gone with
+            // the features. Choosing "Smartcard or security key" now reveals a banner
+            // (`FeatureRequestNotice`) rather than a sub-form, and a banner is not a
+            // row a search hit or a related link can land on — so it has no entry in
+            // this table and needs none.
             // `oc.sso-browser` is deliberately NOT here: it is RENDERED and
             // disabled with its reason (`ssoBrowserUnused`), which is a row a
             // reveal can land on. Only a row that isn't in the hierarchy at all
@@ -244,7 +228,7 @@ extension SettingVisibility {
     /// "Showing What the Key Supplies" with nothing there to show.
     ///
     /// Ids are written out rather than derived from `YubiKeySettings.all` to keep
-    /// this table pure and readable beside the `oc.pkcs11-*` block above; the
+    /// this table pure and readable beside the `oc.*` gates above; the
     /// visibility tests hold every id here to a real spec on the surface.
     static func securityKey(_ c: YubiKeyAuthConfig) -> SettingVisibility {
         var hidden: [String: String] = [:]

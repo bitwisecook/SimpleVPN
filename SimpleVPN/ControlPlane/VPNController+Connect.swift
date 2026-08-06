@@ -314,8 +314,7 @@ extension VPNController {
         // NEITHER of these reaches this method today, and that is a statement rather
         // than an omission. A `.possession` plan is executed by the engine that owns
         // the name — the SSH engine sets `SSH_OPTIONS_IDENTITY_AGENT` from its own
-        // stored socket path, `openconnect` resolves a `pkcs11:` URI through p11-kit —
-        // and neither goes anywhere near `startTunnel(options:)`. A `.typedByDevice`
+        // stored socket path — and never goes near `startTunnel(options:)`. A `.typedByDevice`
         // plan is executed by the connect FORM, which is the only place a focused field
         // exists; by the time it gets here the code is already a typed value. The switch
         // is exhaustive so that a future producer has to come and decide, rather than

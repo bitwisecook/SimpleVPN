@@ -117,17 +117,14 @@ struct SettingVisibilityTests {
         for id in SSHSettings.all.map(\.id) {
             #expect(ssl.reason(id) != nil, "\(id) should be gated out of an SSL VPN")
         }
-        #expect(ssl.reason("oc.token-secret") != nil)         // no token mode chosen
         #expect(ssl.reason("oc.key-password") != nil)         // no certificate set
         // `oc.sso-browser` is RENDERED and disabled with its reason, so a reveal
         // lands on it — it must not be declared hidden.
         #expect(ssl.reason("oc.sso-browser") == nil)
 
         var configured = Self.subprocess(.fortinet)
-        configured.tokenMode = "totp"
         configured.clientCertFile = "~/client.p12"
         let ready = SettingVisibility.subprocess(configured)
-        #expect(ready.reason("oc.token-secret") == nil)
         #expect(ready.reason("oc.key-password") == nil)
     }
 

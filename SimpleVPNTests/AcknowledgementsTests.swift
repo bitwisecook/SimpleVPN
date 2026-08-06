@@ -72,7 +72,7 @@ struct AcknowledgementsTests {
         }
     }
 
-    /// The tools SimpleVPN RUNS (or whose PKCS#11 module it has openconnect load).
+    /// The tools SimpleVPN RUNS.
     /// None of these is bundled and none imposes a notice obligation, so no compiler,
     /// linker or licence scanner will ever miss one — this list is the only thing that
     /// does. The credential programme added six vendors at once, and a seventh arriving
@@ -81,16 +81,18 @@ struct AcknowledgementsTests {
     /// Every name here is a tool the code really executes: `ToolCatalog` +
     /// `LocalToolRunner.run` call sites (`DashlaneProvider`, `LastPassProvider`,
     /// `ProtonPassProvider`, `BitwardenProvider`, `KeeperProvider`,
-    /// `KeePassFileProvider`, `PassboltServer`, `GPGDecrypter`, `YubiKeyManagerTool`,
-    /// `PKCS11ProcessRunner`) plus `PKCS11ModuleDiscovery.wellKnown` for the modules.
+    /// `KeePassFileProvider`, `PassboltServer`, `GPGDecrypter`, `YubiKeyManagerTool`).
+    /// Five PKCS#11 rows used to be asserted here and are gone with smartcard sign-in
+    /// (Docs/AuthSecPKCS11.md): p11tool, OpenSC, p11-kit, yubico-piv-tool's libykcs11
+    /// and SoftHSM. `ykman` stays — it serves the YubiKey OATH and
+    /// challenge-response mechanisms, which are untouched.
     @Test func everyInvokedThirdPartyToolIsCredited() {
         let names = Set(components.map(\.name))
         for required in ["KeePassXC", "Keeper Commander", "Bitwarden CLI",
                          "Dashlane CLI (dcli)", "LastPass CLI (lpass)",
                          "Proton Pass CLI (pass-cli)", "go-passbolt-cli",
                          "GnuPG", "pass (password-store)", "gopass",
-                         "yubikey-manager (ykman)", "GnuTLS p11tool", "OpenSC",
-                         "p11-kit", "yubico-piv-tool (libykcs11)", "SoftHSM",
+                         "yubikey-manager (ykman)",
                          // The subprocess tunnel engines (`TunnelCLI`) are run the same
                          // way and were missing for longer than the vault tools.
                          // `ssh` is not here on purpose: macOS ships it, and
@@ -111,8 +113,7 @@ struct AcknowledgementsTests {
         for name in ["Keeper Commander", "Bitwarden CLI", "Dashlane CLI (dcli)",
                      "LastPass CLI (lpass)", "Proton Pass CLI (pass-cli)",
                      "go-passbolt-cli", "GnuPG", "pass (password-store)", "gopass",
-                     "yubikey-manager (ykman)", "GnuTLS p11tool", "OpenSC",
-                     "yubico-piv-tool (libykcs11)", "SoftHSM",
+                     "yubikey-manager (ykman)",
                      "ocproxy"] {
             let row = components.first { $0.name == name }
             #expect(row?.role.contains("not bundled") == true,
@@ -144,10 +145,12 @@ struct AcknowledgementsTests {
         let keePassXC = try #require(components.first { $0.name == "KeePassXC" })
         #expect(keePassXC.license.contains("GPL-2.0"))
         #expect(keePassXC.license.contains("GPL-3.0"))
-        // GnuTLS is split BY PART — LGPL-2.1-or-later library, GPL-3.0-only tools —
-        // and p11tool is a tool. It said the bare "GPL-3.0".
-        let p11tool = try #require(components.first { $0.name == "GnuTLS p11tool" })
-        #expect(p11tool.license == "GPL-3.0-only")
+        // GnuTLS's p11tool was pinned here (split BY PART — LGPL-2.1-or-later library,
+        // GPL-3.0-only tools — so the bare "GPL-3.0" was wrong for a tool). Its row is
+        // gone with smartcard sign-in, along with OpenSC's, p11-kit's,
+        // yubico-piv-tool's and SoftHSM's: SimpleVPN runs none of them any more
+        // (Docs/AuthSecPKCS11.md).
+        #expect(!components.contains { $0.name == "GnuTLS p11tool" })
         // go-passbolt-cli's own LICENSE file is the MIT text (checked against the
         // repository, not against how an AGPL server tends to license its clients).
         let passbolt = try #require(components.first { $0.name == "go-passbolt-cli" })
@@ -188,10 +191,11 @@ struct AcknowledgementsTests {
         for claim in ["AGPL-3.0", "LGPL-2.1", "CC BY 4.0", "Sparkle",
                       "1Password Go SDK", "crypto_box", "golang.org/x/crypto",
                       "RFC 8439", "KeePassXC",
-                      // A PKCS#11 module is the one credited thing that is LOADED
-                      // rather than run, and it is loaded by openconnect's process.
-                      // Different fact, different sentence.
-                      "PKCS#11", "openconnect"] {
+                      // "PKCS#11" was pinned here, because a provider module was the one
+                      // credited thing that was LOADED rather than run — by openconnect's
+                      // process, not ours. No module is named any more, so the sentence
+                      // that made that distinction is gone with it.
+                      "openconnect"] {
             #expect(note.contains(claim), "the compatibility note never mentions \(claim)")
         }
         #expect(!Acknowledgements.sourceURL.isEmpty)

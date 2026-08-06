@@ -92,7 +92,7 @@ nonisolated enum DiagnosticReportLog {
         "vpn", "tunnel", "sysext", "native", "subprocess", "ssh-engine", "sshnet",
         "wireguard", "tailscale", "proxytunnel", "openconnect-ne",
         "route-mediator", "dns-mediator", "proxy-mediator",
-        "sign-in-sources", "tool-discovery", "local-tool", "pkcs11", "security-key",
+        "sign-in-sources", "tool-discovery", "local-tool", "security-key",
         "extdoctor", "crash",
     ]
 

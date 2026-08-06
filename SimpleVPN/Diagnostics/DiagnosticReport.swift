@@ -44,7 +44,17 @@ nonisolated struct DiagnosticReportRequest: Sendable, Equatable {
     var kind: VPNKind?
     var profileID: String?
     var reason: Reason
-    enum Reason: String, Sendable, Equatable { case untestedKind, untestedSource, connectFailure, userInitiated }
+    /// Why a report is being offered.
+    ///
+    /// The last two are NOT "something went wrong" — they are the other direction:
+    /// SimpleVPN does not do the thing, we cannot see who needs it, and the report is
+    /// the only channel that turns "somebody might want this" into a use case
+    /// somebody actually has. They exist so that removing a feature leaves a way to
+    /// ask for it, rather than a dead end (`FeatureRequestNotice`).
+    enum Reason: String, Sendable, Equatable {
+        case untestedKind, untestedSource, connectFailure, userInitiated
+        case smartcardRequest, verificationCodeTokenRequest
+    }
 }
 
 @MainActor protocol DiagnosticReportPresenting: AnyObject {
@@ -69,6 +79,17 @@ nonisolated extension DiagnosticReportRequest.Reason {
         case .userInitiated:
             "This gathers what SimpleVPN already knows about your setup so you don\u{2019}t have to "
             + "describe it."
+        // NOT an apology and NOT a promise. SimpleVPN does not sign in with a
+        // smartcard, and saying "coming soon" to somebody holding a card their
+        // employer issued would be worse than saying nothing.
+        case .smartcardRequest:
+            "SimpleVPN doesn\u{2019}t sign in with a smartcard or security-key certificate. Whether it "
+            + "ever does depends on hearing from people who need it \u{2014} what follows is what would "
+            + "make that decision, and there is no commitment either way."
+        case .verificationCodeTokenRequest:
+            "SimpleVPN doesn\u{2019}t generate the verification code for you \u{2014} it asks you for it. "
+            + "Whether that changes depends on hearing from people who need it, and there is no "
+            + "commitment either way."
         }
     }
 
@@ -88,6 +109,19 @@ nonisolated extension DiagnosticReportRequest.Reason {
         case .userInitiated:
             "What were you doing? For example: \u{201C}I opened Routes to see why my printer stopped "
             + "working while connected.\u{201D}"
+        // THE USE CASE IS THE WHOLE ASK, so the question names its three parts.
+        // "Would you like smartcards?" gets a yes and tells us nothing.
+        case .smartcardRequest:
+            "Which gateway, which card or key, and what does your organisation require? For example: "
+            + "\u{201C}Our GlobalProtect gateway only accepts the certificate on my PIV card \u{2014} a "
+            + "YubiKey 5 in PIV mode, read through OpenSC \u{2014} and IT will not enable password "
+            + "sign-in for anyone.\u{201D} The gateway, the device and whether you have any other way "
+            + "in are the three things that decide this."
+        case .verificationCodeTokenRequest:
+            "Which gateway asks for the code, where does the code come from today, and why can\u{2019}t "
+            + "you type it? For example: \u{201C}Our FortiGate asks for a TOTP code; our administrator "
+            + "issues the seed as a QR code and nothing else can hold it, so there is no app to read "
+            + "it from.\u{201D}"
         }
     }
 
@@ -98,6 +132,10 @@ nonisolated extension DiagnosticReportRequest.Reason {
         case .untestedSource: "Untested sign-in source"
         case .connectFailure: "Connection failed"
         case .userInitiated: "Report"
+        // "Use case" rather than "Feature request", so the issue is filed as what it
+        // is: evidence about a situation, not a vote.
+        case .smartcardRequest: "Use case: smartcard sign-in"
+        case .verificationCodeTokenRequest: "Use case: verification-code token"
         }
     }
 }

@@ -116,20 +116,12 @@ nonisolated enum SettingRelations {
         // MARK: OpenConnect SSL VPNs
 
         ["oc.client-cert", "oc.client-key", "oc.key-password", "oc.cafile"],
-        // The four sign-in shapes are alternatives to each other. Smartcard belongs
-        // in this clique because "a certificate in a file" and "a certificate on a
-        // device" is the choice a user is actually making.
-        ["oc.password", "oc.client-cert", "oc.pkcs11-certificate", "oc.sso-browser"],
-        // The smartcard sub-form: the module that reads the device, the certificate
-        // on it, its key, and the PIN that unlocks them. Each row's caveat already
-        // named another member ("pick a module first", "the key is only needed
-        // when…") — the clique turns those sentences into links.
-        ["oc.pkcs11-module", "oc.pkcs11-certificate", "oc.pkcs11-key",
-         "oc.pkcs11-pin", "oc.pkcs11-remember-pin"],
-        // A smartcard tunnel can never run on the built-in engine, which is built
-        // without PKCS#11 — the honesty caveat on both rows, as a link.
-        ["oc.pkcs11-module", "oc.prefer-in-process"],
-        ["oc.token-mode", "oc.token-secret", "oc.password"],
+        // The sign-in shapes are alternatives to each other. Smartcard USED TO BE in
+        // this clique (as `oc.pkcs11-certificate`) and the five-row smartcard sub-form
+        // was a clique of its own; both are gone with the feature. There is no
+        // "smartcard" id left to relate to, and inventing one for a banner would put a
+        // link in the help popover that leads to a paragraph rather than a control.
+        ["oc.password", "oc.client-cert", "oc.sso-browser"],
         // The AGENTS.md MTU split, stated as a link: one is the tunnel's, the
         // other the path underneath it.
         ["oc.mtu", "oc.base-mtu"],
@@ -185,6 +177,12 @@ nonisolated enum SettingRelations {
         ["px.local-lan", "px.excluded", "px.default-route"],
         ["sshnet.local-lan", "sshnet.excluded-routes", "sshnet.send-all-traffic"],
         ["wg.local-lan", "wg.allowed-ips"],
+        // The SSL VPNs' own, and the one pairing that is NOT "automatic beside
+        // manual": these kinds have no excluded-routes field to type into, so what
+        // the carve-out needs beside it is the TRANSPORT — it does nothing at all on
+        // the openconnect tool, which takes no routes to carve anything out of. The
+        // row's caveat says exactly that; this is that sentence as a link.
+        ["oc.local-lan", "oc.prefer-in-process"],
 
         // MARK: Search domains ↔ the resolvers they belong to
         //
@@ -260,17 +258,23 @@ nonisolated enum SettingRelations {
         // editor. Somebody told "install YubiKey Manager" needs the row that says
         // where it is.
         ["yk.mechanism", "creds.ykman.tool-path"],
-        // DELIBERATELY NOT DECLARED YET, and worth writing down so nobody adds
-        // them thinking they were forgotten: "yk.mechanism ↔ oc.token-mode" (two
-        // ways to produce one verification code) and "yk.enabled ↔
-        // oc.pkcs11-certificate" (one device, two roles — the code it types versus
-        // the certificate its PIV applet holds) are both real relations, and
-        // neither can be FOLLOWED today. The `yk.*` rows are rendered by one editor
-        // only (EditVPNView's Sign-In tab), so from an SSL-VPN editor the yk end is
-        // filtered out and from the OpenVPN editor the oc end is — a link nobody
-        // can click either way. They belong here the day `YubiKeySignInSection`
-        // appears in SubprocessTunnelView, together with `.securityKey` in that
-        // editor's surfaces and those kinds in `SettingSurface.securityKey.kinds`.
+        // DELIBERATELY NOT DECLARED YET, and worth writing down so nobody adds it
+        // thinking it was forgotten: "yk.enabled ↔ the SSL-VPN sign-in rows" — a
+        // YubiKey that types a code into an SSL VPN's password field — is a real
+        // relation and cannot be FOLLOWED today. The `yk.*` rows are rendered by one
+        // editor only (EditVPNView's Sign-In tab), so from an SSL-VPN editor the yk
+        // end is filtered out and from the OpenVPN editor the oc end is — a link
+        // nobody can click either way. It belongs here the day
+        // `YubiKeySignInSection` appears in SubprocessTunnelView, together with
+        // `.securityKey` in that editor's surfaces and those kinds in
+        // `SettingSurface.securityKey.kinds`.
+        //
+        // The OTHER pair that used to be listed here — "yk.mechanism ↔
+        // oc.token-mode" (two ways to produce one verification code) and
+        // "yk.enabled ↔ oc.pkcs11-certificate" (one device, two roles) — are gone
+        // for a different reason: the `oc.` end of each no longer exists. The
+        // YubiKey end is untouched (Docs/AuthSecYubiKey.md); it is the
+        // OpenConnect-generated code and the PKCS#11 certificate that were removed.
 
         // MARK: Sign-In Sources (which password apps SimpleVPN may use)
         //
