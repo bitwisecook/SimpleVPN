@@ -20,10 +20,20 @@
 //  calls it from `onDisappear` (covers "navigated to another tab" and "closed the
 //  editor" alike) — safe to call repeatedly, exactly like `setCustomRouting` itself.
 //
+//  Reachability invariant (AGENTS.md: every feature must be REACHABLE): each rule
+//  list's "Add …" action is a `+` in the list's own header, ABOVE the scroll region,
+//  and the empty state carries the same action spelled out. It shipped once below the
+//  300pt viewport, which put the only way to add a route rule off-screen in exactly
+//  the state where the list was empty and the viewport near-blank — the feature
+//  worked, the layout hid it. The viewport now sizes to CONTENT up to that 300pt cap
+//  (`routesViewportHeight`) so an empty list claims the space it needs and no more.
+//  `RuleListReachabilityTests` pins both halves.
+//
 //  Animated arrow (Routes only — DNS/proxy `RuleStatus` never reports `.overlapping`):
-//  the rule list + pushed-route reference live in ONE fixed-height ScrollView so the
+//  the rule list + pushed-route reference live in ONE bounded-height ScrollView so the
 //  Canvas overlay, laid over that same ScrollView via `.onPreferenceChange` +
-//  `.overlay`, has a real viewport to clamp against. Row anchors are collected with
+//  `.overlay`, has a real viewport to clamp against — bounded and known at any given
+//  moment is all the clamp needs; it never needed to be CONSTANT. Row anchors are collected with
 //  `anchorPreference` (`RouteAnchorKey`) — Anchor resolution is scroll-offset aware by
 //  construction, so the arrow tracks live as the list scrolls, no timer/polling. An
 //  endpoint scrolled
@@ -135,6 +145,31 @@ private extension View {
     }
 }
 
+// MARK: - Sizing the routes viewport to its content
+
+/// How tall the routes scroll body actually WANTS to be, reported by the body itself.
+/// A separate key from `RouteAnchorKey` so the two travel independently up the same
+/// tree. There is no measurement feedback loop: the ScrollView proposes its own width
+/// (unchanged by the height clamp) and an unbounded height to its content, so the
+/// reported height never depends on the viewport height it decides.
+private struct RoutesContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private extension View {
+    /// Report this view's laid-out height up the preference tree.
+    func measuringRoutesContentHeight() -> some View {
+        background {
+            GeometryReader { geo in
+                Color.clear.preference(key: RoutesContentHeightKey.self, value: geo.size.height)
+            }
+        }
+    }
+}
+
 // MARK: - Small shared badges
 
 /// One glyph for the three non-`.active` statuses `RuleStatus` reports — the same
@@ -219,6 +254,9 @@ struct CustomRoutingTabView: View {
     /// `overlayPreferenceValue(_:_:)`) — Anchor resolution is still scroll-offset
     /// aware regardless of how the dictionary reaches the Canvas.
     @State private var routeAnchors: [String: Anchor<CGPoint>] = [:]
+    /// The routes scroll body's own measured height, rounded to whole points so
+    /// sub-pixel churn can't ping-pong the viewport. 0 = not measured yet.
+    @State private var routesContentHeight: CGFloat = 0
 
     /// Live when connected, last-known when offline — the whole point of this tab
     /// working the same either way.
@@ -284,16 +322,57 @@ struct CustomRoutingTabView: View {
     /// an id the CLI and MDM can address.
     private static let specs = CustomRoutingSettings.catalog
 
+    /// The tallest the routes viewport may grow before it starts scrolling — the
+    /// bound the arrow overlay clamps endpoints against.
+    static let routesViewportMaxHeight: CGFloat = 300
+    /// The shortest it may be. Only load-bearing on the very first pass, before the
+    /// content has reported a height: a 0pt viewport would render nothing and so
+    /// could never measure itself out of it.
+    static let routesViewportMinHeight: CGFloat = 88
+
+    /// Size the viewport to its CONTENT, up to `maximum`. The old `.frame(height: 300)`
+    /// claimed all 300 points whether or not there was anything in them, which is what
+    /// pushed the section's own "Add Route Rule" action off-screen in the empty state.
+    static func routesViewportHeight(contentHeight: CGFloat,
+                                     minimum: CGFloat = routesViewportMinHeight,
+                                     maximum: CGFloat = routesViewportMaxHeight) -> CGFloat {
+        guard contentHeight.isFinite, contentHeight > 0 else { return minimum }
+        return min(max(contentHeight, minimum), maximum)
+    }
+
     /// The header for a control that is a LIST rather than a single value (the
     /// rule editors, the domain pairs): the same name / summary / help-button
     /// arrangement `EngineSettingRow` gives a one-line control, without wrapping a
     /// 300pt scroll view and its Canvas overlay inside a row's HStack.
-    @ViewBuilder private func crHeader(_ spec: EngineSettingSpec, changed: Bool = false) -> some View {
+    ///
+    /// `addTitle`/`add` put the list's PRIMARY action here, in the header, so it can
+    /// never end up below the list's scroll region again (see the reachability
+    /// invariant in this file's header). Icon-only by design — a `+` beside a named
+    /// list is the System Settings idiom — with the full sentence carried in both the
+    /// tooltip and the accessibility label, never only on hover.
+    @ViewBuilder private func crHeader(_ spec: EngineSettingSpec, changed: Bool = false,
+                                       addTitle: String? = nil,
+                                       add: (() -> Void)? = nil) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .center, spacing: 8) {
                 EngineSettingLabel(spec: spec, changed: changed)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 ManualLink(setting: spec)
+                if let addTitle, let add {
+                    Button(action: add) {
+                        // `plus.circle` rather than a bare `plus`, and `.borderless`
+                        // rather than `.plain`, so it is the visual sibling of the `?`
+                        // it sits beside — a header's primary action must read as at
+                        // least as clickable as the help button next to it.
+                        Image(systemName: "plus.circle")
+                            // The app-wide 22×22 minimum, like every other glyph target.
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .help(addTitle)
+                    .accessibilityLabel(addTitle)
+                }
             }
             Text(spec.summary)
                 .font(.callout).foregroundStyle(.secondary)
@@ -322,7 +401,8 @@ struct CustomRoutingTabView: View {
                 .pickerStyle(.segmented)
             }
 
-            crHeader(Self.specs["cr.route-rule"], changed: !profile.routes.rules.isEmpty)
+            crHeader(Self.specs["cr.route-rule"], changed: !profile.routes.rules.isEmpty,
+                     addTitle: Self.addRouteRuleTitle, add: addRouteRule)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
@@ -330,25 +410,51 @@ struct CustomRoutingTabView: View {
                         routeRuleRow($rule)
                     }
                     if profile.routes.rules.isEmpty {
-                        Text("No rules yet — routes pass through unchanged.")
-                            .font(.caption).foregroundStyle(.tertiary)
+                        emptyRuleList("No rules yet — routes pass through unchanged.",
+                                      addTitle: Self.addRouteRuleTitle, add: addRouteRule)
                     }
                     Divider()
                     pushedRoutesReferenceList
                 }
                 .padding(.vertical, 4)
                 .padding(.trailing, 6)
+                .measuringRoutesContentHeight()
             }
-            .frame(height: 300)
+            .frame(height: Self.routesViewportHeight(contentHeight: routesContentHeight))
+            .onPreferenceChange(RoutesContentHeightKey.self) { routesContentHeight = $0.rounded(.up) }
             .onPreferenceChange(RouteAnchorKey.self) { routeAnchors = $0 }
             .overlay(alignment: .topLeading) { routeArrowOverlay(routeAnchors) }
-
-            Button {
-                profile.routes.rules.append(.init(verb: .accept))
-            } label: {
-                Label("Add Route Rule", systemImage: "plus")
-            }
         }
+    }
+
+    /// The label on both halves of the routes list's primary action — the header `+`
+    /// and the empty state's spelled-out button say the same thing.
+    static let addRouteRuleTitle = "Add Route Rule"
+
+    private func addRouteRule() {
+        profile.routes.rules.append(.init(verb: .accept))
+    }
+
+    /// "Nothing here yet" that is not a dead end: the explanation of what happens
+    /// while the list is empty, and the action that fills it. An empty state whose
+    /// only way forward is a control somewhere else is how a working feature becomes
+    /// an invisible one.
+    @ViewBuilder private func emptyRuleList(_ explanation: String,
+                                           addTitle: String,
+                                           add: @escaping () -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(explanation)
+                .font(.caption).foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button(action: add) {
+                Label(addTitle, systemImage: "plus")
+            }
+            .controlSize(.small)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // The button is the one reachable child; the sentence is the container's.
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(explanation)
     }
 
     private func routeRuleRow(_ rule: Binding<RouteFilter.RouteRule>) -> some View {
@@ -657,12 +763,17 @@ struct CustomRoutingTabView: View {
                 .pickerStyle(.segmented)
             }
 
-            crHeader(Self.specs["cr.dns-rule"], changed: !profile.dns.resolverRules.isEmpty)
+            // Same shape as the routes list, and the same reachability contract: the
+            // action is in the header, above the rows, and the empty state repeats it.
+            // This list never had the 300pt viewport that hid the routes one, but it
+            // did put its only "Add" below the rows and offered no empty state at all
+            // — so an untouched DNS section said nothing about what it would do.
+            crHeader(Self.specs["cr.dns-rule"], changed: !profile.dns.resolverRules.isEmpty,
+                     addTitle: Self.addResolverRuleTitle, add: addResolverRule)
             ForEach($profile.dns.resolverRules) { $rule in dnsRuleRow($rule) }
-            Button {
-                profile.dns.resolverRules.append(.init(verb: .accept))
-            } label: {
-                Label("Add Resolver Rule", systemImage: "plus")
+            if profile.dns.resolverRules.isEmpty {
+                emptyRuleList("No rules yet — this VPN's resolvers are used as pushed.",
+                              addTitle: Self.addResolverRuleTitle, add: addResolverRule)
             }
 
             Divider()
@@ -707,6 +818,13 @@ struct CustomRoutingTabView: View {
                 pushedDNSReference
             }
         }
+    }
+
+    /// The DNS list's counterpart to `addRouteRuleTitle`.
+    static let addResolverRuleTitle = "Add Resolver Rule"
+
+    private func addResolverRule() {
+        profile.dns.resolverRules.append(.init(verb: .accept))
     }
 
     private func dnsRuleRow(_ rule: Binding<DNSCustomization.ResolverRule>) -> some View {
