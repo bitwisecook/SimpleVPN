@@ -113,6 +113,61 @@ itself. Never use "store" generically for a vault.
 | Sending all traffic via another machine | **exit node** | Tailscale's own term; keep it |
 | The largest packet that fits | **MTU** | MTU (universal — keep it) |
 
+### What connecting actually does to your Mac
+
+The one question about a connection a person can answer by watching their own machine, and
+therefore the line the connect list and Manage VPNs are grouped on: **does this capture my
+traffic, or does it hand me a port I have to aim things at?**
+
+It is NOT the full-vs-split question above. A split-tunnel OpenVPN is still a whole-Mac
+VPN — it takes the routes it offers, for every app, with nothing configured. A SOCKS proxy
+takes no routes at all, for anybody, until something is pointed at it.
+
+| Concept | House term | Means |
+|---|---|---|
+| Connecting changes where this Mac's traffic goes | **whole-Mac VPN** — section header "Whole-Mac VPNs" | It presents a network interface and takes routes, so every app follows it without being told to |
+| Connecting opens a port on this Mac and does nothing else | **local port** — section header "Local Ports" | A SOCKS proxy or a named forward on `127.0.0.1`. No app uses it until it is aimed at it |
+
+Words we translate away from, on the first side: packet tunnel, packet-tunnel provider,
+`utun`, `NEPacketTunnelProvider`, "personal VPN", system extension, "full-routes path".
+On the second: `ssh -D`, `-L`/`-R`, dynamic forward, `ocproxy`, "the no-root path",
+proxy-only. All of those are facts about our code or someone's command line.
+
+**Never** as our label:
+
+- **"Tunnels" as the opposite of "VPNs"** — a VPN *is* a tunnel. This is the split that was
+  cut in the wrong place (packet-tunnel extension on one side, subprocess and native on the
+  other), which put F5 BIG-IP APM under "Tunnels" away from the VPNs it behaves identically
+  to. It was asked about, and rejected, by the user.
+- **"Other Connections"** for a list of configured profiles. It was honest while that
+  section held only what was *running*; once it listed configured-but-idle profiles it was a
+  second list of VPNs named after not being the first one.
+- **"full tunnel"** for this axis. That term is taken, one table up, for Send All Traffic vs
+  split tunnel — a question you ask *of* a whole-Mac VPN.
+
+**Which side a connection is on is a fact about its CONFIGURATION, not only its protocol.**
+Six of the sixteen kinds can be set up either way, so nothing may hard-code the answer per
+kind:
+
+| Kind | Side | Why |
+|---|---|---|
+| OpenVPN, WireGuard, Tailscale / Headscale, Proxy Tunnel, SSH Network Tunnel | whole-Mac | Each presents its own interface and takes routes |
+| IKEv2, IPsec (IKEv1), L2TP / IPsec | whole-Mac | macOS owns the interface, but it is still every app. (No app can connect L2TP at all — it says so, in the section it belongs to) |
+| SSH in **SOCKS proxy** or **Port forwards** mode | local port | `-D 1080`, or the `-L`/`-R` lines. No interface, no routes |
+| SSH in **Network tunnel** mode | whole-Mac | `-w` is a point-to-point interface carrying a network. It is refused for an unrelated reason (it needs root), and refusing it in the section it belongs to is the honest place to do that |
+| FortiGate, F5 BIG-IP APM, Cisco AnyConnect **with "Run In-Process" actually honoured** | whole-Mac | The built-in engine carries it: full routes, no proxy |
+| GlobalProtect, Pulse **with "Run In-Process" AND browser sign-in** | whole-Mac | Browser sign-in ends in a cookie, and the cookie path carries any protocol whose settings the engine covers. These two have no in-process password path, so this is their only route to it |
+| All five of those **without** it, plus Juniper and Array Networks always | local port | OpenConnect runs under `ocproxy -D <port>` — the no-root path this app uses — which is a SOCKS proxy on `127.0.0.1` and takes no routes |
+
+The load-bearing rows are the OpenConnect ones. **F5 BIG-IP APM is a whole-Mac VPN when the
+built-in engine carries it and a local port when the tool does** — and the tool is the
+default — so its row follows the configuration, not the protocol. Filing an `ocproxy`
+connection under "Whole-Mac VPNs" would promise system-wide protection that does not exist
+— a security claim, not a naming quibble — so where the answer is uncertain, **the
+local-port side wins**. "Asked for" is not "got", either: a setting the built-in engine
+cannot express sends the connection back to the tool, so the question to ask is
+`SubprocessTunnelManager.willRunInProcess` and never the toggle.
+
 ### Connection state
 
 One vocabulary, because the status dot, the sidebar, VoiceOver and the CLI must agree.
@@ -160,6 +215,8 @@ mappings that feed it.
 | Routing everything through the VPN | **"Send All Traffic"** (control), **full tunnel** (gloss) | default route, send everything |
 | Selective routing | **split tunnel** | policy tunnel |
 | Keeping LAN reachable | **"Allow local network access"** | local LAN, exclude local networks |
+| A connection every app follows without being told to | **whole-Mac VPN** (section "Whole-Mac VPNs") | packet tunnel, utun, "Tunnels" as a category, "Other Connections", full tunnel (that is the Send-All-Traffic axis) |
+| A connection that only opens a port you aim apps at | **local port** (section "Local Ports") | proxy on its own — a *connection proxy* is the thing you go THROUGH to reach a server, which is a different concept one row down |
 | Credentials | **username / password** | user, login, account name |
 | Other products' own labels | keep their vocabulary (1Password "one-time password" field, GlobalProtect "portal/gateway", System Settings pane names) | translating another product's proper terms |
 
@@ -202,12 +259,16 @@ link their page for the rest. No version matrices, no "on older versions this to
 
 1. Find your concept in the tables above and use **our** word for it. If it genuinely is not
    there, add a row here *first* — the mapping is the design decision, and the code follows.
-2. Put its settings in the canonical groups (`AGENTS.md`: Connection, Sign-In, Traffic, Security,
+2. Say which side of the whole-Mac / local-port line it falls on — and whether its own
+   settings can move it, as SSH's mode and OpenConnect's "Run In-Process" do. That answer is
+   a value (`ConnectionScope`), never a list of kinds written out in a view, because it
+   decides which section the user finds it in.
+3. Put its settings in the canonical groups (`AGENTS.md`: Connection, Sign-In, Traffic, Security,
    Advanced). A group with nothing in it is omitted, never shown empty.
-3. Quote the vendor's own names for commands, toggles and files verbatim, in `code` spans.
-4. Write the summary in the shape above, and give it a manual anchor — the parity test will fail
+4. Quote the vendor's own names for commands, toggles and files verbatim, in `code` spans.
+5. Write the summary in the shape above, and give it a manual anchor — the parity test will fail
    the build without one.
-5. Register its maturity honestly. New means untested, and untested is not an insult.
+6. Register its maturity honestly. New means untested, and untested is not an insult.
 
 ## Why this file exists at all
 

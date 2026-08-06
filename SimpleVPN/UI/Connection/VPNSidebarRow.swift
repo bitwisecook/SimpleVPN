@@ -201,17 +201,8 @@ struct VPNSidebarRow: View {
     /// focused control says what the connection is doing right now.
     private func circle(_ symbol: String, tint: Color, help: String, label: String,
                         action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol).font(.title3)
-                .frame(width: 34, height: 34)
-                .foregroundStyle(tint)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .glassEffect(.regular.tint(tint.opacity(0.28)).interactive(), in: Circle())
-        .help(help)
-        .accessibilityLabel(label)
-        .accessibilityValue(rowStateDescription)
+        SidebarActionCircle(symbol: symbol, tint: tint, help: help, label: label,
+                            value: rowStateDescription, action: action)
     }
 
     private func play() {
@@ -334,5 +325,43 @@ struct VPNSidebarRow: View {
             }
         }
         return VPNController.statusText(profile.status)
+    }
+}
+
+/// THE CONNECT LIST'S ONE ACTION CONTROL — a glass-tinted circle with a real hit target.
+///
+/// It is shared rather than duplicated because the sidebar's two row shapes now sit in the
+/// SAME section. The list used to be split "VPNs" / "Other Connections", which was our
+/// three transports showing through, and the sections are now cut on what connecting a
+/// thing DOES to the Mac (`ConnectionScope`) — so an F5 BIG-IP APM can be the row directly
+/// under an OpenVPN. A different-looking button on one of them would put the old
+/// implementation split straight back visually, after it had been taken out of the words.
+struct SidebarActionCircle: View {
+    let symbol: String
+    let tint: Color
+    /// The hover tooltip. Never the only carrier of anything (Docs/Accessibility.md).
+    let help: String
+    /// Names the icon-only button for VoiceOver and Voice Control.
+    let label: String
+    /// The live state in words, from the ONE status vocabulary — and, on a dead control,
+    /// the reason after it. Never empty: a focused Connect must say what the connection is
+    /// doing, which `testEveryConnectListRowOffersAnActionThatSaysWhy` asserts row by row.
+    let value: String
+    var disabled = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.title3)
+                .frame(width: 34, height: 34)
+                .foregroundStyle(tint)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.tint(tint.opacity(0.28)).interactive(), in: Circle())
+        .disabled(disabled)
+        .help(help)
+        .accessibilityLabel(label)
+        .accessibilityValue(value)
     }
 }

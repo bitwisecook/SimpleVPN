@@ -208,10 +208,10 @@ final class SubprocessTunnelManager {
             return
         }
         // Configs using settings the in-process bridge doesn't carry route to the
-        // subprocess path (see inProcessOpenConnectSupports).
-        if config.preferInProcess, config.authMode != "sso",
-           [.fortinet, .f5apm, .ciscoAnyConnect].contains(config.kind),
-           Self.inProcessOpenConnectSupports(config) {
+        // subprocess path. ONE PREDICATE, `willRunInProcess` — see its own comment:
+        // this branch, the cookie branch and the editor's caveat were three different
+        // spellings of the same question and two of them were wrong.
+        if Self.willRunInProcess(config) {
             connectInProcessOpenConnect(config, password: password)
             return
         }
@@ -232,13 +232,37 @@ final class SubprocessTunnelManager {
     /// silently dropping a CA file, client cert, proxy, posture wrapper or token
     /// would connect with weaker (or simply broken) settings than configured.
     /// Mirrors `inProcessSSHSupports`.
+    /// The protocols the in-process bridge is wired for on the password / certificate
+    /// path. One constant rather than a literal inside `connect`, because three places
+    /// now ask this question and they must not answer it differently.
+    static let inProcessOpenConnectKinds: Set<VPNKind> = [.fortinet, .f5apm, .ciscoAnyConnect]
+
     /// Whether "Run In-Process" will ACTUALLY be honoured for this config — the
     /// single honesty gate behind the editor's caveats, in the shape
     /// `sshPinBlockReason` established. The toggle asking for it is not the same
     /// as getting it: any option the bridge can't express sends the connection
     /// back to the subprocess (with its SOCKS proxy), and the editor says which.
+    ///
+    /// IT WAS LYING FOR FOUR KINDS, and this is the fix. It answered
+    /// `kind.isSSLVPN && preferInProcess && supports`, while `connect` additionally
+    /// required the kind to be one of the three the bridge is wired for — so a
+    /// GlobalProtect, Juniper, Pulse or Array config with the toggle on was told, by the
+    /// editor's own caveat, that it "is carried as a full system tunnel — no SOCKS proxy
+    /// is opened", and then ran as an `openconnect` subprocess with a SOCKS proxy. Found
+    /// by grouping the connect list on what a connection does to the Mac: the grouping
+    /// asks this predicate, and the answer disagreed with the connect path.
+    ///
+    /// The SSO exception is real rather than a special case. Browser sign-in ends in a
+    /// cookie, and the cookie path (`connectWithCookie`) has no per-protocol sign-in code
+    /// left to run, so it carries any protocol whose SETTINGS the bridge covers. That is
+    /// why GlobalProtect and Pulse can be in-process with single sign-on and never
+    /// without it.
     static func willRunInProcess(_ c: SubprocessTunnelConfig) -> Bool {
-        c.kind.isSSLVPN && c.preferInProcess && inProcessOpenConnectSupports(c)
+        guard c.kind.isSSLVPN, c.preferInProcess, inProcessOpenConnectSupports(c) else {
+            return false
+        }
+        if c.authMode == "sso" { return c.kind.supportsExternalBrowserSSO }
+        return inProcessOpenConnectKinds.contains(c.kind)
     }
 
     private static func inProcessOpenConnectSupports(_ c: SubprocessTunnelConfig) -> Bool {
@@ -396,7 +420,10 @@ final class SubprocessTunnelManager {
     /// `--cookie-on-stdin` (no sign-in left to do — and no sysext required,
     /// preserving the no-root SOCKS path SSO configs had before).
     private func connectWithCookie(_ config: SubprocessTunnelConfig, auth: OCAuthDone) {
-        if config.preferInProcess, Self.inProcessOpenConnectSupports(config) {
+        // The same one predicate as the password path — see `willRunInProcess`. Reached
+        // only with `authMode == "sso"` on a kind that really does browser sign-in, which
+        // is the case it answers `true` for on settings alone.
+        if Self.willRunInProcess(config) {
             inProcessNE.insert(config.id)
             var l = live[config.id] ?? Live()
             l.status = .connecting

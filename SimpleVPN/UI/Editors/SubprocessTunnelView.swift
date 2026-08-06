@@ -1367,7 +1367,10 @@ struct SubprocessTunnelView: View {
             // to the tool whenever a setting needs it — the rows would then be
             // dead for no reason (`willRunInProcess` is the honesty gate).
             if SubprocessTunnelManager.willRunInProcess(draft) {
-                SettingCaveat("With “Run In-Process” on, this VPN is carried as a full system tunnel — no SOCKS proxy is opened, so neither of the two settings above applies.")
+                // "whole-Mac VPN" is the house term for this (ONTOLOGY.md), and the same
+                // words the connect list's heading uses — "full system tunnel" read as a
+                // near-miss of "full tunnel", which is the unrelated Send-All-Traffic axis.
+                SettingCaveat("With “Run In-Process” on, this becomes a whole-Mac VPN — it takes routes and every app follows it, and no SOCKS proxy is opened, so neither of the two settings above applies.")
             }
             // The user-facing MTU, on ONE shared control (UI/Components/MTUField)
             // — it sat in Advanced beside the BASE MTU, which describes the path

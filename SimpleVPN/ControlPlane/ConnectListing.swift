@@ -51,6 +51,151 @@
 
 import Foundation
 
+// MARK: - Which section a connection belongs in
+
+/// WHAT CONNECTING THIS ACTUALLY DOES TO THE MAC — the question the connect list and
+/// Manage VPNs are grouped on, and the only grouping question about a connection that a
+/// person can answer by watching their own machine.
+///
+/// WHAT IT REPLACES, AND WHY THAT HAD TO GO. Both sidebars used to be split on our
+/// IMPLEMENTATION: "VPNs" meant the packet-tunnel extension, "Tunnels" meant a
+/// subprocess and "Native (IKEv2 / IPsec)" meant `NEVPNManager`. So an F5 BIG-IP APM sat
+/// under "Tunnels", filed away from the VPNs it behaves identically to, and the user
+/// asked the obvious question — "why is APM a Tunnel and not a VPN? it sure behaves like
+/// a vpn" — followed by the one that settles it: "is that a useful distinction?". It is
+/// not. Which of our three transports carries a connection is invisible from outside the
+/// app, and ONTOLOGY.md rule 1 forbids naming things after the implementation that
+/// happens to serve them.
+///
+/// The line that IS useful, and is the one drawn here: **a whole-Mac VPN changes where
+/// this Mac's traffic goes, and a local port does nothing at all until you aim something
+/// at it.** That difference is observable (open a browser and look at your IP), it is
+/// actionable (one needs a proxy configured somewhere, the other does not), and it is the
+/// difference that matters for safety.
+///
+/// TWO RULES THIS TYPE EXISTS TO ENFORCE:
+///
+///  1. **The answer follows the CONFIGURATION, not the protocol.** Four of the sixteen
+///     kinds can be set up either way — SSH by its mode, and the three OpenConnect kinds
+///     the in-process bridge carries by "Run In-Process". A per-kind table would put an
+///     `ocproxy` F5 in with the whole-Mac VPNs and be wrong about it.
+///  2. **When it is uncertain, the local-port side wins.** Promising system-wide
+///     protection that is not there is a security claim, not a naming quibble; the
+///     opposite mistake merely undersells a connection.
+nonisolated enum ConnectionScope: String, Sendable, CaseIterable {
+    /// Presents a network interface and takes routes: every app follows it with nothing
+    /// to configure.
+    case wholeMac
+    /// Opens a port on this Mac (a SOCKS proxy, or named forwards) and takes no routes.
+    /// Nothing goes through it until something is pointed at the port.
+    case localPort
+
+    /// The section header, from ONTOLOGY.md's table. Never "Tunnels" (a VPN is also a
+    /// tunnel) and never "Other Connections" (a list named after not being the first
+    /// list).
+    var sectionTitle: String {
+        switch self {
+        case .wholeMac: "Whole-Mac VPNs"
+        case .localPort: "Local Ports"
+        }
+    }
+
+    /// What puts a row in this section, in one sentence and in terms the reader can
+    /// check against their own Mac. Shown on hover AND spoken (below), because
+    /// Docs/Accessibility.md allows nothing to be hover-only.
+    var explanation: String {
+        switch self {
+        case .wholeMac:
+            "Connecting one of these changes where this Mac\u{2019}s traffic goes \u{2014} every app follows it, with nothing to set up."
+        case .localPort:
+            "Connecting one of these opens a port on this Mac. Nothing goes through it until you point an app at that port."
+        }
+    }
+
+    /// What a screen reader hears on the header. A section header has to NAME ITSELF and
+    /// then say what it groups — regrouping rows changes what VoiceOver announces, so the
+    /// heading is the one place the new question gets asked out loud.
+    var spokenHeader: String { "\(sectionTitle). \(explanation)" }
+}
+
+extension ConnectionScope {
+
+    /// THE PARTITION BY KIND — the answer for a kind whose own settings cannot move it,
+    /// and `nil` for the four that can. A caller holding a config must ask `of(_:)`
+    /// instead; a caller holding only a kind (an NE profile, a native personal VPN) gets
+    /// a settled answer here or there is a bug.
+    ///
+    /// The six that answer `nil` are the whole test of this design:
+    ///  • `.ssh` — `-D`/`-L` open a port, `-w` presents an interface. Two scopes, one
+    ///    kind, decided by `sshMode`.
+    ///  • `.fortinet` / `.f5apm` / `.ciscoAnyConnect` — the in-process OpenConnect engine
+    ///    is a full-routes path, and the `openconnect` subprocess runs under
+    ///    `ocproxy -D <port>`, which is a local SOCKS proxy. Decided by
+    ///    `SubprocessTunnelManager.willRunInProcess`.
+    ///  • `.globalProtect` / `.pulse` — the same, but ONLY with browser sign-in: the
+    ///    cookie path carries any protocol whose settings the bridge covers, and there
+    ///    is no in-process password path for these two.
+    ///
+    /// Juniper and Array Networks are settled `.localPort` rather than `nil` because the
+    /// bridge cannot carry them by any route — no in-process password path and no browser
+    /// sign-in — so `ocproxy` is the only shape they have. If that changes, move them to
+    /// the `nil` list; `ConnectListingTests` asserts the correspondence rather than
+    /// trusting this comment.
+    static func settled(for kind: VPNKind) -> ConnectionScope? {
+        switch kind {
+        // Each of these presents its own interface and takes routes. Tailscale is
+        // included on the same ground as the rest: it is a utun with routes whether or
+        // not an exit node makes it the default one.
+        case .openVPN, .wireGuard, .tailscale, .proxyTunnel, .sshNetworkTunnel:
+            .wholeMac
+        // macOS owns the interface for these, which is an implementation detail of whose
+        // code makes the utun — not of what the user gets, which is every app.
+        case .ikev2, .ipsec, .l2tp:
+            .wholeMac
+        // OpenConnect kinds with no in-process path at all: always `ocproxy`, always a
+        // port.
+        case .juniper, .arrayNetworks:
+            .localPort
+        case .ssh, .fortinet, .f5apm, .ciscoAnyConnect, .globalProtect, .pulse:
+            nil
+        }
+    }
+
+    /// Which section this subprocess tunnel belongs in, from ITS OWN SETTINGS.
+    ///
+    /// `@MainActor` only because `willRunInProcess` is; nothing here touches the Mac.
+    @MainActor static func of(_ c: SubprocessTunnelConfig) -> ConnectionScope {
+        if let settled = settled(for: c.kind) { return settled }
+        if c.kind == .ssh {
+            // `-w` carries a network on a point-to-point interface; `-D` and `-L`/`-R`
+            // open ports. That this build then REFUSES `-w` (it needs root) is a
+            // separate fact, said by `SubprocessTunnelReadiness` — and said in the
+            // section the configuration actually asks for, which is the honest place for
+            // it. Filing a refused network tunnel under "Local Ports" would describe a
+            // connection the user never asked for.
+            return c.sshMode == .netTunnel ? .wholeMac : .localPort
+        }
+        // An SSL-VPN is whole-Mac only when the built-in engine will REALLY take it.
+        // `willRunInProcess` is the existing honesty gate: the toggle asking for
+        // in-process is not the same as getting it, and any option the bridge cannot
+        // express sends the connection back to the tool — and to its SOCKS port. Reading
+        // the toggle instead of the gate is how this row would come to claim system-wide
+        // protection that the connection does not provide.
+        return SubprocessTunnelManager.willRunInProcess(c) ? .wholeMac : .localPort
+    }
+
+    /// A native personal VPN. Its store holds nothing that could move the answer, so
+    /// this is `settled(for:)` with the "or there is a bug" spelled out.
+    static func of(native c: NativeVPNConfig) -> ConnectionScope {
+        settled(for: c.kind) ?? .wholeMac
+    }
+
+    /// An NE profile in `vpn.profiles`. Same shape, same reason.
+    static func of(profileKind kind: VPNKind) -> ConnectionScope {
+        settled(for: kind) ?? .wholeMac
+    }
+}
+
 // MARK: - What the connect list contains
 
 /// WHICH CONNECTIONS THE CONNECT WINDOW LISTS — as a decision, not as a view body.
@@ -89,6 +234,43 @@ enum ConnectListing {
         return tag
     }
 
+    /// An NE profile as the listing needs it: the id it is selected by, and the kind that
+    /// decides which section it appears in.
+    ///
+    /// The kind is new here. It arrived with the sectioning, and it is not optional: a
+    /// row cannot be placed without knowing what connecting it does, and the alternative
+    /// — assuming every NE profile is whole-Mac — is the per-kind table this whole
+    /// change exists to delete.
+    nonisolated struct Profile: Equatable, Sendable, Identifiable {
+        let id: String
+        let kind: VPNKind
+        init(id: String, kind: VPNKind) {
+            self.id = id
+            self.kind = kind
+        }
+    }
+
+    /// THE SECTIONS, in the order they are drawn, each holding its rows in order.
+    ///
+    /// Empty sections are dropped rather than drawn as a bare heading — the same rule
+    /// AGENTS.md applies to setting groups ("a group with nothing in it is omitted, never
+    /// shown empty").
+    ///
+    /// Within a section the order is profiles, then subprocess tunnels, then native VPNs.
+    /// That is the store order the list has always used; what changed is that it is now
+    /// asked twice, once per side of the line, instead of once per store.
+    static func sections(profiles: [Profile],
+                         tunnels: [SubprocessTunnelConfig],
+                         native: [NativeVPNConfig]) -> [(scope: ConnectionScope, tags: [String])] {
+        ConnectionScope.allCases.compactMap { scope in
+            var tags: [String] = []
+            tags += profiles.filter { ConnectionScope.of(profileKind: $0.kind) == scope }.map(\.id)
+            tags += tunnels.filter { ConnectionScope.of($0) == scope }.map { tag(forTunnel: $0.id) }
+            tags += native.filter { ConnectionScope.of(native: $0) == scope }.map { tag(forNative: $0.id) }
+            return tags.isEmpty ? nil : (scope, tags)
+        }
+    }
+
     /// Every row the connect list shows, in sidebar order.
     ///
     /// NO ARGUMENT DESCRIBES RUNNING STATE, and that is the design. The bug this
@@ -96,19 +278,47 @@ enum ConnectListing {
     /// had created was hidden until it was connected, and could not be connected
     /// because it was hidden. Nothing that could reintroduce that is reachable from
     /// this signature.
-    static func rowTags(profiles: [String],
+    ///
+    /// IT IS THE CONCATENATION OF THE SECTIONS, deliberately, rather than a second walk
+    /// over the three stores. Grouping is the thing most likely to lose a row — a row
+    /// whose scope nothing claimed would simply not be drawn — so the invariant "every
+    /// profile a user can create appears" is held here BY CONSTRUCTION: if a row is
+    /// missing from the sections it is missing from this list too, and the tests fail.
+    static func rowTags(profiles: [Profile],
                         tunnels: [SubprocessTunnelConfig],
                         native: [NativeVPNConfig]) -> [String] {
-        profiles + tunnels.map { tag(forTunnel: $0.id) } + native.map { tag(forNative: $0.id) }
+        sections(profiles: profiles, tunnels: tunnels, native: native).flatMap(\.tags)
     }
 
     /// Whether the empty-state page ("No VPNs Configured") is the honest thing to
     /// show. Existence again — it used to ask whether anything was RUNNING, so
     /// somebody whose only VPN was an F5 BIG-IP APM was told they had none.
-    static func isEmpty(profiles: [String],
+    static func isEmpty(profiles: [Profile],
                         tunnels: [SubprocessTunnelConfig],
                         native: [NativeVPNConfig]) -> Bool {
         rowTags(profiles: profiles, tunnels: tunnels, native: native).isEmpty
+    }
+
+    /// WHAT A LOCAL-PORT CONNECTION ACTUALLY GIVES YOU, short enough for a 220pt sidebar
+    /// caption — the port to aim at, or the forwards it will open.
+    ///
+    /// This is the payoff of the re-cut and the reason "Local Ports" is worth saying: the
+    /// section tells you nothing goes through it until you point something at it, and the
+    /// row tells you where. `nil` for a whole-Mac VPN, because "it takes your traffic" is
+    /// what that section's heading already says and repeating it on every row is noise.
+    @MainActor static func portSummary(_ c: SubprocessTunnelConfig) -> String? {
+        guard ConnectionScope.of(c) == .localPort else { return nil }
+        if c.kind == .ssh, c.sshMode == .portForward {
+            let count = c.forwards.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.count
+            switch count {
+            case 0: return "No forwards yet"
+            case 1: return "1 port forward"
+            default: return "\(count) port forwards"
+            }
+        }
+        // Every other local-port shape is a SOCKS listener on the loopback: SSH's `-D`,
+        // and `ocproxy -D` for the OpenConnect kinds.
+        return "SOCKS on 127.0.0.1:\(c.socksPort)"
     }
 }
 

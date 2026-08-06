@@ -289,6 +289,12 @@ struct LogoBadge: View {
     let status: NEVPNStatus
     /// Pass a richer state (stall/captive-portal aware) where the caller has one.
     var dotState: DotState? = nil
+    /// What to draw when this connection has no logo of its own. A globe for an NE
+    /// profile (a logo is expected and simply absent); the KIND's symbol for the
+    /// connections that never get one, so an SSH tunnel and an F5 APM sitting in the same
+    /// sidebar section as an OpenVPN read as the same kind of row rather than as three
+    /// identical globes.
+    var fallbackSymbol = "globe"
     var body: some View {
         let state = dotState ?? .from(status: status)
         ZStack(alignment: .bottomTrailing) {
@@ -303,7 +309,7 @@ struct LogoBadge: View {
     }
     @ViewBuilder private var logo: some View {
         if let cg = LogoStore.load(id) { Image(decorative: cg, scale: 1).resizable().scaledToFill() }
-        else { Image(systemName: "globe").foregroundStyle(.secondary) }
+        else { Image(systemName: fallbackSymbol).foregroundStyle(.secondary) }
     }
 }
 

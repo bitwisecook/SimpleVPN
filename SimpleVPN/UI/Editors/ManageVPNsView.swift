@@ -168,89 +168,20 @@ struct ManageVPNsView: View {
     /// toolbar item pushed it past what the compiler will do in reasonable time.
     private var sidebarList: some View {
                 List(selection: $selection) {
-                    Section("VPNs") {
-                        ForEach(vpn.profiles) { p in
-                            HStack(spacing: 8) {
-                                VPNRow(profile: p, labelDefs: labels.labels(for: p.id))
-                                CertExpiryBadge(ovpn: vpn.ovpnText(id: p.id))
-                                InlineKeyStillStoredBadge(reason: vpn.inlineSecretMigrationFailures[p.id])
-                            }
-                                .tag(p.id)
-                                .contextMenu {
-                                    Button("Export .ovpn…") { export(p) }
-                                    Button("Remove", role: .destructive) { Task { try? await vpn.remove(id: p.id) } }
-                                }
-                        }
-                    }
-                    if !tunnels.tunnels.isEmpty {
-                        Section("Tunnels") {
-                            ForEach(tunnels.tunnels) { t in
-                                let st = tunnelManager.status(t.id)
-                                HStack(spacing: 8) {
-                                    StatusDot(state: .from(subprocess: st))
-                                    Image(systemName: t.kind.systemImage)
-                                        .foregroundStyle(tunnelManager.isActive(t.id) ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                                        .accessibilityHidden(true)
-                                    VStack(alignment: .leading, spacing: 1) {
-                                        Text(t.name)
-                                        Text(st.isFailed ? (st.failureText ?? "Failed") : t.kind.displayName)
-                                            .font(.caption)
-                                            .foregroundStyle(st.isFailed ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
-                                            .lineLimit(1)
-                                    }
-                                    // The SSL-VPN kinds live here, and they are
-                                    // exactly the ones nobody has been able to try.
-                                    if let notice = t.kind.maturityNotice {
-                                        MaturityBadge(notice: notice)
-                                    }
-                                }
-                                // One sentence, dot state in words (the dot is
-                                // hidden), then the maturity the chip shows.
-                                .accessibilityElement(children: .combine)
-                                .accessibilityLabel("\(t.name), \(t.kind.displayName), \(DotState.from(subprocess: st).accessibilityDescription)\(st.isFailed ? ", \(st.failureText ?? "failed")" : "")\(t.kind.maturityNotice.map { ", \($0.spokenValue)" } ?? "")")
-                                .tag(Self.tunnelTag + t.id)
-                                .contextMenu {
-                                    Button("Remove", role: .destructive) {
-                                        tunnelManager.disconnect(t.id); tunnels.remove(t.id)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if !nativeVPN.configs.isEmpty {
-                        Section("Native (IKEv2 / IPsec)") {
-                            ForEach(nativeVPN.configs) { c in
-                                // Reflect real status, not just activeConfigID — an
-                                // OS-side drop clears activeConfigID, and connecting/
-                                // failed now read distinctly.
-                                let isThis = nativeVPN.activeConfigID == c.id
-                                HStack(spacing: 8) {
-                                    StatusDot(status: isThis ? nativeVPN.status : .disconnected)
-                                    Image(systemName: c.kind.systemImage)
-                                        .foregroundStyle(isThis && nativeVPN.status == .connected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                                        .accessibilityHidden(true)
-                                    VStack(alignment: .leading, spacing: 1) {
-                                        Text(c.name)
-                                        Text(c.kind.displayName).font(.caption).foregroundStyle(.secondary)
-                                    }
-                                    // All three native kinds are unproven — this Mac
-                                    // has no IKEv2, IPsec or L2TP server to try.
-                                    if let notice = c.kind.maturityNotice {
-                                        MaturityBadge(notice: notice)
-                                    }
-                                }
-                                // One sentence incl. the dot's state in words — the
-                                // hidden dot and icon tint said "connected" to nobody
-                                // — then the maturity the chip shows.
-                                .accessibilityElement(children: .combine)
-                                .accessibilityLabel("\(c.name), \(c.kind.displayName), \(DotState.from(status: isThis ? nativeVPN.status : .disconnected).accessibilityDescription)\(c.kind.maturityNotice.map { ", \($0.spokenValue)" } ?? "")")
-                                .tag(Self.nativeTag + c.id)
-                                .contextMenu {
-                                    Button("Remove", role: .destructive) { nativeVPN.remove(c.id) }
-                                }
-                            }
-                        }
-                    }
+                    // THE HEADINGS THIS WINDOW USED TO HAVE: "VPNs", "Tunnels" and
+                    // "Native (IKEv2 / IPsec)" — our three transports, named as though
+                    // they were three kinds of thing the user owns. That is where the
+                    // reported confusion came from ("why is APM a Tunnel and not a VPN?
+                    // it sure behaves like a vpn"), and the answer to the follow-up ("is
+                    // that a useful distinction?") is no. Both headings now answer what
+                    // connecting the thing DOES — see `ConnectionScope`.
+                    //
+                    // "Compositions" stays, and is not the same kind of heading: a
+                    // composition is a GROUP of VPNs rather than one connection, so it
+                    // sits on a different axis and does not divide the list by anything
+                    // about our code.
+                    scopeSection(.wholeMac)
+                    scopeSection(.localPort)
                     if !compositions.compositions.isEmpty {
                         Section("Compositions") {
                             ForEach(compositions.compositions) { comp in
@@ -259,6 +190,105 @@ struct ManageVPNsView: View {
                         }
                     }
                 }
+    }
+
+    /// One heading and everything under it, from all three stores. Row layouts are
+    /// unchanged — they were lifted out of the three old sections verbatim so this is a
+    /// regrouping and nothing else.
+    @ViewBuilder private func scopeSection(_ scope: ConnectionScope) -> some View {
+        let profiles = vpn.profiles.filter { ConnectionScope.of(profileKind: $0.kind) == scope }
+        let subs = tunnels.tunnels.filter { ConnectionScope.of($0) == scope }
+        let natives = nativeVPN.configs.filter { ConnectionScope.of(native: $0) == scope }
+        if !profiles.isEmpty || !subs.isEmpty || !natives.isEmpty {
+            Section {
+                ForEach(profiles) { p in profileRow(p) }
+                ForEach(subs) { t in tunnelRow(t) }
+                ForEach(natives) { c in nativeRow(c) }
+            } header: {
+                // The heading names itself and says what puts a row under it, spoken as
+                // well as shown (Docs/Accessibility.md: nothing hover-only).
+                Text(scope.sectionTitle)
+                    .help(scope.explanation)
+                    .accessibilityLabel(scope.spokenHeader)
+            }
+        }
+    }
+
+    @ViewBuilder private func profileRow(_ p: VPNController.Profile) -> some View {
+        HStack(spacing: 8) {
+            VPNRow(profile: p, labelDefs: labels.labels(for: p.id))
+            CertExpiryBadge(ovpn: vpn.ovpnText(id: p.id))
+            InlineKeyStillStoredBadge(reason: vpn.inlineSecretMigrationFailures[p.id])
+        }
+            .tag(p.id)
+            .contextMenu {
+                Button("Export .ovpn…") { export(p) }
+                Button("Remove", role: .destructive) { Task { try? await vpn.remove(id: p.id) } }
+            }
+    }
+
+    @ViewBuilder private func tunnelRow(_ t: SubprocessTunnelConfig) -> some View {
+        let st = tunnelManager.status(t.id)
+        // What this one gives you, when what it gives you is a port. The same string the
+        // connect list's caption carries, from the same one place.
+        let port = ConnectListing.portSummary(t)
+        HStack(spacing: 8) {
+            StatusDot(state: .from(subprocess: st))
+            Image(systemName: t.kind.systemImage)
+                .foregroundStyle(tunnelManager.isActive(t.id) ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(t.name)
+                Text(st.isFailed ? (st.failureText ?? "Failed")
+                     : [t.kind.displayName, port].compactMap { $0 }.joined(separator: " \u{00B7} "))
+                    .font(.caption)
+                    .foregroundStyle(st.isFailed ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                    .lineLimit(1)
+            }
+            // The SSL-VPN kinds are exactly the ones nobody has been able to try.
+            if let notice = t.kind.maturityNotice {
+                MaturityBadge(notice: notice)
+            }
+        }
+        // One sentence, dot state in words (the dot is hidden), then the maturity the
+        // chip shows.
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(t.name), \(t.kind.displayName)\(port.map { ", \($0)" } ?? ""), \(DotState.from(subprocess: st).accessibilityDescription)\(st.isFailed ? ", \(st.failureText ?? "failed")" : "")\(t.kind.maturityNotice.map { ", \($0.spokenValue)" } ?? "")")
+        .tag(Self.tunnelTag + t.id)
+        .contextMenu {
+            Button("Remove", role: .destructive) {
+                tunnelManager.disconnect(t.id); tunnels.remove(t.id)
+            }
+        }
+    }
+
+    @ViewBuilder private func nativeRow(_ c: NativeVPNConfig) -> some View {
+        // Reflect real status, not just activeConfigID — an OS-side drop clears
+        // activeConfigID, and connecting/failed now read distinctly.
+        let isThis = nativeVPN.activeConfigID == c.id
+        HStack(spacing: 8) {
+            StatusDot(status: isThis ? nativeVPN.status : .disconnected)
+            Image(systemName: c.kind.systemImage)
+                .foregroundStyle(isThis && nativeVPN.status == .connected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(c.name)
+                Text(c.kind.displayName).font(.caption).foregroundStyle(.secondary)
+            }
+            // All three native kinds are unproven — this Mac has no IKEv2, IPsec or
+            // L2TP server to try.
+            if let notice = c.kind.maturityNotice {
+                MaturityBadge(notice: notice)
+            }
+        }
+        // One sentence incl. the dot's state in words — the hidden dot and icon tint
+        // said "connected" to nobody — then the maturity the chip shows.
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(c.name), \(c.kind.displayName), \(DotState.from(status: isThis ? nativeVPN.status : .disconnected).accessibilityDescription)\(c.kind.maturityNotice.map { ", \($0.spokenValue)" } ?? "")")
+        .tag(Self.nativeTag + c.id)
+        .contextMenu {
+            Button("Remove", role: .destructive) { nativeVPN.remove(c.id) }
+        }
     }
 
     /// A composition row: single Connect/Disconnect for the whole group, plus edit/remove.

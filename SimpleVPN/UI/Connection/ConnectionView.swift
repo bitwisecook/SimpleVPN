@@ -89,9 +89,12 @@ struct ConnectionView: View {
 
     // MARK: - The connections that are not NE profiles
 
-    /// One row of the "Other Connections" section, flattened out of the two stores
-    /// behind it so the section body has one shape to draw and one place to read
+    /// One row for a connection that is not an NE profile, flattened out of the two
+    /// stores behind it so the sections have one shape to draw and one place to read
     /// readiness from.
+    ///
+    /// These rows are no longer a section of their own — see `connectSection`. They are
+    /// interleaved with the NE profiles under whichever heading their scope names.
     private struct OtherConnection: Identifiable {
         /// The sidebar selection tag (prefixed).
         let id: String
@@ -99,6 +102,11 @@ struct ConnectionView: View {
         let configID: String
         let name: String
         let kind: VPNKind
+        /// Which heading this row appears under: what connecting it does to the Mac.
+        let scope: ConnectionScope
+        /// The port it opens, for a local-port row — what you have to aim something at.
+        /// nil for a whole-Mac VPN.
+        let portSummary: String?
         let dot: DotState
         let isActive: Bool
         /// The engine's last word: a failure message or a caution. nil when quiet.
@@ -128,6 +136,7 @@ struct ConnectionView: View {
             let live = tunnelManager?.live[t.id]
             rows.append(OtherConnection(
                 id: ConnectListing.tunnelTag + t.id, configID: t.id, name: t.name, kind: t.kind,
+                scope: ConnectionScope.of(t), portSummary: ConnectListing.portSummary(t),
                 dot: .from(subprocess: tunnelManager?.status(t.id) ?? .disconnected),
                 isActive: tunnelManager?.isActive(t.id) == true,
                 note: live?.status.failureText ?? live?.caution,
@@ -144,6 +153,7 @@ struct ConnectionView: View {
             let isActive = nativeBackendActive && nativeVPN?.activeConfigID == c.id
             rows.append(OtherConnection(
                 id: ConnectListing.nativeTag + c.id, configID: c.id, name: c.name, kind: c.kind,
+                scope: ConnectionScope.of(native: c), portSummary: nil,
                 dot: isActive ? .from(status: nativeVPN?.status ?? .disconnected) : .off,
                 isActive: isActive,
                 note: isActive ? nativeVPN?.lastError : nil,
@@ -164,22 +174,41 @@ struct ConnectionView: View {
         return rows
     }
 
-    @ViewBuilder private var otherConnectionsSection: some View {
-        let rows = otherConnections
-        if !rows.isEmpty {
-            // NAME. "Other Connections" was honest while this section only ever held
-            // things that were RUNNING — it was the live-status strip. Now that it
-            // lists configured-but-idle profiles it is a list of VPNs like the one
-            // above it, and the split it draws is our implementation (packet-tunnel
-            // extension vs subprocess/native) rather than anything the user can act
-            // on. Re-cutting the sidebar on the question that DOES matter — does this
-            // capture my traffic system-wide, or hand me a local port — is queued
-            // separately (Q5); it moves rows between sections and needs ONTOLOGY.md
-            // definitions, so it is deliberately not done here.
-            Section("Other Connections") {
-                ForEach(rows) { row in
+    /// ONE SECTION OF THE CONNECT LIST — every connection, of every kind, whose scope
+    /// puts it under this heading.
+    ///
+    /// THE LINE THIS DRAWS, AND THE ONE IT REPLACES. The list used to be "VPNs" (the
+    /// packet-tunnel extension) and "Other Connections" (everything else), which is our
+    /// implementation showing through: an F5 BIG-IP APM was filed away from the VPNs it
+    /// behaves identically to, and the second heading was named after not being the
+    /// first. Both headings now answer the question a person can actually check — does
+    /// connecting this change where my traffic goes, or does it hand me a port I have to
+    /// aim something at (`ConnectionScope`, defined in ONTOLOGY.md).
+    ///
+    /// NE profiles and the other two stores are INTERLEAVED here rather than kept apart.
+    /// That is the point: which of our three transports carries a connection is no longer
+    /// visible in the sidebar, because it was never information the user could use.
+    @ViewBuilder private func connectSection(_ scope: ConnectionScope) -> some View {
+        let profiles = vpn.profiles.filter { ConnectionScope.of(profileKind: $0.kind) == scope }
+        let others = otherConnections.filter { $0.scope == scope }
+        if !profiles.isEmpty || !others.isEmpty {
+            Section {
+                ForEach(profiles) { p in
+                    VPNSidebarRow(vpn: vpn, profile: p, labelDefs: labels.labels(for: p.id), dotState: rowDot(p))
+                        .tag(p.id)
+                        .contextMenu { sidebarMenu(p) }
+                }
+                ForEach(others) { row in
                     otherConnectionRow(row).tag(row.id)
                 }
+            } header: {
+                // A heading that regroups rows has to SAY what it groups: it is the only
+                // place the new question is asked out loud, and VoiceOver reads the
+                // heading before the rows under it (Docs/Accessibility.md). The sentence
+                // is spoken AND shown on hover — never only on hover.
+                Text(scope.sectionTitle)
+                    .help(scope.explanation)
+                    .accessibilityLabel(scope.spokenHeader)
             }
         }
     }
@@ -187,9 +216,25 @@ struct ConnectionView: View {
     private func otherConnectionRow(_ row: OtherConnection) -> some View {
         let notice = row.kind.maturityNotice
         let need = otherNeeds[row.id]
-        return HStack(spacing: 8) {
-            StatusDot(state: row.dot)
-            VStack(alignment: .leading, spacing: 1) {
+        // THE CAPTION, in priority order. Something missing outranks everything (that is
+        // what the user has to act on), and the status word comes from the ONE
+        // vocabulary — never a phrase invented here. Otherwise a local-port row says
+        // WHICH PORT, which is the fact its section exists to make actionable, and a
+        // whole-Mac row says only its kind: "it takes your traffic" is the heading's job.
+        let caption = need.map { "\(row.kind.displayName) \u{00B7} \($0.statusWord)" }
+            ?? [row.kind.displayName, row.portSummary].compactMap { $0 }.joined(separator: " \u{00B7} ")
+        return HStack(spacing: 10) {
+            // THE SAME BADGE, METRICS AND CONTROL AS `VPNSidebarRow`. These rows share a
+            // section with the NE profiles now, so a shorter row with a bare dot and a
+            // borderless glyph would redraw the transport split this change removed — the
+            // user would still see which ones are "the other kind", just without a label
+            // for it. The badge falls back to the KIND's symbol because these connections
+            // never have a logo of their own.
+            LogoBadge(id: row.configID, status: .disconnected, dotState: row.dot,
+                      fallbackSymbol: row.kind.systemImage)
+                .scaleEffect(1.15)
+                .frame(width: 26, height: 26)
+            VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
                     Text(row.name).lineLimit(1)
                     // A kind nobody has proven: the chip is still true, and a row
@@ -197,52 +242,51 @@ struct ConnectionView: View {
                     // whether to try it.
                     if let notice { MaturityBadge(notice: notice) }
                 }
-                // The kind, or — when something is missing — the one word that says
-                // so. The sidebar is 220pt wide, so the SENTENCE lives in the detail
-                // pane's banner and on this row's `.help`; what fits here is the
-                // fact that there is something to do.
-                Text(need.map { "\(row.kind.displayName) \u{00B7} \($0.statusWord)" }
-                     ?? row.kind.displayName)
-                    .font(.caption)
+                // The sidebar is 220pt wide, so the SENTENCE lives in the detail pane's
+                // banner and on this row's `.help`; what fits here is the fact that
+                // there is something to do, or the port to aim at.
+                Text(caption)
+                    .font(.caption).lineLimit(1)
                     .foregroundStyle(need == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.orange))
             }
-            // One sentence per row; the (hidden) dot's state rides in words.
+            // One sentence per row; the (hidden) dot's state rides in words. The port
+            // rides here too — a caption a screen reader never hears would make the
+            // one actionable fact about a local port sighted-only.
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("\(row.name), \(row.kind.displayName), \(row.dot.accessibilityDescription)\(notice.map { ", \($0.spokenValue)" } ?? "")")
+            .accessibilityLabel("\(row.name), \(row.kind.displayName)\(row.portSummary.map { ", \($0)" } ?? ""), \(row.dot.accessibilityDescription)\(notice.map { ", \($0.spokenValue)" } ?? "")")
             .accessibilityValue(need?.sentence ?? "")
-            Spacer(minLength: 8)
+            Spacer(minLength: 6)
             if row.isActive {
-                Button(action: row.stop) {
-                    Image(systemName: "stop.fill").frame(width: 22, height: 22).contentShape(Rectangle())
-                }
-                    .buttonStyle(.borderless).foregroundStyle(.secondary)
-                    .help("Disconnect")
-                    .accessibilityLabel("Disconnect \(row.name)")
-                    // Every other Connect/Disconnect control in the app reports the
-                    // live state in its value (rule 1). The words come from DotState,
-                    // which is the status vocabulary — there is no NEVPNStatus behind
-                    // a subprocess or native tunnel to read instead.
-                    .accessibilityValue(row.dot.accessibilityDescription)
+                // Every other Connect/Disconnect control in the app reports the live
+                // state in its value (rule 1). The words come from DotState, which is the
+                // status vocabulary — there is no NEVPNStatus behind a subprocess or
+                // native tunnel to read instead.
+                SidebarActionCircle(symbol: "stop.fill", tint: .red, help: "Disconnect",
+                                    label: "Disconnect \(row.name)",
+                                    value: row.dot.accessibilityDescription,
+                                    action: row.stop)
             } else {
                 // DISABLED, NEVER ABSENT — an absent button is indistinguishable
                 // from a broken layout, and this row exists precisely so that a
                 // profile which cannot connect yet is still visible and still says
-                // what it needs.
-                Button(action: row.connect) {
-                    Image(systemName: "play.fill").frame(width: 22, height: 22).contentShape(Rectangle())
-                }
-                    .buttonStyle(.borderless).foregroundStyle(.secondary)
-                    .disabled(need != nil)
-                    .help(need?.sentence ?? "Connect \(row.name)")
-                    .accessibilityLabel("Connect \(row.name)")
-                    // THE STATUS WORD FIRST, then the reason. A Connect control in
-                    // this window has to report the live state in its value from the
-                    // ONE vocabulary (rule 1, asserted by VoiceOverWalkthroughTests);
-                    // the sentence after it is what makes the disabled state
-                    // actionable rather than merely dimmed.
-                    .accessibilityValue(need?.spokenValue ?? row.dot.accessibilityDescription)
+                // what it needs. Grey rather than green when it cannot go, matching
+                // `VPNSidebarRow`: a green Play that can only fail is a lie.
+                SidebarActionCircle(
+                    symbol: "play.fill", tint: need == nil ? .green : .gray,
+                    help: need?.sentence ?? "Connect \(row.name)",
+                    label: "Connect \(row.name)",
+                    // THE STATUS WORD FIRST, then the reason. A Connect control in this
+                    // window has to report the live state in its value from the ONE
+                    // vocabulary (rule 1, asserted by VoiceOverWalkthroughTests); the
+                    // sentence after it is what makes the disabled state actionable
+                    // rather than merely dimmed.
+                    value: need?.spokenValue ?? row.dot.accessibilityDescription,
+                    disabled: need != nil, action: row.connect)
             }
         }
+        // The same vertical metrics as `VPNSidebarRow`, so one section is one list.
+        .padding(.vertical, 6)
+        .frame(minHeight: 52)
     }
 
     /// This native VPN's Custom Routing proxy, as `NEVPNManager` wants it. Mirrors
@@ -401,10 +445,18 @@ struct ConnectionView: View {
     /// is the same mistake as the list filter: somebody whose only VPN was an F5
     /// BIG-IP APM opened the app and was told "No VPNs Configured", with an Import
     /// button, about a VPN they had just configured. Existence is the question.
+    /// Asked through `ConnectListing`, not spelled out here: the empty-state page and the
+    /// list must agree about what "you have nothing" means, and two hand-written
+    /// existence checks are how they came to disagree in the first place.
     private var hasNothingConfigured: Bool {
-        vpn.profiles.isEmpty
-            && (tunnels?.tunnels.isEmpty ?? true)
-            && (nativeVPN?.configs.isEmpty ?? true)
+        ConnectListing.isEmpty(profiles: listedProfiles,
+                               tunnels: tunnels?.tunnels ?? [],
+                               native: nativeVPN?.configs ?? [])
+    }
+
+    /// The NE profiles as the listing sees them — id plus the kind that places them.
+    private var listedProfiles: [ConnectListing.Profile] {
+        vpn.profiles.map { .init(id: $0.id, kind: $0.kind) }
     }
 
     @ViewBuilder private var content: some View {
@@ -464,14 +516,11 @@ struct ConnectionView: View {
         // open is new.
         NavigationSplitView(columnVisibility: $columnVisibility) {
             List(selection: listSelection) {
-                Section("VPNs") {
-                    ForEach(vpn.profiles) { p in
-                        VPNSidebarRow(vpn: vpn, profile: p, labelDefs: labels.labels(for: p.id), dotState: rowDot(p))
-                            .tag(p.id)
-                            .contextMenu { sidebarMenu(p) }
-                    }
-                }
-                otherConnectionsSection
+                // Two headings, one question each, in `ConnectionScope.allCases` order —
+                // whole-Mac first because that is what most people have. A section with
+                // no rows draws nothing (see `connectSection`).
+                connectSection(.wholeMac)
+                connectSection(.localPort)
             }
             .navigationSplitViewColumnWidth(min: 220, ideal: 260)
             // Tab moves column by column — the whole sidebar is one focus

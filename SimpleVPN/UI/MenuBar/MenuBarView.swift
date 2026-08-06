@@ -459,7 +459,7 @@ struct MenuBarView: View {
                 }
             }
 
-            otherConnectionsSection
+            alsoRunningSection
 
             if let p = connected {
                 Divider().padding(.vertical, 4)
@@ -602,17 +602,26 @@ struct MenuBarView: View {
         .accessibilityHidden(true)
     }
 
-    // MARK: Other backends (SSH / OpenConnect / native IKEv2) — visible + stoppable
+    // MARK: Also running — the subprocess and native connections, visible + stoppable
 
     private var nativeBackendActive: Bool {
         nativeVPN?.status == .connected || nativeVPN?.status == .connecting
     }
 
-    @ViewBuilder private var otherConnectionsSection: some View {
+    /// A LIVE-STATUS STRIP, and it is the one place that is still the honest thing to
+    /// be: this section is filtered by `isActive` on purpose, because a menu-bar extra
+    /// is a glance at what is happening rather than a list of what you own (the connect
+    /// window is that list, and it lists everything that exists).
+    ///
+    /// It is NOT called "Other Connections" any more. That name divided connections by
+    /// which of our transports carries them — the implementation leak ONTOLOGY.md now
+    /// names and forbids — whereas what this strip actually holds is "things running
+    /// that are not in the list above", which is what it now says.
+    @ViewBuilder private var alsoRunningSection: some View {
         let subs = (tunnels?.tunnels ?? []).filter { tunnelManager?.isActive($0.id) == true }
         if !subs.isEmpty || nativeBackendActive {
             Divider().padding(.vertical, 4)
-            Text("Other Connections").font(.caption).foregroundStyle(.secondary)
+            Text("Also Running").font(.caption).foregroundStyle(.secondary)
                 .padding(.horizontal, 14)
             ForEach(subs) { t in
                 otherRow(name: t.name,
