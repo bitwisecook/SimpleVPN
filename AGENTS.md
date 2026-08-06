@@ -202,7 +202,14 @@ as `{password}{otp}` (no `static-challenge`). No client cert → `ENABLE_EXTERNA
   - `SimpleVPN/Diagnostics/` — logging/highlighting, doctor, diagnostic bundles + capture UI, crash
     handling, `UserFacingError`.
   - `SimpleVPN/Geo/` — GeoIP, regions, endpoints/discovery/ranking, world-map model.
-  - `SimpleVPN/Import/` — config importers (ovpn/cisco/ssh/cert) + detector.
+  - `SimpleVPN/Import/` — config importers (ovpn/cisco/ssh/cert) + detector, i.e. ONE VPN's
+    file at a time.
+  - `SimpleVPN/Portability/` — the WHOLE configuration as one file: every VPN and every app
+    setting, exported and imported as JSON or YAML (`Docs/SecretsAndSync.md` §5 step 1). One
+    model (`ConfigValue`) with two encoders, keys that are stable setting ids, secret-free by
+    default and test-proven so, and an import that validates and shows a diff before applying.
+    Distinct from `Import/` on purpose: that is a document action on one VPN, this is a
+    settings operation on the Mac.
   - `SimpleVPN/MDM/` — `ManagedPolicy` (forced defaults) + `Policy` (the seam every enable/disable
     routes through).
   - `SimpleVPN/Intents/` — App Intents / Shortcuts (`VPNIntents.swift`), thin adapters over the

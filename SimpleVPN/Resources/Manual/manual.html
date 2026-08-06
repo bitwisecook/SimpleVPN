@@ -110,6 +110,7 @@
   <a href="#certificates">Certificates &amp; Keys</a>
   <a href="#pausing">Pausing a VPN</a>
   <a href="#connection-problems">Connection Problems</a>
+  <a href="#exporting">Moving to Another Mac</a>
   <a href="#privacy">Privacy Notes</a>
 
   <h2>Common Problems</h2>
@@ -204,6 +205,8 @@
   <a href="#ssh-extra-options">Extra Options</a>
 
   <h2>SSL VPN (OpenConnect)</h2>
+  <a href="#oc-server">Server Address</a>
+  <a href="#oc-username">Username</a>
   <a href="#oc-password">Password</a>
   <a href="#oc-client-cert">Client Certificate</a>
   <a href="#oc-client-key">Client Private Key</a>
@@ -477,6 +480,34 @@
 <p><strong>Symptom:</strong> on a new Wi-Fi network the VPN won't connect, and web pages redirect to a "accept terms" or "sign in" screen.</p>
 <p><strong>Cause:</strong> this is a captive portal — the network holds all traffic hostage until you complete its sign-in page in a browser.</p>
 <p><strong>Fix:</strong> open any website (try a plain <code>http://</code> address), complete the network's sign-in or terms page, then connect the VPN. The Doctor only detects and explains this; there's nothing to change in the VPN's settings.</p>
+
+<h2 id="exporting">Moving to Another Mac</h2>
+<p><strong>Settings &#9656; General &#9656; Export &amp; Import</strong> writes every VPN and every SimpleVPN setting to one file, and reads one back. Name the file <code>.yaml</code> or <code>.json</code> and you get that encoding &mdash; they carry exactly the same thing, so pick whichever you would rather read.</p>
+<ul>
+  <li><a href="#exporting-secrets">No passwords or keys are in the file</a></li>
+  <li><a href="#exporting-import">What importing does, and what it will not do</a></li>
+  <li><a href="#exporting-managed">On a managed Mac</a></li>
+</ul>
+<p>Inside the file, a name like <code>openvpn.port</code> or <code>wg.endpoint</code> is SimpleVPN's own name for that setting. Those names never change, so a file keeps working even when a label on screen is reworded &mdash; and you can look any of them up in this manual.</p>
+
+<h3 id="exporting-secrets">No passwords or keys are in the file</h3>
+<p>Nothing secret is ever written, and there is no option to include it: an exported file leaves every protection SimpleVPN has &mdash; mail, a shared folder, a repository, a backup &mdash; and cannot be recalled once it exists. Everything left out is recoverable, because it is still in this Mac's keychain and whoever set up the VPN can issue it again.</p>
+<p>The file lists what it left out and what to do about it, both at the top and under each VPN. After importing, type the missing password or key in once and the VPN is complete. Public material <em>is</em> included &mdash; a certificate authority decides who your tunnel trusts, so it belongs where you can read and compare it.</p>
+<p>If you want a backup that includes your secrets, that is a different thing and is not this: keep using Time Machine and your keychain, or ask your VPN's owner for the original files.</p>
+
+<h3 id="exporting-import">What importing does, and what it will not do</h3>
+<ul>
+  <li><strong>It shows you the changes first.</strong> Every setting that would change, with its before and after; every VPN that would be added, with its server address, its pinned certificate or host key, and anything else that decides where traffic goes and who is trusted. Nothing happens until you say so.</li>
+  <li><strong>VPNs are added alongside yours.</strong> Nothing is replaced. A VPN whose name you already use arrives as &ldquo;<em>name</em> (imported)&rdquo;, so you can compare the two and delete whichever you don't want.</li>
+  <li><strong>Your current settings are saved first.</strong> Before anything changes, SimpleVPN writes them to <code>~/Library/Application&nbsp;Support/SimpleVPN/Recovery</code> and reads the file back to check it. If that fails, the import doesn't start.</li>
+  <li><strong>It never turns verification off.</strong> A file asking SimpleVPN to stop checking a host key or a certificate has that VPN refused outright, and says which setting was the problem. SimpleVPN has no such option anywhere and will not take one from a file.</li>
+  <li><strong>It never turns on a macOS permission.</strong> Location stays as you have it: macOS asks for that permission when <em>you</em> turn the switch on, and a file must not answer for you.</li>
+  <li><strong>Anything it doesn't understand is reported, not guessed at.</strong> An unknown kind of VPN, a value of the wrong type, or a file written by a newer SimpleVPN is refused with a reason. One bad VPN in a file does not stop the others.</li>
+</ul>
+<p>Labels come along too. A label you already have keeps the name and colour you gave it.</p>
+
+<h3 id="exporting-managed">On a managed Mac</h3>
+<p>If your organisation has locked SimpleVPN's settings, both buttons are unavailable and say so: a managed Mac may forbid configuration leaving the device at all.</p>
 
 <h2 id="privacy">Privacy Notes</h2>
 <ul>
@@ -843,6 +874,15 @@
 <p>Raw <code>ssh_config</code> directives, one per line as “Key Value” (e.g. <code>Ciphers aes256-gcm@openssh.com</code>, <code>MACs hmac-sha2-512</code>). An escape hatch for anything this screen doesn't expose. A tunnel using extra options runs through the system <code>ssh</code> tool rather than the built-in engine.</p>
 
 <!-- ══════════════════ SSL VPN (OpenConnect) ══════════════════ -->
+
+<h2 id="oc-server">Server Address</h2>
+<p class="default">Required.</p>
+<p>The VPN gateway to connect to — the name or address your administrator gave you, such as <code>vpn.example.com</code>. Every vendor has its own word for this machine (F5 calls it a virtual server, Cisco a headend or concentrator, Palo Alto a portal and a gateway, Juniper a Connect Secure), and they all go in this one field. Give the address only: a username belongs in <a href="#oc-username">Username</a>, and a non-standard port in <a href="#oc-socks-port">its own field</a> rather than after a colon. A password embedded in the address is refused outright — it would be stored unencrypted and handed to the tool on a command line any program on this Mac can read.</p>
+<p>Until this is filled in the VPN still appears in the main window's list, with Connect disabled and a note saying the address is missing — it is never hidden.</p>
+
+<h2 id="oc-username">Username</h2>
+<p class="default">Optional — required by password sign-in.</p>
+<p>Who you sign in as. Sent by the <strong>Password</strong> sign-in method together with your <a href="#oc-password">password</a>. With a <a href="#oc-client-cert">client certificate</a>, a <a href="#oc-pkcs11-certificate">smartcard</a> or single sign-on, the certificate or the identity provider says who you are and this field is not used. Some gateways also want a realm or group alongside it; that has its own field.</p>
 
 <h2 id="oc-password">Password</h2>
 <p class="default">Optional — required by password sign-in.</p>

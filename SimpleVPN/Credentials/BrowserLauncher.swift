@@ -163,17 +163,21 @@ enum BrowserCatalog {
 
 /// The app-wide default browser for SSO / links, and per-VPN resolution.
 enum BrowserDefaults {
-    private static let key = "app.browser.default.v1"
+    /// Internal, not private: the whole-configuration export names this key in its
+    /// own table (`ConfigAppSettings`) so a person moving to a new Mac keeps their
+    /// sign-in browser. One constant, read by both, rather than the same string
+    /// typed twice.
+    static let preferenceKey = "app.browser.default.v1"
 
     static var appDefault: BrowserSelection {
         get {
             // Default to the in-app sign-in window (no external browser, no profile
             // fuss, and it just works out of the box). The user can change it.
-            guard let d = UserDefaults.standard.data(forKey: key),
+            guard let d = UserDefaults.standard.data(forKey: preferenceKey),
                   let s = try? JSONDecoder().decode(BrowserSelection.self, from: d) else { return .inApp }
             return s
         }
-        set { UserDefaults.standard.set(try? JSONEncoder().encode(newValue), forKey: key) }
+        set { UserDefaults.standard.set(try? JSONEncoder().encode(newValue), forKey: preferenceKey) }
     }
 
     /// Per-VPN wins; otherwise the app default; otherwise the OS default.

@@ -331,6 +331,12 @@ struct SimpleVPNApp: App {
                 // So Sign-In Sources can NAME the VPNs that read a vault before
                 // removing it, instead of orphaning them silently.
                 .environment(vpn)
+                // So Export & Import can reach EVERY kind of VPN. The subprocess
+                // kinds (SSH, the SSL VPNs) and the OS's own kinds live in these two
+                // stores rather than in NE preferences, and a "whole configuration"
+                // export that only walked `vpn.profiles` would silently omit both.
+                .environment(tunnels)
+                .environment(nativeVPN)
                 // So a route to an app-level setting (a `creds.*` global-search hit,
                 // or "Configure…" on a sign-in chooser row) can select the tab.
                 .environment(settingsRouter)

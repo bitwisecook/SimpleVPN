@@ -84,6 +84,11 @@ struct ManualAnchorParityTests {
         // App chapters
         "importing", "endpoints-map", "certificates", "pausing",
         "connection-problems", "privacy",
+        // Moving a whole setup to another Mac (Settings ▸ General ▸ Export & Import).
+        // PROSE, not settings: the two controls are actions — a save panel and an
+        // open panel — and the chapter is about what the file does and does not
+        // carry, which is a promise rather than a value anybody sets.
+        "exporting", "exporting-secrets", "exporting-import", "exporting-managed",
         // Troubleshooting
         "problem-mtu", "problem-ipv6-leak", "problem-dns-leak", "problem-lan",
         "problem-udp-blocked", "problem-otp-reneg", "problem-cipher", "problem-cert",

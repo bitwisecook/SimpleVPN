@@ -207,6 +207,43 @@ nonisolated enum FeatureMaturityRegistry {
         .vault(.passbolt):          .untested,
     ]
 
+    // MARK: Features that are neither a VPN kind nor a sign-in source
+
+    /// A capability whose confidence is worth stating and which belongs to no kind
+    /// and no vault. The third table, added because the whole-configuration
+    /// export/import has exactly the shape this registry exists for: one half of it
+    /// is proven here by construction, and the other half cannot be.
+    nonisolated enum AppFeature: String, Sendable, CaseIterable {
+        /// Settings ▸ General ▸ Export & Import (Docs/SecretsAndSync.md §5, step 1).
+        case configurationTransfer
+
+        var title: String {
+            switch self {
+            case .configurationTransfer: "Exporting and importing settings"
+            }
+        }
+    }
+
+    /// WHAT WAS PROVEN for `configurationTransfer`, and it is most of it: the file
+    /// format in both encodings, the round trip of every VPN kind, that no secret
+    /// reaches either encoding even when the exporter is handed one, that a
+    /// verification-weakening file is refused, and the diff the confirmation shows.
+    /// All of it in `ConfigDocumentTests`.
+    ///
+    /// WHAT WAS NOT: applying an imported file to REAL profiles. Adding a VPN goes
+    /// through `NETunnelProviderManager.saveToPreferences`, which needs the system
+    /// extension approved and a live macOS prompt, so no test can reach it — and no
+    /// file written on one Mac has ever been imported on another, because there is
+    /// one Mac here. `.partlyVerified` rather than `.untested` precisely because
+    /// pretending the format is unproven would be as dishonest in the other
+    /// direction.
+    static let features: [AppFeature: FeatureMaturity] = [
+        .configurationTransfer: .partlyVerified(
+            checked: "the file itself is proven \u{2014} both encodings round-trip every kind of VPN, "
+                + "no secret can reach either of them, and a file that would weaken certificate or "
+                + "host-key checking is refused"),
+    ]
+
     // MARK: Lookups
 
     /// A kind's maturity. An unregistered kind is `.untested` — the safe default:
@@ -242,6 +279,13 @@ nonisolated enum FeatureMaturityRegistry {
         if let claim = (table ?? signInSources)[id] { return claim }
         if case .vault = id { return .untested }
         return .tested
+    }
+
+    /// A feature's maturity. Unlisted is `.untested`, the same safe default as a
+    /// VPN kind's: a new capability arrives unproven.
+    static func maturity(ofFeature feature: AppFeature,
+                         in table: [AppFeature: FeatureMaturity]? = nil) -> FeatureMaturity {
+        (table ?? features)[feature] ?? .untested
     }
 
     /// Every kind that still carries a notice, in `VPNKind.allCases` order. Used by
@@ -363,6 +407,36 @@ nonisolated struct MaturityNotice: Sendable, Equatable {
                     + "and stop, rather than disturb anything else on this Mac. Whichever happens, "
                     + "telling us is what gets this notice removed \u{2014} a single report is "
                     + "usually enough.")
+        }
+    }
+
+    /// A feature that belongs to no VPN kind and no vault. Same shape as the two
+    /// factories below it, so a banner or a caption is derived rather than written:
+    /// flipping the claim stays a one-line change in the registry.
+    static func forFeature(_ feature: FeatureMaturityRegistry.AppFeature,
+                           in table: [FeatureMaturityRegistry.AppFeature: FeatureMaturity]? = nil)
+        -> MaturityNotice? {
+        let maturity = FeatureMaturityRegistry.maturity(ofFeature: feature, in: table)
+        guard maturity.needsNotice else { return nil }
+        let name = feature.title
+        switch maturity {
+        case .tested:
+            return nil
+        case .partlyVerified(let checked):
+            return MaturityNotice(
+                subject: name, maturity: maturity, key: "feature.\(feature.rawValue)",
+                title: "\(name) is only partly tested",
+                detail: "Part of it is proven: \(checked). What has never been done here is the other "
+                    + "half \u{2014} taking a file written on one Mac and applying it on another, because "
+                    + "there is only one Mac. It should work, and if it doesn\u{2019}t it will say why and "
+                    + "change nothing. Telling us what happened is what gets this notice removed.")
+        case .untested:
+            return MaturityNotice(
+                subject: name, maturity: maturity, key: "feature.\(feature.rawValue)",
+                title: "\(name) has never been tested",
+                detail: "The code is written and reviewed, but nobody has used it for real yet. It may "
+                    + "well work. If it doesn\u{2019}t it should say why and change nothing. Telling us what "
+                    + "happened is what gets this notice removed.")
         }
     }
 

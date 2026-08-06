@@ -29,7 +29,7 @@ struct SettingsView: View {
 
     var body: some View {
         TabView(selection: $pane) {
-            ExtensionsSettings(ext: ext, updater: updater)
+            ExtensionsSettings(ext: ext, updater: updater, labels: labels)
                 .tabItem { Label("General", systemImage: "gearshape") }
                 .tag(Pane.general)
             SignInSourcesSettings()
@@ -100,6 +100,15 @@ private struct VirtualizationFoundRows: View {
 private struct ExtensionsSettings: View {
     @Bindable var ext: ExtensionController
     var updater: SPUUpdater?
+    /// For the Export & Import section: the label catalog travels with a whole
+    /// configuration, so it is carried by the same file.
+    var labels: LabelStore
+    /// The three stores a whole-configuration export has to read. Optional because
+    /// a preview has none; the section says so rather than offering a button that
+    /// would write half a file.
+    @Environment(VPNController.self) private var vpn: VPNController?
+    @Environment(SubprocessTunnelStore.self) private var tunnels: SubprocessTunnelStore?
+    @Environment(NativeVPNManager.self) private var nativeVPN: NativeVPNManager?
     /// Mirrors Sparkle's own persisted setting (it stores this in defaults);
     /// seeded in onAppear, written back on toggle.
     @State private var autoCheckUpdates = false
@@ -285,6 +294,13 @@ private struct ExtensionsSettings: View {
                     }
                     VirtualizationFoundRows()
                 }
+            }
+            // Moving a whole setup to another Mac. AFTER Privacy and before the
+            // managed/Advanced sections: it is a thing a person does once, and it
+            // reads the settings above it.
+            if let vpn, let tunnels, let nativeVPN {
+                ExportImportSettings(vpn: vpn, tunnels: tunnels,
+                                     nativeVPN: nativeVPN, labels: labels)
             }
             if ManagedPolicy.isManaged {
                 Section("Managed by Your Organization") {

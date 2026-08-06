@@ -76,6 +76,30 @@ final class LabelStore {
         persist()
     }
 
+    /// Add a label KEEPING THE ID IT ALREADY HAS. The settings import needs this:
+    /// a label's id is what a VPN's assignment points at, so re-generating one
+    /// would import the catalog and quietly lose every assignment that referred to
+    /// it. A label whose id is already here is left exactly as it is — renaming
+    /// somebody's label out from under them is a silent destruction of the thing
+    /// that organises their sidebar.
+    func add(_ label: LabelDef) {
+        guard !labels.contains(where: { $0.id == label.id }) else { return }
+        labels.append(label)
+        persist()
+    }
+
+    /// Assign an existing label to a VPN. `toggle` is the UI's verb and cannot be
+    /// used by an import (a second call would take the label off again); this one
+    /// is idempotent.
+    func assign(_ labelID: String, to profile: String) {
+        guard labels.contains(where: { $0.id == labelID }) else { return }
+        var set = assignments[profile] ?? []
+        guard !set.contains(labelID) else { return }
+        set.insert(labelID)
+        assignments[profile] = set
+        persist()
+    }
+
     func addLabel(name: String, resolved: Color.Resolved) {
         labels.append(LabelDef(name: name.isEmpty ? "New Label" : name, resolved: resolved))
         persist()
