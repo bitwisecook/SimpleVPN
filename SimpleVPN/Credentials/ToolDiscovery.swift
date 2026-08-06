@@ -107,11 +107,14 @@ nonisolated enum ToolLocationClass: String, CaseIterable, Sendable, Hashable {
     case asdfShim
     /// A Nix profile.
     case nixProfile
-    // NOTE: there is deliberately no PKCS#11 case. `ControlPlane/PKCS11Discovery`
-    // owns that, and it answers something this file cannot — whether a module is
-    // merely installed or is REGISTERED with p11-kit, which is what decides whether
-    // it can be loaded at all. A shorter, dumber list here would be a second answer
-    // to one question. See Docs/ToolDiscovery.md.
+    // NOTE: there is deliberately no PKCS#11 case, and now nothing anywhere has one —
+    // the `PKCS11Discovery` that used to own it was deleted with smartcard sign-in
+    // (Docs/AuthSecPKCS11.md). The reasoning that kept it out of THIS file still holds
+    // if it is ever rebuilt: a provider module is a LOADED LIBRARY rather than an
+    // executed program, so this map's allow-list argument does not transfer to it, and
+    // the question that decides whether it works at all — merely installed, or
+    // REGISTERED with p11-kit — is one this file cannot answer. See
+    // Docs/ToolDiscovery.md.
     /// Found ONLY by walking `$PATH`, in a directory none of the classes above
     /// describes. The most interesting class and the least trustworthy one.
     case pathEntry

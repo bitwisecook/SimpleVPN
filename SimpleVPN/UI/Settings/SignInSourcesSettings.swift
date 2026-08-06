@@ -1009,7 +1009,7 @@ struct SignInSourcesSettings: View {
         // and, unlike the rest of these, it has no detection to fall back on, which
         // is why the drag-in well beside it matters rather than being a nicety.
         case .serverURL, .entryFieldName, .toolBinary, .unixSocket, .daemonEndpoint,
-             .securityKeySlot, .pkcs11Module, .accountIdentifier:
+             .securityKeySlot, .accountIdentifier:
             nil
         }
     }

@@ -59,12 +59,16 @@ final class SubprocessTunnelManager {
         /// Per-forward status keyed by `forwardKey(line)` — drives the editor's
         /// live row badges while connected.
         var forwardStates: [String: ForwardPhase] = [:]
-        /// Smartcard sign-in only: what the tool's output said about the token, so
-        /// the exit message can be "that PIN was refused, one attempt left" instead
-        /// of "exited before connecting (code 1)".
-        var pkcs11: PKCS11ConnectWatcher? = nil
-        /// A non-fatal caution to keep visible even once connected (a certificate
-        /// about to expire, a PIN counter running down).
+        /// A non-fatal caution to keep visible even once connected — a certificate
+        /// about to expire, say.
+        ///
+        /// NOTHING WRITES IT TODAY, and that is worth saying rather than leaving to be
+        /// discovered: its only producer was the smartcard connect-time watcher (a PIN
+        /// counter running down), which went with smartcard sign-in
+        /// (Docs/AuthSecPKCS11.md). It is READ by `ConnectionView` and by the
+        /// subprocess editor, both of which render nothing for `nil`, so the seam is
+        /// harmless and is the obvious place for the next non-fatal caution. If none
+        /// arrives, delete it and both readers together — not one of the three.
         var caution: String? = nil
     }
 
@@ -76,60 +80,7 @@ final class SubprocessTunnelManager {
     private var authTasks: [String: Task<Void, Never>] = [:]  // in-flight ocauth-helper sign-ins (SSO)
     private var proxiedIDs: Set<String> = []                  // ids whose SOCKS proxy we pointed the system at
     private var controlSockets: [String: String] = [:]       // ssh ControlMaster socket per tunnel (live -O ops)
-    /// The last token reading per tunnel, from `surveyPKCS11(_:)`. Observed by the
-    /// editor (so the PIN-retry warning is on screen BEFORE Connect is pressed) and
-    /// read by `connectSubprocess` to seed the output watcher. No PIN is involved in
-    /// producing it: enumeration never logs in.
-    private(set) var pkcs11TokenStatus: [String: PKCS11TokenStatus] = [:]
     private static let log = Logger(subsystem: "com.bragi0.SimpleVPN", category: "subprocess")
-
-    // MARK: PKCS#11 (smartcard) survey
-    //
-    // Kept on the manager rather than in the view so the editor and the connect path
-    // read the SAME reading — a warning the user saw and a decision we then make on
-    // different information is the bug this avoids.
-
-    /// Read the modules on this Mac, and — when a module is chosen — the tokens and
-    /// certificates it can see. Never asks for or uses a PIN.
-    func surveyPKCS11(_ c: SubprocessTunnelConfig) async -> PKCS11Survey {
-        let discovery = PKCS11ModuleDiscovery()
-        let enumerator = PKCS11Enumerator.live()
-        var survey = PKCS11Survey(modules: discovery.modules(),
-                                  toolsAvailable: enumerator.hasAnyTool)
-        let module = (c.pkcs11ModulePath ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !module.isEmpty, enumerator.hasAnyTool else {
-            if survey.modules.isEmpty { survey.failure = .noModuleInstalled }
-            return survey
-        }
-        let expanded = (module as NSString).expandingTildeInPath
-        switch await enumerator.tokens(module: expanded) {
-        case .failure(let failure):
-            survey.failure = failure
-            pkcs11TokenStatus[c.id] = nil
-            return survey
-        case .success(let tokens):
-            survey.tokens = tokens
-            // The token the configured certificate URI points at, when it names one;
-            // otherwise the only token there is.
-            let scope = (c.pkcs11CertificateURI).flatMap { PKCS11URI.parse($0)?.tokenScope }
-            let chosen = tokens.first { token in
-                guard let scope, let wanted = PKCS11URI.parse(scope)?.value("serial"),
-                      let have = PKCS11URI.parse(token.uri)?.value("serial") else { return false }
-                return wanted == have
-            } ?? (tokens.count == 1 ? tokens[0] : nil)
-            pkcs11TokenStatus[c.id] = chosen
-        }
-        let scope = (c.pkcs11CertificateURI).flatMap { PKCS11URI.parse($0)?.tokenScope }
-        switch await enumerator.certificates(module: expanded, tokenScope: scope) {
-        case .failure(let failure):
-            // A token with no matching certificate is worth saying, but it must not
-            // erase the token reading (which carries the PIN warning).
-            survey.failure = failure
-        case .success(let certs):
-            survey.certificates = certs
-        }
-        return survey
-    }
 
     func status(_ id: String) -> Status { live[id]?.status ?? .disconnected }
     func isActive(_ id: String) -> Bool {
@@ -144,24 +95,9 @@ final class SubprocessTunnelManager {
     /// Prefer the linked in-process engine where we have one; otherwise the
     /// subprocess path. SSH SOCKS runs on libssh (no /usr/bin/ssh); if it can't
     /// start, we fall back to the subprocess so nothing regresses.
-    /// `tokenPIN` is the smartcard PIN for a `authMode == "token"` tunnel, and is
-    /// kept a SEPARATE parameter from `password` on purpose: the two travel to
-    /// different places, and overloading one slot is how a PIN ends up in a
-    /// keychain item named "password" or in an argv built for the other mode. It
-    /// exists only for the duration of this call and the `Data` written to the
-    /// child's stdin — nothing here retains it.
-    func connect(_ config: SubprocessTunnelConfig, password: String?, tokenPIN: String? = nil) {
+    func connect(_ config: SubprocessTunnelConfig, password: String?) {
         guard tasks[config.id] == nil, sshEngines[config.id] == nil,
               !inProcessNE.contains(config.id), authTasks[config.id] == nil else { return }
-        // Smartcard sign-in with no PIN anywhere: openconnect would prompt, find the
-        // pipe closed and die with "user input required". Say the actual fix.
-        if Self.openconnectAuthMode(config) == "token",
-           (tokenPIN ?? "").isEmpty,
-           (Self.storedPKCS11PIN(config) ?? "").isEmpty {
-            live[config.id] = Live(status: .failed(
-                "Enter the token's PIN to connect. (Turn on \u{201C}Remember PIN\u{201D} under Sign-In to keep it in your login keychain instead.)"))
-            return
-        }
         // A password embedded in the server or proxy address would be persisted
         // unencrypted AND handed to the tool on its command line (`ps`-readable).
         if let reason = Self.addressCredentialReason(config) {
@@ -179,19 +115,6 @@ final class SubprocessTunnelManager {
         // BEFORE the dispatch below, because the dispatch is what this predicts.
         if let reason = Self.sslTransportBlockReason(config) {
             live[config.id] = Live(status: .failed(reason))
-            return
-        }
-        // Token mode without a stored seed would just let openconnect die under
-        // --non-inter — fail fast with the actual fix instead.
-        // (Not under SSO: the token never reaches the argv there — the identity
-        // provider asks for the code in the browser.)
-        // (Not for yubioath either: the code comes off the YubiKey, so there is
-        // no seed to store and requiring one would block a working setup.)
-        if config.kind.isSSLVPN, SubprocessTunnelConfig.tokenModeRequiresSecret(config.tokenMode),
-           Self.openconnectAuthMode(config) != "sso",
-           (KeychainCredentialStore.loadCredentials(profile: "tunnel.\(config.id).token")?.password ?? "").isEmpty {
-            live[config.id] = Live(status: .failed(
-                "Verification-code token is set to \(config.tokenMode.uppercased()) but no token secret is stored — add it under Sign-In ▸ Token secret and save."))
             return
         }
         // A pinned host key is enforced by the in-process engine only —
@@ -235,15 +158,7 @@ final class SubprocessTunnelManager {
             connectInProcessOpenConnect(config, password: password)
             return
         }
-        connectSubprocess(config, password: password, tokenPIN: tokenPIN)
-    }
-
-    /// The token PIN the editor saved, when "Remember PIN" is on. Read once per
-    /// connect and never cached on this object.
-    static func storedPKCS11PIN(_ c: SubprocessTunnelConfig) -> String? {
-        guard c.pkcs11RemembersPIN else { return nil }
-        let pin = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(c.id).pkcs11")?.password
-        return (pin?.isEmpty ?? true) ? nil : pin
+        connectSubprocess(config, password: password)
     }
 
     /// The in-process OpenConnect bridge only carries server + realm + pinned
@@ -295,42 +210,41 @@ final class SubprocessTunnelManager {
     /// `OpenConnectBridge.runSession`, one `openconnect_set_*` call each — and
     /// `InProcessOpenConnectCoverageTests` proves every one reaches the bridge.
     ///
-    /// FOUR REMAIN, and each is a real limit rather than unfinished work:
+    /// THREE REMAIN, and each is a real limit rather than unfinished work:
     ///
-    ///  1. **Smartcard sign-in** (`authMode == "token"`, or a `pkcs11:` URI). Our
-    ///     libopenconnect is `--with-openssl --without-gnutls`
-    ///     (Tools/build-openconnect-xcframework.sh) and OpenConnect's PKCS#11
-    ///     support lives only in its GnuTLS/p11-kit backend. Rebuilding with GnuTLS
-    ///     would not help: p11-kit's whole job is to `dlopen` a third-party provider
-    ///     module, and that `dlopen` is what AMFI refuses inside a sysext-embedding
-    ///     app (commit a86046f · Docs/AuthSecPKCS11.md).
-    ///  2. **Host checker / endpoint posture** (`csdWrapper`, `disableCSD`).
+    ///  1. **Host checker / endpoint posture** (`csdWrapper`, `disableCSD`).
     ///     `openconnect_setup_csd` exists, but it works by *forking a child* — the
     ///     gateway's trojan, or the wrapper standing in for it. The packet-tunnel
     ///     extension is `com.apple.security.app-sandbox` AND runs as root, so this
     ///     would mean executing a user-nominated script as root from inside the
     ///     sandbox. Not a plumbing job; a decision with an entitlement attached.
-    ///  3. **Base MTU** (`baseMTU`) and **HTTP keepalive off** (`noHTTPKeepalive`).
+    ///  2. **Base MTU** (`baseMTU`) and **HTTP keepalive off** (`noHTTPKeepalive`).
     ///     `--base-mtu` and `--no-http-keepalive` write `vpninfo->basemtu` /
     ///     `->no_http_keepalive` directly from OpenConnect's own CLI. The library
     ///     header exposes no setter for either (`openconnect_set_reqmtu` is `--mtu`,
     ///     a different number — see the MTU pair in `SettingRelations`).
-    ///  4. **Extra arguments** (`extraArgs`). Arbitrary argv has no in-process
+    ///  3. **Extra arguments** (`extraArgs`). Arbitrary argv has no in-process
     ///     equivalent by construction: the escape hatch's whole value is that it
     ///     passes through un-interpreted, and parsing "a known subset" would mean
     ///     silently ignoring the rest — the one thing this predicate exists to
     ///     prevent. It stays a documented fallback to the tool.
     ///
+    /// **SMARTCARD SIGN-IN USED TO BE CLAUSE 1**, and it was the reason the
+    /// subprocess path existed for SSL VPNs at all: it was the one thing the tool
+    /// could do that the engine could not, whatever the xcframework was configured
+    /// with. It is gone — the feature was removed rather than fixed, because it was
+    /// built against no real token and no real gateway — so a smartcard profile is
+    /// now refused by `sslAuthBlockReason` before this predicate is ever asked, and
+    /// the subprocess is a fallback for four ordinary settings and nothing more.
+    /// `Docs/AuthSecPKCS11.md` is the record of why, including why a GnuTLS/p11-kit
+    /// rebuild would not have helped (AMFI forbids the `dlopen` p11-kit exists to do).
+    /// The soft-token seed (`tokenMode`) was the other, for its own reasons, and it
+    /// is refused in the same place.
+    ///
     /// A clause may only be deleted once the setting is genuinely CARRIED. Dropping
     /// a CA file, a client certificate or a proxy silently would connect with
     /// weaker — or simply broken — settings than the profile asks for.
     private static func inProcessOpenConnectSupports(_ c: SubprocessTunnelConfig) -> Bool {
-        if c.authMode == "token" { return false }
-        if c.pkcs11CertificateURI != nil || c.pkcs11KeyURI != nil { return false }
-        // The software-token seed (TOTP/HOTP/…) is a long-lived secret with no
-        // channel to the extension yet, and `yubioath`/`rsa` need libpcsclite /
-        // libstoken, which this build has not got.
-        if !c.tokenMode.isEmpty { return false }
         if c.disableCSD || !c.csdWrapper.isEmpty { return false }
         if c.baseMTU != nil || c.noHTTPKeepalive { return false }
         // A compression mode OpenConnect hasn't got. The tool refuses it at startup
@@ -409,6 +323,12 @@ final class SubprocessTunnelManager {
         if let m = c.ocMTU { conf["mtu"] = m }
         if let d = c.forceDPD { conf["dpd"] = d }
         if let t = c.reconnectTimeout { conf["reconnectTimeout"] = t }
+        // "Allow local network access". The TOGGLE travels in the (persisted)
+        // provider configuration; the PREFIXES travel in the session, because they
+        // are a fact about which networks this Mac is on right now and the extension
+        // is sandboxed (Docs/Networking.md §4.2.1). Only written when on, so the
+        // absent key means "off" in the extension exactly as `nil` does here.
+        if c.allowsLocalNetworkAccess { conf["localLan"] = true }
         return conf
     }
 
@@ -767,8 +687,7 @@ final class SubprocessTunnelManager {
     /// (`cookieCommand(for:auth:)`) supplies its own; everything else (readiness
     /// markers, log, SOCKS surfacing, exit handling) is shared.
     private func connectSubprocess(_ config: SubprocessTunnelConfig, password: String?,
-                                   command: (String, [String], Data?)? = nil,
-                                   tokenPIN: String? = nil) {
+                                   command: (String, [String], Data?)? = nil) {
         guard tasks[config.id] == nil else { return }
         if config.kind == .ssh, config.sshMode == .portForward,
            let bad = Self.invalidForwardLine(config.forwards) {
@@ -777,8 +696,7 @@ final class SubprocessTunnelManager {
             return
         }
         guard let (path, baseArgs, stdin) = command
-                ?? Self.command(for: config, password: password,
-                                pin: tokenPIN ?? Self.storedPKCS11PIN(config)) else {
+                ?? Self.command(for: config, password: password) else {
             // Name the tool and the fix — "the required command-line tool" sends
             // nobody anywhere (ONTOLOGY: failure text names the fix).
             live[config.id] = Live(status: .failed(Self.missingToolReason(config)))
@@ -805,17 +723,10 @@ final class SubprocessTunnelManager {
         if command == nil, config.authMode == "sso", !config.kind.supportsExternalBrowserSSO {
             initialLog.append("Single sign-on isn't available for \(config.kind.displayName) — signing in with the saved password instead.")
         }
-        // Smartcard sign-in gets an output watcher, seeded with whatever the
-        // pre-flight token reading knew — that seed is what lets "Wrong PIN" become
-        // "that PIN was refused, and one attempt remains".
-        let watcher: PKCS11ConnectWatcher? = Self.openconnectAuthMode(config) == "token"
-            ? PKCS11ConnectWatcher(tokenStatus: pkcs11TokenStatus[config.id], pinSupplied: true)
-            : nil
         live[config.id] = Live(status: .connecting,
                                socksPort: (config.kind == .ssh && config.sshMode == .socks) || usesOcproxy(config) ? config.socksPort : nil,
                                log: initialLog,
-                               forwardStates: initialForwards,
-                               pkcs11: watcher)
+                               forwardStates: initialForwards)
 
         // SSH may prompt for two hosts (jump + target); a host-aware askpass
         // returns the right password for whichever prompt ssh raises.
@@ -837,15 +748,6 @@ final class SubprocessTunnelManager {
                 var l = self.live[config.id] ?? Live()
                 l.log.append(line)
                 if l.log.count > 300 { l.log.removeFirst(l.log.count - 300) }
-                // Smartcard sign-in: read the token's own verdict out of the tool's
-                // output while it happens, so the failure can be explained instead
-                // of reported as an exit code.
-                if l.pkcs11 != nil {
-                    l.pkcs11?.observe(line)
-                    if let caution = l.pkcs11?.caution { l.caution = caution }
-                }
-                // The tunnel is up ⇒ openconnect has read its --token-secret file.
-                if isReady { Self.removeTokenSecretFile(config.id) }
                 if isReady, l.status == .connecting {
                     l.status = .connected
                     // The initial argv forwards live or die with the session
@@ -860,18 +762,13 @@ final class SubprocessTunnelManager {
             },
             onExit: { [weak self] code in
                 guard let self else { return }
-                Self.removeTokenSecretFile(config.id)
                 var l = self.live[config.id] ?? Live()
                 // Restore only if WE pointed the system at this tunnel (and a
                 // manual disconnect hasn't already restored it).
                 if self.proxiedIDs.remove(config.id) != nil { Self.setSystemSOCKS(enabled: false) }
                 switch l.status {
                 case .connecting:
-                    // One actionable sentence beats an exit code. The watcher answers
-                    // "which of the six token failures was this?" from the tool's own
-                    // words; only when it can't does the generic message stand.
-                    l.status = .failed(l.pkcs11?.failureMessage()
-                                       ?? "Exited before connecting (code \(code)). Check the log.")
+                    l.status = .failed("Exited before connecting (code \(code)). Check the log.")
                 case .connected:  l.status = .disconnected
                 default: break
                 }
@@ -901,7 +798,6 @@ final class SubprocessTunnelManager {
         sshEngines[id] = nil
         if inProcessNE.remove(id) != nil { Task { await OpenConnectProfileStore.stop(id) } }
         removeControlSocket(id)
-        Self.removeTokenSecretFile(id)   // stop() suppresses onExit — clean up here too
         if var l = live[id] { l.status = .disconnected; l.forwardStates = [:]; live[id] = l }
     }
 
@@ -1095,12 +991,12 @@ final class SubprocessTunnelManager {
 
     /// Returns (executable, argv, stdin-to-write) or nil when the tool is missing.
     ///
-    /// `pin` is the smartcard PIN, and it appears in exactly one place in the whole
-    /// return value: the stdin `Data`. It is never formatted into argv, never put in
-    /// the environment and never written to a file. `TunnelProcess.start()` writes
-    /// that data and closes the pipe immediately, so it exists in this process for
-    /// the length of one `write(2)`.
-    static func command(for c: SubprocessTunnelConfig, password: String?, pin: String? = nil)
+    /// The only secret in the return value is the stdin `Data` — the password, for
+    /// the one mode that pipes one. It is never formatted into argv, never put in the
+    /// environment and never written to a file. `TunnelProcess.start()` writes that
+    /// data and closes the pipe immediately, so it exists in this process for the
+    /// length of one `write(2)`.
+    static func command(for c: SubprocessTunnelConfig, password: String?)
         -> (String, [String], Data?)? {
 
         switch c.kind {
@@ -1134,16 +1030,8 @@ final class SubprocessTunnelManager {
                 // write is what used to hang the connect (or surface as an
                 // opaque certificate error).
                 //
-                // Token mode writes the PIN down the SAME pipe: the argv carries
-                // --passwd-on-stdin, and OpenConnect gives that value to the first
-                // password-type form field it meets, which is the PKCS#11 PIN prompt
-                // raised while the certificate is loaded (see openconnectArgs).
-                let stdin: Data?
-                switch openconnectAuthMode(c) {
-                case "password": stdin = password.map { Data(($0 + "\n").utf8) }
-                case "token":    stdin = pin.map { Data(($0 + "\n").utf8) }
-                default:         stdin = nil
-                }
+                let stdin: Data? = openconnectAuthMode(c) == "password"
+                    ? password.map { Data(($0 + "\n").utf8) } : nil
                 return (oc, openconnectArgs(for: c), stdin)
             }
             // No `openfortivpn` fallback for FortiGate any more, and it was never
@@ -1186,24 +1074,20 @@ final class SubprocessTunnelManager {
     /// fix instead of failing opaquely inside openconnect.
     static func sslAuthBlockReason(_ c: SubprocessTunnelConfig) -> String? {
         guard c.kind.isSSLVPN else { return nil }
+        // TWO SIGN-IN SHAPES SIMPLEVPN NO LONGER IMPLEMENTS, refused here rather
+        // than converted. Both are stored values somebody chose, so the profile is
+        // left exactly as it is and Connect says what happened — the one answer
+        // ruled out was quietly turning either into a password prompt, which would
+        // send a password to a gateway the profile never asked to send one to.
+        //
+        // The wording is `FeatureRequestNotice`'s, because the banner in the editor
+        // and this sentence have to agree about what the user should do next: open
+        // an issue with the use case. Neither of them promises the feature.
         if openconnectAuthMode(c) == "token" {
-            // A malformed module path or URI, or a missing one.
-            if let reason = SubprocessTunnelConfig.pkcs11Problem(c) { return reason }
-            // The vendored in-process engine and `ocauth-helper` are both built
-            // `--with-openssl --without-gnutls --without-libpcsclite`
-            // (Tools/build-openconnect-xcframework.sh), and OpenConnect's PKCS#11
-            // support lives entirely in its GnuTLS/p11-kit backend. So a token
-            // tunnel is the ONE case that can only run on the installed tool — the
-            // mirror image of `sshPinBlockReason`, which can only run in-process.
-            if !TunnelCLI.openconnect.isAvailable {
-                return "Smartcard sign-in needs the openconnect tool — SimpleVPN's built-in engine is built without smartcard support. \(TunnelCLI.openconnect.installHint)"
-            }
-            // openconnect resolves a pkcs11: URI through p11-kit, which only loads
-            // modules the registry declares — see PKCS11Module.registeredWithP11Kit.
-            // An unregistered module fails with "no certificate found", which reads
-            // like a wrong URI and isn't. Block with the fix instead.
-            if let reason = pkcs11RegistrationBlockReason(c) { return reason }
-            return nil
+            return FeatureRequestNotice.smartcardSignIn.blockedConnectReason
+        }
+        if !c.tokenMode.trimmingCharacters(in: .whitespaces).isEmpty {
+            return FeatureRequestNotice.verificationCodeToken.blockedConnectReason
         }
         guard openconnectAuthMode(c) == "certificate" else { return nil }
         if c.clientCertFile.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -1244,7 +1128,7 @@ final class SubprocessTunnelManager {
     /// has no privilege problem at all — the packet-tunnel extension already runs
     /// as root and already owns a utun, so NetworkExtension *is* the privilege —
     /// and it is bundled. Homebrew is only named when the config uses something the
-    /// bridge can't carry (a smartcard above all), because then the toggle would be
+    /// bridge can't carry (a host-checker script above all), because then the toggle would be
     /// a lie: `willRunInProcess` would still be false with it on.
     ///
     /// Availability is injected so this is testable on a Mac that happens to have
@@ -1293,10 +1177,6 @@ final class SubprocessTunnelManager {
     /// sentences became lies (they described settings the bridge now carries), which
     /// is why the two live next to each other.
     private static func inProcessRefusalNoun(_ c: SubprocessTunnelConfig) -> String {
-        if openconnectAuthMode(c) == "token" || c.pkcs11CertificateURI != nil || c.pkcs11KeyURI != nil {
-            return "SimpleVPN's built-in engine is built without smartcard support"
-        }
-        if !c.tokenMode.isEmpty { return "the built-in engine can't hold a verification-code token seed" }
         if !c.csdWrapper.isEmpty || c.disableCSD { return "the built-in engine can't run a host-checker script" }
         if c.baseMTU != nil { return "the built-in engine can't take a base MTU" }
         if c.noHTTPKeepalive { return "the built-in engine can't turn HTTP keepalive off" }
@@ -1326,26 +1206,6 @@ final class SubprocessTunnelManager {
     static func inProcessOfferReason(_ c: SubprocessTunnelConfig) -> String? {
         guard c.kind.isSSLVPN, !c.runsInProcess, inProcessOpenConnectSupports(c) else { return nil }
         return "This VPN runs the openconnect tool, which can only give you a SOCKS proxy on port \(c.socksPort) — no interface, no routes and no DNS of its own. SimpleVPN's built-in engine carries it as a full system tunnel instead, and needs nothing installed. Turning this on closes port \(c.socksPort), so check nothing is pointed at it first."
-    }
-
-    /// Why the chosen PKCS#11 module can't be reached by `openconnect`, or nil.
-    /// Split out from `sslAuthBlockReason` so the editor can pair it with a
-    /// copy-to-clipboard button for `pkcs11RegistrationCommand(_:)`.
-    static func pkcs11RegistrationBlockReason(_ c: SubprocessTunnelConfig,
-                                             discovery: PKCS11ModuleDiscovery = .init()) -> String? {
-        guard openconnectAuthMode(c) == "token",
-              let module = discovery.module(atUserPath: c.pkcs11ModulePath ?? ""),
-              !module.registeredWithP11Kit else { return nil }
-        return "\u{201C}\((module.path as NSString).lastPathComponent)\u{201D} isn't registered with p11-kit, so openconnect can't load it. Run the one-line command below (no admin rights needed), then connect."
-    }
-
-    /// The command the editor offers to copy when the module isn't registered.
-    static func pkcs11RegistrationCommand(_ c: SubprocessTunnelConfig,
-                                          discovery: PKCS11ModuleDiscovery = .init()) -> String? {
-        guard openconnectAuthMode(c) == "token",
-              let module = discovery.module(atUserPath: c.pkcs11ModulePath ?? ""),
-              !module.registeredWithP11Kit else { return nil }
-        return module.registrationCommand
     }
 
     /// Whether an address carries a PASSWORD in its userinfo
@@ -1387,19 +1247,12 @@ final class SubprocessTunnelManager {
         // a stale cert path used to win over the piped password — certificate
         // auth while the UI said "Password".
         //
-        // TOKEN MODE USES THE SAME PIPE, and that is the whole PIN story. OpenConnect
-        // raises the PKCS#11 PIN as an ordinary password-type form field (its
-        // `gnutls_pin_callback` builds a form with auth_id "pkcs11_pin"), and its CLI
-        // hands a `--passwd-on-stdin` value to the FIRST password field it meets. The
-        // token's PIN is asked for while the certificate is being loaded, before any
-        // gateway form, so it is that first field. The alternatives were all worse:
-        // `--key-password=<PIN>` and a `pin-value=`/`pin-source=` URI attribute both
-        // put the PIN (or a path to it) on a command line every local process can
-        // read with `ps`. `--passwd-on-stdin` also sets OpenConnect's own
-        // `allow_stdin_read`, so a SECOND prompt reads the (already closed) pipe,
-        // gets EOF and fails immediately instead of hanging — and, importantly, is
-        // never answered with a second wrong PIN attempt.
-        if mode == "password" || mode == "token" { a.append("--passwd-on-stdin") }
+        // A `"token"` (smartcard) profile NEVER REACHES HERE: `sslAuthBlockReason`
+        // refuses it before the dispatch, because SimpleVPN no longer implements
+        // smartcard sign-in. Nothing below has a token branch, deliberately — a
+        // half-built argv for a mode that is refused upstream is the shape of thing
+        // that comes back to life by accident.
+        if mode == "password" { a.append("--passwd-on-stdin") }
         if !c.username.isEmpty { a += ["--user=\(c.username)"] }
         // TODO(fortinet): verify --authgroup actually carries the Fortinet
         // realm (vs a portal path / --usergroup) — needs a real gateway.
@@ -1434,28 +1287,6 @@ final class SubprocessTunnelManager {
                 a += ["--key-password=\(kp)"]
             }
         }
-        // Token mode ONLY: the certificate lives on a smartcard / security key, so
-        // `--certificate` takes a PKCS#11 URI instead of a path. OpenConnect 7.01+
-        // derives the matching private key from the same URI (adding `type=cert` and
-        // `type=private` itself), which is why `--sslkey` is passed only when the
-        // user gave an explicit key URI for a token that labels the two differently.
-        // NO `--key-password` here: the PIN is on stdin (see --passwd-on-stdin above).
-        if mode == "token" {
-            if let cert = c.pkcs11CertificateURI, !cert.trimmingCharacters(in: .whitespaces).isEmpty {
-                a += ["--certificate=\(SubprocessTunnelConfig.pkcs11Argument(cert))"]
-            }
-            if let key = c.pkcs11KeyURI, !key.trimmingCharacters(in: .whitespaces).isEmpty {
-                a += ["--sslkey=\(SubprocessTunnelConfig.pkcs11Argument(key))"]
-            }
-        }
-        // Software token (OTP): mode + secret. The secret is the long-lived
-        // TOTP/HOTP seed — never place it on argv (world-readable via `ps`).
-        // openconnect accepts --token-secret=@FILE; we pass a 0600 temp file.
-        // Not under SSO: the identity provider asks for the code itself.
-        if mode != "sso", !c.tokenMode.isEmpty {
-            a += ["--token-mode=\(c.tokenMode)"]
-            if let ref = Self.tokenSecretFileArgument(for: c) { a += ["--token-secret=\(ref)"] }
-        }
         // Host-checker / endpoint posture (F5 EPA, Cisco CSD, GP/NC trojan):
         // a real wrapper wins over the skip; otherwise "disable" stubs it out.
         // (The editor disables the skip toggle and names the wrapper, so the
@@ -1478,7 +1309,7 @@ final class SubprocessTunnelManager {
     /// Transport argv for a session ocauth-helper already signed in: connect to
     /// the exact URL and certificate the sign-in produced (`--resolve` defeats
     /// round-robin DNS), with the cookie on stdin — never argv. Auth-time flags
-    /// (user, authgroup, token, CSD) are gone; only transport knobs remain.
+    /// (user, authgroup, CSD) are gone; only transport knobs remain.
     static func cookieCommand(for c: SubprocessTunnelConfig, auth: OCAuthDone)
         -> (String, [String], Data?)? {
         guard let oc = TunnelCLI.openconnect.resolvedPath else { return nil }
@@ -1513,31 +1344,6 @@ final class SubprocessTunnelManager {
     /// escapes embedded single quotes.
     private static func shellQuote(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
-
-    /// Write the OTP token secret to a private 0600 temp file and return the
-    /// `@path` reference openconnect reads, so the seed never appears on argv.
-    /// The file is deleted on the first "ready" line, on process exit, or on a
-    /// manual disconnect — whichever comes first (see `removeTokenSecretFile`).
-    private static func tokenSecretFileArgument(for c: SubprocessTunnelConfig) -> String? {
-        guard let secret = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(c.id).token")?.password,
-              !secret.isEmpty, let data = secret.data(using: .utf8) else { return nil }
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("svpn-tok-\(c.id)-\(UUID().uuidString)")
-        do {
-            try data.write(to: url, options: .completeFileProtection)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        } catch { return nil }
-        removeTokenSecretFile(c.id)   // a stale one from an aborted connect
-        tokenSecretFiles[c.id] = url
-        return "@\(url.path)"
-    }
-
-    /// Token-secret temp files awaiting cleanup, keyed by tunnel id.
-    private static var tokenSecretFiles: [String: URL] = [:]
-    private static func removeTokenSecretFile(_ id: String) {
-        guard let url = tokenSecretFiles.removeValue(forKey: id) else { return }
-        try? FileManager.default.removeItem(at: url)
     }
 
     /// The OpenConnect `--proxy` value for the config's proxy mode, or nil for

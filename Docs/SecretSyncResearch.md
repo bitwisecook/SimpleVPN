@@ -547,8 +547,9 @@ smartcards* at connect time. SparkLabs call it "the recommended approach for dep
 environments" because one config file works for every user.
 
 For us that would make a profile **secret-free and portable by construction** — it says *which* identity
-it needs, not *what* the key is — and it unifies the inline-key case with the PKCS#11/smartcard case that
-`Docs/AuthSecPKCS11.md` currently keeps on a separate path. That is a bigger change than the strip and should not
+it needs, not *what* the key is. (It used to be argued that this also unifies the inline-key case with the
+PKCS#11/smartcard case; smartcard sign-in has since been removed — `Docs/AuthSecPKCS11.md` — so that half
+of the argument no longer applies.) That is a bigger change than the strip and should not
 block it, but it is the direction the strip should be shaped towards, so the reference left behind in the
 `.ovpn` should be a **selector**, not an opaque keychain row id.
 

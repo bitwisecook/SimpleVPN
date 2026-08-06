@@ -198,9 +198,10 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
 
     // CLIENT CERTIFICATE SIGN-IN from files. Refused before this change, which is
     // the most expensive of the old gates: a certificate profile could not have a
-    // system tunnel at all. A `pkcs11:` URI must never arrive here — the app's gate
-    // keeps smartcard sign-in on the tool, because this build has no PKCS#11
-    // backend and would report a confusing "no certificate found".
+    // system tunnel at all. FILES ONLY: a `pkcs11:` URI would fail here with a
+    // confusing "no certificate found", because this build has no PKCS#11 backend.
+    // Nothing can produce one now — SimpleVPN does not sign in with a certificate on a
+    // smartcard at all (Docs/AuthSecPKCS11.md).
     if (_cfg.clientCertFile.length) {
         if (openconnect_set_client_cert(_vpninfo, _cfg.clientCertFile.UTF8String,
                                         _cfg.clientKeyFile.length ? _cfg.clientKeyFile.UTF8String : NULL) != 0) {

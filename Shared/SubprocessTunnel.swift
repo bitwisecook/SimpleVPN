@@ -10,8 +10,11 @@
 //  extension for OpenConnect, which is now the DEFAULT for a new SSL VPN
 //  (`preferInProcess` is Optional; absent means in-process). Genuinely
 //  subprocess-only: `.netTunnel`, SSH configs with a jump host or raw extra-options,
-//  SSH port forwards, smartcard sign-in, and the four settings
-//  `inProcessOpenConnectSupports` still can't carry.
+//  SSH port forwards, and the four settings `inProcessOpenConnectSupports` still
+//  can't carry (a host-checker script, a base MTU, HTTP-keepalive off, extra
+//  arguments). Smartcard sign-in used to head that list and was the last thing
+//  keeping the subprocess path alive for SSL VPNs at all; it is gone — see
+//  Docs/AuthSecPKCS11.md.
 //  The no-root subprocess path exposes a local SOCKS proxy (ssh -D, or
 //  `openconnect --script-tun --script "ocproxy -D <port>"`), which SimpleVPN can
 //  optionally wire in as the system SOCKS proxy. Secrets live in the keychain
@@ -113,10 +116,22 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
 
     // SSL-VPN (OpenConnect). The --protocol value comes from
     // `kind.openconnectProtocol` — the kind IS the protocol, nothing stored here.
-    // How the SSL-VPN authenticates: password, a client certificate, a certificate
-    // held on a smartcard/security key (PKCS#11), or single sign-on in the browser
-    // (SAML/SSO — this is the passkey/WebAuthn path, since the identity provider's
-    // page does the passkey ceremony).
+    // How the SSL-VPN authenticates: password, a client certificate, or single
+    // sign-on in the browser (SAML/SSO — this is the passkey/WebAuthn path, since
+    // the identity provider's page does the passkey ceremony).
+    //
+    // `"token"` — a certificate held on a smartcard or security key — IS STILL A
+    // VALUE HERE, and deliberately so, even though SimpleVPN no longer implements
+    // it. It is the marker that says "this profile signs in with a smartcard", and
+    // it has to survive for two reasons:
+    //  • an existing profile must not be silently converted into a password one.
+    //    `migrated()` leaves it alone and `normalized()` never rewrites it, so the
+    //    profile still says what it is, connect is REFUSED with an explanation
+    //    (`SubprocessTunnelManager.sslAuthBlockReason`), and nothing is sent to a
+    //    gateway that the profile did not ask for;
+    //  • the editor still offers the choice, so somebody who came looking for
+    //    smartcard finds where to ask for it instead of finding nothing.
+    // See Docs/AuthSecPKCS11.md for why it is not implemented.
     var authMode = "password"    // "password" | "certificate" | "token" | "sso"
     var realm = ""               // optional auth realm/group (--authgroup)
     var trustedCertSHA256 = ""   // pin the server cert (openconnect --servercert)
@@ -149,7 +164,17 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     // ignored otherwise). Covers the meaningful flags across anyconnect/nc/gp/pulse/
     // f5/fortinet/array.
     var usergroup = ""           // --usergroup (GP portal-vs-gateway, NC/pulse URL path)
-    var tokenMode = ""           // --token-mode: "" | totp | hotp | oidc  (secret in keychain "tunnel.<id>.token")
+    // `tokenMode` — OpenConnect's own TOTP/HOTP/OIDC/RSA/yubioath code generator —
+    // IS STILL DECODED AND STILL STORED, for the same reason `authMode == "token"`
+    // is: a profile that has one must not be quietly turned into a plain
+    // password sign-in. It is no longer OFFERED and no longer reaches any argv;
+    // a profile carrying one is refused at connect with an explanation
+    // (`SubprocessTunnelManager.sslAuthBlockReason`). Docs/AuthSecPKCS11.md §"Soft
+    // tokens" records why it stays closed: the seed is a long-lived secret with no
+    // channel to the extension, and `yubioath`/`rsa` need libpcsclite/libstoken,
+    // which this build has not got. This is NOT the YubiKey hardware-OTP path —
+    // that is a different feature and it is unaffected (Docs/AuthSecYubiKey.md).
+    var tokenMode = ""           // stored-and-refused: "" | totp | hotp | oidc | rsa | yubioath
     var clientCertFile = ""      // --certificate (PEM/PKCS#12 client cert for cert auth)
     var clientKeyFile = ""       // --sslkey (client private key; passphrase in keychain "…privateKey")
     var ocCompression = ""       // --compression: "" | stateful | none | all
@@ -201,28 +226,47 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     /// the key), which is exactly when the modern default should apply.
     var transportWasChosen: Bool { preferInProcess != nil }
 
-    // MARK: PKCS#11 / smartcard sign-in (`authMode == "token"`)
+    // MARK: "Allow local network access" (ONTOLOGY.md's binding term)
     //
-    // All Optional (the `proxyPasswordInArgv` precedent) so tunnels saved before
-    // these fields existed still decode. The token PIN is NOT here and never will
-    // be: it lives in the login keychain under "tunnel.<id>.pkcs11" when the user
-    // asks it to be remembered, and is typed at connect time otherwise. Either way
-    // it reaches openconnect on a private pipe — see
-    // `SubprocessTunnelManager.openconnectArgs`.
+    // The printer/NAS carve-out, on the same terms as WireGuard, the Proxy Tunnel
+    // and the SSH Network Tunnel: the prefixes come from `LocalNetworkCarveOut`
+    // (computed in the app, carried in `startTunnel(options:)`) and reach this kind
+    // through the SAME excluded-route seam the other three use — never a second
+    // mechanism. Docs/Networking.md §4.2.1 holds the per-kind table.
+    //
+    // IT ONLY BITES IN-PROCESS, and that is a fact about the transport rather than
+    // a limitation of the setting: the `openconnect` subprocess carries traffic as
+    // `ocproxy -D <port>`, a SOCKS listener with no interface and no routes of its
+    // own, so there is nothing to carve anything out of. In-process is the default
+    // for a new SSL VPN, which is why this setting matters at all — while these
+    // kinds were local ports it would have had nothing to do.
+    //
+    // OPTIONAL, the `proxyPasswordInArgv` precedent: this struct's `Codable` is
+    // synthesized, and a synthesized decoder does NOT fall back to a property's
+    // default for a missing key — so a non-Optional `Bool` here would fail to
+    // decode every SSL VPN saved before today. `nil` ⇒ OFF, which is also the
+    // fail-closed direction: traffic stays inside the tunnel.
+    var allowLocalNetworkAccess: Bool? = nil
 
-    /// Absolute path to the PKCS#11 provider module (`libykcs11.dylib`,
-    /// `opensc-pkcs11.so`, …). Always absolute and always the user's choice: we do
-    /// not let the dynamic-loader search order decide which library reads the key.
-    var pkcs11ModulePath: String? = nil
-    /// RFC 7512 URI naming the CERTIFICATE on the token. openconnect derives the
-    /// matching private key from it (`--certificate=pkcs11:…`, no `--sslkey`).
-    var pkcs11CertificateURI: String? = nil
-    /// An explicit URI for the private key, for the tokens whose key is labelled
-    /// differently from its certificate and openconnect's heuristic misses.
-    var pkcs11KeyURI: String? = nil
-    /// Where the PIN comes from: nil/"ask" = typed at each connect (nothing stored),
-    /// "keychain" = the login keychain item saved by the editor.
-    var pkcs11PINSource: String? = nil
+    /// Whether this VPN carves the local network out. THE ONE READER — nothing
+    /// should unwrap `allowLocalNetworkAccess` itself, for the same reason nothing
+    /// unwraps `preferInProcess`: a security-determining default must not come to
+    /// mean two things in two places.
+    var allowsLocalNetworkAccess: Bool { allowLocalNetworkAccess ?? false }
+
+    // PKCS#11 / SMARTCARD SIGN-IN USED TO HAVE FOUR FIELDS HERE — a provider-module
+    // path, a certificate URI, a key URI and a PIN source — and they are GONE, along
+    // with the discovery, enumeration, URI parser, token-status reader and
+    // connect-time output watcher behind them. What replaced them is a request for
+    // use cases (`FeatureRequestNotice.smartcardSignIn`), because the feature was
+    // built against no real token and no real gateway and there is nothing to
+    // validate it with. Docs/AuthSecPKCS11.md is the record of WHY, including why a
+    // GnuTLS/p11-kit rebuild would not have helped.
+    //
+    // `authMode == "token"` is deliberately NOT removed (see its declaration): the
+    // profile keeps saying what it is and is refused with an explanation. Its stored
+    // PIN — the keychain item "tunnel.<id>.pkcs11" — is deliberately NOT deleted
+    // either; see `remove(_:)`.
 
     var isDefault: Bool { self == SubprocessTunnelConfig(id: id) }
 
@@ -256,8 +300,6 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     /// Free text here meant a typo was accepted and then rejected by the tool at
     /// startup with an opaque error.
     static let spoofOSValues = ["linux", "linux-64", "win", "mac-intel", "android", "apple-ios"]
-    /// Exactly what `--token-mode=` accepts, minus "" (= none).
-    static let tokenModeValues = ["totp", "hotp", "oidc", "rsa", "yubioath"]
     /// Exactly the three compression modes OpenConnect has, minus "" (= the
     /// engine's own default). These are `oc_compression_mode_t`'s only members
     /// (`Vendor/openconnect-include/openconnect.h`): NONE, STATELESS, ALL.
@@ -268,13 +310,6 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     /// carrying it is CAVEATED by `compressionProblem` instead, and the built-in
     /// engine declines to guess what it meant.
     static let compressionValues = ["none", "stateless", "all"]
-
-    /// Whether a token mode needs a stored seed. `yubioath` reads the code off
-    /// the YubiKey itself — requiring a seed for it would block a working
-    /// configuration, which is the other half of the validation rule.
-    static func tokenModeRequiresSecret(_ mode: String) -> Bool {
-        !mode.isEmpty && mode != "yubioath"
-    }
 
     /// Trim, and collapse out-of-range numbers back to "tool default" (nil) or
     /// the documented fallback. Called from every save path, the same shape as
@@ -310,10 +345,6 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
             return t
         }
         n.sshAgentSocket = cleanOptional(sshAgentSocket)
-        n.pkcs11ModulePath = cleanOptional(pkcs11ModulePath)
-        n.pkcs11CertificateURI = cleanOptional(pkcs11CertificateURI)
-        n.pkcs11KeyURI = cleanOptional(pkcs11KeyURI)
-        n.pkcs11PINSource = cleanOptional(pkcs11PINSource)
         n.forwards = forwards.map(clean).filter { !$0.isEmpty }
         n.sshExtraOptions = sshExtraOptions.map(clean).filter { !$0.isEmpty }
         n.extraArgs = extraArgs.map(clean).filter { !$0.isEmpty }
@@ -333,11 +364,13 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
         if let v = n.baseMTU, !Self.baseMTURange.contains(v) { n.baseMTU = nil }
         if let v = n.reconnectTimeout, !Self.reconnectTimeoutRange.contains(v) { n.reconnectTimeout = nil }
         if let v = n.forceDPD, !Self.forceDPDRange.contains(v) { n.forceDPD = nil }
-        // NOT blanked. Both are stored values a user (or an importer) put there on
+        // `spoofOS` (and `tokenMode`, which is no longer offered at all) are NOT
+        // blanked. Both are stored values a user (or an importer) put there on
         // purpose, and quietly emptying one on an unrelated save loses it with no
-        // trace — the same rule the SOCKS port now follows. The tool would reject
-        // the value at startup, so it is CAVEATED on its row instead
-        // (`spoofOSProblem` / `tokenModeProblem`), where it can be seen and fixed.
+        // trace — the same rule the SOCKS port now follows. `spoofOS` is CAVEATED on
+        // its row instead (`spoofOSProblem`); `tokenMode` is refused at connect with
+        // an explanation, which is the same principle applied to a feature that is
+        // gone rather than to a value the tool would reject.
         return n
     }
 
@@ -357,14 +390,6 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty, !compressionValues.contains(s) else { return nil }
         return "OpenConnect has three compression modes — \(compressionValues.joined(separator: ", ")) — and refuses \u{201C}\(s)\u{201D} at startup. Pick one above, or clear it to leave the engine's default."
-    }
-
-    /// Why this token mode isn't one `--token-mode=` accepts, or nil. Same
-    /// non-blocking treatment as `spoofOSProblem`.
-    static func tokenModeProblem(_ raw: String) -> String? {
-        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !s.isEmpty, !tokenModeValues.contains(s) else { return nil }
-        return "OpenConnect only accepts one of \(tokenModeValues.joined(separator: ", ")) — it refuses \u{201C}\(s)\u{201D} at startup. Pick one above, or choose \u{201C}None\u{201D}."
     }
 
     /// Why this SOCKS port can't be used, or nil. BLOCKING (the editor's Save):
@@ -497,46 +522,6 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
         }
     }
 
-    // MARK: PKCS#11 sign-in (the token half of "who are you?")
-
-    /// Whether the PIN is remembered in the login keychain (`"keychain"`) rather
-    /// than typed at each connect. Absent/anything else means "ask every time",
-    /// which is the default and the safer one.
-    var pkcs11RemembersPIN: Bool { pkcs11PINSource == "keychain" }
-
-    /// Why this tunnel's token sign-in can't work as configured, or nil. BLOCKING
-    /// (the `serverCertPinProblem` treatment): every one of these fails inside
-    /// openconnect with a message about a certificate, a long way from the field
-    /// that was actually wrong.
-    static func pkcs11Problem(_ c: SubprocessTunnelConfig) -> String? {
-        guard c.authMode == "token" else { return nil }
-        let module = c.pkcs11ModulePath?.trimmingCharacters(in: .whitespaces) ?? ""
-        if module.isEmpty {
-            return "Choose the PKCS#11 provider module that reads your token — set it under Sign-In."
-        }
-        if !module.hasPrefix("/") && !module.hasPrefix("~") {
-            return "The provider module needs its full path, starting with \u{201C}/\u{201D}."
-        }
-        let cert = c.pkcs11CertificateURI?.trimmingCharacters(in: .whitespaces) ?? ""
-        if cert.isEmpty {
-            return "Pick the certificate on your token — use \u{201C}Find Certificates\u{201D} under Sign-In."
-        }
-        if let problem = PKCS11URI.problem(cert) { return problem }
-        if let key = c.pkcs11KeyURI?.trimmingCharacters(in: .whitespaces), !key.isEmpty,
-           let problem = PKCS11URI.problem(key) { return problem }
-        return nil
-    }
-
-    /// The value to hand `--certificate`. The URI's query is dropped (it can only
-    /// carry the two PIN attributes we refuse, or a module path that would fight the
-    /// one chosen above); the path attributes pass through UNTOUCHED, because
-    /// OpenConnect 7.01+ adds `type=cert`/`type=private` itself and strips the label
-    /// when it has to hunt for the key. Rewriting a user's URI to "help" is how a
-    /// working configuration stops working.
-    static func pkcs11Argument(_ raw: String) -> String {
-        PKCS11URI.parse(raw)?.withoutQuery ?? raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
     /// The value to hand `--servercert`. A pin that already names its own hash
     /// form passes through untouched; a bare base64 digest gets the
     /// `pin-sha256:` prefix it means. Prefixing unconditionally (which is what
@@ -628,6 +613,15 @@ final class SubprocessTunnelStore {
         // Delete the tunnel's keychain secrets too — password, proxy/jump passwords,
         // the OTP token seed, the client-key passphrase and the smartcard PIN — or
         // they'd linger in the keychain indefinitely after the tunnel itself is gone.
+        //
+        // `.token` and `.pkcs11` STAY IN THIS LIST even though neither feature exists
+        // any more, and that is the whole of the decision about them. Deleting
+        // somebody's PIN or verification-code seed as a side effect of REMOVING A
+        // FEATURE is not ours to do: an upgrade never touches it, and neither does
+        // opening or saving the profile. Deleting the PROFILE, on the other hand, is
+        // an explicit act by the person who owns the secret — and leaving the item
+        // behind then would orphan it in their keychain for ever, with nothing left on
+        // screen to say what it belonged to.
         for suffix in ["", ".proxy", ".jump", ".token", ".privateKey", ".pkcs11"] {
             KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(id)\(suffix)")
         }

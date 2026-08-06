@@ -126,19 +126,13 @@ struct SSHSettingDescriptorTests {
         #expect(!SubprocessTunnelConfig.forceDPDRange.contains(3601))
     }
 
-    /// `--os=` and `--token-mode=` take closed sets. `rsa` and `yubioath` were
-    /// missing from the picker, so a working configuration couldn't be expressed.
+    /// `--os=` takes a closed set. (`--token-mode=`'s set was asserted here too and
+    /// is gone with the feature: SimpleVPN does not generate verification codes, so
+    /// there is no picker to hold to OpenConnect's values — see
+    /// `FeatureRequestNotice.verificationCodeToken`.)
     @Test func closedValueSetsMatchOpenConnect() {
         #expect(SubprocessTunnelConfig.spoofOSValues
                 == ["linux", "linux-64", "win", "mac-intel", "android", "apple-ios"])
-        #expect(SubprocessTunnelConfig.tokenModeValues
-                == ["totp", "hotp", "oidc", "rsa", "yubioath"])
-        // A YubiKey holds its own secret — demanding a seed would block a
-        // working setup, which is the other half of the validation rule.
-        #expect(SubprocessTunnelConfig.tokenModeRequiresSecret("totp"))
-        #expect(SubprocessTunnelConfig.tokenModeRequiresSecret("rsa"))
-        #expect(!SubprocessTunnelConfig.tokenModeRequiresSecret("yubioath"))
-        #expect(!SubprocessTunnelConfig.tokenModeRequiresSecret(""))
         // Every offered value has a human label.
         for v in SubprocessTunnelConfig.spoofOSValues {
             #expect(!SubprocessTunnelView.spoofOSLabel(v).isEmpty)
@@ -225,9 +219,9 @@ struct SSHSettingDescriptorTests {
         #expect(SubprocessTunnelConfig.spoofOSProblem("windoze") != nil)
         #expect(SubprocessTunnelConfig.spoofOSProblem("win") == nil)
         #expect(SubprocessTunnelConfig.spoofOSProblem("") == nil)
-        #expect(SubprocessTunnelConfig.tokenModeProblem("magic") != nil)
-        #expect(SubprocessTunnelConfig.tokenModeProblem("totp") == nil)
-        #expect(SubprocessTunnelConfig.tokenModeProblem("") == nil)
+        // `tokenModeProblem` is gone with the picker. What replaced it for a stored
+        // token mode is not a caveat but a REFUSAL with an explanation
+        // (`sslAuthBlockReason`), which is asserted in ConnectListingTests.
     }
 
     /// REGRESSION (silent security/behaviour change). Gating the `--certificate` /

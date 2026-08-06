@@ -104,7 +104,7 @@ nonisolated enum LocalVaultVendor: String, CaseIterable, Sendable, Hashable {
 // the same five raw values plus the four shapes that were always there and never
 // named: `.osKeychain`, `.osAutoFill`, `.agent` and `.hardware`. It sits beside the
 // kind axis because the two are read together, and because the mechanisms that are
-// not vaults (the SSH agent, a PKCS#11 token, a security key that types) need the
+// not vaults (the SSH agent, a security key that types) need the
 // same vocabulary as the ones that are.
 
 /// Why a vendor that IS installed still can't answer. Each one has a fix the

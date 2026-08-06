@@ -293,9 +293,9 @@ nonisolated enum ConfigFieldNaming {
             "noHTTPKeepalive": "oc.no-http-keepalive",
             "enablePFS": "oc.pfs",
             "extraArgs": "oc.extra-args",
-            "pkcs11ModulePath": "oc.pkcs11-module",
-            "pkcs11CertificateURI": "oc.pkcs11-certificate",
-            "pkcs11KeyURI": "oc.pkcs11-key",
+            // Named after what the user is deciding, and after the id every other
+            // kind uses for the same decision — one concept, one id shape.
+            "allowLocalNetworkAccess": "oc.local-lan",
             "samlBrowser": "oc.sso-browser",
         ],
         // Per-VPN sign-in. No descriptors exist for these (the rows predate the
@@ -399,8 +399,9 @@ nonisolated enum ConfigSecrets {
         "authKey",
         // A verification-code seed generates every future code.
         "tokenSecret", "otpSecret", "totpSecret",
-        // A smartcard/security-key PIN.
-        "pin", "pkcs11PIN",
+        // A security key's PIN. `pkcs11PIN` used to sit beside it and is gone with
+        // smartcard sign-in; `pin` stays because a security key still has one.
+        "pin",
     ]
 
     /// Name fragments that MIGHT mean a secret. Never used on their own to decide —
@@ -417,19 +418,18 @@ nonisolated enum ConfigSecrets {
         // key?"), not the key itself.
         "usesSharedSecret": "a yes/no choice of sign-in method, not a key",
         "xauth": "a yes/no choice of sign-in method, not a password",
-        // "" | totp | hotp | oidc — which KIND of code, never the seed.
+        // "" | totp | hotp | oidc — which KIND of code, never the seed. The field is
+        // no longer offered (SimpleVPN does not generate codes) but is still stored
+        // and therefore still exported, so it still has to be classified.
         "tokenMode": "which kind of verification code is used, not its seed",
-        // Where the PIN comes from ("keychain" / "ask"), never the PIN.
-        "pkcs11PINSource": "where the PIN is obtained from, never the PIN itself",
         // A path to a file on disk. The file may hold a key; the path does not.
         "clientKeyFile": "a file path, not the key in it",
         "sshCertificateFile": "a file path, not the key in it",
         "jumpIdentityFile": "a file path, not the key in it",
         "identityFile": "a file path, not the key in it",
-        // A URI that NAMES an object on a smartcard; the token keeps the key.
-        "pkcs11KeyURI": "names an object on the security key, never its contents",
-        // Whether macOS should remember the PIN, not the PIN.
-        "pkcs11RemembersPIN": "a yes/no choice about remembering, not the PIN",
+        // `pkcs11KeyURI` and `pkcs11RemembersPIN` were classified here. Both fields
+        // are gone with smartcard sign-in, and so are their entries: a classification
+        // for a field that cannot appear is a claim nothing holds to a struct.
         // Whether the proxy password is handed over on the command line rather than
         // on stdin — a choice ABOUT a password's handling, never the password.
         "proxyPasswordInArgv": "a yes/no choice about how a password is passed, not the password",
@@ -480,7 +480,7 @@ nonisolated enum ConfigSecrets {
         case "sharedSecret", "groupSecret": "shared key"
         case "authKey": "setup key"
         case "tokenSecret", "otpSecret", "totpSecret": "verification-code seed"
-        case "pin", "pkcs11PIN": "security key\u{2019}s PIN"
+        case "pin": "security key\u{2019}s PIN"
         default: field
         }
     }

@@ -692,11 +692,13 @@ struct ConnectListingTests {
                 var cert = named
                 cert.authMode = "certificate"
                 add(SubprocessTunnelReadiness.need(for: cert, facts: .init(installedTools: allTools)))
-                // Smartcard sign-in with no module.
+                // Smartcard sign-in — refused outright now (the feature is gone), so
+                // this exercises the "not built, here is where to ask" sentence.
                 var token = named
                 token.authMode = "token"
                 add(SubprocessTunnelReadiness.need(for: token, facts: .init(installedTools: allTools)))
-                // A verification-code token with no seed.
+                // A stored verification-code token — likewise refused with an
+                // explanation rather than asked for a seed.
                 var totp = named
                 totp.tokenMode = "totp"
                 add(SubprocessTunnelReadiness.need(

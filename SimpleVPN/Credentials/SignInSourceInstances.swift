@@ -379,7 +379,7 @@ nonisolated extension VendorConfigFieldKind {
     /// exhaustive.
     var level: SignInConfigLevel {
         switch self {
-        case .toolBinary, .unixSocket, .daemonEndpoint, .pkcs11Module: .transport
+        case .toolBinary, .unixSocket, .daemonEndpoint: .transport
         // A store's directory and the field name to read inside its entries are both
         // "which vault, and how it is laid out" — the same level as a .kdbx path,
         // and both legitimately differ between a work store and a personal one.

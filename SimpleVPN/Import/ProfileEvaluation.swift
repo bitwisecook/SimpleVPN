@@ -60,10 +60,17 @@ struct ProfileEvaluation: Equatable, Sendable {
     var usesPKCS11: Bool { !pkcs11Directives.isEmpty }
 
     /// The one thing to say about a `pkcs11-*` profile, or nil. Names the directive
-    /// found, why it can't work here, and the two routes that do.
+    /// found and why it can't work here.
+    ///
+    /// The last clause USED TO SAY "SimpleVPN supports PKCS#11 on the SSL VPN kinds"
+    /// and it no longer does — smartcard sign-in is gone from those too
+    /// (Docs/AuthSecPKCS11.md). Sending somebody to a feature that isn't there is
+    /// worse than the opaque openvpn3 error this sentence exists to replace, so it now
+    /// says where to ask instead. The REFUSAL itself is unchanged and unrelated to the
+    /// removal: the OpenVPN 3 core throws on an option it doesn't implement.
     var pkcs11Advice: String? {
         guard let first = pkcs11Directives.first else { return nil }
-        return "This configuration uses \u{201C}\(first)\u{201D} to sign in with a smartcard or security key. SimpleVPN's OpenVPN engine (the OpenVPN 3 core) has no smartcard support and refuses to load a profile containing it \u{2014} remove the pkcs11 lines to import the rest. For hardware-backed certificate sign-in, SimpleVPN supports PKCS#11 on the SSL VPN kinds (AnyConnect, GlobalProtect, FortiGate\u{2026}); ask your administrator whether the gateway offers one of those."
+        return "This configuration uses \u{201C}\(first)\u{201D} to sign in with a smartcard or security key. SimpleVPN's OpenVPN engine (the OpenVPN 3 core) has no smartcard support and refuses to load a profile containing it \u{2014} remove the pkcs11 lines to import the rest, and it will ask for a password instead. SimpleVPN can\u{2019}t sign in with a smartcard on any of its VPN kinds. If your gateway leaves you no other way in, open an issue describing which gateway and which card \u{2014} that is what would decide whether it is built."
     }
 
     /// Placeholder-friendly accessors (empty string → nil).

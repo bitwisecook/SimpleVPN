@@ -185,15 +185,6 @@ enum CredentialSourceSettings {
                     + "Leave it empty when your database doesn\u{2019}t use a security key.",
                 group: .signIn,
                 default: "")
-        case .pkcs11Module:
-            EngineSettingSpec(
-                id: field.settingID,
-                name: "\(vendorTitle(field)) smartcard module",
-                summary: "The software that talks to your smartcard or security key on "
-                    + "\(vendorTitle(field))\u{2019}s behalf \u{2014} a file its maker supplies. "
-                    + "SimpleVPN reads the card through it and never runs it as a program of its own.",
-                group: .signIn,
-                default: "")
         }
     }
 

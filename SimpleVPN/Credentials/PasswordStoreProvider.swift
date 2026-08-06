@@ -48,7 +48,7 @@ nonisolated struct PasswordStoreConfiguration: Sendable, Equatable {
             case .entryFieldName:
                 let v = shown.value.trimmingCharacters(in: .whitespaces)
                 out.usernameField = v.isEmpty ? nil : v
-            case .toolBinary, .unixSocket, .daemonEndpoint, .pkcs11Module,
+            case .toolBinary, .unixSocket, .daemonEndpoint,
                  .vaultFile, .keyFile, .securityKeySlot, .serverURL, .toolConfigFile,
                  .accountIdentifier:
                 continue

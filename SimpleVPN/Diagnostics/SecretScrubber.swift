@@ -86,7 +86,7 @@ nonisolated struct SecretScrubber: Sendable {
 
         /// A filesystem path in the report. Addresses and hostnames are OFF: a
         /// path's last label looks like a TLD often enough
-        /// (`opensc-pkcs11.so`, `libykcs11.dylib`) that the hostname pass would
+        /// (`keepassxc-cli.app`, `libopnative.a`) that the hostname pass would
         /// turn the single most useful fact in the tool inventory into
         /// `<host:ab12ef>`. High-entropy runs are OFF for the same reason.
         static let path = Policy(style: .placeholder,

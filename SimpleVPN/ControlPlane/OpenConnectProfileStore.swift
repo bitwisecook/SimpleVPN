@@ -76,6 +76,21 @@ enum OpenConnectProfileStore {
             // from the keychain here (the extension is root and cannot) and carried
             // in memory only — never providerConfiguration, which persists.
             options.merge(SubprocessTunnelManager.inProcessSecrets(config)) { current, _ in current }
+            // Org policy travels with the session, like every other kind's start
+            // path (VPNController+WireGuard and friends). ForceKeepInsideVPN is
+            // enforced in the EXTENSION — that is the one place a stale profile
+            // cannot route around — so it has to be told, or the local-network
+            // carve-out below would escape a policy that says everything stays
+            // inside the VPN.
+            if ManagedPolicy.forceKeepInsideVPN { options["policyKeepInside"] = true as NSNumber }
+            // "Allow local network access": the prefixes this Mac's own interfaces
+            // are on, computed HERE because the app is unsandboxed and an empty
+            // enumeration inside the sysext would be a carve-out that looks applied
+            // and is not. Absent ⇒ no carve-out (fail closed).
+            if config.allowsLocalNetworkAccess {
+                let local = LocalNetworkCarveOut.live()
+                if !local.isEmpty { options[LocalNetworkCarveOut.optionKey] = local as NSArray }
+            }
             if let auth {
                 options["cookie"] = auth.cookie as NSString
                 options["servercert"] = auth.servercert as NSString

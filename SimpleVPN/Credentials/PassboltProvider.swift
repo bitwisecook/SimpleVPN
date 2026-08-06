@@ -55,7 +55,7 @@ nonisolated struct PassboltConfiguration: Sendable, Equatable {
             case .toolConfigFile:
                 let path = shown.value.trimmingCharacters(in: .whitespaces)
                 out.location.configFile = path.isEmpty ? nil : path
-            case .toolBinary, .unixSocket, .daemonEndpoint, .pkcs11Module, .vaultFile,
+            case .toolBinary, .unixSocket, .daemonEndpoint, .vaultFile,
                  .keyFile, .securityKeySlot, .storeDirectory, .entryFieldName,
                  .accountIdentifier:
                 continue

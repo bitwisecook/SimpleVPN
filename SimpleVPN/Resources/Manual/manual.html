@@ -216,14 +216,7 @@
   <a href="#oc-client-key">Client Private Key</a>
   <a href="#oc-key-password">Key / PKCS#12 Passphrase</a>
   <a href="#oc-smartcards">Smartcards &amp; Security Keys</a>
-  <a href="#oc-pkcs11-module">Smartcard Provider Module</a>
-  <a href="#oc-pkcs11-certificate">Smartcard Certificate</a>
-  <a href="#oc-pkcs11-key">Smartcard Private Key</a>
-  <a href="#oc-pkcs11-pin">Smartcard PIN</a>
-  <a href="#oc-pkcs11-remember-pin">Remember PIN</a>
   <a href="#oc-sso-browser">Sign-In Browser</a>
-  <a href="#oc-token-mode">Verification-Code Token</a>
-  <a href="#oc-token-secret">Token Secret</a>
   <a href="#oc-pinned-server-cert">Pinned Server Certificate</a>
   <a href="#oc-cafile">CA Certificate File</a>
   <a href="#oc-pfs">Perfect Forward Secrecy</a>
@@ -242,6 +235,7 @@
   <a href="#oc-reconnect-timeout">Reconnect Timeout</a>
   <a href="#oc-socks-port">Local SOCKS Port</a>
   <a href="#oc-system-proxy">Route Mac Traffic</a>
+  <a href="#oc-local-lan">Allow local network access</a>
   <a href="#oc-mtu">MTU</a>
   <a href="#oc-base-mtu">Base MTU</a>
   <a href="#oc-force-dpd">Dead-Peer Detection</a>
@@ -923,7 +917,7 @@
 
 <h2 id="oc-username">Username</h2>
 <p class="default">Optional — required by password sign-in.</p>
-<p>Who you sign in as. Sent by the <strong>Password</strong> sign-in method together with your <a href="#oc-password">password</a>. With a <a href="#oc-client-cert">client certificate</a>, a <a href="#oc-pkcs11-certificate">smartcard</a> or single sign-on, the certificate or the identity provider says who you are and this field is not used. Some gateways also want a realm or group alongside it; that has its own field.</p>
+<p>Who you sign in as. Sent by the <strong>Password</strong> sign-in method together with your <a href="#oc-password">password</a>. With a <a href="#oc-client-cert">client certificate</a> or single sign-on, the certificate or the identity provider says who you are and this field is not used. Some gateways also want a realm or group alongside it; that has its own field.</p>
 
 <h2 id="oc-password">Password</h2>
 <p class="default">Optional — required by password sign-in.</p>
@@ -942,144 +936,46 @@
 <p>The passphrase that decrypts your client key or <code>.p12</code> file. Stored in your login keychain and used only by certificate sign-in.</p>
 
 <h2 id="oc-smartcards">Smartcards &amp; Security Keys</h2>
-<p>A smartcard, a PIV-enabled YubiKey or an HSM holds a certificate <em>and</em> its private key, and
-never hands the key over: every signature the VPN needs is computed on the device, after you unlock it
-with its PIN. That is the strongest form of the “certificate instead of a password” sign-in, because a
-copy of your laptop's disk contains nothing an attacker can use.</p>
-<p>SimpleVPN talks to these devices through <strong>PKCS#11</strong>, the standard interface every card and
-key vendor implements. Choose <strong>Smartcard or security key</strong> as the sign-in method on any of the
-SSL VPN kinds (Cisco AnyConnect, GlobalProtect, FortiGate, F5 APM, Juniper, Pulse, Array) and five rows
-appear: the <a href="#oc-pkcs11-module">provider module</a> that reads the device, the
-<a href="#oc-pkcs11-certificate">certificate</a> on it, optionally its
-<a href="#oc-pkcs11-key">private key</a>, the <a href="#oc-pkcs11-pin">PIN</a>, and whether to
-<a href="#oc-pkcs11-remember-pin">remember</a> it.</p>
-<p>On this page: <a href="#oc-smartcards-setup">setting a device up</a> ·
-<a href="#oc-smartcards-registration">registering the module</a> ·
-<a href="#oc-smartcards-pin-retries">the PIN retry counter</a> ·
-<a href="#oc-smartcards-openvpn">why OpenVPN profiles can't use one</a>.</p>
-
-<h3 id="oc-smartcards-setup">Setting a device up</h3>
-<p>SimpleVPN does not ship a provider module for anybody's hardware, and never will: a module is a
-piece of software that talks to a security device, and it belongs to the vendor who supports it. Install
-the one for your device, then point SimpleVPN at it. Two current commands cover almost every Mac:</p>
-<ul>
-  <li><strong>Smartcards and PIV (including a YubiKey over the card reader)</strong> —
-      <code>brew install opensc</code>, which installs
-      <code>/opt/homebrew/lib/opensc-pkcs11.so</code>. OpenSC's own documentation lives at
-      <em>github.com/OpenSC/OpenSC/wiki</em>, and its macOS installer package puts the same module in
-      <code>/Library/OpenSC/lib/</code>.</li>
-  <li><strong>YubiKey, using Yubico's own module</strong> —
-      <code>brew install yubico-piv-tool</code>, which installs
-      <code>libykcs11.dylib</code> under the Homebrew prefix. Yubico documents loading certificates onto
-      a key at <em>developers.yubico.com/yubico-piv-tool</em>; do that part with their tool, not this
-      app.</li>
-</ul>
-<p>SimpleVPN finds either automatically. Press <strong>Look Again</strong> after installing one.</p>
-
-<h3 id="oc-smartcards-registration">Registering the module</h3>
-<p>There is one step no installer always does for you. The sign-in tool finds provider modules through
-<strong>p11-kit</strong>, which only loads the ones a registration file names — so a module can be
-installed and still be invisible. SimpleVPN checks, says so on the module row, and offers the exact
-one-line command to copy. It writes to your own home folder, needs no admin password, and SimpleVPN
-never runs it for you:</p>
-<pre><code>mkdir -p ~/.config/pkcs11/modules &amp;&amp; printf 'module: /opt/homebrew/lib/opensc-pkcs11.so\n' &gt; ~/.config/pkcs11/modules/opensc-pkcs11.module</code></pre>
-
-<h3 id="oc-smartcards-pin-retries">The PIN retry counter — read this once</h3>
-<p>Every card and key counts wrong PINs, and locks itself when the count runs out. On a YubiKey PIV
-that is not a lockout you can talk your way out of: it destroys the key the PIN protected, and the
-certificate on it becomes useless.</p>
-<p>SimpleVPN therefore does three things. It reads the counter's state <em>before</em> you connect —
-the token itself reports “only a few attempts left” and “final attempt”, and SimpleVPN shows that
-warning next to the rows in red. It refuses to connect at all to a token that is already locked, since
-further attempts achieve nothing. And it never spends an attempt on your behalf: listing the
-certificates on a device is done without logging in, and one wrong PIN produces one refusal, never a
-retry loop.</p>
-<p>If the warning says one attempt remains, stop and be certain of the PIN. Unblocking a locked PIN needs
-the PUK and the manufacturer's own tool.</p>
-
-<h3 id="oc-smartcards-openvpn">Why OpenVPN profiles can't use one</h3>
-<p>OpenVPN 2.x has its own smartcard options (<code>pkcs11-providers</code>, <code>pkcs11-id</code> and
-relatives). SimpleVPN carries OpenVPN on the OpenVPN&nbsp;3 core, which does not implement them — and
-does not quietly ignore them either: it refuses to load a configuration containing an option it does not
-support. So an <code>.ovpn</code> file with <code>pkcs11-</code> lines in it is rejected at import, with
-that explained, rather than failing later with a complaint about an unknown option. Delete the
-<code>pkcs11-</code> lines to import the rest of the profile. Hardware-backed certificate sign-in is
-available on the SSL VPN kinds above; if your gateway offers one of those, use it there.</p>
-<p>The same limit applies to <a href="#oc-prefer-in-process">Run In-Process</a>: SimpleVPN's built-in
-SSL VPN engine is built without smartcard support, so a smartcard tunnel always runs through the
-installed <code>openconnect</code> tool. The editor says so rather than letting the toggle look
-effective.</p>
-
-<h2 id="oc-pkcs11-module">Smartcard Provider Module</h2>
-<p class="default">Optional — required by smartcard sign-in.</p>
-<p>The library that talks to your card or security key. SimpleVPN lists the ones it finds — OpenSC,
-Yubico's YKCS11, SoftHSM — and you can also type the full path to any other. It is always a full path,
-never a bare name: letting the system's library search order decide which code reads your private key
-would mean a writable folder could substitute its own.</p>
-<p>A module that is installed but not registered with p11-kit cannot be used by the sign-in tool. The row
-says so and offers the one command that fixes it — see
-<a href="#oc-smartcards-registration">Registering the module</a>.</p>
-<p>SimpleVPN does not load the module itself, by design. Listing the certificates on a device is done by
-running <code>p11tool</code> (from GnuTLS) or <code>pkcs11-tool</code> (from OpenSC) if you have either
-— <code>brew install gnutls</code> adds the first. Without them you can still connect; you just have to
-type the certificate's address by hand instead of picking it from a list.</p>
-
-<h2 id="oc-pkcs11-certificate">Smartcard Certificate</h2>
-<p class="default">Optional — required by smartcard sign-in.</p>
-<p>Which certificate on the device identifies you. A PIV card typically holds four (authentication,
-digital signature, key management, card authentication) and only one of them is enrolled for VPN
-access — press <strong>Find Certificates</strong> and pick from the list, which shows each one's name,
-who it was issued to and when it expires. An expired certificate is called out beside the chooser,
-because the gateway's refusal arrives much later and blames TLS.</p>
-<p>The value itself is a PKCS#11 URI (RFC&nbsp;7512): <code>pkcs11:</code> followed by attributes that
-identify the object, such as <code>pkcs11:id=%01</code> or
-<code>pkcs11:manufacturer=piv_II;id=%01</code>. Typing one is checked as you go, and
-<strong>Connect</strong> stays disabled until it is valid — a malformed URI is not a warning but a
-connection that always fails.</p>
-<p>One thing is refused outright: a URI containing <code>pin-value=</code> or <code>pin-source=</code>.
-Both are legal in the standard and both appear in guides on the internet, but the URI is handed to the
-sign-in tool on its command line, where every other program on this Mac can read it. SimpleVPN types the
-PIN in privately instead.</p>
-
-<h2 id="oc-pkcs11-key">Smartcard Private Key</h2>
-<p class="default">Optional.</p>
-<p>Leave this empty. The sign-in tool finds the private key belonging to the
-<a href="#oc-pkcs11-certificate">certificate</a> by itself, matching them on the device's own object
-id. Fill it in only for the unusual device that labels its key differently and cannot be matched — the
-certificate list's key entries have the address to paste.</p>
-
-<h2 id="oc-pkcs11-pin">Smartcard PIN</h2>
-<p class="default">Required by smartcard sign-in.</p>
-<p>The PIN that unlocks the card or key. Where it goes, exactly: it is typed here, and at connect time it
-is written down a private pipe to the sign-in tool and the pipe is closed. It is never part of a command
-line (which any program can read), never written to a file, never put in an environment variable and
-never written to a log or a diagnostic report. If <a href="#oc-pkcs11-remember-pin">Remember PIN</a> is
-off, nothing anywhere keeps a copy once the connection attempt is over.</p>
-<p>Read <a href="#oc-smartcards-pin-retries">The PIN retry counter</a> before guessing. A wrong PIN here
-costs one attempt from the device's own counter — SimpleVPN never retries, so it can only ever cost
-one — but that counter is short, and on a YubiKey exhausting it destroys the key.</p>
-
-<h2 id="oc-pkcs11-remember-pin">Remember PIN</h2>
-<p class="default">Default: off.</p>
-<p>Off — the default — you type the PIN at each connection and nothing keeps it. On, it is stored in your
-login keychain, protected the same way every other password SimpleVPN keeps is, and reused
-automatically. Turning it off again deletes the stored PIN immediately: it is a real removal, not a
-change of display.</p>
-<p>Which to choose is a genuine trade. A PIN is the second factor that makes the hardware worth having,
-so remembering it moves the security back towards “whoever has this Mac unlocked”. Leaving it off keeps
-the device's protection intact at the cost of typing four to eight digits per connection.</p>
+<p><strong>SimpleVPN cannot sign in with a certificate held on a smartcard.</strong> Not on the SSL VPN
+kinds, not on OpenVPN, not anywhere. If your gateway will only accept the certificate on a card or a
+PIV-enabled YubiKey, SimpleVPN is not a client you can use for it today, and the honest thing is to
+say so on this page rather than let you find out at the end of a setup.</p>
+<p>There was an implementation and it was <em>removed</em>. It had never been run against a real card
+or a real gateway — the machine SimpleVPN is built on has neither — so nobody could say whether it
+worked. A sign-in method that might silently fail is worse than one that isn't offered: you would
+have spent your card's PIN retry counter finding out, and on a YubiKey exhausting that counter
+destroys the key it protects. The option is still in the <strong>Sign-in method</strong> list so that
+this page can be found, and choosing it shows the same notice rather than a form.</p>
+<p><strong>What does work instead.</strong> A certificate in a <em>file</em> — a PEM pair or a
+<code>.p12</code> bundle — is fully supported: see <a href="#oc-client-cert">Client Certificate</a>.
+So is <a href="#oc-sso-browser">single sign-on</a> on the gateways that offer it, which is often how
+an organisation that issues cards also allows a browser sign-in with the same identity. Ask whoever
+runs your gateway which of those two is available to you.</p>
+<p><strong>If neither is, tell us.</strong> Whether this is ever built depends entirely on hearing
+from people who need it, and what decides it is your situation rather than a vote. Open an issue
+describing three things: <em>which gateway</em> (AnyConnect, GlobalProtect, FortiGate, F5 APM,
+Juniper, Pulse, Array), <em>which card or key</em> and the module that reads it, and <em>what your
+organisation requires</em> — in particular whether it leaves you any other way in. The
+<strong>Tell Us What You Need</strong> button on the notice in the editor opens a report with those
+questions in it and fills in what SimpleVPN already knows about your setup, so you don't have to
+describe it. Nothing is sent until you have read it. There is no commitment either way.</p>
+<p><strong>A verification code SimpleVPN generates</strong> — TOTP, HOTP, RSA SecurID — is a separate
+thing and also not offered: SimpleVPN asks you for the code instead, and a password app that holds
+codes can fill it in. Holding the seed would mean carrying a secret that generates every future code
+into the part of SimpleVPN that builds the tunnel, and there is no channel for that. The same notice
+appears for a VPN that still has one configured, with the same invitation.</p>
+<p><strong>A YubiKey that types a code is not affected.</strong> That is a different mechanism on the
+same piece of plastic: the key acts as a keyboard and enters a one-time code, or computes an OATH
+code that SimpleVPN reads back. It is built, it is supported, and it is documented under
+<a href="#yk-what-is-it">Security Keys</a>. What is missing is only the <em>certificate</em> its PIV
+applet can hold.</p>
+<p>The engineering reasons — why the built-in engine cannot do it, and why rebuilding it differently
+would not have helped — are recorded in <code>Docs/AuthSecPKCS11.md</code> in the source, for anyone
+who wants them.</p>
 
 <h2 id="oc-sso-browser">Sign-In Browser</h2>
 <p class="default">Default: the app default (Settings).</p>
 <p>Which browser — and, for Chrome/Edge/Firefox, which profile — opens the single-sign-on page, so your passkeys, security key and saved passwords are where you already keep them. Used only by the <strong>Single sign-on</strong> method, and only for the protocols OpenConnect can browser-sign-in (Cisco AnyConnect, GlobalProtect, Pulse); for the others no browser is opened at all.</p>
-
-<h2 id="oc-token-mode">Verification-Code Token</h2>
-<p class="default">Default: None.</p>
-<p>Let SimpleVPN generate the verification code the gateway asks for, instead of you reading it off a phone: <strong>TOTP</strong> (time-based), <strong>HOTP</strong> (counter-based) or <strong>OIDC</strong>. Works alongside password or certificate sign-in. With single sign-on it isn't used — the identity provider asks for the code on its own page.</p>
-
-<h2 id="oc-token-secret">Token Secret</h2>
-<p class="default">Required when a token mode is set.</p>
-<p>The seed your codes are generated from (the string or QR contents your administrator issued). It is stored in your login keychain and handed to OpenConnect in a private, short-lived <code>0600</code> file — never on the command line, where any local process could read it. Without it the connection fails before it starts.</p>
 
 <h2 id="oc-pinned-server-cert">Pinned Server Certificate</h2>
 <p class="default">Optional — but it is the only server-identity check these VPNs have.</p>
@@ -1119,7 +1015,7 @@ the device's protection intact at the cost of typing four to eight digits per co
 <h2 id="oc-prefer-in-process">Run In-Process</h2>
 <p class="default">Default: off — the <code>openconnect</code> command-line tool runs the VPN.</p>
 <p>Carries this VPN with SimpleVPN's own built-in OpenConnect engine, as a full system tunnel, instead of launching the <code>openconnect</code> tool. As a system tunnel it routes the whole Mac by itself, so no <a href="#oc-socks-port">SOCKS proxy</a> is opened and <a href="#oc-system-proxy">Route Mac Traffic Through This Proxy</a> has nothing to do.</p>
-<p>The built-in engine deliberately carries only what it can carry exactly: the server, the realm, a pinned certificate, the sign-in browser and your credentials. Any other setting on this screen — a port, a <a href="#oc-cafile">CA file</a>, a <a href="#oc-client-cert">client certificate</a>, a <a href="#oc-token-mode">verification-code token</a>, a <a href="#oc-csd-wrapper">host-checker wrapper</a>, a connection proxy, <a href="#oc-compression">compression</a>, <a href="#oc-pfs">PFS</a>, an <a href="#oc-mtu">MTU</a>, a <a href="#oc-reconnect-timeout">timeout</a> or <a href="#oc-extra-args">extra arguments</a> — sends the connection back to the tool, and the editor says so rather than letting the toggle look effective. Silently dropping one of those would connect with weaker settings than you configured.</p>
+<p>The built-in engine deliberately carries only what it can carry exactly: the server, the realm, a pinned certificate, the sign-in browser and your credentials. Any other setting on this screen — a port, a <a href="#oc-cafile">CA file</a>, a <a href="#oc-client-cert">client certificate</a>, a <a href="#oc-csd-wrapper">host-checker wrapper</a>, a connection proxy, <a href="#oc-compression">compression</a>, <a href="#oc-pfs">PFS</a>, an <a href="#oc-mtu">MTU</a>, a <a href="#oc-reconnect-timeout">timeout</a> or <a href="#oc-extra-args">extra arguments</a> — sends the connection back to the tool, and the editor says so rather than letting the toggle look effective. Silently dropping one of those would connect with weaker settings than you configured.</p>
 <div class="warn">Newer than the subprocess path. Check it against your own gateway before relying on it.</div>
 
 <h2 id="oc-csd-wrapper">Host-Checker Wrapper</h2>
@@ -1167,6 +1063,14 @@ the device's protection intact at the cost of typing four to eight digits per co
 <h2 id="oc-system-proxy">Route Mac Traffic Through This Proxy</h2>
 <p class="default">Default: off.</p>
 <p>Points the active network service's SOCKS proxy at the tunnel while it's connected (macOS asks for your admin password), and restores the old setting on disconnect. Flipping it while connected applies immediately. Off, only apps you point at the <a href="#oc-socks-port">proxy</a> yourself use the tunnel.</p>
+
+<h2 id="oc-local-lan">Allow local network access</h2>
+<p class="default">Default: off.</p>
+<p>Keeps the devices on the network you are physically on — printers, file servers, a NAS, smart-home gear — reachable while the VPN is up. Turn it on if printing or local file shares stop working when you connect.</p>
+<p><strong>What leaves the tunnel:</strong> traffic to the networks your Mac's own interfaces are on, and to the addresses devices use to find each other (link-local and multicast, which is how AirPlay and Bonjour work). Nothing else. Anyone watching the network you are on can see that traffic, which is why it is off unless you ask for it.</p>
+<p>SimpleVPN works out which networks those are when the VPN connects, from the interfaces that are actually up, and never guesses at a wider range — a carve-out wider than the truth would send traffic outside the tunnel that you believe is inside it. Joining a different network later does not move the carve-out; reconnect to pick up the new one. Virtual-machine and container networks are deliberately not included: those have their own offer, which names the guest and says what it will do.</p>
+<p><strong>It needs <a href="#oc-prefer-in-process">Run In-Process</a>.</strong> The <code>openconnect</code> tool carries these VPNs as a SOCKS proxy on a local port and takes no routes at all, so there is no tunnel for a carve-out to make a hole in — the local network was never captured in the first place. With the built-in engine the VPN is a whole-Mac tunnel, and then this is what keeps the printer working. The row says so when the tool is going to run the VPN.</p>
+<p>If your organisation manages this Mac and has switched on <em>ForceKeepInsideVPN</em>, the carve-out is refused when the VPN starts, whatever this says. That decision is enforced where the tunnel is actually built, so an older profile cannot get around it.</p>
 
 <h2 id="oc-mtu">MTU</h2>
 <p class="default">Default: auto-detected.</p>

@@ -59,33 +59,18 @@ enum OpenConnectSettings {
         .init(id: "oc.key-password", name: "Key / PKCS#12 Passphrase",
               summary: "The passphrase protecting your client key or .p12 file. Stored in your login keychain.",
               group: .signIn, default: ""),
-        // Smartcard / security-key sign-in (PKCS#11). The certificate stays on the
-        // device: the key never leaves it, and every signature is made on the token.
-        .init(id: "oc.pkcs11-module", name: "Smartcard Provider Module",
-              summary: "The software that talks to your smartcard or security key — OpenSC for cards and PIV keys, Yubico's own module for a YubiKey. Used by smartcard sign-in only.",
-              group: .signIn, default: ""),
-        .init(id: "oc.pkcs11-certificate", name: "Smartcard Certificate",
-              summary: "Which certificate on the inserted card or key identifies you. Use \u{201C}Find Certificates\u{201D} to pick one instead of typing its address.",
-              group: .signIn, default: ""),
-        .init(id: "oc.pkcs11-key", name: "Smartcard Private Key",
-              summary: "Only needed when the key on the device is labelled differently from its certificate and can't be found automatically.",
-              group: .signIn, default: ""),
-        .init(id: "oc.pkcs11-pin", name: "Smartcard PIN",
-              summary: "The PIN that unlocks the card or key. It is typed into the sign-in tool privately — never on a command line, never in a file, and never in a log.",
-              group: .signIn, default: ""),
-        .init(id: "oc.pkcs11-remember-pin", name: "Remember PIN",
-              summary: "Keep the PIN in your login keychain so you aren't asked each time. Leave off to type it at every connection.",
-              group: .signIn, default: false),
-
+        // SMARTCARD SIGN-IN HAD FIVE ROWS HERE — provider module, certificate, key,
+        // PIN, remember-PIN — and a verification-code token had two. All seven are
+        // gone with the features behind them. What stands in their place is not a
+        // setting and therefore has no descriptor: the sign-in method picker still
+        // offers "Smartcard or security key", and choosing it shows
+        // `FeatureRequestNotice.smartcardSignIn` — a banner asking for the use case.
+        // A banner is not addressable by the CLI or MDM and has no default to state,
+        // which is exactly why it is not spec'd (AGENTS.md rule 5 is about controls
+        // that SET something).
         .init(id: "oc.sso-browser", name: "Sign-In Browser",
               summary: "Which browser (and profile) opens the single sign-on page, so passkeys and saved passwords are where you keep them.",
               group: .signIn),
-        .init(id: "oc.token-mode", name: "Verification-Code Token",
-              summary: "Have OpenConnect produce the verification code (TOTP, HOTP, OIDC, RSA SecurID or a YubiKey) instead of you typing it. Used alongside password or certificate sign-in.",
-              group: .signIn, default: ""),
-        .init(id: "oc.token-secret", name: "Token Secret",
-              summary: "The seed your verification codes are generated from. Stored in your login keychain and handed over in a private file — never on the command line. Not needed for a YubiKey, which holds its own.",
-              group: .signIn, default: ""),
 
         // MARK: Traffic
 
@@ -99,6 +84,21 @@ enum OpenConnectSettings {
               group: .traffic, default: 1080),
         .init(id: "oc.system-proxy", name: "Route Mac Traffic Through This Proxy",
               summary: "Points the whole Mac at the tunnel's proxy while connected (asks for your admin password) and puts things back on disconnect.",
+              group: .traffic, default: false),
+        // THE SAME WORDS as `wg.local-lan`, `px.local-lan` and `sshnet.local-lan`,
+        // to the character (AGENTS.md glossary: one concept, one name). It is one
+        // decision — "keep the printer reachable" — reaching every kind through the
+        // one `LocalNetworkCarveOut` definition, and a summary reworded per kind is
+        // how a user who learned one editor stops trusting the next.
+        //
+        // The clause this summary deliberately does NOT carry is "only while Run
+        // In-Process is on". That is true, and it is a fact about the TRANSPORT
+        // rather than about what the setting means, so it is said where the
+        // transport is visible: as a caveat on the row when the tool will run this
+        // VPN, and in the manual. Baking it into the shared summary would make four
+        // identical decisions read as four different ones.
+        .init(id: "oc.local-lan", name: "Allow local network access",
+              summary: "Keep printers, file shares and other devices on the network you're on reachable while connected. Traffic to them leaves your Mac outside the tunnel. Default: off.",
               group: .traffic, default: false),
         .init(id: "oc.mtu", name: "MTU",
               summary: "Largest tunnel packet size, 576–1500. Leave empty to auto-detect; lower it if transfers stall.",

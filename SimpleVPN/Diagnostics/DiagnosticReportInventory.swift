@@ -272,19 +272,11 @@ nonisolated enum DiagnosticReportInventory {
                 detail: detail)
     }
 
-    /// PKCS#11 provider modules. Filesystem only — `PKCS11ModuleDiscovery.modules()`
-    /// reads paths and p11-kit `.module` files and executes nothing.
-    static func pkcs11Fields() -> [DiagnosticReportField] {
-        PKCS11ModuleDiscovery().modules().map { module in
-            DiagnosticReportField(
-                label: module.displayName,
-                value: .path(module.path),
-                detail: [
-                    .state("origin: \(module.origin.rawValue)"),
-                    .flag(module.registeredWithP11Kit),
-                ])
-        }
-    }
+    // A `pkcs11Fields()` GATHERER USED TO BE HERE, listing the PKCS#11 provider
+    // modules installed on this Mac. Smartcard sign-in is gone, so the report no
+    // longer reveals which security software somebody has installed for a feature
+    // SimpleVPN cannot use — which is a small privacy improvement as well as dead
+    // code removed.
 
     /// Security keys plugged in right now. IORegistry only: no HID input is read,
     /// nothing is executed, and no Input Monitoring permission is involved.

@@ -117,6 +117,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         if let ocProto = kind.openconnectProtocol {
             startOpenConnect(conf: conf, options: options, profile: profile,
                              protocol: ocProto, divert: divert,
+                             localNetworks: localNetworks,
                              completionHandler: completionHandler)
             return
         }
@@ -272,7 +273,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
     /// options (root can't read the keychain), same as OpenVPN.
     private func startOpenConnect(conf: [String: Any]?, options: [String: NSObject]?,
                                   profile: String, protocol ocProto: String,
-                                  divert: DivertPlan,
+                                  divert: DivertPlan, localNetworks: [String],
                                   completionHandler: @escaping (Error?) -> Void) {
         let s = OCClientSettings()
         s.server = (conf?["server"] as? String) ?? (protocolConfiguration.serverAddress ?? "")
@@ -330,12 +331,29 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
             Self.log.log("gateway ownership at establish (openconnect): owned=\(owned.boolValue)")
         }
 
+        // "Allow local network access", through the SAME excluded-route seam the
+        // diverts use — one list, not a second mechanism (Docs/Networking.md
+        // §4.2.1). The per-kind toggle is checked HERE, from the provider
+        // configuration; `localNetworks` only says WHICH prefixes are local, and
+        // startTunnel has already emptied it under ForceKeepInsideVPN.
+        //
+        // Each prefix goes through `RoutingRule.routeDest`, which is the same
+        // validator a divert rule passes: it refuses a malformed address and any
+        // prefix length of 0, so a `0.0.0.0/0` arriving from anywhere can never be
+        // installed as a "local network" and become a whole-tunnel bypass.
+        let wantsLocalLan = (conf?["localLan"] as? NSNumber)?.boolValue ?? false
+        let localCarveOuts: [RouteDest] = wantsLocalLan
+            ? localNetworks.compactMap { RoutingRule(destination: $0).routeDest }
+            : []
+        if wantsLocalLan {
+            Self.log.log("local network access (openconnect): \(localCarveOuts.count) of \(localNetworks.count) prefix(es) accepted as excluded routes")
+        }
         // Divert rules, same contract as OpenVPN: this bridge also builds its own
         // NEPacketTunnelNetworkSettings from the captured push, so both halves of a
         // divert apply. Seeded BEFORE connect so the very first tun build carries
         // them (setup_tun happens on the library's thread).
-        if !divert.outside.isEmpty {
-            b.setDivertedDestinations(divert.outsideDictionaries)
+        if !divert.outside.isEmpty || !localCarveOuts.isEmpty {
+            b.setDivertedDestinations((divert.outside + localCarveOuts).map(\.dictionary))
             Self.log.log("divert (openconnect): \(divert.outside.count) destination(s) routed around the VPN")
         }
         if !divert.inbound.isEmpty {

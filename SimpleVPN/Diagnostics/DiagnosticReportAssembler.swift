@@ -186,7 +186,6 @@ enum DiagnosticReportAssembler {
         var fields = DiagnosticReportInventory.vendorStateFields(facts: facts)
         fields += DiagnosticReportInventory.toolFields(
             discoveries: context.settings.discoveryEnabled ? context.availability.discoveries : [:])
-        fields += DiagnosticReportInventory.pkcs11Fields()
         fields += DiagnosticReportInventory.securityKeyFields()
         return DiagnosticReportSection(id: .toolsAndAPIs, fields: fields)
     }

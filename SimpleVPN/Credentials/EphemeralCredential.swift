@@ -15,7 +15,7 @@
 //      account.
 //   2. `InteractionWait` — "we are waiting for a human, with a deadline, and they
 //      can cancel". A YubiKey touch, a Touch ID prompt, 1Password's approval
-//      dialog, KeePassXC's allow-access dialog, a smartcard PIN entry: all the same
+//      dialog, KeePassXC's allow-access dialog, a `gpg` pinentry: all the same
 //      arithmetic, and getting the arithmetic wrong is how a prompt sits armed for
 //      ever or expires while the user is still reaching for their key.
 //
@@ -183,7 +183,7 @@ nonisolated final class SingleUseCode: Sendable {
 ///
 /// Every credential source that needs a human has this shape: a security key touch,
 /// a Touch ID prompt, 1Password's approval dialog, KeePassXC's allow-access dialog,
-/// a smartcard PIN. What differs is the WORDING and what arrives at the end; what
+/// a `gpg` passphrase. What differs is the WORDING and what arrives at the end; what
 /// is identical is arm / count down / complete / time out / cancel, and each of
 /// those has a way to be subtly wrong (a prompt that stays armed for ever, one that
 /// expires while the user is still reaching, a cancel that leaves the deadline

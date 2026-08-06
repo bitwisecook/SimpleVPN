@@ -155,26 +155,24 @@ discovers it; what the app does with a YubiKey is not this document's subject.
 - **No deprecation claim** is made about `lpass`: there is no formal notice, only a quiet
   release history.
 
-### PKCS#11 modules — **not this map's job**
+### PKCS#11 modules — **nothing to discover**
 
-**`ToolDiscovery` deliberately does not search for PKCS#11 modules.**
-`SimpleVPN/ControlPlane/PKCS11Discovery.swift` already does, and it answers a question this map
-cannot: whether a module is merely *installed* or is *registered with p11-kit* — which is what
-decides whether it can be loaded at all, since p11-kit only loads registered modules and RFC
-7512's `module-path=` does not work (measured). Duplicating a shorter, dumber list here would give
-two answers to one question.
-
-**Take module paths from that file, not from this document.** Two corrections it records that a
-plausible-sounding list would get wrong:
+**`ToolDiscovery` does not search for PKCS#11 modules, and neither does anything else any more.**
+There used to be a `PKCS11Discovery` beside this map, deliberately kept separate because it answered a
+question this one cannot: whether a module is merely *installed* or is *registered with p11-kit*, which
+is what decides whether it can be loaded at all. Smartcard sign-in was removed, and that file went with
+it — see `Docs/AuthSecPKCS11.md`, which keeps the two findings a plausible-sounding replacement list
+would get wrong:
 
 - **`~/.pkcs11_modules/` is not a p11-kit path.** It appears in a lot of prose and in none of
   p11-kit's own behaviour. The real registry directories were extracted from the installed
-  `libp11-kit.0.dylib` and are listed in `PKCS11Discovery.registryDirectories`.
-- **Installed ≠ loadable.** `PKCS11Module.registeredWithP11Kit` is the distinction, and the UI
-  has to say which one it means.
+  `libp11-kit.0.dylib`: `<prefix>/etc/pkcs11/modules` and `~/.config/pkcs11/modules`.
+- **Installed ≠ loadable**, because p11-kit loads only registered modules and RFC 7512's
+  `module-path=` does not fill the gap (measured).
 
-A module is also a **loaded library, not an executed program**, so the allow-list reasoning in
-this document does not transfer to it unchanged. That is a further reason to leave it where it is.
+A module is also a **loaded library, not an executed program**, so the allow-list reasoning in this
+document would not have transferred to it unchanged. If smartcard sign-in is ever rebuilt, that is
+still true, and `Docs/AuthSecPKCS11.md` says where the load would have to happen instead.
 
 ---
 

@@ -135,29 +135,13 @@ enum Acknowledgements {
         .init(name: "yubikey-manager (ykman)", license: "BSD-2-Clause",
               role: "Invoked for OATH codes and slot challenge-response \u{2014} user-installed, not bundled",
               url: "https://github.com/Yubico/yubikey-manager"),
-        // GnuTLS is dual-licensed BY PART: the library is LGPL-2.1-or-later and the
-        // command-line tools — which is all `p11tool` is — are GPL-3.0-only. Homebrew's
-        // formula says exactly that ("LGPL-2.1-or-later AND GPL-3.0-only"). The badge
-        // names the half we actually run.
-        .init(name: "GnuTLS p11tool", license: "GPL-3.0-only",
-              role: "Invoked to list certificates on a smartcard \u{2014} user-installed, not bundled",
-              url: "https://gnutls.org"),
-        .init(name: "OpenSC", license: "LGPL-2.1-or-later",
-              role: "Its pkcs11-tool invoked for token details, and its PKCS#11 module loaded by OpenConnect \u{2014} user-installed, not bundled",
-              url: "https://github.com/OpenSC/OpenSC"),
-        .init(name: "p11-kit", license: "BSD-3-Clause",
-              role: "Registry that resolves PKCS#11 modules for OpenConnect \u{2014} system component, not bundled",
-              url: "https://p11-glue.github.io/p11-glue/p11-kit.html"),
-        // The other two token providers SimpleVPN offers (PKCS11Discovery.wellKnown).
-        // A module is a LIBRARY rather than a program, and the one that loads it is
-        // openconnect's process, not ours — said in the note below, because it is a
-        // different fact from "we ran their binary".
-        .init(name: "yubico-piv-tool (libykcs11)", license: "BSD-2-Clause",
-              role: "Its PKCS#11 module offered for YubiKey PIV and loaded by OpenConnect \u{2014} user-installed, not bundled",
-              url: "https://github.com/Yubico/yubico-piv-tool"),
-        .init(name: "SoftHSM", license: "BSD-2-Clause",
-              role: "Software PKCS#11 token, offered and loaded the same way \u{2014} user-installed, not bundled",
-              url: "https://github.com/opendnssec/SoftHSMv2"),
+        // FIVE ROWS STOOD HERE — GnuTLS's p11tool, OpenSC, p11-kit, yubico-piv-tool's
+        // libykcs11 and SoftHSM — and they are gone because SimpleVPN no longer runs
+        // or names any of them: smartcard sign-in was removed
+        // (Docs/AuthSecPKCS11.md). Note which YubiKey row did NOT go: `ykman` above
+        // stays, because the OATH and challenge-response mechanisms it serves are a
+        // live feature. yubico-piv-tool was credited for a PKCS#11 MODULE, which is a
+        // different thing on the same device.
         // The password-store family, and Passbolt. GnuPG is listed because the `pass` /
         // `gopass` source's whole read path is a `gpg --decrypt`; `pass` and `gopass`
         // themselves because the store layout that read walks is theirs; and
@@ -224,12 +208,10 @@ enum Acknowledgements {
     KeePassXC code is included, and the credit above is a courtesy, not an obligation.
 
     The same is true of every sign-in source that reaches a password manager or a \
-    smartcard, and of the tunnel engines driven as child processes (openconnect, \
+    security key, and of the tunnel engines driven as child processes (openconnect, \
     ocproxy). SimpleVPN never bundles or installs a vendor's tool: it \
     runs a program you installed yourself, or speaks to one already running on your \
-    Mac. A PKCS#11 module is the one variation, and it is a weaker link rather than a \
-    stronger one — it is a library, and the process that loads it is openconnect's, \
-    never SimpleVPN's. Running a program is not linking to it and compiles none of its \
+    Mac. Running a program is not linking to it and compiles none of its \
     code in, so being credited for that reason imposes nothing on this binary beyond \
     what the linked components above already answer: the rows are there so you can see \
     whose work a feature depends on, and what licence you get if you go and install it. \

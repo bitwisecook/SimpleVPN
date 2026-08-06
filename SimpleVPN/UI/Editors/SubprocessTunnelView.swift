@@ -34,16 +34,7 @@ struct SubprocessTunnelView: View {
     @State private var password = ""
     @State private var proxyPassword = ""
     @State private var jumpPassword = ""
-    @State private var tokenSecret = ""
     @State private var keyPassphrase = ""
-    // Smartcard / security-key sign-in (PKCS#11). `pkcs11PIN` is the ONLY place the
-    // PIN lives in this view; it is written to the keychain on Save when "Remember
-    // PIN" is on, handed to `manager.connect(tokenPIN:)` otherwise, and never put in
-    // the draft (which is persisted in UserDefaults in the clear).
-    @State private var pkcs11PIN = ""
-    @State private var pkcs11Survey: PKCS11Survey?
-    @State private var pkcs11Scanning = false
-    @State private var pkcs11ScanTask: Task<Void, Never>?
     @State private var remember = true
     @State private var loaded = false
     // Shown when a saved "sso" was migrated back to password (unsupported kind).
@@ -876,17 +867,18 @@ struct SubprocessTunnelView: View {
             Picker("Sign-in method", selection: $draft.authMode) {
                 Text("Password").tag("password")
                 Text("Client certificate").tag("certificate")
+                // STILL OFFERED, and it is not an oversight. SimpleVPN does not
+                // implement smartcard sign-in (Docs/AuthSecPKCS11.md), and choosing
+                // this reveals a banner saying so and asking for the use case rather
+                // than a sub-form. The alternative — deleting the option — leaves
+                // somebody whose gateway demands a card with nothing on screen to
+                // explain the absence and leaves us with no way to learn that they
+                // exist. It is also what an EXISTING smartcard profile shows, so the
+                // picker never silently reads "Password" for a profile that is not.
                 Text("Smartcard or security key").tag("token")
                 if draft.kind.supportsExternalBrowserSSO {
                     Text("Single sign-on (SAML / passkey)").tag("sso")
                 }
-            }
-            // Picking Smartcard is the moment to go and look at the hardware — the
-            // module list and the PIN-retry state are what the rows below need, and
-            // asking the user to press a button for something we can just do is the
-            // kind of friction that makes a feature look broken.
-            .onChange(of: draft.authMode) { _, new in
-                if new == "token" { startPKCS11Survey() }
             }
             if let note = authNote {
                 Label(note, systemImage: "info.circle")
@@ -918,46 +910,14 @@ struct SubprocessTunnelView: View {
                 }
             }
 
-            // Software verification-code token (secret stored in the keychain).
-            EngineSettingRow(spec: Self.specs["oc.token-mode"], value: draft.tokenMode,
-                             disabledReason: tokenUnused) {
-                Picker(selection: $draft.tokenMode) {
-                    Text("None").tag("")
-                    Text("TOTP").tag("totp")
-                    Text("HOTP").tag("hotp")
-                    Text("OIDC").tag("oidc")
-                    // openconnect takes these two as well; leaving them out
-                    // meant a working configuration couldn't be expressed.
-                    Text("RSA SecurID").tag("rsa")
-                    Text("YubiKey (OATH)").tag("yubioath")
-                    // Same as `oc.os`: a stored value from outside the set is
-                    // SHOWN rather than blanked behind the user's back.
-                    if SubprocessTunnelConfig.tokenModeProblem(draft.tokenMode) != nil {
-                        Text(draft.tokenMode).tag(draft.tokenMode)
-                    }
-                } label: {
-                    EngineSettingLabel(spec: Self.specs["oc.token-mode"], value: draft.tokenMode)
-                }
-            }
-            if let caveat = SubprocessTunnelConfig.tokenModeProblem(draft.tokenMode) {
-                SettingCaveat(caveat)
-            }
-            // YubiKey codes come off the key itself, so no seed is stored (or
-            // required) for that mode.
-            if SubprocessTunnelConfig.tokenModeRequiresSecret(draft.tokenMode) {
-                EngineSettingRow(spec: Self.specs["oc.token-secret"], value: tokenSecret,
-                                 disabledReason: tokenUnused) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        LabeledContent {
-                            SecureField("", text: $tokenSecret, prompt: Text("TOTP/HOTP seed"))
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            EngineSettingLabel(spec: Self.specs["oc.token-secret"], value: tokenSecret)
-                        }
-                        Text("Required: without it the connection fails before starting.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
+            // A VERIFICATION-CODE TOKEN SIMPLEVPN GENERATES had two rows here (the
+            // mode and the seed) and has none now. The banner below appears only for a
+            // profile that already carries one, because that is the person who has to
+            // be told: for everybody else the answer is simply "type the code", which
+            // is what the password row already does and needs no notice.
+            if !draft.tokenMode.trimmingCharacters(in: .whitespaces).isEmpty {
+                FeatureRequestBanner(notice: .verificationCodeToken,
+                                     kind: draft.kind, profileID: draft.id)
             }
 
             // Client-certificate sign-in — inert unless the certificate method
@@ -985,266 +945,22 @@ struct SubprocessTunnelView: View {
                     }
                 }
             }
-            if sslMethod == "token" { pkcs11Rows }
-        }
-    }
-
-    // MARK: Smartcard / security-key sign-in (PKCS#11)
-
-    /// The smartcard sub-form. Rendered only under the Smartcard method — five dead
-    /// rows under Password would bury the two controls that method uses (and
-    /// `SettingVisibility.subprocess` tells a search hit why they aren't here).
-    @ViewBuilder private var pkcs11Rows: some View {
-        pkcs11ModuleRow
-        pkcs11RegistrationNotice
-        pkcs11TokenNotice
-        pkcs11CertificateRow
-        row("oc.pkcs11-key", text: optionalText(\.pkcs11KeyURI),
-            prompt: "pkcs11:… (only if the key isn't found)",
-            warning: (draft.pkcs11KeyURI?.isEmpty == false)
-                ? PKCS11URI.problem(draft.pkcs11KeyURI ?? "") : nil)
-        pkcs11PINRows
-    }
-
-    @ViewBuilder private var pkcs11ModuleRow: some View {
-        let spec = Self.specs["oc.pkcs11-module"]
-        let path = draft.pkcs11ModulePath ?? ""
-        EngineSettingRow(spec: spec, value: path) {
-            VStack(alignment: .leading, spacing: 6) {
-                LabeledContent {
-                    TextField("/opt/homebrew/lib/opensc-pkcs11.so",
-                              text: optionalText(\.pkcs11ModulePath))
-                        .multilineTextAlignment(.trailing).autocorrectionDisabled()
-                        .accessibilityValue([path, PKCS11Module.pathWarning(path)]
-                            .compactMap { $0 }.joined(separator: ". "))
-                } label: {
-                    EngineSettingLabel(spec: spec, value: path)
-                }
-                // The detected list FILLS the field rather than replacing it: an
-                // absolute path the user typed stays first-class (and the field is
-                // the one source of truth, so nothing can disagree with it).
-                pkcs11ModuleMenu
-                if let warning = PKCS11Module.pathWarning(path) {
-                    Label(warning, systemImage: "exclamationmark.triangle.fill")
-                        .font(.callout).foregroundStyle(.orange)
-                        .accessibilityLabel("Warning: \(warning)")
-                }
+            // Where the five smartcard rows used to be. A banner, not a sub-form: it
+            // states the absence, says what still works, and offers the one action
+            // that could change the situation — describing the gateway and the device.
+            if draft.authMode == "token" {
+                FeatureRequestBanner(notice: .smartcardSignIn,
+                                     kind: draft.kind, profileID: draft.id)
             }
         }
     }
 
-    @ViewBuilder private var pkcs11ModuleMenu: some View {
-        let modules = pkcs11Survey?.modules ?? []
-        HStack(spacing: 10) {
-            if modules.isEmpty {
-                // "Nothing found" is a state with an action, not a dead end.
-                Label(pkcs11Scanning ? "Looking for provider modules…"
-                                     : "No provider module found on this Mac.",
-                      systemImage: pkcs11Scanning ? "hourglass" : "questionmark.circle")
-                    .font(.callout).foregroundStyle(.secondary)
-            } else {
-                Menu {
-                    ForEach(modules) { module in
-                        Button {
-                            draft.pkcs11ModulePath = module.path
-                            startPKCS11Survey()
-                        } label: {
-                            Text(module.registeredWithP11Kit
-                                 ? module.displayName
-                                 : "\(module.displayName) — not registered")
-                        }
-                    }
-                } label: {
-                    Text("Detected modules (\(modules.count))")
-                }
-                .accessibilityLabel("Detected provider modules")
-                .accessibilityValue("\(modules.count) found")
-                .accessibilityHint("Choose one to fill in the module path")
-            }
-            Button("Look Again") { startPKCS11Survey() }
-                .controlSize(.small)
-                .disabled(pkcs11Scanning)
-                .accessibilityValue(pkcs11Scanning ? "unavailable — already looking" : "")
-            if !PKCS11Tool.p11tool.isAvailable, !PKCS11Tool.pkcs11Tool.isAvailable {
-                // Reading a token needs one of the user's own PKCS#11 tools. Missing
-                // it costs the certificate list, never the ability to connect — so
-                // this is an offer, not a block.
-                let command = PKCS11Tool.p11tool.installCommand
-                CopyCommandLink(command: command, title: "Copy \u{201C}\(command)\u{201D}")
-            }
-        }
-    }
-
-    /// openconnect loads provider modules only through p11-kit's registry, so an
-    /// installed-but-unregistered module fails as "no certificate found". Say what is
-    /// wrong and hand over the exact one-line fix — SimpleVPN never runs it.
-    @ViewBuilder private var pkcs11RegistrationNotice: some View {
-        if let reason = SubprocessTunnelManager.pkcs11RegistrationBlockReason(draft),
-           let command = SubprocessTunnelManager.pkcs11RegistrationCommand(draft) {
-            VStack(alignment: .leading, spacing: 6) {
-                Label(reason, systemImage: "exclamationmark.triangle.fill")
-                    .font(.callout).foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-                CopyCommandLink(command: command, title: "Copy the registration command")
-            }
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel("Provider module not registered: \(reason)")
-        }
-    }
-
-    /// What the inserted token says about itself — including the PIN-retry warning,
-    /// which is the whole reason this is on screen BEFORE Connect: exhausting a
-    /// YubiKey PIV PIN destroys the key it protects, so the warning has to arrive
-    /// while the user can still stop.
-    @ViewBuilder private var pkcs11TokenNotice: some View {
-        if let survey = pkcs11Survey {
-            if let failure = survey.failure, survey.certificates == nil {
-                Label(failure.message, systemImage: "exclamationmark.triangle.fill")
-                    .font(.callout).foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityLabel("Problem: \(failure.message)")
-            }
-            ForEach(Array((survey.tokens ?? []).enumerated()), id: \.offset) { _, token in
-                VStack(alignment: .leading, spacing: 4) {
-                    Label("\(token.isHardware ? "Token" : "Software token") “\(token.label)” is present.",
-                          systemImage: "checkmark.seal")
-                        .font(.callout).foregroundStyle(.secondary)
-                    if let warning = token.pinWarning {
-                        Label(warning, systemImage: "exclamationmark.octagon.fill")
-                            .font(.callout).foregroundStyle(.red)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel(token.pinWarning.map {
-                    "Token \(token.label) is present. Warning: \($0)"
-                } ?? "Token \(token.label) is present.")
-            }
-        }
-    }
-
-    @ViewBuilder private var pkcs11CertificateRow: some View {
-        let spec = Self.specs["oc.pkcs11-certificate"]
-        let uri = draft.pkcs11CertificateURI ?? ""
-        EngineSettingRow(spec: spec, value: uri) {
-            VStack(alignment: .leading, spacing: 6) {
-                LabeledContent {
-                    TextField("pkcs11:id=%01", text: optionalText(\.pkcs11CertificateURI))
-                        .multilineTextAlignment(.trailing).autocorrectionDisabled()
-                        .font(.callout.monospaced())
-                        .accessibilityValue([uri, uri.isEmpty ? nil : PKCS11URI.problem(uri)]
-                            .compactMap { $0 }.joined(separator: ". Problem: "))
-                } label: {
-                    EngineSettingLabel(spec: spec, value: uri)
-                }
-                pkcs11CertificateMenu
-                if !uri.isEmpty, let problem = PKCS11URI.problem(uri) {
-                    Label(problem, systemImage: "exclamationmark.triangle.fill")
-                        .font(.callout).foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityLabel("Problem: \(problem)")
-                }
-            }
-        }
-    }
-
-    @ViewBuilder private var pkcs11CertificateMenu: some View {
-        let certs = pkcs11Survey?.certificates ?? []
-        HStack(spacing: 10) {
-            if certs.isEmpty {
-                Text(pkcs11Scanning ? "Reading the token…"
-                     : "Press \u{201C}Find Certificates\u{201D} to list what is on the token.")
-                    .font(.callout).foregroundStyle(.secondary)
-            } else {
-                Menu {
-                    ForEach(certs) { cert in
-                        Button {
-                            draft.pkcs11CertificateURI = cert.uri
-                        } label: {
-                            Text("\(cert.label) — \(cert.rowSummary())")
-                        }
-                    }
-                } label: {
-                    Text("Certificates on the token (\(certs.count))")
-                }
-                .accessibilityLabel("Certificates on the token")
-                .accessibilityValue("\(certs.count) found")
-                .accessibilityHint("Choose one to use for signing in")
-            }
-            Button("Find Certificates") { startPKCS11Survey() }
-                .controlSize(.small)
-                .disabled(pkcs11Scanning || (draft.pkcs11ModulePath ?? "").isEmpty)
-                .accessibilityValue(findCertificatesDisabledReason.map { "unavailable — \($0)" } ?? "")
-                .help(findCertificatesDisabledReason ?? "Read the certificates off the inserted token")
-        }
-        // An expired certificate is worth saying beside the chooser, where the
-        // choice is made — the gateway's refusal arrives much later and blames TLS.
-        if let chosen = certs.first(where: { $0.uri == (draft.pkcs11CertificateURI ?? "") }),
-           chosen.isExpired {
-            Label("That certificate has expired — the gateway will refuse it. Ask whoever issued it for a replacement.",
-                  systemImage: "exclamationmark.triangle.fill")
-                .font(.callout).foregroundStyle(.orange)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityLabel("Warning: that certificate has expired. The gateway will refuse it.")
-        }
-    }
-
-    private var findCertificatesDisabledReason: String? {
-        if pkcs11Scanning { return "already reading the token" }
-        if (draft.pkcs11ModulePath ?? "").isEmpty { return "choose a provider module first" }
-        return nil
-    }
-
-    @ViewBuilder private var pkcs11PINRows: some View {
-        let pinSpec = Self.specs["oc.pkcs11-pin"]
-        EngineSettingRow(spec: pinSpec, value: pkcs11PIN) {
-            LabeledContent {
-                SecureField("", text: $pkcs11PIN, prompt: Text("the card or key's PIN"))
-                    .multilineTextAlignment(.trailing)
-                    .accessibilityValue(pkcs11PIN.isEmpty ? "Required" : "Entered")
-            } label: {
-                EngineSettingLabel(spec: pinSpec, value: pkcs11PIN)
-            }
-        }
-        toggleRow("oc.pkcs11-remember-pin", isOn: Binding(
-            get: { draft.pkcs11RemembersPIN },
-            set: { draft.pkcs11PINSource = $0 ? "keychain" : nil }))
-        if !draft.pkcs11RemembersPIN {
-            Text("The PIN isn't stored: it is typed into the sign-in tool for this connection only, on a private pipe, and forgotten afterwards.")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-    }
-
-    /// Look for provider modules and — when one is chosen — the tokens and
-    /// certificates on it. Never asks for or uses the PIN: spending an attempt from a
-    /// counter whose exhaustion destroys the key is not an acceptable price for
-    /// filling in a menu.
-    private func startPKCS11Survey() {
-        pkcs11ScanTask?.cancel()
-        pkcs11Scanning = true
-        let config = draft
-        pkcs11ScanTask = Task { @MainActor in
-            let survey = await manager.surveyPKCS11(config)
-            guard !Task.isCancelled else { return }
-            pkcs11Survey = survey
-            pkcs11Scanning = false
-            // Announce the outcome: this is a reveal the user just asked for, so it
-            // speaks immediately (Docs/Accessibility.md rule 2, user-initiated path).
-            let count = survey.certificates?.count ?? 0
-            if let failure = survey.failure, count == 0 {
-                AccessibilityAnnouncer.sayNow(failure.message)
-            } else if let warning = (survey.tokens ?? []).compactMap(\.pinWarning).first {
-                AccessibilityAnnouncer.sayNow(warning)
-            } else if count > 0 {
-                AccessibilityAnnouncer.sayNow(
-                    "Found \(count) certificate\(count == 1 ? "" : "s") on the token.")
-            } else if survey.modules.isEmpty {
-                AccessibilityAnnouncer.sayNow("No smartcard provider module found on this Mac.")
-            } else {
-                AccessibilityAnnouncer.sayNow("Found \(survey.modules.count) provider module\(survey.modules.count == 1 ? "" : "s").")
-            }
-        }
-    }
+    /// What turning the carve-out on actually does, in the words the Proxy Tunnel
+    /// and SSH Network Tunnel editors already use for the same decision.
+    private static let localNetworkCaveat =
+        "Traffic to the network you're on \u{2014} and to the addresses devices use to find each other "
+        + "\u{2014} leaves your Mac outside the tunnel, where anyone on that network can see it. "
+        + "Everything else still goes through the tunnel."
 
     /// The sign-in method this tunnel will actually use — the same rule the argv
     /// builder follows, so the form can never claim one thing while openconnect
@@ -1277,24 +993,17 @@ struct SubprocessTunnelView: View {
     private var passwordUnused: String? {
         switch sslMethod {
         case "certificate": "Not used when signing in with a client certificate — choose “Password” as the sign-in method to send one."
-        case "token": "Not used when signing in with a smartcard or security key — the card's PIN below unlocks it instead. Choose “Password” as the sign-in method to send a password."
+        case "token": "Not used when signing in with a smartcard or security key. SimpleVPN can't do that — see the notice below."
         case "sso": "Not used when signing in with single sign-on — the password is typed in your browser, at your identity provider."
         default: nil
         }
     }
 
-    /// Why the client-certificate rows are inert, or nil. The FILE rows and the
-    /// SMARTCARD rows are mutually exclusive: one method is used, and only one.
+    /// Why the client-certificate rows are inert, or nil — one method is used, and
+    /// only one.
     private var certificateUnused: String? {
         sslMethod == "certificate" ? nil
             : "Not used when signing in with \(sslMethodLabel) — choose “Client certificate” as the sign-in method to present one."
-    }
-
-    /// Why the verification-code token rows are inert, or nil.
-    private var tokenUnused: String? {
-        sslMethod == "sso"
-            ? "Not used with single sign-on — your identity provider asks for the code on its own page."
-            : nil
     }
 
     /// Non-blocking: the wrapper script isn't there. openconnect fails at
@@ -1373,6 +1082,28 @@ struct SubprocessTunnelView: View {
                 // words the connect list's heading uses — "full system tunnel" read as a
                 // near-miss of "full tunnel", which is the unrelated Send-All-Traffic axis.
                 SettingCaveat("With “Run In-Process” on, this becomes a whole-Mac VPN — it takes routes and every app follows it, and no SOCKS proxy is opened, so neither of the two settings above applies.")
+            }
+            // "Allow local network access", on the same terms as WireGuard, the
+            // Proxy Tunnel and the SSH Network Tunnel: the prefixes are computed
+            // once by `LocalNetworkCarveOut` and reach this kind through the same
+            // excluded-route seam. Stored Optional (nil = nobody chose = off), so
+            // the toggle writes an explicit choice, exactly like the transport one.
+            toggleRow("oc.local-lan",
+                      isOn: Binding(get: { draft.allowsLocalNetworkAccess },
+                                    set: { draft.allowLocalNetworkAccess = $0 ? true : nil }))
+            if draft.allowsLocalNetworkAccess {
+                SettingCaveat(Self.localNetworkCaveat)
+                // The honest half: on the tool this setting has nothing to act on.
+                // `ocproxy -D <port>` is a SOCKS listener with no interface and no
+                // routing table entries of its own, so there is no tunnel to carve
+                // the LAN out of — the LAN was never captured in the first place.
+                // Said as a caveat rather than a disabledReason for the same reason
+                // the SOCKS rows above are: `willRunInProcess` swings on other
+                // settings, and a row that greys itself out as you edit an unrelated
+                // field reads as a bug.
+                if !SubprocessTunnelManager.willRunInProcess(draft) {
+                    SettingCaveat("This VPN is going to run the openconnect tool, which only offers a SOCKS proxy on 127.0.0.1:\(draft.socksPort) — it takes no routes, so there is nothing for this to carve out and it has no effect. Turn on “Run In-Process” under Advanced for it to do anything.")
+                }
             }
             // The user-facing MTU, on ONE shared control (UI/Components/MTUField)
             // — it sat in Advanced beside the BASE MTU, which describes the path
@@ -1532,7 +1263,7 @@ struct SubprocessTunnelView: View {
                 // to the tool. Say which, instead of letting the toggle look
                 // effective (SubprocessTunnelManager.willRunInProcess is the gate).
                 if draft.runsInProcess, !SubprocessTunnelManager.willRunInProcess(draft) {
-                    SettingCaveat("This VPN uses settings the built-in engine can't carry (smartcard sign-in, a verification-code token, a host-checker script, a base MTU, an HTTP-keepalive override, or extra arguments), so the openconnect tool runs it instead.")
+                    SettingCaveat("This VPN uses settings the built-in engine can't carry (a host-checker script, a base MTU, an HTTP-keepalive override, or extra arguments), so the openconnect tool runs it instead.")
                 }
 
                 // F5 APM / Cisco endpoint posture (host checker / EPA).
@@ -1669,22 +1400,15 @@ struct SubprocessTunnelView: View {
     private var connectBlockedReason: String? {
         var facts = SubprocessTunnelReadiness.Facts(installedTools: TunnelCLI.installed())
         facts.hasPassword = !password.isEmpty
-        facts.hasTokenSecret = !tokenSecret.isEmpty
-        facts.hasSmartcardPIN = !pkcs11PIN.isEmpty
         if let need = SubprocessTunnelReadiness.need(for: draft, facts: facts) {
             return need.sentence
         }
-        // THE ONE CHECK THAT CANNOT MOVE: it is not a fact about the configuration but
-        // about the HARDWARE in the slot right now, learned by a survey that only runs
-        // while this editor is open. A locked token cannot be unlocked from here and
-        // further attempts do nothing but spend retries, so refuse rather than let the
-        // user burn them.
-        if sslMethod == "token",
-           let blocked = (pkcs11Survey?.tokens ?? []).first(where: \.isBlocked) {
-            return blocked.pinLocked
-                ? "The token “\(blocked.label)” has its PIN locked — unblock it with your PUK using the manufacturer's tool first."
-                : "The token “\(blocked.label)” has no PIN set yet — set one with the manufacturer's tool first."
-        }
+        // A CHECK THAT USED TO BE HERE AND IS GONE WITH ITS FEATURE: "this token's
+        // PIN is locked" was the one refusal that came from the HARDWARE rather than
+        // the configuration, read by a survey that only ran while this editor was
+        // open. There is no survey, no PIN and no attempt to spend, and a smartcard
+        // profile is refused by `SubprocessTunnelReadiness` above for a reason that
+        // needs no hardware.
         return nil
     }
 
@@ -1833,14 +1557,11 @@ struct SubprocessTunnelView: View {
         }
         proxyPassword = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(draft.id).proxy")?.password ?? ""
         jumpPassword = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(draft.id).jump")?.password ?? ""
-        tokenSecret = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(draft.id).token")?.password ?? ""
         keyPassphrase = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(draft.id).privateKey")?.password ?? ""
-        if draft.pkcs11RemembersPIN {
-            pkcs11PIN = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(draft.id).pkcs11")?.password ?? ""
-        }
-        // Look at the hardware as soon as a smartcard tunnel is opened, so the module
-        // list and any PIN-retry warning are on screen before Connect is reachable.
-        if draft.authMode == "token" { startPKCS11Survey() }
+        // NOTHING IS READ FOR A SMARTCARD OR A TOKEN SEED. Both keychain items may
+        // still exist — removing the features deliberately did not delete them
+        // (SubprocessTunnelStore.remove) — and this editor has no field to put either
+        // in, so reading one would be a keychain prompt for a value nothing uses.
         // A saved "sso" on a kind openconnect can't browser-sign-in (the store
         // migrates persisted configs, but this draft may predate it): fall back
         // to password and say so.
@@ -1877,28 +1598,18 @@ struct SubprocessTunnelView: View {
         } else {
             KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(draft.id).jump")
         }
-        // OTP token seed (--token-secret rides a private temp file at connect).
-        if !draft.tokenMode.isEmpty, !tokenSecret.isEmpty {
-            try? KeychainCredentialStore.saveCredentials(profile: "tunnel.\(draft.id).token",
-                                                         .init(username: draft.username, password: tokenSecret))
-        } else {
-            KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(draft.id).token")
-        }
+        // NO `tunnel.<id>.token` AND NO `tunnel.<id>.pkcs11` WRITE OR DELETE HERE,
+        // and the DELETE is the deliberate half. Saving an unrelated change to a
+        // profile that once had a smartcard PIN or a token seed must not destroy it:
+        // a feature removal is not the user asking for their secret to be thrown
+        // away. Deleting the profile still cleans both up
+        // (`SubprocessTunnelStore.remove`), because that IS the user asking.
         // Client private-key / PKCS#12 passphrase (--key-password).
         if !draft.clientCertFile.isEmpty || !draft.clientKeyFile.isEmpty, !keyPassphrase.isEmpty {
             try? KeychainCredentialStore.saveCredentials(profile: "tunnel.\(draft.id).privateKey",
                                                          .init(username: draft.username, password: keyPassphrase))
         } else {
             KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(draft.id).privateKey")
-        }
-        // Smartcard PIN — stored ONLY when "Remember PIN" is on, and deleted the
-        // moment it is turned off (so turning it off is a real revocation, not a
-        // display change).
-        if draft.authMode == "token", draft.pkcs11RemembersPIN, !pkcs11PIN.isEmpty {
-            try? KeychainCredentialStore.saveCredentials(profile: "tunnel.\(draft.id).pkcs11",
-                                                         .init(username: draft.username, password: pkcs11PIN))
-        } else {
-            KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(draft.id).pkcs11")
         }
         // Fire-and-forget: save() is called synchronously (Save button, Connect);
         // commitCustomRouting is idempotent and CustomRoutingTabView's own
@@ -1920,10 +1631,6 @@ struct SubprocessTunnelView: View {
 
     private func connect() {
         save()
-        // The PIN travels as its own argument, not in the password slot: the two go
-        // to different places (one to the token, one to the gateway) and merging
-        // them is how a PIN ends up in the wrong keychain item or the wrong argv.
-        manager.connect(draft, password: password.isEmpty ? nil : password,
-                        tokenPIN: pkcs11PIN.isEmpty ? nil : pkcs11PIN)
+        manager.connect(draft, password: password.isEmpty ? nil : password)
     }
 }

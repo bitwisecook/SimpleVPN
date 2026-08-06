@@ -8,7 +8,7 @@
 //  There were eight separate error enums (`PassboltError`, `BitwardenError`,
 //  `DashlaneError`, `LastPassError`, `ProtonPassError`, `KeeperError`,
 //  `KeePassFileError`, `PasswordStoreError`, plus `OPError`, `KeePassXCError`,
-//  `AppleError`, `YubiKeyToolError`, `PKCS11Failure`, `SSHAgentTransportError`), and
+//  `AppleError`, `YubiKeyToolError`, `SSHAgentTransportError`), and
 //  every caller got the same thing out of all of them: a `LocalizedError` string. So
 //  the caller could show a sentence and could do nothing else — it could not say
 //  which LEVEL of configuration to send somebody to, and it could not tell "your

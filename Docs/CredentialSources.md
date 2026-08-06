@@ -30,11 +30,20 @@ all of them, and it is not restated here.
 
 **`AuthSec*` — security sources**, which never hand over bytes:
 
-| Doc | Source |
-|---|---|
-| `AuthSecPKCS11.md` | smartcards, PIV and HSMs — SimpleVPN names a key, the module signs |
-| `AuthSecSSHAgent.md` | an SSH agent — it signs, and decides whether to |
-| `AuthSecYubiKey.md` | security keys, including the one that *types* its answer |
+| Doc | Source | State |
+|---|---|---|
+| `AuthSecSSHAgent.md` | an SSH agent — it signs, and decides whether to | ✅ built |
+| `AuthSecYubiKey.md` | security keys, including the one that *types* its answer | ✅ built |
+| `AuthSecPKCS11.md` | smartcards, PIV and HSMs | ❌ **not implemented** |
+
+The third row keeps its place in this group rather than being deleted, and the **State**
+column exists because of it. Smartcard sign-in *was* built and was removed: it had never
+been run against a real card or a real gateway, and finding out whether it worked would
+have spent attempts from a PIN counter whose exhaustion destroys the key it protects. So
+`AuthSecPKCS11.md` is no longer a description of a source — it is the record of **why**
+(the OpenSSL/GnuTLS backend split, the AMFI `dlopen` prohibition, why a GnuTLS rebuild
+would not have helped), what it would take to build properly, and where a use case
+should go. Leaving it in the group is what stops the removal reading as an oversight.
 
 Two sources deliberately have no doc of their own, because they have no vendor to
 describe: **typing it each time** and **Save in SimpleVPN** (the Apple keychain). Apple
@@ -78,11 +87,11 @@ somebody's 1Password fields.
 
 **The unified call returns a plan, not a secret** (`AuthPlan`). Three of the nine
 mechanisms never hand over bytes, and a `resolve() -> RawCredentials` seam could not
-express any of them — which is exactly why all three sat outside the credential seam
+express them — which is exactly why they sat outside the credential seam
 with their own return shapes and error conventions:
 
 - `.value` → the bytes (`RawCredentials`, unchanged: it was right for this delivery);
-- `.possession` → a **name** — an agent socket path, a `pkcs11:` URI, a slot number;
+- `.possession` → a **name** — an agent socket path, a security-key slot number;
 - `.typedByDevice` → an **armed capture**, because a security key *types* and focus
   management is therefore the whole feature.
 

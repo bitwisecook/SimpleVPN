@@ -351,7 +351,6 @@ struct SourceCardinalityTests {
         #expect(VendorConfigFieldKind.toolBinary(tool: "bw").level == .transport)
         #expect(VendorConfigFieldKind.unixSocket.level == .transport)
         #expect(VendorConfigFieldKind.daemonEndpoint.level == .transport)
-        #expect(VendorConfigFieldKind.pkcs11Module.level == .transport)
         #expect(VendorConfigFieldKind.vaultFile(extensions: ["kdbx"]).level == .instance)
         #expect(VendorConfigFieldKind.keyFile.level == .instance)
         #expect(VendorConfigFieldKind.securityKeySlot.level == .instance)

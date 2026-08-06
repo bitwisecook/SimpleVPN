@@ -123,8 +123,6 @@ nonisolated enum VendorConfigFieldKind: Sendable, Equatable {
     /// has a number in it. A separate "use a security key" switch would be a second
     /// place for the same fact to live, and the two would fall out of step.
     case securityKeySlot
-    /// A PKCS#11 module (a `.so`/`.dylib`, loaded rather than executed).
-    case pkcs11Module
     /// A DIRECTORY holding a whole store, rather than one file — a `pass` /
     /// `gopass` password store, whose entries are files inside it.
     ///
@@ -171,14 +169,19 @@ nonisolated enum VendorConfigFieldKind: Sendable, Equatable {
     /// ends up typing a username where their account name goes.
     case accountIdentifier
 
-    // NOTE on `daemonEndpoint` and `pkcs11Module`: no shipped field declares them
-    // yet. They are here because the adapters that need them are already designed —
-    // Bitwarden's `bw serve` is a loopback endpoint — and each one's validation and
-    // its setting copy are written and tested. Their presence is what makes adding
-    // either a one-row declaration instead of another branch in every switch. A
-    // field is only DECLARED when something reads it, which is why neither appears
-    // on screen: a setting nothing consults is worse than a missing one, because
-    // someone will configure it and then wonder why their VPN still fails.
+    // NOTE on `daemonEndpoint`: no shipped field declares it yet. It is here because
+    // the adapter that needs it is already designed — Bitwarden's `bw serve` is a
+    // loopback endpoint — and its validation and its setting copy are written and
+    // tested. Its presence is what makes adding it a one-row declaration instead of
+    // another branch in every switch. A field is only DECLARED when something reads
+    // it, which is why it does not appear on screen: a setting nothing consults is
+    // worse than a missing one, because someone will configure it and then wonder why
+    // their VPN still fails.
+    //
+    // A `pkcs11Module` CASE USED TO SIT BESIDE IT, for a vault unlocked by a
+    // smartcard. It is gone: nothing declared it, and it was a promise for the one
+    // feature this app has now decided against (Docs/AuthSecPKCS11.md). "A case with
+    // no producer is a promise" — AuthPlan.swift's own rule, applied here.
 
     /// The tool whose discovery result pre-fills this field, if any.
     var detectionTool: String? {
@@ -1100,7 +1103,7 @@ final class SignInSourceSettingsStore {
             // carries its account, and filling the field from a gesture the user made
             // is better than any guess.
             return nil
-        case .securityKeySlot, .daemonEndpoint, .pkcs11Module:
+        case .securityKeySlot, .daemonEndpoint:
             return nil
         }
     }
@@ -1235,8 +1238,6 @@ final class SignInSourceSettingsStore {
             }
         case .keyFile:
             return (st.st_mode & S_IFMT) == S_IFREG ? .ok : .notAFile
-        case .pkcs11Module:
-            return (st.st_mode & S_IFMT) == S_IFREG ? .ok : .missing
         case .toolBinary:
             guard (st.st_mode & S_IFMT) == S_IFREG,
                   FileManager.default.isExecutableFile(atPath: path) else { return .notExecutable }

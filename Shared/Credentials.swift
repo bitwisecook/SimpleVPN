@@ -15,7 +15,7 @@
 //
 //  `RawCredentials` below is the `.value` half of `AuthPlan` and nothing more. The
 //  other two deliveries have no fields here BY DESIGN: an SSH agent's key and a
-//  PKCS#11 token's certificate are never bytes we hold, so a field for them would be
+//  security key's own secret are never bytes we hold, so a field for them would be
 //  a field that is always nil. See `AuthPlan`.
 
 import Foundation

@@ -211,4 +211,86 @@ struct InProcessOpenConnectCoverageTests {
                     "unexpected secret key \(key)")
         }
     }
+
+    // MARK: "Allow local network access" — the same seam, and the same fail-closed rule
+
+    /// SECURITY-DETERMINING, so both directions are asserted. `be5045d` wired the
+    /// carve-out to WireGuard, the Proxy Tunnel and the SSH Network Tunnel; `51a067a`
+    /// made the SSL VPNs whole-Mac by default, and the setting did not exist for them —
+    /// so "allow local network access" had no effect on the kinds most people run.
+    ///
+    /// The TOGGLE rides `providerConfiguration` (it persists, and it is not a secret);
+    /// the PREFIXES ride `startTunnel(options:)`, because which networks this Mac is on
+    /// is a fact about right now. Absence of the key means OFF in the extension exactly
+    /// as `nil` means off here — the fail-closed direction, where traffic stays inside.
+    @Test func theLocalNetworkCarveOutTravelsAsAToggleAndDefaultsOff() {
+        // OFF by default, and "nobody ever chose" is off — not "on because the field is
+        // absent from an older config".
+        #expect(SubprocessTunnelConfig().allowLocalNetworkAccess == nil)
+        #expect(!SubprocessTunnelConfig().allowsLocalNetworkAccess)
+        #expect(conf { _ in }["localLan"] == nil, "an unset carve-out must not appear at all")
+        #expect(conf { $0.allowLocalNetworkAccess = true }["localLan"] as? Bool == true)
+        // Explicitly-off is also absent: one representation of "no carve-out".
+        #expect(conf { $0.allowLocalNetworkAccess = false }["localLan"] == nil)
+        // The setting is addressable, documented and declared off (the CLI/MDM/manual
+        // contract), and named EXACTLY as the other three kinds name it.
+        let spec = OpenConnectSettings.catalog["oc.local-lan"]
+        #expect(spec.group == .traffic)
+        #expect(!spec.isChanged(false))
+        #expect(spec.isChanged(true))
+        for other in [WireGuardSettings.catalog["wg.local-lan"],
+                      ProxyTunnelSettings.catalog["px.local-lan"],
+                      SSHNetSettings.catalog["sshnet.local-lan"]] {
+            #expect(spec.name == other.name, "one concept, one name")
+            #expect(spec.summary == other.summary, "one concept, one summary")
+        }
+    }
+
+    /// A CONFIG SAVED BEFORE THE FIELD EXISTED MUST STILL DECODE. `SubprocessTunnelConfig`
+    /// has a synthesized `Codable`, and a synthesized decoder does NOT fall back to a
+    /// property's default for a missing key — so a non-Optional `Bool` here would have
+    /// made every stored SSL VPN undecodable, which is why the field is `Bool?`
+    /// (the `proxyPasswordInArgv` precedent).
+    @Test func aConfigWithoutTheCarveOutKeyStillDecodes() throws {
+        // Built by ENCODING a real config and then removing the one key, so the fixture
+        // cannot rot as other fields are added — which is exactly what a hand-written
+        // JSON literal would do here.
+        var carved = config { $0.allowLocalNetworkAccess = true }
+        carved.tokenMode = "totp"
+        carved.authMode = "token"
+        var object = try #require(try JSONSerialization.jsonObject(
+            with: try JSONEncoder().encode(carved)) as? [String: Any])
+        #expect(object["allowLocalNetworkAccess"] != nil, "an explicit choice must be written")
+        object["allowLocalNetworkAccess"] = nil
+        let older = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(SubprocessTunnelConfig.self, from: older)
+        #expect(decoded.allowLocalNetworkAccess == nil)
+        #expect(!decoded.allowsLocalNetworkAccess, "an older config must not gain a carve-out")
+
+        // …and the two fields the smartcard / token removal left behind as MARKERS
+        // survive every path a save or a load goes through: a stored profile still says
+        // what it is, and is refused with an explanation rather than converted.
+        #expect(decoded.authMode == "token")
+        #expect(decoded.tokenMode == "totp")
+        #expect(decoded.normalized().authMode == "token", "normalized() must not convert it")
+        #expect(decoded.normalized().tokenMode == "totp")
+        #expect(SubprocessTunnelStore.migrated([decoded]).list[0].authMode == "token",
+                "load-time migration must not convert it")
+    }
+
+    /// THE WIDTH RULE, at the point the extension applies it. Every prefix the app
+    /// offers is re-validated by `RoutingRule.routeDest` — the same validator a divert
+    /// rule passes — so a `/0` arriving from anywhere can never be installed as a
+    /// "local network" and become a whole-tunnel bypass. A carve-out wider than the
+    /// truth sends traffic outside the tunnel that the user believes is inside it.
+    @Test func aLocalNetworkPrefixIsRevalidatedAndAZeroPrefixIsRefused() {
+        for good in LocalNetworkCarveOut.prefixes(of: [.init(name: "en0", subnets: ["192.168.1.34/24"])]) {
+            #expect(RoutingRule(destination: good).routeDest != nil, "\(good) should survive")
+        }
+        for bypass in ["0.0.0.0/0", "::/0", "not-an-address/24", "192.168.1.0/33"] {
+            #expect(RoutingRule(destination: bypass).routeDest == nil,
+                    "\(bypass) must never become an excluded route")
+        }
+    }
 }
