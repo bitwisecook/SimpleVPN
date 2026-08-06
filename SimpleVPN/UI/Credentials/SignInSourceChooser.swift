@@ -42,6 +42,18 @@ struct SignInSourceChooser: View {
     /// vendor. nil in a host that has no way to open a window (previews, and the
     /// compact first-connect card if it ever wants the row without the button).
     var onConfigure: ((LocalVaultVendor) -> Void)?
+    /// "Check Again" on a vendor row that is waiting on something — re-probe and say
+    /// what changed.
+    ///
+    /// THIS BUTTON IS THE WHOLE DIFFERENCE BETWEEN A LINK AND A WALKTHROUGH. Somebody
+    /// who has just followed the steps into 1Password's or Keeper's own settings comes
+    /// back wanting a straight yes or no, and a poll that quietly re-probes every
+    /// fifteen seconds does not give them one — it gives them a row that might update
+    /// while they are looking away. So the poll stays as the belt and this is the
+    /// braces: an explicit ask, with an explicit answer, at the moment they ask it.
+    ///
+    /// nil in a host with nothing to re-probe with (previews).
+    var onRecheck: ((LocalVaultVendor) -> Void)?
     /// Tighter type inside the first-connect card, which is already a card.
     var compact = false
     /// Put the keyboard on the chooser when it appears. The first-run card does;
@@ -159,25 +171,46 @@ struct SignInSourceChooser: View {
     private var showsMaturityBanner: Bool { !compact }
 
     @ViewBuilder private func fetchableRowBody(_ option: SignInSourceOption) -> some View {
-        if let vendor = option.configurableVendor, onConfigure != nil {
+        if let vendor = option.configurableVendor, onConfigure != nil || onRecheck != nil {
             HStack(alignment: .top, spacing: 8) {
                 radioRow(option)
-                Button("Configure\u{2026}") { onConfigure?(vendor) }
-                    .buttonStyle(.glass)
-                    .controlSize(.small)
-                    .help("Turn \(option.title) off, or tell SimpleVPN where its tool is")
-                    .accessibilityLabel("Configure \(option.title)")
-                    .accessibilityHint("Opens SimpleVPN\u{2019}s settings, where you can turn "
-                                       + "\(option.title) off or set where its tool is.")
-                    .accessibilityIdentifier("signin-configure-\(option.id.rawValue)")
+                // ONLY where there is something to re-check. A row that already works
+                // has nothing to report and a button offering to tell it again would be
+                // an invitation to spawn a vendor's tool for no reason.
+                if wantsRecheck(option), onRecheck != nil {
+                    Button("Check Again") { onRecheck?(vendor) }
+                        .buttonStyle(.glass)
+                        .controlSize(.small)
+                        .help("Look again, now that you have changed something in \(option.title)")
+                        .accessibilityLabel("Check \(option.title) again")
+                        .accessibilityHint("Looks again and says whether SimpleVPN can read "
+                                           + "\(option.title) now.")
+                        .accessibilityIdentifier("signin-recheck-\(option.id.rawValue)")
+                }
+                if onConfigure != nil {
+                    Button("Configure\u{2026}") { onConfigure?(vendor) }
+                        .buttonStyle(.glass)
+                        .controlSize(.small)
+                        .help("Turn \(option.title) off, or tell SimpleVPN where its tool is")
+                        .accessibilityLabel("Configure \(option.title)")
+                        .accessibilityHint("Opens SimpleVPN\u{2019}s settings, where you can turn "
+                                           + "\(option.title) off or set where its tool is.")
+                        .accessibilityIdentifier("signin-configure-\(option.id.rawValue)")
+                }
             }
-            // Holds two buttons: a container with its own sentence, never .combine.
+            // Holds buttons: a container with its own sentence, never .combine.
             .accessibilityElement(children: .contain)
             .accessibilityLabel("\(option.title). \(option.summary)")
             .accessibilityValue(option.spokenStateAndMaturity)
         } else {
             radioRow(option)
         }
+    }
+
+    /// Whether this row is waiting on something a re-probe could settle. Pure, and
+    /// stated once, so the button and any test agree about when it appears.
+    private func wantsRecheck(_ option: SignInSourceOption) -> Bool {
+        SignInSourceCatalog.readinessRank(option.state) > 0
     }
 
     private func radioRow(_ option: SignInSourceOption) -> some View {
@@ -413,7 +446,11 @@ struct SignInChooserPopover: View {
                 selection: selectedID,
                 onChoose: { choose($0) },
                 onOpenApp: { open($0) },
-                onConfigure: { configure($0) })
+                onConfigure: { configure($0) },
+                // Same "Check Again" as the first-connect card: somebody who has just
+                // switched something on in the vendor's own settings wants a straight
+                // answer here too, not a row that may update while they look away.
+                onRecheck: { _ in Task { await sources.deepScan(force: true); sources.refresh() } })
             // STEP TWO OF THE SAME QUESTION. Picking "KeePass database file" is not
             // an answer on its own: which database, and which entry in it, is what
             // makes it work — and asking that here, in order, is what keeps the

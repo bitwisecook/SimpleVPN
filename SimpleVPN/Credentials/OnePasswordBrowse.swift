@@ -122,6 +122,64 @@ nonisolated enum OnePasswordAccountMemory {
         effective(profile: profile, remembered: remembered(in: store))
     }
 
+    /// THE THREE-LEVEL PRECEDENCE, once 1Password has named CONNECTIONS rather than
+    /// one remembered string. In order, and each step is a decision:
+    ///
+    ///  1. **What this VPN says** (`CredentialSource.account`). An explicit per-VPN
+    ///     value is a choice somebody made about this VPN and outranks everything —
+    ///     the same rule `effective(profile:remembered:)` has always had.
+    ///  2. **The connection this VPN names** (level 2). This is the new step, and it
+    ///     is the whole point: with a personal account and a work tenant set up, a
+    ///     VPN pointing at the work one must ask the work one.
+    ///  3. **What we remember** (the legacy app-wide string). Still consulted, and
+    ///     not merely for politeness: it is where the value lives before
+    ///     `SourceInstanceMigration` has run, and after migration it holds the same
+    ///     string as connection #1 — so this can never contradict step 2, only
+    ///     precede it in time.
+    ///
+    /// A connection that is GONE contributes nothing rather than falling through to
+    /// another one. `SourceInstanceResolver` already refuses to substitute, and
+    /// asking the wrong tenant for somebody's VPN password is precisely the silent
+    /// failure that refusal exists to prevent — the caller surfaces
+    /// `SourceInstanceResolution.chosenIsGone` instead.
+    static func effective(profile: String, connection: String, remembered: String) -> String {
+        let own = profile.trimmingCharacters(in: .whitespaces)
+        if !own.isEmpty { return own }
+        let named = connection.trimmingCharacters(in: .whitespaces)
+        if !named.isEmpty { return named }
+        return remembered.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// The account for one profile's stored source, connection included. Reads the
+    /// settings store, so it is main-actor bound like every other level-2 read
+    /// (`KeePassFileConfiguration.current`, `PassboltConfiguration.current`).
+    @MainActor
+    static func effectiveAccount(for source: CredentialSource,
+                                 store settings: SignInSourceSettingsStore = .shared,
+                                 in store: UserDefaults = .standard) -> String {
+        effective(profile: source.account,
+                  connection: connectionAccount(source.selection.instance, store: settings),
+                  remembered: remembered(in: store))
+    }
+
+    /// The account name held by ONE connection, or "" when the connection names
+    /// nothing, does not exist any more, or none is chosen.
+    @MainActor
+    static func connectionAccount(_ wanted: SourceInstanceID?,
+                                  store: SignInSourceSettingsStore = .shared) -> String {
+        guard let instance = store.instanceStore.resolve(wanted, for: .onePassword).instance
+        else { return "" }
+        for field in SignInSourceSettings.fields(for: .onePassword) {
+            guard case .accountIdentifier = field.kind else { continue }
+            // Through `presentation` so an MDM-pinned account wins, exactly as it does
+            // for a tool path or a database.
+            let shown = store.presentation(for: field, instance: instance)
+            let value = shown.value.trimmingCharacters(in: .whitespaces)
+            if !value.isEmpty { return value }
+        }
+        return ""
+    }
+
     /// Whether a success should update what we remember. Nothing to learn from
     /// an empty name, or from the one already stored.
     static func shouldRemember(_ account: String, current: String) -> Bool {

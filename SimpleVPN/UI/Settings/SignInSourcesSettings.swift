@@ -1005,9 +1005,11 @@ struct SignInSourcesSettings: View {
             ("Choose Setup File\u{2026}",
              "Pick the setup file in the Finder instead of typing its path", [])
         // A server's address is typed, not picked: there is no Finder panel for
-        // something that is not on this Mac.
+        // something that is not on this Mac. An ACCOUNT NAME has no panel either —
+        // and, unlike the rest of these, it has no detection to fall back on, which
+        // is why the drag-in well beside it matters rather than being a nicety.
         case .serverURL, .entryFieldName, .toolBinary, .unixSocket, .daemonEndpoint,
-             .securityKeySlot, .pkcs11Module:
+             .securityKeySlot, .pkcs11Module, .accountIdentifier:
             nil
         }
     }

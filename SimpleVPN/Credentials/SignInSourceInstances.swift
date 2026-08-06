@@ -101,14 +101,24 @@ nonisolated extension LocalVaultVendor {
     /// WHETHER THIS VENDOR CAN HAVE SEVERAL INSTANCES — decided per vendor, from
     /// what the vendor actually allows through the channel SimpleVPN uses:
     ///
-    ///  • `.onePassword` — SINGLE. The channel is the running app's own signed IPC
-    ///    (`OnePasswordVaultAdapter`, `.signedIPC`); there is one app, and nothing
-    ///    instance-shaped for us to configure or probe — no path, no endpoint, no
-    ///    file. 1Password accounts and vaults are real and a person may have
-    ///    several, but they are 1Password's own namespace and are already addressed
-    ///    PER VPN (`CredentialSource.account` / `.vault`), which is level 3 where
-    ///    they belong. An instance list here would be a list of rows with no fields
-    ///    in them.
+    ///  • `.onePassword` — MULTIPLE, and this one was `.single` until the distinction
+    ///    between an ACCOUNT and a VAULT was drawn properly. The old reasoning was
+    ///    that accounts and vaults "are 1Password's own namespace and are already
+    ///    addressed PER VPN", and half of that was right: a VAULT is *scope*, it is
+    ///    not configured at all, and `Docs/Onboarding.md` says why (we ride
+    ///    1Password's own search rather than enumerating, which is what keeps the
+    ///    first run prompt-free). An ACCOUNT is not scope. It is *which 1Password we
+    ///    are talking to at all*, a person can have a personal one and a work tenant
+    ///    signed in at the same moment, and — decisively — it CANNOT BE DISCOVERED:
+    ///    the desktop integration rejects an account it can't match, the empty string
+    ///    included, and nothing in the SDK hands out a list of the ones the app is
+    ///    signed into. So it is a thing the user tells us, once per account, app-wide,
+    ///    which is the definition of a level-2 connection.
+    ///
+    ///    It was already stored app-wide, as one string, by `OnePasswordAccountMemory`
+    ///    — a hand-rolled singleton connection sitting beside the general mechanism
+    ///    built for exactly this. Sharing that defaults key is what makes migration
+    ///    free: the remembered account becomes connection #1.
     ///  • `.keePassXC` — SINGLE. One running app, one browser-integration socket
     ///    per login session (level 1). The app decides which of its open databases
     ///    matches an entry; SimpleVPN never names one.
@@ -152,7 +162,7 @@ nonisolated extension LocalVaultVendor {
     ///    prevent, in the other direction from `.keePassFile`'s.
     var cardinality: SourceCardinality {
         switch self {
-        case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane, .lastPass, .protonPass:
+        case .keePassXC, .keeper, .bitwarden, .dashlane, .lastPass, .protonPass:
             .single
         // MULTIPLE, for the same reason as a .kdbx and then some: PASSWORD_STORE_DIR
         // exists precisely so one person can keep several stores, and "work" and
@@ -164,7 +174,9 @@ nonisolated extension LocalVaultVendor {
         // needs a second config file and `--config` — which is precisely a
         // per-instance setting, not a per-Mac one. A company Passbolt and a
         // self-hosted personal one, with different keys, is entirely ordinary.
-        case .keePassFile, .passwordStore, .passbolt: .multiple
+        // MULTIPLE, and the only one whose instance is neither a file nor a server but
+        // an ACCOUNT — see the note above.
+        case .keePassFile, .passwordStore, .passbolt, .onePassword: .multiple
         }
     }
 
@@ -179,7 +191,13 @@ nonisolated extension LocalVaultVendor {
         // that is the word Passbolt itself uses, and calling it a vault would hide
         // the one fact that matters — it is somewhere else, over a network.
         case .passbolt: "server"
-        case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane, .lastPass, .protonPass:
+        // NOT "vault", and the difference is the whole point of 1Password being
+        // `.multiple`: what somebody sets up here is an ACCOUNT — the thing named at
+        // the top of 1Password's sidebar — and calling it a vault would ask them for
+        // the wrong string. Their vaults are inside it, and SimpleVPN does not ask
+        // about those at all.
+        case .onePassword: "account"
+        case .keePassXC, .keeper, .bitwarden, .dashlane, .lastPass, .protonPass:
             "vault"
         }
     }
@@ -189,7 +207,8 @@ nonisolated extension LocalVaultVendor {
         case .keePassFile: "databases"
         case .passwordStore: "stores"
         case .passbolt: "servers"
-        case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane, .lastPass, .protonPass:
+        case .onePassword: "accounts"
+        case .keePassXC, .keeper, .bitwarden, .dashlane, .lastPass, .protonPass:
             "vaults"
         }
     }
@@ -209,7 +228,11 @@ nonisolated extension LocalVaultVendor {
         case .passwordStore: "the folder itself is left exactly as it is"
         case .passbolt:
             "nothing on the server changes, and Passbolt\u{2019}s own setup is left alone"
-        case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane, .lastPass, .protonPass:
+        // Says ACCOUNT, and says the one thing somebody removing it will worry about:
+        // SimpleVPN is forgetting a name it was told, not signing anybody out.
+        case .onePassword:
+            "nothing in 1Password changes and you stay signed in to it"
+        case .keePassXC, .keeper, .bitwarden, .dashlane, .lastPass, .protonPass:
             "nothing in the vault itself changes"
         }
     }
@@ -367,8 +390,16 @@ nonisolated extension VendorConfigFieldKind {
         // the `passbolt` binary, which is one per Mac. And a vendor tool's own
         // config FILE is level 2 whenever it holds one server's sign-in setup,
         // which `go-passbolt-cli`'s does: two servers means two files.
+        //
+        // AN ACCOUNT IDENTIFIER is level 2 as well, and it is the case that forced
+        // the distinction to be stated rather than assumed: it sounds
+        // transport-shaped ("how do we reach 1Password?") and is not. There is one
+        // 1Password app on this Mac and one signed IPC channel to it — that is
+        // level 1, and it has no fields at all. WHICH ACCOUNT is which sign-in of the
+        // user's we are asking, and a person may have a personal one and a work
+        // tenant signed in at once.
         case .vaultFile, .keyFile, .securityKeySlot, .storeDirectory, .entryFieldName,
-             .serverURL, .toolConfigFile: .instance
+             .serverURL, .toolConfigFile, .accountIdentifier: .instance
         }
     }
 }

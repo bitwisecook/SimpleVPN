@@ -320,10 +320,50 @@ struct SignInSourceSettingsStoreTests {
         #expect(settings.validate(file.path, field: field) == .notASocket)
     }
 
-    /// 1Password has no path to get wrong: its channel is the app's own signed IPC.
-    /// A field here would be a question with no answer.
-    @Test func onePasswordHasNoPathField() {
-        #expect(SignInSourceSettings.fields(for: .onePassword).isEmpty)
+    /// 1Password has no PATH to get wrong: its channel is the app's own signed IPC,
+    /// so a binary, a socket or an endpoint here would be a question with no answer.
+    ///
+    /// What it does have is its ACCOUNT, and the distinction is the point rather than
+    /// a technicality: the account is not how we reach 1Password (there is one app and
+    /// one channel to it — that is level 1, and it is empty), it is WHICH 1Password we
+    /// are asking, which is a level-2 connection. It is also the one thing here that
+    /// genuinely cannot be discovered: the desktop integration refuses a request that
+    /// does not name an account, and nothing in the SDK hands out a list of the ones
+    /// the app is signed into.
+    @Test func onePasswordHasNoPathFieldOnlyItsAccount() throws {
+        let fields = SignInSourceSettings.fields(for: .onePassword)
+        // Level 1 is empty: nothing about REACHING 1Password is configurable.
+        #expect(SignInSourceSettings.transportFields(for: .onePassword).isEmpty)
+        // …and every field it does have is level 2 and is the account.
+        let field = try #require(fields.first)
+        #expect(fields.count == 1)
+        #expect(field.level == .instance)
+        guard case .accountIdentifier = field.kind else {
+            Issue.record("1Password's only field should be its account, not \(field.kind)")
+            return
+        }
+        // It shares the key `OnePasswordAccountMemory` already used, which is what
+        // makes migration into connection #1 free rather than bespoke.
+        #expect(field.defaultsKey == OnePasswordAccountMemory.defaultsKey)
+    }
+
+    /// An account name is a NAME, and nothing on this Mac can check it. Accepting the
+    /// shape and letting the first real use produce the verdict is deliberate: the
+    /// only way to check would be a call to 1Password, which raises its own approval
+    /// prompt — from a settings field, on every keystroke.
+    @Test func anAccountFieldAcceptsAnyNameAndSuggestsNothing() throws {
+        let (settings, _) = store()
+        let field = try #require(SignInSourceSettings.fields(for: .onePassword).first)
+        #expect(settings.validate("my.1password.com", field: field) == .ok)
+        // Not a path, so the absolute-path rule must never be applied to it.
+        #expect(settings.validate("Work", field: field) == .ok)
+        #expect(settings.detected(for: field) == nil)
+        // …and the example is a PROMPT, never a value — the landmine this project
+        // shipped once.
+        let shown = settings.presentation(for: field)
+        #expect(shown.value.isEmpty)
+        #expect(shown.prompt == field.example)
+        #expect(!shown.isSet)
     }
 
     /// `ykman` gets its row HERE, writing the SAME `signin.tool.ykman.path` key the

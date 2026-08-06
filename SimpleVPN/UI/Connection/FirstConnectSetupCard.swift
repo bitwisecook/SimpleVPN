@@ -102,6 +102,7 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                 selection: selectedID,
                 onChoose: { choose($0) },
                 onOpenApp: { open($0) },
+                onRecheck: { recheck($0) },
                 compact: true)
 
             switch source.kind {
@@ -456,6 +457,37 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
         // Choosing 1Password is the first genuine need for a 1Password lookup —
         // and the only moment this card is allowed to raise its approval prompt.
         if kind == .onePassword { checkOnePassword(force: false) }
+    }
+
+    /// "Check Again" on a row that is waiting on something. THE ANSWER IS SPOKEN AND
+    /// SHOWN, which is the point: somebody who has just gone into 1Password's or
+    /// Keeper's own settings and come back wants a straight yes or no, not a row that
+    /// may have quietly updated while they were looking away.
+    ///
+    /// It re-probes EVERY vendor rather than one, because `deepScanAll` is the only
+    /// pass there is and it already skips the vendors the user has switched off — and
+    /// because the thing somebody just enabled is frequently not the row they pressed
+    /// (installing `keepassxc-cli` settles the KeePass-file row, not the KeePassXC
+    /// one). The scan is sequential on purpose: two vendor approval dialogs at once is
+    /// a mess.
+    private func recheck(_ vendor: LocalVaultVendor) {
+        let before = sources.facts.availability(vendor)
+        Task {
+            // 1Password's own preflight is the more specific check, and it is the one
+            // that clears its "the integration is off" state — so a re-check of that
+            // row pays for it as well.
+            if vendor == .onePassword { checkOnePassword(force: true) }
+            await sources.deepScan(force: true)
+            sources.refresh()
+            let after = sources.facts.availability(vendor)
+            let title = LocalVaultCopyBook.copy(for: vendor).title
+            // A straight answer either way. "Nothing changed" is a real answer and is
+            // more use than silence, which reads as "the button did nothing".
+            AccessibilityAnnouncer.sayNow(
+                after == .ready ? "\(title) is ready to use now."
+                    : after == before ? "\(title) still isn\u{2019}t ready. Nothing has changed yet."
+                    : "\(title): \(after.spokenChange)")
+        }
     }
 
     /// A pointer row's button: open the app the user's password is probably in.

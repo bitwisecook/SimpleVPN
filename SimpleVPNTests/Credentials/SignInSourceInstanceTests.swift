@@ -265,13 +265,61 @@ struct SourceCardinalityTests {
     /// `LocalVaultVendor.cardinality`'s own documentation — a new vendor has to make
     /// it, because this test names every case.
     @Test func everyVendorDeclaresItsCardinality() {
-        #expect(LocalVaultVendor.onePassword.cardinality == .single)
+        // 1Password: MULTIPLE, and it was `.single` until an ACCOUNT and a VAULT were
+        // told apart. A vault is scope — never configured here, because SimpleVPN
+        // rides 1Password's own search rather than enumerating (which is what keeps
+        // the first run prompt-free). An account is which 1Password we are asking at
+        // all, a personal one and a work tenant can be signed in at once, and it
+        // cannot be discovered.
+        #expect(LocalVaultVendor.onePassword.cardinality == .multiple)
+        // …and its noun is "account", not "vault": asking for the wrong one would ask
+        // the user for the wrong string.
+        #expect(LocalVaultVendor.onePassword.instanceNoun == "account")
         #expect(LocalVaultVendor.keePassXC.cardinality == .single)
         #expect(LocalVaultVendor.keeper.cardinality == .single)
         #expect(LocalVaultVendor.bitwarden.cardinality == .single)
         // The case that named the problem: a `.kdbx` is a file, and "work" and
         // "personal" are entirely ordinary.
         #expect(LocalVaultVendor.keePassFile.cardinality == .multiple)
+    }
+
+    /// THE ACCOUNT PRECEDENCE, pinned. Three levels, in order, and the middle one is
+    /// the new step: with a work tenant and a personal account both set up, a VPN
+    /// naming the work connection must ask the work tenant. Getting this wrong is
+    /// silent — it reads the wrong account's entry, or finds nothing and looks like a
+    /// broken vault.
+    @Test func aVPNsOwnAccountOutranksItsConnectionWhichOutranksTheRememberedOne() {
+        // What this VPN says wins outright: it is a choice somebody made about it.
+        #expect(OnePasswordAccountMemory.effective(
+            profile: "mine", connection: "work", remembered: "old") == "mine")
+        // With nothing per-VPN, the connection it names decides.
+        #expect(OnePasswordAccountMemory.effective(
+            profile: "", connection: "work", remembered: "old") == "work")
+        // With neither, the remembered one — which is where the value lives before
+        // migration has run, and holds the same string as connection #1 after.
+        #expect(OnePasswordAccountMemory.effective(
+            profile: "", connection: "", remembered: "old") == "old")
+        // Nothing anywhere is "", not a guess. 1Password refuses that too, with a
+        // message that asks for the account by name.
+        #expect(OnePasswordAccountMemory.effective(
+            profile: "  ", connection: " ", remembered: "") == "")
+    }
+
+    /// A remembered account becomes CONNECTION #1, for free, because the field shares
+    /// the defaults key `OnePasswordAccountMemory` already wrote. No bespoke migration
+    /// code, and nothing lost: the legacy key is read and left exactly where it is.
+    @Test func aRememberedAccountMigratesIntoTheFirstConnection() throws {
+        let field = try #require(SignInSourceSettings.fields(for: .onePassword).first)
+        let migrated = SourceInstanceMigration.migrate(
+            vendor: .onePassword, legacy: [field.instanceKey: "work.1password.com"])
+        let first = try #require(migrated.first)
+        #expect(migrated.count == 1)
+        #expect(first.value(for: field) == "work.1password.com")
+        // Named after the account itself: 1Password has no file-shaped field to take a
+        // stem from, so the fallback is the vendor's own title rather than a number.
+        #expect(!first.name.isEmpty)
+        // Nothing remembered ⇒ no connection invented.
+        #expect(SourceInstanceMigration.migrate(vendor: .onePassword, legacy: [:]).isEmpty)
     }
 
     /// A singular vendor is not given a meaningless list to manage.
@@ -686,5 +734,121 @@ struct SourceInstanceSettingsTests {
         let reason = store.instanceStore.addLockReason(.keeper)
         #expect(reason?.contains("only one") == true)
         #expect(store.instances(for: .keeper).isEmpty)
+    }
+}
+
+// MARK: - The seam between the two halves: a second VPN must not re-ask
+
+/// THE ONE INVARIANT that says the app-wide half and the per-VPN half were separated
+/// properly. Being asked to set 1Password up again on the second VPN would be the
+/// clearest possible sign they were not — so it is pinned rather than assumed.
+///
+/// Onboarding is the only flow that crosses the boundary (`Docs/Onboarding.md`);
+/// afterwards each half is edited in its own place, and the app-wide half is shared
+/// by every VPN.
+@MainActor
+struct SecondVPNReusesConnectionTests {
+
+    private func settings() -> (SignInSourceSettingsStore, UserDefaults) {
+        let defaults = UserDefaults(suiteName: "SecondVPNReusesConnection.\(UUID().uuidString)")!
+        return (SignInSourceSettingsStore(store: defaults), defaults)
+    }
+
+    private var accountField: VendorConfigField {
+        SignInSourceSettings.instanceFields(for: .onePassword)[0]
+    }
+
+    /// Setting a connection up ONCE serves every VPN. The second VPN reads the same
+    /// list, resolves to the same connection, and gets the same account — with nothing
+    /// per-VPN stored at all.
+    @Test func aConnectionSetUpOnceServesEveryVPN() throws {
+        let (store, defaults) = settings()
+        let created = try #require(store.instanceStore.add(named: "Work", for: .onePassword))
+        store.setValue("work.1password.com", for: accountField, instance: created)
+
+        // VPN #1 names the connection explicitly — the ordinary result of onboarding.
+        var first = CredentialSource()
+        first.kind = .onePassword
+        first.reference = "GR Lab"
+        first.instanceID = created.id.rawValue
+        #expect(OnePasswordAccountMemory.effectiveAccount(
+            for: first, store: store, in: defaults) == "work.1password.com")
+
+        // VPN #2 was set up afterwards and names NOTHING at level 2 — which is what a
+        // second VPN looks like when the flow correctly does not re-ask. It must still
+        // land on the same account, through the DEFAULT connection.
+        var second = CredentialSource()
+        second.kind = .onePassword
+        second.reference = "Other VPN"
+        #expect(second.instanceID.isEmpty)
+        #expect(OnePasswordAccountMemory.effectiveAccount(
+            for: second, store: store, in: defaults) == "work.1password.com")
+    }
+
+    /// Adding a SECOND connection must not disturb the first, and must not silently
+    /// repoint the VPNs already using it. The default stays the default: migration's
+    /// connection is always first in the list, which is what keeps every existing
+    /// profile pointing where it always pointed.
+    @Test func addingASecondConnectionLeavesTheFirstAlone() throws {
+        let (store, defaults) = settings()
+        let work = try #require(store.instanceStore.add(named: "Work", for: .onePassword))
+        store.setValue("work.1password.com", for: accountField, instance: work)
+
+        var vpn = CredentialSource()
+        vpn.kind = .onePassword
+        vpn.reference = "GR Lab"
+        // Deliberately unset, like every profile written before a second connection
+        // existed.
+        #expect(vpn.instanceID.isEmpty)
+
+        let personal = try #require(store.instanceStore.add(named: "Personal", for: .onePassword))
+        store.setValue("my.1password.com", for: accountField, instance: personal)
+
+        #expect(store.instances(for: .onePassword).map(\.name) == ["Work", "Personal"])
+        // The first is still the default, so the VPN still asks the work tenant.
+        #expect(OnePasswordAccountMemory.effectiveAccount(
+            for: vpn, store: store, in: defaults) == "work.1password.com")
+        // …and the first connection's own value was not touched.
+        #expect(store.presentation(for: accountField, instance: work).value
+            == "work.1password.com")
+    }
+
+    /// A VPN naming a connection that has GONE gets nothing rather than somebody
+    /// else's account. Asking the wrong tenant for a password is the silent failure
+    /// this refusal exists to prevent.
+    @Test func aVPNNamingAGoneConnectionIsNeverRepointed() throws {
+        let (store, defaults) = settings()
+        let work = try #require(store.instanceStore.add(named: "Work", for: .onePassword))
+        store.setValue("work.1password.com", for: accountField, instance: work)
+        let personal = try #require(store.instanceStore.add(named: "Personal", for: .onePassword))
+        store.setValue("my.1password.com", for: accountField, instance: personal)
+
+        var vpn = CredentialSource()
+        vpn.kind = .onePassword
+        vpn.reference = "GR Lab"
+        vpn.instanceID = personal.id.rawValue
+        #expect(OnePasswordAccountMemory.effectiveAccount(
+            for: vpn, store: store, in: defaults) == "my.1password.com")
+
+        store.instanceStore.remove(personal.id, for: .onePassword)
+        // NOT "work.1password.com": the resolution is `.chosenIsGone`, which carries no
+        // instance, so there is no account to hand over and the readiness path says so.
+        #expect(store.instanceStore.resolve(personal.id, for: .onePassword)
+            == .chosenIsGone(personal.id))
+        #expect(OnePasswordAccountMemory.effectiveAccount(
+            for: vpn, store: store, in: defaults) == "")
+    }
+
+    /// Removing a connection NAMES the VPNs that still use it, in the vendor's own
+    /// noun — "account" for 1Password, never "vault" and never "instance".
+    @Test func removingAConnectionNamesTheVPNsAndSaysAccount() {
+        let warning = SignInSourceSteps.removalWarning(
+            vendor: .onePassword, name: "Work", usedBy: ["GR Lab", "Office"])
+        #expect(warning.contains("account"))
+        #expect(!warning.contains("vault"))
+        #expect(!warning.lowercased().contains("instance"))
+        #expect(warning.contains("GR Lab") && warning.contains("Office"))
+        // …and reassures about the one thing somebody will worry about.
+        #expect(warning.contains("signed in"))
     }
 }

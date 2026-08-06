@@ -302,6 +302,23 @@ nonisolated enum LocalVaultAvailability: Sendable, Equatable {
         case .ready: 3
         }
     }
+
+    /// WHAT A RE-CHECK LEARNED, in one clause, for the announcement after "Check
+    /// Again". Never a status code and never a block's raw name.
+    ///
+    /// It exists because "nothing changed" is a real answer that has to be told apart
+    /// from "the button did nothing": a re-check that reports neither leaves somebody
+    /// pressing it again. The per-block sentences the ROW already shows stay where they
+    /// are — this is deliberately the short version, because it is spoken over the top
+    /// of a row that is about to say the long one.
+    var spokenChange: String {
+        switch self {
+        case .notInstalled: "it isn\u{2019}t on this Mac."
+        case .blocked: "there is still something to do first \u{2014} the steps are on its row."
+        case .unchecked: "it looks ready; SimpleVPN will know for certain the first time you use it."
+        case .ready: "it is ready to use now."
+        }
+    }
 }
 
 // MARK: - Where the vendor's own documentation lives
@@ -1348,20 +1365,80 @@ nonisolated enum SignInSourceCatalog {
     }
 
     static func fetchable(_ facts: SignInSourceFacts) -> [SignInSourceOption] {
+        // THE THREE THAT ARE ALWAYS THERE, always in this order, and always at the
+        // top. "Type it each time" is FIRST and is never moved: it is the answer for
+        // somebody who wants no integration at all, and burying it under a detected
+        // product would be an answer to a question they did not ask. Neither of the
+        // first two depends on anything being installed, so no amount of detection can
+        // reorder them.
         var out: [SignInSourceOption] = [typeEachTime()]
         if facts.allowsPasswordSave {
             out.append(saveInSimpleVPN(biometricsAvailable: facts.biometricsAvailable))
         }
         out.append(applePasswords())
-        // Vendor order is the enum's order — stable, and one place to change.
-        for vendor in LocalVaultVendor.allCases {
-            if let option = vaultOption(
-                vendor, availability: facts.availability(vendor),
-                foundOutsideAllowList: facts.toolsFoundOutsideAllowList[vendor]) {
-                out.append(option)
-            }
-        }
+        out += vendorRows(facts)
         return out
+    }
+
+    /// The vendor rows, ORDERED BY WHAT WILL WORK HERE WITH THE FEWEST STEPS — see
+    /// `readinessRank`. Split out from `fetchable` so the ordering is testable on its
+    /// own, which is the only way an ordering rule stays true.
+    static func vendorRows(_ facts: SignInSourceFacts) -> [SignInSourceOption] {
+        let rows = LocalVaultVendor.allCases.compactMap { vendor in
+            vaultOption(vendor, availability: facts.availability(vendor),
+                        foundOutsideAllowList: facts.toolsFoundOutsideAllowList[vendor])
+                .map { (vendor: vendor, option: $0) }
+        }
+        // Stable sort by hand: `sorted(by:)` is not guaranteed stable, and the last
+        // key IS the enum's own order, which is the tie-break of record.
+        return rows.enumerated().sorted { left, right in
+            let (a, b) = (left.element, right.element)
+            let ranks = (readinessRank(a.option.state), readinessRank(b.option.state))
+            if ranks.0 != ranks.1 { return ranks.0 < ranks.1 }
+            // MATURITY breaks the tie, so a source whose code has been proven is
+            // offered ahead of one that has not. It ranks OUR confidence in OUR
+            // adapter and says nothing about which product is better — and an untested
+            // row still carries its Untested banner and its feedback link, because
+            // first run is exactly where somebody meets an untried adapter.
+            let maturities = (maturityRank(a.option), maturityRank(b.option))
+            if maturities.0 != maturities.1 { return maturities.0 < maturities.1 }
+            return left.offset < right.offset
+        }.map(\.element.option)
+    }
+
+    /// HOW CLOSE THIS SOURCE IS TO WORKING ON THIS MAC. Lower is closer.
+    ///
+    /// This is the ordering key, and it is deliberately a fact about the Mac rather
+    /// than an opinion about the vendor: a source that already works needs no steps, a
+    /// source we have not been able to check yet needs a try, and a source waiting on a
+    /// toggle needs a trip to another app. A row for something not installed does not
+    /// exist at all (`vaultOption` returns nil), so a first run never lists ten
+    /// products the user does not own.
+    ///
+    /// `.unchecked` sits ABOVE `.needsSetup` on purpose. "We will know once you try" is
+    /// nearer to working than "go and switch this on", and putting an unproven row
+    /// below a blocked one would imply we know it is worse — which is precisely the
+    /// certainty an `.unchecked` row exists to disclaim.
+    static func readinessRank(_ state: SignInSourceState) -> Int {
+        switch state {
+        case .ready: 0
+        case .unchecked: 1
+        case .needsSetup: 2
+        }
+    }
+
+    /// Registered maturity, as a sort key. Never a claim about the product.
+    ///
+    /// `.partlyVerified` sits between the two rather than being folded into either:
+    /// something whose channel has been exercised really is a better bet than something
+    /// that has never run, and calling it `.tested` would be the lie
+    /// `FeatureMaturity`'s own third case exists to avoid.
+    static func maturityRank(_ option: SignInSourceOption) -> Int {
+        switch option.maturity {
+        case .tested: 0
+        case .partlyVerified: 1
+        case .untested: 2
+        }
     }
 
     /// The pointer rows on their own (the chooser gives them their own heading).

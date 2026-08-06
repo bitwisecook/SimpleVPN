@@ -64,6 +64,114 @@ struct SignInSourceCatalogTests {
         #expect(SignInSourceCatalog.options(bareMac()).first?.id == .typeEachTime)
     }
 
+    // MARK: - Ordering: what works here, not what we prefer
+
+    /// A source that ALREADY WORKS is offered ahead of one waiting on a toggle, and
+    /// an UNPROVEN one sits between them. The order is a fact about this Mac — how
+    /// many steps until it works — and never an opinion about the product.
+    ///
+    /// `.unchecked` above `.needsSetup` is the deliberate part: "we will know once you
+    /// try" is nearer to working than "go and switch this on", and ranking it below
+    /// would imply we know it is worse, which is exactly the certainty an unchecked
+    /// row exists to disclaim.
+    @Test func aWorkingSourceIsOfferedBeforeOneThatNeedsSetup() {
+        var facts = bareMac()
+        // KeePassXC is EARLIER in the enum than Keeper, so enum order alone would put
+        // the blocked one first — which is what this rule overturns.
+        facts.vaults[.keePassXC] = .blocked(.integrationOff)
+        facts.vaults[.keeper] = .ready
+        let rows = SignInSourceCatalog.vendorRows(facts).map(\.id)
+        #expect(rows == [.vault(.keeper), .vault(.keePassXC)])
+    }
+
+    /// …and unproven sits between the two.
+    @Test func anUnprovenSourceSitsBetweenWorkingAndBlocked() {
+        var facts = bareMac()
+        facts.vaults[.onePassword] = .blocked(.integrationOff)
+        facts.vaults[.keePassXC] = .ready
+        facts.vaults[.keeper] = .unchecked(.checkOwedOnUse)
+        let rows = SignInSourceCatalog.vendorRows(facts).map(\.id)
+        #expect(rows == [.vault(.keePassXC), .vault(.keeper), .vault(.onePassword)])
+    }
+
+    /// The three that need no detection are never reordered by it: typing first, the
+    /// keychain second, Apple Passwords third, whatever is installed. A detected
+    /// product must not push "type it each time" down the list — it is the answer for
+    /// somebody who wants no integration at all.
+    @Test func detectionNeverReordersTheThreeThatAlwaysWork() {
+        var facts = bareMac()
+        for vendor in LocalVaultVendor.allCases { facts.vaults[vendor] = .ready }
+        let rows = SignInSourceCatalog.fetchable(facts).map(\.id)
+        #expect(Array(rows.prefix(3)) == [.typeEachTime, .saveInSimpleVPN, .applePasswords])
+    }
+
+    /// Maturity breaks a tie between two equally ready sources, so a proven adapter is
+    /// offered ahead of an unproven one — and the ranking is OUR confidence in OUR
+    /// code, never a claim about the vendor.
+    @Test func maturityBreaksATieBetweenTwoReadySources() {
+        var facts = bareMac()
+        let vendors: [LocalVaultVendor] = [.onePassword, .keePassXC, .keeper, .bitwarden,
+                                           .dashlane, .keePassFile, .passwordStore,
+                                           .lastPass, .protonPass, .passbolt]
+        for vendor in vendors { facts.vaults[vendor] = .ready }
+        let rows = SignInSourceCatalog.vendorRows(facts)
+        // Ranks are non-decreasing down the list: no untested row may appear above a
+        // tested one when both are ready.
+        let ranks = rows.map { SignInSourceCatalog.maturityRank($0) }
+        #expect(ranks == ranks.sorted())
+    }
+
+    /// An untested source STILL carries its notice. First run is exactly where
+    /// somebody meets an untried adapter, so ordering it lower must never be mistaken
+    /// for having warned them.
+    @Test func anUntestedRowKeepsItsNoticeWhereverItIsOrdered() {
+        var facts = bareMac()
+        for vendor in LocalVaultVendor.allCases { facts.vaults[vendor] = .ready }
+        for row in SignInSourceCatalog.vendorRows(facts) where row.maturity.needsNotice {
+            #expect(row.maturityNotice != nil,
+                    "\(row.id) is not tested but carries no notice")
+        }
+    }
+
+    /// A source that is NOT INSTALLED gets no row at all — a first-run screen listing
+    /// ten products somebody does not own is noise, not helpfulness.
+    @Test func anAbsentSourceIsOmittedRatherThanRankedLast() {
+        var facts = bareMac()
+        facts.vaults[.keeper] = .ready
+        let rows = SignInSourceCatalog.vendorRows(facts).map(\.id)
+        #expect(rows == [.vault(.keeper)])
+    }
+
+    // MARK: - "Check Again": the affordance that makes it a walkthrough
+
+    /// The button appears exactly where a re-probe could settle something, and NOT on a
+    /// row that already works — offering to re-check a working source would invite
+    /// spawning a vendor's tool for no reason. `readinessRank` is the shared rule, so
+    /// the button and the ordering can never disagree about what "waiting" means.
+    @Test func onlyARowWaitingOnSomethingWantsARecheck() {
+        #expect(SignInSourceCatalog.readinessRank(.ready) == 0)
+        #expect(SignInSourceCatalog.readinessRank(.unchecked(note: "n")) > 0)
+        #expect(SignInSourceCatalog.readinessRank(.needsSetup(headline: "h", steps: [])) > 0)
+    }
+
+    /// A re-check ALWAYS produces a sentence, including when nothing changed. Silence
+    /// after pressing a button reads as "the button did nothing", which sends somebody
+    /// pressing it again — and each of these four says what to do next without naming a
+    /// status code.
+    @Test func everyRecheckOutcomeHasASpokenAnswer() {
+        let outcomes: [LocalVaultAvailability] = [
+            .notInstalled, .blocked(.integrationOff), .unchecked(.checkOwedOnUse), .ready,
+        ]
+        for outcome in outcomes {
+            let said = outcome.spokenChange
+            #expect(!said.isEmpty)
+            // Plain language only: no raw case names leaking into speech.
+            #expect(!said.contains("integrationOff"))
+            #expect(!said.contains("notInstalled"))
+            #expect(!said.lowercased().contains("credential"))
+        }
+    }
+
     /// A profile that forbids saving the password (`auth-nocache`) must not be
     /// offered the keychain row — offering a setting the engine refuses is the
     /// definition of a dead option.

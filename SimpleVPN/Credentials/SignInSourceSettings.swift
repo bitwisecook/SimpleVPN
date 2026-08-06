@@ -153,6 +153,23 @@ nonisolated enum VendorConfigFieldKind: Sendable, Equatable {
     /// database" but "can anybody else on this Mac read it", which is a sentence
     /// the other kinds have no use for.
     case toolConfigFile
+    /// WHICH ACCOUNT of a vendor SimpleVPN is talking to — 1Password's sidebar name
+    /// or the same account's UUID. A name, never a secret.
+    ///
+    /// The first field kind that identifies neither a place on this Mac nor a place
+    /// on a network, but a *sign-in of the user's* inside the vendor's own product.
+    /// It is `.instance` level (see `VendorConfigFieldKind.level`) because it is the
+    /// answer to "which 1Password are we asking", which is exactly what a level-2
+    /// connection is — and NOT `.transport`, because there is one 1Password app on
+    /// this Mac and it may be signed into a personal account and a work tenant at
+    /// the same time.
+    ///
+    /// Deliberately not `entryFieldName`, which is also free text: that names a line
+    /// INSIDE an entry and belongs to a store's layout, while this names the account
+    /// an entry is looked up in. Same shape, different question, different copy —
+    /// and one kind rendering as two rows with unrelated meanings is how somebody
+    /// ends up typing a username where their account name goes.
+    case accountIdentifier
 
     // NOTE on `daemonEndpoint` and `pkcs11Module`: no shipped field declares them
     // yet. They are here because the adapters that need them are already designed —
@@ -293,10 +310,31 @@ nonisolated enum SignInSourceSettings {
     static func fields(for vendor: LocalVaultVendor) -> [VendorConfigField] {
         switch vendor {
         case .onePassword:
-            // Nothing: 1Password is reached over its own SDK's signed IPC to the
-            // running app. There is no socket to point at and no binary to find,
-            // so there is no field to get wrong.
-            []
+            // ONE row, and it is not a path: there is no socket to point at and no
+            // binary to find, because 1Password is reached over its own SDK's signed
+            // IPC to the running app.
+            //
+            // WHICH ACCOUNT, though, cannot be discovered and must be supplied. The
+            // desktop integration answers an account it cannot match — THE EMPTY
+            // STRING INCLUDED — with "Account not found", and nothing in the SDK
+            // hands out a list of the accounts the app is signed into. So this is
+            // the one thing about reaching 1Password that a person has to tell us,
+            // and it is INSTANCE level because somebody with a personal account and a
+            // work tenant has two of them.
+            //
+            // It shares its defaults key with `OnePasswordAccountMemory`, which held
+            // exactly this value as a single app-wide string before connections
+            // existed. That is what makes `SourceInstanceMigration` turn a remembered
+            // account into connection #1 with no migration code of its own.
+            [VendorConfigField(
+                settingID: "creds.onepassword.account",
+                vendor: .onePassword,
+                ownerTitle: LocalVaultVendor.onePassword.displayTitle,
+                kind: .accountIdentifier,
+                defaultsKey: OnePasswordAccountMemory.defaultsKey,
+                // The shape of a sidebar name, not a real one. Shown as a
+                // placeholder and nowhere else.
+                example: "my.1password.com")]
         case .keePassXC:
             [VendorConfigField(
                 settingID: "creds.keepassxc.socket",
@@ -1053,6 +1091,15 @@ final class SignInSourceSettingsStore {
             var isDirectory: ObjCBool = false
             let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
             return exists && !isDirectory.boolValue ? path : nil
+        case .accountIdentifier:
+            // NOTHING TO DETECT, and this one is a fact about the vendor rather than a
+            // policy of ours: 1Password has no API that hands out the accounts the app
+            // is signed into, and the sandbox cannot read its configuration. So there
+            // is no suggestion to make and no scan that would produce one — which is
+            // exactly why the DRAG is the affordance that matters here. A dragged item
+            // carries its account, and filling the field from a gesture the user made
+            // is better than any guess.
+            return nil
         case .securityKeySlot, .daemonEndpoint, .pkcs11Module:
             return nil
         }
@@ -1097,6 +1144,14 @@ final class SignInSourceSettingsStore {
             if let why = PassboltServerLocation.validate(path) { return .badServerAddress(why) }
             return .ok
         }
+        // AN ACCOUNT NAME is not a path and there is nothing on this Mac to check it
+        // against: only 1Password knows whether it has an account by that name, and
+        // asking would mean a call that can raise its approval prompt — from a
+        // settings field, on every keystroke. So the shape is accepted and the
+        // VERDICT comes from the first real use, which is where the vendor's own
+        // "Account not found" already lands (`OnePasswordNativeError.accountNotFound`,
+        // whose sentence names what was tried).
+        if case .accountIdentifier = field.kind { return .ok }
         // A slot number is not a path either, and telling somebody to start it with a
         // slash would be nonsense.
         if case .securityKeySlot = field.kind {
@@ -1122,7 +1177,7 @@ final class SignInSourceSettingsStore {
         switch field.kind {
         case .unixSocket:
             return (st.st_mode & S_IFMT) == S_IFSOCK ? .ok : .notASocket
-        case .daemonEndpoint, .securityKeySlot, .serverURL:
+        case .daemonEndpoint, .securityKeySlot, .serverURL, .accountIdentifier:
             return .ok               // handled above
         case .toolConfigFile:
             // A file, and one only its owner should be able to read: it holds an

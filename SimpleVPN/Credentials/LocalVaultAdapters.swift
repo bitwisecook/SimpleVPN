@@ -153,7 +153,11 @@ struct OnePasswordVaultAdapter: LocalVaultAdapter {
         guard !source.reference.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
         return OnePasswordProvider(
             itemReference: source.reference, vault: source.vault,
-            account: OnePasswordAccountMemory.effectiveAccount(profile: source.account),
+            // THREE LEVELS, in order: what this VPN says, then the CONNECTION it
+            // names, then what we remember. The middle step is what makes a work
+            // tenant and a personal account both usable — see
+            // `OnePasswordAccountMemory.effective(profile:connection:remembered:)`.
+            account: OnePasswordAccountMemory.effectiveAccount(for: source),
             fieldMap: source.fieldMap)
     }
 }

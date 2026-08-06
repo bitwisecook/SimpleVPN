@@ -104,6 +104,18 @@ enum CredentialSourceSettings {
                     + "why it is yours to set.",
                 group: .signIn,
                 default: "")
+        case .accountIdentifier:
+            EngineSettingSpec(
+                id: field.settingID,
+                name: "Account",
+                summary: "Which \(vendorTitle(field)) account SimpleVPN asks \u{2014} the name shown at "
+                    + "the top of \(vendorTitle(field))\u{2019}s own sidebar. SimpleVPN can\u{2019}t "
+                    + "work this out on its own: \(vendorTitle(field)) has no way to tell another app "
+                    + "which accounts you are signed in to, so this is the one thing it needs to be "
+                    + "told. Dragging an item across from \(vendorTitle(field)) fills it in for you. "
+                    + "It is a name, not a password.",
+                group: .signIn,
+                default: "")
         case .serverURL:
             EngineSettingSpec(
                 id: field.settingID,

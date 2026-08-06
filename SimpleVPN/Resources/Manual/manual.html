@@ -351,6 +351,8 @@
   <a href="#creds-what-is-it">What This Is</a>
   <a href="#creds-discovery">Looking for Password Apps</a>
   <a href="#creds-onepassword-enabled">Use 1Password</a>
+  <a href="#creds-onepassword-accounts">Your 1Password Accounts</a>
+  <a href="#creds-onepassword-account">1Password Account</a>
   <a href="#creds-keepassxc-enabled">Use KeePassXC</a>
   <a href="#creds-keepassxc-socket">KeePassXC Connection Point</a>
   <a href="#creds-keeper-enabled">Use Keeper</a>
@@ -1115,11 +1117,9 @@ the device's protection intact at the cost of typing four to eight digits per co
 <div class="warn">Bypassing posture checks may violate your organisation's access policy. Some servers also refuse to connect without it — it cuts both ways.</div>
 
 <h2 id="oc-prefer-in-process">Run In-Process</h2>
-<p class="default">Default: on for a VPN you create now. A VPN you created before this changed keeps whatever it was using.</p>
-<p>Carries this VPN with SimpleVPN's own built-in OpenConnect engine, as a full system tunnel, instead of launching the <code>openconnect</code> tool. As a system tunnel it routes the whole Mac by itself &mdash; its own interface, its own routes, its own DNS &mdash; so no <a href="#oc-socks-port">SOCKS proxy</a> is opened and <a href="#oc-system-proxy">Route Mac Traffic Through This Proxy</a> has nothing to do. It also needs nothing installed: the engine is part of SimpleVPN, and the system extension already has the privileges a tunnel requires.</p>
-<p><strong>Why it is the default now.</strong> With this off, the <code>openconnect</code> tool cannot make a network interface without administrator rights, so SimpleVPN runs it under <code>ocproxy</code> instead &mdash; and that gives you a SOCKS proxy on a local port and nothing else. No interface, no routes, no DNS. Every routing feature in SimpleVPN &mdash; <a href="#cr-route-rule">Route Rules</a>, split tunnelling, the default-gateway picker, per-VPN DNS &mdash; has nothing to act on in that shape. It was off by default for longer than it should have been.</p>
-<p><strong>Why your existing VPNs were not moved.</strong> A VPN that already worked keeps the transport it had, on purpose. Its SOCKS port may be written down somewhere &mdash; in a browser's proxy settings, a <code>curl</code> alias, a colleague's notes &mdash; and turning this on closes that port. The row offers you the change and names the port that would close, so you can check nothing is pointed at it first.</p>
-<p><strong>What still needs the tool.</strong> Almost nothing, now. The engine carries the server and port, the realm, a <a href="#oc-cafile">CA file</a>, a pinned certificate, a <a href="#oc-client-cert">client certificate</a> and its key, a <a href="#oc-usergroup">user group or path</a>, a connection proxy, <a href="#oc-compression">compression</a>, <a href="#oc-pfs">PFS</a>, the <a href="#oc-disable-ipv6">IPv6</a> and <a href="#oc-no-dtls">DTLS</a> switches, the <a href="#oc-os">reported identity</a> fields, the <a href="#oc-mtu">MTU</a>, <a href="#oc-force-dpd">dead-peer detection</a> and the <a href="#oc-reconnect-timeout">reconnect timeout</a>. What sends a connection back to the tool is smartcard sign-in, a <a href="#oc-token-mode">verification-code token</a>, a <a href="#oc-csd-wrapper">host-checker wrapper</a>, a <a href="#oc-base-mtu">base MTU</a>, <a href="#oc-no-http-keepalive">disabling HTTP keepalive</a>, or <a href="#oc-extra-args">extra arguments</a>. The editor names which one, rather than letting the toggle look effective &mdash; silently dropping a setting would connect with weaker settings than you configured, which is worse than using the tool.</p>
+<p class="default">Default: off — the <code>openconnect</code> command-line tool runs the VPN.</p>
+<p>Carries this VPN with SimpleVPN's own built-in OpenConnect engine, as a full system tunnel, instead of launching the <code>openconnect</code> tool. As a system tunnel it routes the whole Mac by itself, so no <a href="#oc-socks-port">SOCKS proxy</a> is opened and <a href="#oc-system-proxy">Route Mac Traffic Through This Proxy</a> has nothing to do.</p>
+<p>The built-in engine deliberately carries only what it can carry exactly: the server, the realm, a pinned certificate, the sign-in browser and your credentials. Any other setting on this screen — a port, a <a href="#oc-cafile">CA file</a>, a <a href="#oc-client-cert">client certificate</a>, a <a href="#oc-token-mode">verification-code token</a>, a <a href="#oc-csd-wrapper">host-checker wrapper</a>, a connection proxy, <a href="#oc-compression">compression</a>, <a href="#oc-pfs">PFS</a>, an <a href="#oc-mtu">MTU</a>, a <a href="#oc-reconnect-timeout">timeout</a> or <a href="#oc-extra-args">extra arguments</a> — sends the connection back to the tool, and the editor says so rather than letting the toggle look effective. Silently dropping one of those would connect with weaker settings than you configured.</p>
 <div class="warn">Newer than the subprocess path. Check it against your own gateway before relying on it.</div>
 
 <h2 id="oc-csd-wrapper">Host-Checker Wrapper</h2>
@@ -1133,8 +1133,7 @@ the device's protection intact at the cost of typing four to eight digits per co
 
 <h2 id="oc-compression">Compression</h2>
 <p class="default">Default: whatever the gateway proposes.</p>
-<p>Whether traffic inside the tunnel may be compressed. <strong>Stateless</strong> and <strong>All</strong> ask for it, <strong>None</strong> refuses it. Leave it on Default unless an administrator names a setting: modern traffic is mostly already compressed, so there is usually nothing to gain, and refusing compression is occasionally a workaround for a gateway that implements it badly.</p>
-<p>This row used to offer a <strong>Stateful</strong> option, which OpenConnect has never had &mdash; it has exactly these three modes, and it refuses anything else when it starts. If a VPN of yours still has that value, the row says so and keeps it rather than guessing which of the three you meant; pick one and save.</p>
+<p>Whether traffic inside the tunnel may be compressed. <strong>Stateful</strong> and <strong>All</strong> ask for it, <strong>None</strong> refuses it. Leave it on Default unless an administrator names a setting: modern traffic is mostly already compressed, so there is usually nothing to gain, and refusing compression is occasionally a workaround for a gateway that implements it badly.</p>
 
 <h2 id="oc-disable-ipv6">Disable IPv6 in the Tunnel</h2>
 <p class="default">Default: off (IPv6 used when the gateway offers it).</p>
@@ -1665,6 +1664,23 @@ the device's protection intact at the cost of typing four to eight digits per co
 <p class="default">Default: on.</p>
 <p>Offers 1Password as a way to sign in. SimpleVPN asks the 1Password app itself, which does the unlocking; your 1Password password never reaches SimpleVPN.</p>
 <p>Off means SimpleVPN neither offers 1Password nor mentions it, even if it is installed. There is no path to set: SimpleVPN talks to the app directly rather than through a command-line tool, so there is nothing to point at.</p>
+
+<h2 id="creds-onepassword-accounts">Your 1Password Accounts</h2>
+<p class="default">One to begin with &mdash; the one you were already using. Add as many as you like.</p>
+<p>You can be signed in to more than one 1Password account at a time &mdash; a personal one and a work one is the ordinary case &mdash; and SimpleVPN has to be told which of them to ask. Each account you set up here gets a name you choose. Each VPN then picks which of them to read when you set its sign-in up: first <em>which account</em>, then <em>which entry</em> inside it.</p>
+<p><strong>SimpleVPN cannot work this out on its own, and that is 1Password&rsquo;s decision rather than a gap here.</strong> 1Password has no way to tell another app which accounts you are signed in to, and it refuses a request that does not name one. So this is the one thing about reaching 1Password that has to come from you.</p>
+<p><strong>The easiest way to fill it in is to drag.</strong> Drag any item out of 1Password onto a VPN&rsquo;s sign-in and the item brings its account with it &mdash; SimpleVPN fills the name in for you, and nothing has to be typed or looked up.</p>
+<p>Three buttons: <strong>Add Account&hellip;</strong> makes a new one, <strong>Rename&hellip;</strong> changes what it is called, and <strong>Remove</strong> forgets it. Removing one changes nothing in 1Password and does not sign you out of anything &mdash; SimpleVPN only forgets a name it was told. If any of your VPNs read that account, SimpleVPN names them before removing it, and each of those will ask you to choose another account before it next connects.</p>
+<p>Renaming is free: a VPN remembers which account it uses by an identity of its own, not by the name you gave it.</p>
+<p><strong>Which vaults get searched is 1Password&rsquo;s business, not a setting here.</strong> SimpleVPN searches the account you name and does not ask you to list its vaults &mdash; there is nothing to keep in step and nothing to get wrong.</p>
+<p>Your organization can set this list for you, and can stop you adding to it. When it does, the rows say so and cannot be changed here.</p>
+
+<h2 id="creds-onepassword-account">1Password Account</h2>
+<p class="default">Nothing is set until you set it.</p>
+<p>This belongs to whichever of <a href="#creds-onepassword-accounts">your accounts</a> is selected above.</p>
+<p>The name shown at the top of 1Password&rsquo;s own sidebar. 1Password&rsquo;s own identifier for the account works here too, and is what a dragged item fills in &mdash; it keeps working if you rename the account.</p>
+<p><strong>It is a name, not a password.</strong> Nothing secret goes here, and nothing secret ever will: your 1Password password stays with 1Password, which does the unlocking itself.</p>
+<p>SimpleVPN cannot check it for you. Only 1Password knows whether it has an account by that name, and asking would mean a request that puts 1Password&rsquo;s own approval prompt on screen &mdash; from a settings field, as you type. So anything is accepted here, and the answer comes from the first real use: if 1Password does not recognise it, the message says so and names what was tried.</p>
 
 <h2 id="creds-keepassxc-enabled">Use KeePassXC</h2>
 <p class="default">Default: on.</p>

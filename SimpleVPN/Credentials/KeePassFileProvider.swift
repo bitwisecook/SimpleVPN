@@ -534,11 +534,13 @@ struct KeePassFileConfiguration: Sendable, Equatable {
                 out.slot = YubiKeySlot(rawValue: Int(shown.value.trimmingCharacters(
                     in: .whitespaces)) ?? 0)
             case .toolBinary, .unixSocket, .daemonEndpoint, .pkcs11Module,
-                 .storeDirectory, .entryFieldName, .serverURL, .toolConfigFile:
+                 .storeDirectory, .entryFieldName, .serverURL, .toolConfigFile,
+                 .accountIdentifier:
                 // Not kdbx fields. `storeDirectory` and `entryFieldName` belong to the
-                // password-store source; they can never appear in this vendor's own
-                // field list, and skipping them here keeps the switch total without
-                // pretending they mean something to a .kdbx.
+                // password-store source, `accountIdentifier` to 1Password's; they can
+                // never appear in this vendor's own field list, and skipping them here
+                // keeps the switch total without pretending they mean something to a
+                // .kdbx.
                 continue
             }
         }
