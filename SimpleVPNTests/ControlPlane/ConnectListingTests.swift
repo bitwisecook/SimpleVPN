@@ -204,11 +204,40 @@ struct ConnectListingTests {
     /// With the address filled in and no `openconnect` on the Mac, the row still
     /// exists, Connect is still refused, and the reason is a level-1 (transport)
     /// problem naming the install command rather than a level-3 sign-in one.
+    /// A Mac with no Homebrew at all must still connect an in-process SSL VPN.
+    ///
+    /// This is the shape of the bug that hid for so long: the tool check ran before
+    /// anyone asked whether the tool would be executed. All seven SSL-VPN kinds go
+    /// through the bundled engine when `willRunInProcess` says so, and that path
+    /// execs nothing — so a demand for `openconnect` there is a dead button in front
+    /// of a working VPN. Asserted per kind, because the dispatch used to name three
+    /// of them by hand and silently sent the other four to the subprocess.
+    @Test func inProcessSSLVPNsNeedNoInstalledTool() {
+        for kind in subprocessKinds where kind.isSSLVPN {
+            var c = freshTunnel(kind)
+            c.server = "vpn.example.com"
+            c.username = "alex"
+            c.preferInProcess = true
+            guard SubprocessTunnelManager.willRunInProcess(c) else {
+                Issue.record("\(kind.displayName): expected the bundled engine to carry this config")
+                continue
+            }
+            // Nothing installed. Nothing needs to be.
+            let need = SubprocessTunnelReadiness.need(
+                for: c, facts: .init(installedTools: [], hasPassword: true))
+            #expect(need == nil,
+                    "\(kind.displayName): blocked with no tool installed, but nothing would be executed — \(need?.sentence ?? "")")
+        }
+    }
+
     @Test func aMissingToolIsAStateNotAHidingReason() {
         for kind in subprocessKinds where kind.isSSLVPN {
             var c = freshTunnel(kind)
             c.server = "vpn.example.com"
             c.username = "alex"
+            // The subprocess path is the one that needs a tool, so ask for it
+            // explicitly rather than relying on a default that may change.
+            c.preferInProcess = false
             // Nothing installed at all.
             let need = SubprocessTunnelReadiness.need(for: c, facts: .init(installedTools: []))
             guard let need else {
@@ -506,10 +535,26 @@ struct ConnectListingTests {
         var c = freshTunnel(.fortinet)
         c.server = "vpn.example.com"
         c.username = "alex"
-        // openfortivpn present, openconnect not: nothing is missing at level 1.
+        c.preferInProcess = false
+        // openfortivpn present, openconnect not. It is INSTALLED, so level 1's
+        // presence check passes — and the connection is still refused, because
+        // openfortivpn drives pppd, has no userspace mode, and therefore needs
+        // administrator rights this app does not take. Present is not the same as
+        // usable, and this test previously asserted the opposite: it required
+        // `need == nil` here, which is exactly the silent failure that shipped —
+        // a Connect that looked ready and then died with nothing explaining why.
         let need = SubprocessTunnelReadiness.need(
             for: c, facts: .init(installedTools: [.openfortivpn], hasPassword: true))
-        #expect(need == nil, "openfortivpn alone can carry a FortiGate password sign-in")
+        #expect(need?.locus == .transport)
+        #expect(need?.sentence.contains("administrator rights") == true,
+                "say that the tool cannot work without privileges we don't take")
+        #expect(need?.sentence.contains("Run In-Process") == true,
+                "and name the fix that needs no Homebrew at all")
+
+        // With openconnect and ocproxy both present the subprocess path is genuinely
+        // usable, so nothing is withheld.
+        #expect(SubprocessTunnelReadiness.need(
+            for: c, facts: .init(installedTools: [.openconnect, .ocproxy], hasPassword: true)) == nil)
     }
 
     /// L2TP cannot be connected by any app on macOS. It is still LISTED, and it says

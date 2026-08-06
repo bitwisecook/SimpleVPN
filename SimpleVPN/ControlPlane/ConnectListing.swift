@@ -259,10 +259,31 @@ enum SubprocessTunnelReadiness {
 
         // ── LEVEL 1 — THE ENGINE THAT WOULD CARRY IT. A missing external tool is
         // one of these states, not a reason to hide the row.
-        let cli = requiredCLI(for: c.kind, installed: facts.installedTools)
-        if !facts.installedTools.contains(cli) {
-            return ConnectNeed(.blocked, locus: .transport,
-                               "\(c.kind.displayName) connects using \u{201C}\(cli.rawValue)\u{201D}, which isn\u{2019}t installed on this Mac. \(cli.installHint)")
+        //
+        // ASK WHETHER THE TOOL WILL BE RUN AT ALL FIRST. All seven SSL-VPN kinds go
+        // through the bundled in-process engine when `willRunInProcess` says so, and
+        // that path never execs anything — so demanding an installed `openconnect`
+        // there dead-buttons a VPN that would connect perfectly well on a Mac with
+        // no Homebrew at all. That was the last real Homebrew dependency on the
+        // in-process path, and it only became reachable for every SSL kind once the
+        // dispatch stopped naming three of them by hand.
+        if !SubprocessTunnelManager.willRunInProcess(c) {
+            let cli = requiredCLI(for: c.kind, installed: facts.installedTools)
+            if !facts.installedTools.contains(cli) {
+                return ConnectNeed(.blocked, locus: .transport,
+                                   "\(c.kind.displayName) connects using \u{201C}\(cli.rawValue)\u{201D}, which isn\u{2019}t installed on this Mac. \(cli.installHint)")
+            }
+            // The tool is present but cannot carry traffic without root unless
+            // `ocproxy` is too — and FortiGate's own client cannot at all. Availability
+            // comes from `facts` rather than the live filesystem so the answer is the
+            // same in a test as on a Mac.
+            if let reason = SubprocessTunnelManager.sslTransportBlockReason(
+                c,
+                inProcess: false,
+                ocproxyAvailable: facts.installedTools.contains(.ocproxy),
+                openconnectAvailable: facts.installedTools.contains(.openconnect)) {
+                return ConnectNeed(.blocked, locus: .transport, reason)
+            }
         }
 
         // ── SSH: the mode, and the host-key pin's engine constraint.
