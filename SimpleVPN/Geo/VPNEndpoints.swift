@@ -47,13 +47,28 @@ nonisolated struct VPNEndpoint: Codable, Sendable, Equatable, Identifiable {
     /// .ovpn doesn't mention it. false/nil ⇒ this is an annotation attached to
     /// an address the profile itself advertises, and it disappears with it.
     var userAdded: Bool?
+    /// Where the user PUT this server, 0-based. nil ⇒ they never said, so the
+    /// automatic ranking decides (measured, else nearest — `EndpointRanking`).
+    ///
+    /// An annotation like any other in this blob, and stored the same way: a
+    /// server the configuration advertises can carry one exactly as it can carry
+    /// a name or a corrected country. What it changes is the order the app OFFERS
+    /// its servers in; it never rewrites the configuration's own `remote` lines,
+    /// which is why moving a configuration-provided server is honest — the lock
+    /// travels with the row and the address is still the file's.
+    ///
+    /// Sparse and self-healing on purpose: a server that appears later (a
+    /// re-imported .ovpn with a new remote) has no order and sorts after the ones
+    /// that do, rather than silently taking somebody's first-choice slot.
+    var order: Int?
 
     /// Same shape as `Endpoint.id`, so a stored annotation and a scanned remote
     /// identify each other, and so existing override matching keeps working.
     var id: String { "\(host):\(port.map(String.init) ?? "*"):\(proto ?? "*")" }
 
     init(host: String, port: Int? = nil, proto: String? = nil, label: String? = nil,
-         country: String? = nil, region: RegionBucket? = nil, userAdded: Bool? = nil) {
+         country: String? = nil, region: RegionBucket? = nil, userAdded: Bool? = nil,
+         order: Int? = nil) {
         self.host = host
         self.port = port
         self.proto = proto
@@ -61,6 +76,7 @@ nonisolated struct VPNEndpoint: Codable, Sendable, Equatable, Identifiable {
         self.country = country
         self.region = region
         self.userAdded = userAdded
+        self.order = order
     }
 
     /// From a `remote` line scanned out of an .ovpn.
@@ -78,8 +94,13 @@ nonisolated struct VPNEndpoint: Codable, Sendable, Equatable, Identifiable {
     }
 
     /// Whether the user has said anything about this endpoint worth storing.
+    ///
+    /// `order` counts. It is the whole reason a manual order survives a relaunch:
+    /// `VPNEndpointList.encodedBlob()` drops entries that say nothing, so an entry
+    /// carrying only a position would otherwise be thrown away on the way to disk.
     var hasAnnotations: Bool {
         !(label?.isEmpty ?? true) || country != nil || region != nil || userAdded == true
+            || order != nil
     }
 
     // Hand-written so a blob written by a newer build (or a hand-edited one)
@@ -87,7 +108,7 @@ nonisolated struct VPNEndpoint: Codable, Sendable, Equatable, Identifiable {
     // arrived as a string is still read, and an unrecognised region name
     // degrades to "no override" rather than throwing.
     private enum CodingKeys: String, CodingKey {
-        case host, port, proto, label, country, region, userAdded
+        case host, port, proto, label, country, region, userAdded, order
     }
 
     init(from decoder: Decoder) throws {
@@ -103,6 +124,14 @@ nonisolated struct VPNEndpoint: Codable, Sendable, Equatable, Identifiable {
         country = (try? c.decode(String.self, forKey: .country))?.uppercased()
         region = (try? c.decode(String.self, forKey: .region)).flatMap(RegionBucket.init(rawValue:))
         userAdded = try? c.decode(Bool.self, forKey: .userAdded)
+        // Lenient like `port`: a hand-edited or MDM-written blob may say "2".
+        // A negative position is nonsense and decodes to "no position" rather
+        // than sorting ahead of everything.
+        if let n = try? c.decode(Int.self, forKey: .order) {
+            order = n >= 0 ? n : nil
+        } else if let s = try? c.decode(String.self, forKey: .order), let n = Int(s), n >= 0 {
+            order = n
+        }
     }
 
     func encode(to encoder: Encoder) throws {
@@ -114,6 +143,7 @@ nonisolated struct VPNEndpoint: Codable, Sendable, Equatable, Identifiable {
         try c.encodeIfPresent(country, forKey: .country)
         try c.encodeIfPresent(region?.rawValue, forKey: .region)
         try c.encodeIfPresent(userAdded, forKey: .userAdded)
+        try c.encodeIfPresent(order, forKey: .order)
     }
 }
 

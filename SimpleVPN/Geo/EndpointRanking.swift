@@ -127,7 +127,18 @@ nonisolated struct RankedEndpoint: Sendable, Equatable, Identifiable {
 nonisolated struct RegionGroup: Sendable, Equatable, Identifiable {
     var region: RegionBucket
     var endpoints: [RankedEndpoint]
-    var id: String { region.rawValue }
+    /// This group is a RUN of a hand-made order rather than the whole of a region —
+    /// so the same region can appear more than once, and the id has to say which
+    /// run this is. See `EndpointRanking.grouped`.
+    var isManualOrder = false
+
+    var id: String {
+        isManualOrder ? "manual\u{1F}\(endpoints.first?.id ?? region.rawValue)" : region.rawValue
+    }
+
+    /// What to write above the group. One place decides it, so a picker's visible
+    /// heading and its spoken one can never disagree.
+    var heading: String { region.name }
 }
 
 nonisolated enum EndpointRanking {
@@ -169,9 +180,55 @@ nonisolated enum EndpointRanking {
         return .unknown
     }
 
-    /// Ranked best-first. Stable: endpoints that can't be told apart keep the
-    /// order they arrived in (which is the profile's own order).
+    /// True once the user has PLACED any of these servers by hand.
+    ///
+    /// One expressed position switches the whole list over, rather than each
+    /// placed server being merged into a ranked list: a half-manual, half-measured
+    /// order is one nobody can predict, and a probe landing would then move rows
+    /// the user had just arranged.
+    static func isManuallyOrdered(_ items: [RankedEndpoint]) -> Bool {
+        items.contains { $0.endpoint.order != nil }
+    }
+
+    /// Best-first, unless the user has said otherwise.
+    ///
+    /// A MANUAL ORDER WINS. Ranking is a guess the app makes on the user's behalf —
+    /// a measured round trip or a great-circle distance — and the moment somebody
+    /// drags a row they have replaced the guess with an answer. So a manual order
+    /// is not blended with the ranking, and a probe landing afterwards does not
+    /// re-sort the list; the timing becomes DATA in the Speed column, which is
+    /// where it was always most useful. Nothing in the app connects in this order
+    /// (choosing a server writes the server/port/protocol overrides explicitly and
+    /// OpenVPN's own failover follows the configuration's `remote` lines), so what
+    /// this decides is the order the user is OFFERED them in — which is exactly
+    /// what they were rearranging.
+    ///
+    /// Servers with no position of their own — a remote that appeared in a
+    /// re-imported configuration after the arranging was done — keep their ranked
+    /// order and follow the placed ones. They are never dropped and never
+    /// interleaved into somebody's arrangement.
     static func ordered(_ items: [RankedEndpoint], home: GeoPoint?) -> [RankedEndpoint] {
+        guard !isManuallyOrdered(items) else {
+            let placed = items.filter { $0.endpoint.order != nil }
+                .enumerated()
+                .sorted { a, b in
+                    let ao = a.element.endpoint.order ?? 0, bo = b.element.endpoint.order ?? 0
+                    // Stable by hand, like the ranking below: two servers that
+                    // somehow hold the same position keep the order they arrived
+                    // in rather than swapping between renders.
+                    return ao == bo ? a.offset < b.offset : ao < bo
+                }
+                .map(\.element)
+            let unplaced = ranked(items.filter { $0.endpoint.order == nil }, home: home)
+            return placed + unplaced
+        }
+        return ranked(items, home: home)
+    }
+
+    /// The automatic order: measured beats guessed, stable within a tier. Kept as
+    /// its own function so `ordered` can state plainly that a manual order replaces
+    /// it rather than modifies it.
+    private static func ranked(_ items: [RankedEndpoint], home: GeoPoint?) -> [RankedEndpoint] {
         items.enumerated()
             .map { (index: $0.offset, item: $0.element, basis: basis(for: $0.element, home: home)) }
             .sorted { a, b in
@@ -186,6 +243,30 @@ nonisolated enum EndpointRanking {
     /// so "nearest region first" falls out of the same comparison; the unknown
     /// bucket is always last, whatever it contains.
     static func grouped(_ items: [RankedEndpoint], home: GeoPoint?) -> [RegionGroup] {
+        // A HAND-MADE ORDER IS NEVER REGROUPED. Gathering every European server
+        // under one heading is part of the AUTOMATIC ordering — "nearest region
+        // first" is a claim about ranking — and doing it over a manual order
+        // rearranges it behind the user's back: London, New York, Paris would draw
+        // as "Europe: London, Paris / North America: New York", which is neither
+        // what they arranged nor what the Servers table beside it shows.
+        //
+        // So a manual order is grouped into RUNS instead: consecutive servers that
+        // share a region get one heading, and a region may therefore appear more
+        // than once. Flattening these groups reproduces the user's order exactly,
+        // and every heading still names the region it is actually over — which
+        // matters because the pickers head their sections with `region.name`.
+        guard !isManuallyOrdered(items) else {
+            var runs: [RegionGroup] = []
+            for item in ordered(items, home: home) {
+                if runs.last?.region == item.region {
+                    runs[runs.count - 1].endpoints.append(item)
+                } else {
+                    runs.append(RegionGroup(region: item.region, endpoints: [item],
+                                            isManualOrder: true))
+                }
+            }
+            return runs
+        }
         var order: [RegionBucket] = []
         var members: [RegionBucket: [RankedEndpoint]] = [:]
         for item in ordered(items, home: home) {

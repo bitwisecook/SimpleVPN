@@ -49,6 +49,42 @@
 //  and a new row commits once it has an address. Nothing here needs a Save button
 //  and there is no draft to lose by closing the window.
 //
+//  ORDER: WHOSE IS IT?
+//
+//  The table used to RANK its rows and nothing else — quickest measured first, else
+//  nearest. Manual order and automatic ranking are in direct conflict, so one has to
+//  win, and the answer is that the user's does. The evidence for choosing that way
+//  round: nothing in this app connects in ranked order. Picking a server writes the
+//  server/port/protocol overrides explicitly (`EndpointSection.select`), and
+//  OpenVPN's own failover walks the configuration's `remote` lines, not this list. So
+//  ranking was never deciding where a connection went — it was deciding what to
+//  OFFER first, which is exactly the thing somebody rearranging rows is expressing an
+//  opinion about. `EndpointRanking.ordered` therefore stops sorting the moment any
+//  row carries a position, and a later probe fills in the Speed column without moving
+//  anything.
+//
+//  Three consequences, all deliberate:
+//    • THE FIRST DRAG TURNS THE RANKING OFF, visibly. This table declares no sort key
+//      on any column, so there is no column sort to refuse or to clear — but the
+//      ranking IS a sort, and a drag that left it in place would be undone by the
+//      next probe. The footer sentence changes and "Use automatic order" appears, so
+//      the switch is stated and reversible rather than silent.
+//    • A CONFIGURATION-PROVIDED SERVER CAN BE MOVED. Its lock is about EXISTENCE —
+//      only the configuration adds or removes it — not about description or
+//      position; the user can already rename it and correct its country. A position
+//      changes the order SimpleVPN offers it in and never rewrites the .ovpn, and the
+//      lock glyph travels with the row, so moving one cannot misrepresent where it
+//      came from. `ServersTableCopy.lockedHelp` says all of that in words.
+//    • THE PICKERS FOLLOW. `EndpointRanking.grouped` groups a manual order into RUNS
+//      rather than gathering each region, because gathering is part of the automatic
+//      ordering and would rearrange a hand-made list behind the user's back. Every
+//      region heading still names the region it is over; a region may simply appear
+//      twice. Flattening the groups reproduces this table's order exactly, so the
+//      connection page's dropdown and the sidebar's picker agree with it.
+//
+//  The affordance itself is shared (`UI/Components/Reorder.swift`) — same words, same
+//  Move Up / Move Down, same drop indicator as the Custom Routing rule lists.
+//
 //  ACCESSIBILITY
 //
 //  A `Table`'s rows are AppKit rows rather than composable SwiftUI rows, so the
@@ -160,7 +196,34 @@ struct ServersTable: View {
             TableColumn(ServersTableCopy.speedHeading) { row in speedCell(row) }
                 .width(min: 96, ideal: 128, max: 170)
         } rows: {
-            ForEach(rows) { TableRow($0) }
+            // The NATIVE table reorder, which on macOS 26 is exactly this pair and
+            // nothing else: `TableRow.draggable` to pick a row up and
+            // `dropDestination(for:action:)` on the ForEach to be told the index it
+            // was let go at. `Table` has no `onMove` and no `moveDisabled` — those
+            // live on `DynamicViewContent`/`View`, i.e. `List` — so this is the path
+            // rather than a hand-rolled hit-test, and AppKit draws the insertion
+            // line, the row snapshot and the drop animation itself.
+            //
+            // That snapshot is also what keeps the drag away from live controls: an
+            // NSTableView drags a static image of the row, so the `TextField` in the
+            // name cell is never inside the animating transform (AGENTS.md's
+            // layout-loop invariant). Nothing here supplies a custom preview,
+            // because `TableRowContent.draggable` has no preview overload — one more
+            // reason the platform path is the safe one.
+            ForEach(rows) { row in
+                if row.isDraft {
+                    // A row that isn't a server yet has no place in the order.
+                    TableRow(row)
+                        .contextMenu { rowMenu(row) }
+                } else {
+                    TableRow(row)
+                        .draggable(ReorderPayload(rowID: row.id, listID: Self.listID))
+                        .contextMenu { rowMenu(row) }
+                }
+            }
+            .dropDestination(for: ReorderPayload.self) { index, payloads in
+                drop(payloads, at: index)
+            }
         }
         .tableStyle(.inset)
         // The Mac convention for a bordered editable list: Delete removes the
@@ -169,6 +232,18 @@ struct ServersTable: View {
         .onDeleteCommand(perform: removeSelected)
         .frame(minHeight: 150)
         .overlay { if rows.isEmpty { emptyState } }
+    }
+
+    /// The row context menu. Right-clicking a row is what a Mac user tries first,
+    /// and VO-⇧-M reaches it — but it is never the only path: the same two commands
+    /// are Tab-reachable buttons in the bottom bar (Docs/Accessibility.md).
+    @ViewBuilder
+    private func rowMenu(_ row: ServerRow) -> some View {
+        ReorderMenuItems(commands: reorderCommands(for: row))
+        if manuallyOrdered {
+            Divider()
+            Button(ServersTableCopy.automaticOrderLabel, action: useAutomaticOrder)
+        }
     }
 
     // MARK: Cells
@@ -339,6 +414,18 @@ struct ServersTable: View {
                 .help(removeBlockedReason ?? removeHelp)
                 .accessibilityLabel(ServersTableCopy.removeButtonLabel)
                 .accessibilityValue(removeBlockedReason ?? removeHelp)
+            Divider().frame(height: 16)
+            // THE keyboard path. Beside `+`/`−` where System Settings puts a
+            // bordered list's actions, and the reason the drag is allowed to exist:
+            // a drag-only order is unusable without a pointer. This is the one pair
+            // in the window that may claim ⌘⌥↑/⌘⌥↓.
+            ReorderButtons(commands: reorderCommands(for: selectedRow), shortcuts: true)
+            if manuallyOrdered {
+                Button(ServersTableCopy.automaticOrderLabel, action: useAutomaticOrder)
+                    .help(ServersTableCopy.automaticOrderHelp)
+                    .accessibilityLabel(ServersTableCopy.automaticOrderLabel)
+                    .accessibilityValue(ServersTableCopy.automaticOrderHelp)
+            }
             Spacer()
         }
         // Standard controls adopt the material; no custom glass surface is needed
@@ -362,6 +449,15 @@ struct ServersTable: View {
                 // says what it means in words — the same sentence every other
                 // server list uses.
                 Text(EndpointRegions.orderExplanation(items: items, home: home))
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            // Said while the app is still doing the ordering, so a user learns what
+            // a drag will REPLACE before they try it. Once they have their own
+            // order the sentence above already describes it, and repeating the
+            // offer would be advice about something already done.
+            if !manuallyOrdered, items.count > 1 {
+                Text(ServersTableCopy.dragHint)
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -421,6 +517,71 @@ struct ServersTable: View {
     private var selectedItem: RankedEndpoint? {
         guard let selection else { return nil }
         return items.first { $0.id == selection }
+    }
+
+    // MARK: Order
+
+    /// This table's identity in a drag payload, so a rule row from another pane can
+    /// never be interpreted here as one of these servers.
+    private static let listID = "vpn.servers"
+
+    /// True once the user has placed any of these servers by hand.
+    private var manuallyOrdered: Bool { EndpointRanking.isManuallyOrdered(items) }
+
+    private var selectedRow: ServerRow? {
+        guard let selection else { return nil }
+        return rows.first { $0.id == selection }
+    }
+
+    /// The shared Move Up / Move Down commands for one row (nil = the selection,
+    /// whatever it is). The list supplies four facts and gets the whole affordance:
+    /// what the row is called, where it is, how long the list is, and how to write
+    /// a new order down.
+    /// Persisting a new order writes it through the endpoint annotation blob — the
+    /// same store, save and cache a name or a corrected country goes through.
+    ///
+    /// The first move is also what switches the automatic ranking OFF, and that is
+    /// deliberate rather than incidental: this table has no column sort to clear
+    /// (its `TableColumn`s declare no sort key), but the ranking IS a sort, so a
+    /// drag that left it in place would be silently undone by the next probe. The
+    /// switch is visible — the footer sentence changes and a "Use automatic order"
+    /// button appears — so nothing is taken away without a way back.
+    private func reorderCommands(for row: ServerRow?) -> ReorderCommands {
+        let list = items
+        let index = row?.item.flatMap { item in list.firstIndex { $0.id == item.id } }
+        let controller = vpn
+        let profile = profileID
+        return ReorderCommands(
+            subject: row?.item.map(ServersTableCopy.moveSubject) ?? ServersTableCopy.moveSubjectNone,
+            index: index,
+            count: list.count,
+            // A locked row moves like any other — the lock is about existence, not
+            // position (ServersTableCopy.lockedHelp). The draft is the one row that
+            // cannot: it isn't a server yet.
+            blocked: row?.isDraft == true ? ServersTableCopy.moveDraftBlocked : nil,
+            nothingSelected: ServersTableCopy.moveNothingSelected,
+            move: { from, to in
+                let reordered = Reorder.moved(list, from: from, to: to)
+                guard reordered.map(\.id) != list.map(\.id) else { return }
+                let ids = reordered.map(\.id)
+                Task { await controller.setEndpointOrder(ids, for: profile) }
+            })
+    }
+
+    /// A drop from the table's own drag. `index` arrives in `rows` coordinates and
+    /// may point past the last server (the draft row, or the end of the list).
+    private func drop(_ payloads: [ReorderPayload], at index: Int) {
+        guard let payload = payloads.first, payload.listID == Self.listID,
+              let from = items.firstIndex(where: { $0.id == payload.rowID }) else { return }
+        let commands = reorderCommands(for: rows.first { $0.id == payload.rowID })
+        commands.drop(from: from, insertingBefore: min(index, items.count))
+    }
+
+    private func useAutomaticOrder() {
+        Task {
+            await vpn.clearEndpointOrder(for: profileID)
+            AccessibilityAnnouncer.sayNow(ServersTableCopy.automaticOrderRestored)
+        }
     }
 
     private var removeBlockedReason: String? {

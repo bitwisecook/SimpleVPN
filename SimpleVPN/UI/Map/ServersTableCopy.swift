@@ -230,8 +230,12 @@ nonisolated enum ServersTableCopy {
     /// The lock on a row the user cannot remove — Mail's treatment of an account
     /// a profile provided. This used to be a footnote under the form; it is a
     /// glyph on the row it is about now.
+    /// The lock is about EXISTENCE, not about description or position: the
+    /// configuration owns which servers there are, the user owns what they are
+    /// called, where they are, and the order they are offered in. Saying so is
+    /// what stops a lock reading as "this row is frozen" when it isn't.
     static let lockedHelp = "This server comes from this VPN\u{2019}s configuration."
-        + " You can name it, but only the configuration can add or remove it."
+        + " You can name it and move it, but only the configuration can add or remove it."
     static let lockedLabel = "Provided by this VPN\u{2019}s configuration"
 
     /// Why `\u{2212}` can't remove, or nil when it can.
@@ -252,9 +256,47 @@ nonisolated enum ServersTableCopy {
     // MARK: The footer
 
     static let lockFootnote = "Servers from this VPN\u{2019}s configuration carry a lock:"
-        + " you can name them, but only the configuration can add or remove them."
+        + " you can name them and put them in any order, but only the configuration can add"
+        + " or remove them. Moving one changes the order SimpleVPN offers it in \u{2014} it never"
+        + " rewrites the configuration."
     static let probeToggleTitle = "Check how quick each server is"
     static let probeToggleDetail = "When this is on, SimpleVPN measures each server when you open"
         + " a server list, and puts the quickest first. Off means no checks are made and the list"
         + " is ordered by which servers are nearest to you. This is the same switch as in Settings."
+
+    // MARK: Order
+
+    /// What one row is CALLED when a command has to name what it is moving. The
+    /// same rule as everywhere else: the user's name for it when they gave it one,
+    /// otherwise the address (`RankedEndpoint.primaryLabel`).
+    static func moveSubject(_ item: RankedEndpoint) -> String { item.primaryLabel }
+
+    /// The subject when nothing is selected. Never left empty — "Move up" with no
+    /// subject is a button whose effect a VoiceOver user has to guess.
+    static let moveSubjectNone = "the selected server"
+
+    /// Why the draft row can't be moved: it isn't a server yet, so there is no
+    /// position to remember.
+    static let moveDraftBlocked = "Type an address first \u{2014} a server SimpleVPN hasn\u{2019}t"
+        + " saved yet has no place in the order."
+
+    static let moveNothingSelected = "Select a server in the table first, then move it."
+
+    /// The button that hands the order back to the app. The counterpart to the
+    /// first drag, and the reason arranging servers is not a one-way door: a
+    /// ranking that a drag switches off must be switchable back on, visibly.
+    static let automaticOrderLabel = "Use automatic order"
+    static let automaticOrderHelp = "Forget the order you put these in and go back to"
+        + " quickest-first (or nearest-first when nothing has been checked)."
+
+    /// Said after the automatic order is restored — the counterpart to
+    /// `ReorderCopy.landed`, because a list silently re-sorting itself is the one
+    /// change on this pane that a screen-reader user cannot see happen.
+    static let automaticOrderRestored = "Back to the automatic order."
+
+    /// What a drag replaces, said before it happens rather than discovered
+    /// afterwards. Shown only while the app is still ordering the list, so it is
+    /// never advice about something that already happened.
+    static let dragHint = "Drag a row, or use the up and down buttons, to put these servers"
+        + " in your own order. Doing that turns off the automatic ordering."
 }

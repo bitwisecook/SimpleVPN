@@ -57,6 +57,24 @@
             </array>
         </dict>
     </array>
+    <!-- The private "a row is being dragged to reorder it" type (UI/Components/Reorder.swift).
+         Declared rather than improvised so `UTType(exportedAs:)` names a real type: a
+         generic text/data payload would let a routing rule be dropped into an address
+         field, and let any dragged text land in a rule list as a reorder. It never
+         reaches the pasteboard outside a single in-app drag and describes no file. -->
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.bragi0.SimpleVPN.reorder-row</string>
+            <key>UTTypeDescription</key>
+            <string>SimpleVPN List Row</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+        </dict>
+    </array>
     <key>UTImportedTypeDeclarations</key>
     <array>
         <dict>

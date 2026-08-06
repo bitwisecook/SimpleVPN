@@ -42,11 +42,37 @@
 //  0→1 progress value on focus (a Path trim) and then sits still — no persistent
 //  animation. `accessibilityReduceMotion` snaps the progress straight to 1.
 //
+//  ORDER IS SEMANTICS HERE, NOT PRESENTATION. Both rule lists are first-match-wins
+//  (`RouteFilter.dispositionForPrefix`, `DNSCustomization.dispositionForResolver`), so
+//  moving a rule changes WHERE TRAFFIC GOES — `Ignore 10/8` above `Replace 10/8` drops
+//  the route, below it the route is swapped. That makes a reorder security-determining
+//  and shapes four decisions:
+//    • Every row carries its NUMBER, and the number is the drag handle. A handle
+//      rather than the whole row because these rows are full of text fields, and a
+//      visible 1, 2, 3 because "which rule wins" is the question the order answers.
+//    • The insertion line shows where the dragged rule will land BEFORE the pointer is
+//      released, so the new winner is visible rather than discovered.
+//    • The overlap arrow is SUPPRESSED while a reorder drag is over the routes list
+//      (`routeDropIndex != nil`) and its focus is cleared by a move. The Canvas is
+//      drawn from row anchors and the rows are moving; an arrow drawn from last
+//      render's geometry would be a lie about which route a rule overlaps, which is
+//      the one thing the overlay exists to tell the truth about.
+//    • Persistence is the EXISTING path and nothing new: a move writes the host's
+//      draft, and `commitCustomRouting` carries it to `setCustomRouting` on Save and
+//      on leaving the tab — so a reorder cannot lose on a tab switch, and where the
+//      host offers Revert it undoes a reorder like any other edit.
+//  Drag is never the only way (Docs/Accessibility.md rule 7): every row carries
+//  Tab-reachable Move Up / Move Down buttons and the same pair in its context menu,
+//  from the shared affordance in `UI/Components/Reorder.swift`.
+//
 //  Crash invariant (see AGENTS.md / layout-loop-crash memory): the ONLY thing that
 //  animates is the Canvas overlay's path trim. Every control (Picker, TextField,
 //  SecureField, Toggle, Button) lives in an ordinary, untransformed sibling — never
 //  inside a scaled/animated container — exactly like RouteGraphView's edge Canvas
-//  sits apart from its cards' real controls.
+//  sits apart from its cards' real controls. A DRAG IS A TRANSFORM and falls under the
+//  same rule, which is why `reorderDraggable` demands a preview and the preview is
+//  `ReorderDragPreview` — a line of text on glass. The live row, Picker and text
+//  fields included, is never what moves under the pointer.
 //
 
 import SwiftUI
@@ -257,6 +283,12 @@ struct CustomRoutingTabView: View {
     /// The routes scroll body's own measured height, rounded to whole points so
     /// sub-pixel churn can't ping-pong the viewport. 0 = not measured yet.
     @State private var routesContentHeight: CGFloat = 0
+    /// Where a dragged rule would land, per list: the index the insertion line is
+    /// drawn above, `count` meaning "at the end". nil = no reorder drag over this
+    /// list. Non-nil on the routes list ALSO suppresses the overlap arrow — see
+    /// `routeArrowOverlay`.
+    @State private var routeDropIndex: Int?
+    @State private var dnsDropIndex: Int?
 
     /// Live when connected, last-known when offline — the whole point of this tab
     /// working the same either way.
@@ -404,6 +436,17 @@ struct CustomRoutingTabView: View {
             crHeader(Self.specs["cr.route-rule"], changed: !profile.routes.rules.isEmpty,
                      addTitle: Self.addRouteRuleTitle, add: addRouteRule)
 
+            // ORDER IS THE MEANING HERE, so it is stated where the rules are rather
+            // than left to the manual: these rules are tried top to bottom and the
+            // first one that matches decides. Reordering them changes where traffic
+            // goes, which is why every row carries its number and why the drag has
+            // a keyboard equivalent on every row.
+            if !profile.routes.rules.isEmpty {
+                Text(Self.firstMatchWins)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach($profile.routes.rules) { $rule in
@@ -412,6 +455,13 @@ struct CustomRoutingTabView: View {
                     if profile.routes.rules.isEmpty {
                         emptyRuleList("No rules yet — routes pass through unchanged.",
                                       addTitle: Self.addRouteRuleTitle, add: addRouteRule)
+                    } else {
+                        // "Move it to the end" — the one destination no row target
+                        // can express, because every row means "land where I am".
+                        endOfListDropTarget(listID: Self.routesListID,
+                                            count: profile.routes.rules.count,
+                                            indicator: $routeDropIndex,
+                                            drop: dropRouteRule)
                     }
                     Divider()
                     pushedRoutesReferenceList
@@ -462,10 +512,21 @@ struct CustomRoutingTabView: View {
         let issues = CustomRoutingValidator.validate(r)
         let status = profile.routes.ruleStatus(r, against: pushed.routes)
         let overlaps = overlapTargets(for: r)
+        let index = profile.routes.rules.firstIndex { $0.id == r.id } ?? 0
+        let count = profile.routes.rules.count
 
         let sentence = Self.routeRuleSentence(r, status: status, overlapping: !overlaps.isEmpty)
+        let commands = routeReorderCommands(index: index, subject: sentence)
         return VStack(alignment: .leading, spacing: 3) {
+            // Where this rule will land if the pointer lets go here. In a
+            // first-match-wins list that line is not decoration: it is the answer
+            // to "which rule wins after this drop".
+            if routeDropIndex == index { ReorderInsertionLine() }
             HStack(spacing: 8) {
+                // The row's number, which is also its drag handle: a handle rather
+                // than the whole row, because dragging inside a text field must
+                // still select text.
+                ReorderGrip(subject: sentence, position: index, count: count)
                 // The verb is the row's grammatical subject — an unnamed popup
                 // ("pop up button, Replace") strands the reader mid-sentence.
                 // Writing through `verbBinding` clears the field the new verb
@@ -515,6 +576,11 @@ struct CustomRoutingTabView: View {
                     .accessibilityValue(overlapHelp(overlaps))
                     .accessibilityAddTraits(focusedRuleID == r.id ? .isSelected : [])
                 }
+                // THE keyboard path, on every row. Without it the order — and so
+                // where traffic goes — would be reachable only with a pointer.
+                ReorderButtons(commands: commands)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
                 Button {
                     if focusedRuleID == r.id { focusedRuleID = nil }
                     profile.routes.rules.removeAll { $0.id == r.id }
@@ -530,9 +596,71 @@ struct CustomRoutingTabView: View {
         .padding(.vertical, 2)
         // The row reads as ONE sentence incl. status ("Add 10.0.0.0/8,
         // overlaps a pushed route"), with the controls still reachable inside.
+        // The POSITION joins it, because in this list the position is part of what
+        // the rule does — and it is how VoiceOver hears a move land.
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(sentence)
+        .accessibilityLabel("\(sentence). Rule \(ReorderCopy.position(index, of: count))")
         .routingAnchor("rule:\(r.id.uuidString)")
+        // Drag source and drop target. The preview is text on glass
+        // (`ReorderDragPreview`) and never this row: the row holds a Picker and two
+        // text fields, and a drag animates a transform (AGENTS.md's layout-loop
+        // invariant).
+        .reorderDraggable(ReorderPayload(rowID: r.id.uuidString, listID: Self.routesListID),
+                          subject: sentence, enabled: count > 1)
+        .reorderDropTarget(insertingBefore: index, listID: Self.routesListID,
+                           indicator: $routeDropIndex, drop: dropRouteRule)
+        .contextMenu { ReorderMenuItems(commands: commands) }
+    }
+
+    /// The sentence that states what the order MEANS, in both rule lists.
+    static let firstMatchWins = "Rules are tried from the top down and the FIRST one that"
+        + " matches decides \u{2014} so moving a rule changes what happens. Drag a row by its"
+        + " number, or use the up and down buttons beside it."
+
+    /// This list's identity in a drag payload, so a resolver rule can never be read
+    /// here as a route rule.
+    private static let routesListID = "cr.route-rules"
+    private static let dnsListID = "cr.dns-rules"
+
+    /// Move Up / Move Down for one route rule, writing through the draft the host
+    /// editor already owns — so a reorder persists by exactly the path every other
+    /// edit on this tab uses (`commitCustomRouting` on Save AND on leaving the tab),
+    /// and Revert undoes it like any other change.
+    private func routeReorderCommands(index: Int, subject: String) -> ReorderCommands {
+        ReorderCommands(subject: subject, index: index, count: profile.routes.rules.count) { from, to in
+            profile.routes.rules = Reorder.moved(profile.routes.rules, from: from, to: to)
+            // The overlap arrow is drawn from row anchors, and the rows just moved:
+            // keeping it would draw last render's geometry. Clear the focus rather
+            // than draw a line that is no longer true.
+            focusedRuleID = nil
+        }
+    }
+
+    private func dropRouteRule(_ payload: ReorderPayload, _ target: Int) {
+        guard let id = UUID(uuidString: payload.rowID),
+              let from = profile.routes.rules.firstIndex(where: { $0.id == id }) else { return }
+        let sentence = Self.routeRuleSentence(profile.routes.rules[from],
+                                              status: .active, overlapping: false)
+        routeReorderCommands(index: from, subject: sentence)
+            .drop(from: from, insertingBefore: target)
+    }
+
+    /// The strip below the last row of a list: the only place a drop can mean "put
+    /// it at the end". Deliberately thin and invisible until a drag is over it.
+    @ViewBuilder
+    private func endOfListDropTarget(listID: String, count: Int, indicator: Binding<Int?>,
+                                    drop: @escaping (ReorderPayload, Int) -> Void) -> some View {
+        VStack(spacing: 0) {
+            if indicator.wrappedValue == count { ReorderInsertionLine() }
+            // `minHeight`, not `height`: this is a drop strip and not the viewport,
+            // and `RuleListReachabilityTests` rightly refuses any `.frame(height:)`
+            // inside the routes scroll region — that constant is how the viewport
+            // once claimed 300 points it had nothing to put in.
+            Color.clear.frame(minHeight: 6)
+        }
+        .reorderDropTarget(insertingBefore: count, listID: listID,
+                           indicator: indicator, drop: drop)
+        .accessibilityHidden(true)
     }
 
     /// The rule in words — the container sentence VoiceOver announces when it
@@ -672,6 +800,13 @@ struct CustomRoutingTabView: View {
     @ViewBuilder private func routeArrowOverlay(_ anchors: [String: Anchor<CGPoint>]) -> some View {
         GeometryReader { proxy in
             Canvas { ctx, size in
+                // NOT DURING A REORDER. The arrow is drawn from row anchors, and
+                // while a reorder drag is over this list the rows it points at are
+                // about to be somewhere else — an arrow drawn from last render's
+                // geometry is a lie about which route a rule overlaps, and the whole
+                // point of the overlay is to tell the truth about that. It comes
+                // back the moment the drag leaves or lands.
+                guard routeDropIndex == nil else { return }
                 guard let fid = focusedRuleID,
                       let rule = profile.routes.rules.first(where: { $0.id == fid }),
                       let fromAnchor = anchors["rule:\(fid.uuidString)"] else { return }
@@ -770,10 +905,22 @@ struct CustomRoutingTabView: View {
             // — so an untouched DNS section said nothing about what it would do.
             crHeader(Self.specs["cr.dns-rule"], changed: !profile.dns.resolverRules.isEmpty,
                      addTitle: Self.addResolverRuleTitle, add: addResolverRule)
+            // The same sentence as the routes list, because it is the same rule:
+            // first match wins, so the order is the behaviour.
+            if !profile.dns.resolverRules.isEmpty {
+                Text(Self.firstMatchWins)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             ForEach($profile.dns.resolverRules) { $rule in dnsRuleRow($rule) }
             if profile.dns.resolverRules.isEmpty {
                 emptyRuleList("No rules yet — this VPN's resolvers are used as pushed.",
                               addTitle: Self.addResolverRuleTitle, add: addResolverRule)
+            } else {
+                endOfListDropTarget(listID: Self.dnsListID,
+                                    count: profile.dns.resolverRules.count,
+                                    indicator: $dnsDropIndex,
+                                    drop: dropResolverRule)
             }
 
             Divider()
@@ -832,8 +979,13 @@ struct CustomRoutingTabView: View {
         let issues = CustomRoutingValidator.validate(r)
         let status = profile.dns.ruleStatus(r, against: pushed.dns)
         let sentence = Self.dnsRuleSentence(r, status: status)
+        let index = profile.dns.resolverRules.firstIndex { $0.id == r.id } ?? 0
+        let count = profile.dns.resolverRules.count
+        let commands = dnsReorderCommands(index: index, subject: sentence)
         return VStack(alignment: .leading, spacing: 3) {
+            if dnsDropIndex == index { ReorderInsertionLine() }
             HStack(spacing: 8) {
+                ReorderGrip(subject: sentence, position: index, count: count)
                 Picker("Rule action", selection: Self.verbBinding(rule)) {
                     Text("Accept").tag(FilterVerb.accept)
                     Text("Ignore").tag(FilterVerb.ignore)
@@ -862,6 +1014,9 @@ struct CustomRoutingTabView: View {
                 }
                 Spacer(minLength: 4)
                 if status != .active { RuleStatusBadge(status: status) }
+                ReorderButtons(commands: commands)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
                 Button {
                     profile.dns.resolverRules.removeAll { $0.id == r.id }
                 } label: {
@@ -873,9 +1028,31 @@ struct CustomRoutingTabView: View {
             IssueCaption(issues: issues)
         }
         .padding(.vertical, 2)
-        // Same sentence discipline as the route rows.
+        // Same sentence discipline as the route rows, position included.
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(sentence)
+        .accessibilityLabel("\(sentence). Rule \(ReorderCopy.position(index, of: count))")
+        .reorderDraggable(ReorderPayload(rowID: r.id.uuidString, listID: Self.dnsListID),
+                          subject: sentence, enabled: count > 1)
+        .reorderDropTarget(insertingBefore: index, listID: Self.dnsListID,
+                           indicator: $dnsDropIndex, drop: dropResolverRule)
+        .contextMenu { ReorderMenuItems(commands: commands) }
+    }
+
+    /// The resolver list's counterpart to `routeReorderCommands`. Same shared
+    /// commands, same draft, same commit — the two lists differ only in which array
+    /// they write to.
+    private func dnsReorderCommands(index: Int, subject: String) -> ReorderCommands {
+        ReorderCommands(subject: subject, index: index,
+                        count: profile.dns.resolverRules.count) { from, to in
+            profile.dns.resolverRules = Reorder.moved(profile.dns.resolverRules, from: from, to: to)
+        }
+    }
+
+    private func dropResolverRule(_ payload: ReorderPayload, _ target: Int) {
+        guard let id = UUID(uuidString: payload.rowID),
+              let from = profile.dns.resolverRules.firstIndex(where: { $0.id == id }) else { return }
+        let sentence = Self.dnsRuleSentence(profile.dns.resolverRules[from], status: .active)
+        dnsReorderCommands(index: from, subject: sentence).drop(from: from, insertingBefore: target)
     }
 
     private static func dnsRuleSentence(_ r: DNSCustomization.ResolverRule, status: RuleStatus) -> String {

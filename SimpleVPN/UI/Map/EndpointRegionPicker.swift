@@ -90,6 +90,20 @@ enum EndpointRegions {
     /// a table has columns to carry what a region heading used to.
     static func orderExplanation(items: [RankedEndpoint], home: GeoPoint?,
                                  connected: Bool = false) -> String {
+        // The user's own order comes FIRST in this sentence, because it beats every
+        // reason below it: a footnote promising "fastest first" over a hand-made
+        // order would be describing a list that isn't on screen.
+        if EndpointRanking.isManuallyOrdered(items) {
+            let unplaced = items.filter { $0.endpoint.order == nil }.count
+            var s = "In the order you put them in. Speed checks fill in the Speed column"
+                + " but no longer change the order."
+            if unplaced > 0 {
+                s += " \(unplaced) newer server\(unplaced == 1 ? "" : "s") from this VPN's"
+                    + " configuration \(unplaced == 1 ? "sits" : "sit") at the end until you"
+                    + " place \(unplaced == 1 ? "it" : "them")."
+            }
+            return s
+        }
         let measured = items.contains { $0.measurement?.rttMS != nil }
         if connected {
             return measured
