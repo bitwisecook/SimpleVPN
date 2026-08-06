@@ -13,7 +13,9 @@
 //    • OpenConnect opted in → `connectInProcessOpenConnect`, the packet-tunnel
 //                             extension's in-process bridge (`willRunInProcess`). That
 //                             is a FULL-ROUTES path and needs no privileged helper —
-//                             NetworkExtension is the privilege.
+//                             NetworkExtension is the privilege. ALL SEVEN SSL-VPN
+//                             kinds go this way; the extension dispatches on
+//                             `VPNKind.openconnectProtocol` and always has.
 //  Everything else is one child process: we build its argv, feed the password headlessly
 //  (SSH via a locked-down SSH_ASKPASS script, OpenConnect via --passwd-on-stdin), watch
 //  its output for the "up" signal, keep a rolling log, and — for SOCKS kinds — optionally
@@ -22,6 +24,10 @@
 //
 //  The subprocess SOCKS path needs no root either: `ssh -D` and `openconnect
 //  --script-tun --script "ocproxy -D <port>"` both expose a userspace proxy.
+//  ocproxy is NOT optional on that path — without it `openconnect` goes looking for a
+//  real tun device it has no privilege to make. `sslTransportBlockReason` refuses the
+//  connect in that case and names the in-process toggle as the fix, because the
+//  bundled engine needs no tool at all. See Docs/Networking.md §3.3.
 //
 
 import Foundation
@@ -169,6 +175,12 @@ final class SubprocessTunnelManager {
             live[config.id] = Live(status: .failed(reason))
             return
         }
+        // …and the transport it would use can't carry traffic without root. Read
+        // BEFORE the dispatch below, because the dispatch is what this predicts.
+        if let reason = Self.sslTransportBlockReason(config) {
+            live[config.id] = Live(status: .failed(reason))
+            return
+        }
         // Token mode without a stored seed would just let openconnect die under
         // --non-inter — fail fast with the actual fix instead.
         // (Not under SSO: the token never reaches the argv there — the identity
@@ -209,9 +221,16 @@ final class SubprocessTunnelManager {
         }
         // Configs using settings the in-process bridge doesn't carry route to the
         // subprocess path (see inProcessOpenConnectSupports).
-        if config.preferInProcess, config.authMode != "sso",
-           [.fortinet, .f5apm, .ciscoAnyConnect].contains(config.kind),
-           Self.inProcessOpenConnectSupports(config) {
+        //
+        // ONE rule, `willRunInProcess`, and this is the only place that decides.
+        // It used to be two: the editor promised in-process for every SSL-VPN kind
+        // while this dispatch named `[.fortinet, .f5apm, .ciscoAnyConnect]` — so a
+        // GlobalProtect / Juniper / Pulse / Array tunnel was told it would run
+        // in-process and silently ran as an `openconnect` subprocess (needing
+        // ocproxy, and Homebrew, for no reason). The extension has never had that
+        // limit: `PacketTunnelProvider.startTunnel` dispatches on
+        // `VPNKind.openconnectProtocol`, which covers all seven.
+        if config.authMode != "sso", Self.willRunInProcess(config) {
             connectInProcessOpenConnect(config, password: password)
             return
         }
@@ -273,8 +292,19 @@ final class SubprocessTunnelManager {
             }
             guard let self else { return }
             if !ok {
-                Self.log.error("in-process OpenConnect failed, falling back to subprocess")
                 self.inProcessNE.remove(config.id); self.live[config.id] = nil
+                // The fallback is only a fallback if it can actually carry traffic.
+                // `sslTransportBlockReason` was nil at connect() precisely BECAUSE
+                // this path was chosen, so re-ask it as a subprocess would: with
+                // ocproxy absent, falling back here would spawn `openconnect` to go
+                // hunting for a tun device it cannot make. Report, don't fall back.
+                if let reason = Self.sslTransportBlockReason(config, inProcess: false) {
+                    Self.log.error("in-process OpenConnect failed and the subprocess can't carry it")
+                    self.live[config.id] = Live(status: .failed(
+                        "SimpleVPN's built-in engine couldn't start this VPN. \(reason)"))
+                    return
+                }
+                Self.log.error("in-process OpenConnect failed, falling back to subprocess")
                 self.connectSubprocess(config, password: password)
             }
         }
@@ -396,7 +426,7 @@ final class SubprocessTunnelManager {
     /// `--cookie-on-stdin` (no sign-in left to do — and no sysext required,
     /// preserving the no-root SOCKS path SSO configs had before).
     private func connectWithCookie(_ config: SubprocessTunnelConfig, auth: OCAuthDone) {
-        if config.preferInProcess, Self.inProcessOpenConnectSupports(config) {
+        if Self.willRunInProcess(config) {
             inProcessNE.insert(config.id)
             var l = live[config.id] ?? Live()
             l.status = .connecting
@@ -407,8 +437,17 @@ final class SubprocessTunnelManager {
                 }
                 guard let self else { return }
                 if !ok {
-                    Self.log.error("in-process OpenConnect (cookie) failed, falling back to subprocess")
                     self.inProcessNE.remove(config.id)
+                    // Same rule as connectInProcessOpenConnect: `cookieCommand`
+                    // appends ocproxy conditionally too, so a fallback without it
+                    // would be the silent no-privilege failure again.
+                    if let reason = Self.sslTransportBlockReason(config, inProcess: false) {
+                        Self.log.error("in-process OpenConnect (cookie) failed and the subprocess can't carry it")
+                        self.live[config.id] = Live(status: .failed(
+                            "You are signed in, but SimpleVPN's built-in engine couldn't start the tunnel. \(reason)"))
+                        return
+                    }
+                    Self.log.error("in-process OpenConnect (cookie) failed, falling back to subprocess")
                     self.connectSubprocess(config, password: nil, command: Self.cookieCommand(for: config, auth: auth))
                 }
             }
@@ -570,7 +609,9 @@ final class SubprocessTunnelManager {
         guard let (path, baseArgs, stdin) = command
                 ?? Self.command(for: config, password: password,
                                 pin: tokenPIN ?? Self.storedPKCS11PIN(config)) else {
-            live[config.id] = Live(status: .failed("The required command-line tool isn't installed."))
+            // Name the tool and the fix — "the required command-line tool" sends
+            // nobody anywhere (ONTOLOGY: failure text names the fix).
+            live[config.id] = Live(status: .failed(Self.missingToolReason(config)))
             return
         }
         var args = baseArgs
@@ -1007,6 +1048,94 @@ final class SubprocessTunnelManager {
             return "Certificate sign-in needs openconnect — the openfortivpn fallback can't present a client certificate. \(TunnelCLI.openconnect.installHint)"
         }
         return nil
+    }
+
+    /// The tool `command(for:)` couldn't find, and how to get it. An SSL VPN that
+    /// could go in-process is told about the toggle first — it is bundled, and it
+    /// is the answer that needs no package manager at all.
+    static func missingToolReason(_ c: SubprocessTunnelConfig) -> String {
+        if c.kind == .ssh { return "/usr/bin/ssh is missing from this Mac — it ships with macOS, so reinstall the command line tools." }
+        guard c.kind.isSSLVPN else { return "The command-line tool this VPN needs isn't installed." }
+        if inProcessOpenConnectSupports(c), !c.preferInProcess {
+            return "openconnect isn't installed. Turn on Run In-Process under Advanced to carry this VPN with SimpleVPN's built-in engine instead — or install the tool with: brew install openconnect"
+        }
+        return "openconnect isn't installed. \(TunnelCLI.openconnect.installHint)"
+    }
+
+    /// Why an SSL VPN that is going to run as a **subprocess** can't carry traffic
+    /// on this Mac, or nil — the transport twin of `sslAuthBlockReason`.
+    ///
+    /// `openconnect` and `openfortivpn` both configure a real tun/ppp device, which
+    /// needs root, and SimpleVPN deliberately never takes root in the user's
+    /// context. The no-root subprocess path is `--script-tun --script "ocproxy -D
+    /// <port>"`, appended by `openconnectArgs` only when ocproxy resolves — so with
+    /// ocproxy absent the argv quietly omitted it and the tool went off to make a
+    /// tun it cannot make. Nothing refused the connect and nothing said why; the
+    /// user got whatever the tool printed, or a hang. That was the defect.
+    ///
+    /// **The first fix named is the toggle, not Homebrew.** The in-process engine
+    /// has no privilege problem at all — the packet-tunnel extension already runs
+    /// as root and already owns a utun, so NetworkExtension *is* the privilege —
+    /// and it is bundled. Homebrew is only named when the config uses something the
+    /// bridge can't carry (a smartcard above all), because then the toggle would be
+    /// a lie: `willRunInProcess` would still be false with it on.
+    ///
+    /// Availability is injected so this is testable on a Mac that happens to have
+    /// (or not have) the tools — the `pkcs11RegistrationBlockReason` precedent.
+    /// `inProcess: false` asks the question as the *fallback* would face it: the
+    /// in-process engine was chosen and then failed to start, so the answer must
+    /// ignore `willRunInProcess` and judge the subprocess on its own merits.
+    static func sslTransportBlockReason(
+        _ c: SubprocessTunnelConfig,
+        inProcess: Bool? = nil,
+        ocproxyAvailable: Bool = TunnelCLI.ocproxy.isAvailable,
+        openconnectAvailable: Bool = TunnelCLI.openconnect.isAvailable
+    ) -> String? {
+        guard c.kind.isSSLVPN else { return nil }
+        // Going in-process: no tool, no tun of ours to make, nothing to install.
+        if inProcess ?? willRunInProcess(c) { return nil }
+        // Offer the toggle only when turning it on would actually change the
+        // answer: the bridge must be able to carry the config AND the toggle must
+        // still be off. "Turn on the thing you already turned on" is the shape of
+        // advice that makes people stop reading error messages.
+        let theToggleWouldFixIt = inProcessOpenConnectSupports(c) && !c.preferInProcess
+        // Fortinet with only openfortivpn: it drives pppd and has no userspace
+        // mode, so there is no ocproxy equivalent to reach for.
+        if !openconnectAvailable, c.kind == .fortinet {
+            let fix = theToggleWouldFixIt
+                ? "Turn on Run In-Process under Advanced to use SimpleVPN's built-in engine, which needs no administrator rights"
+                : "Install openconnect and ocproxy (brew install openconnect ocproxy)"
+            return "openfortivpn builds its own tunnel device and needs administrator rights, which SimpleVPN doesn't take. \(fix)."
+        }
+        if ocproxyAvailable { return nil }
+        if theToggleWouldFixIt {
+            return "Running this VPN with the openconnect tool needs ocproxy to carry it without administrator rights, and ocproxy isn't installed. Turn on Run In-Process under Advanced to use SimpleVPN's built-in engine instead — or install ocproxy (brew install ocproxy)."
+        }
+        // The toggle is already on and the engine couldn't take it: `ocproxy` is
+        // the only remaining way for the tool to carry traffic without root.
+        if c.preferInProcess, inProcessOpenConnectSupports(c) {
+            return "The openconnect tool needs ocproxy to carry this VPN without administrator rights, and ocproxy isn't installed. Install it with: brew install ocproxy"
+        }
+        return "This VPN has to run with the openconnect tool — \(inProcessRefusalNoun(c)) — and that needs ocproxy to carry traffic without administrator rights. Install it with: brew install ocproxy"
+    }
+
+    /// The reason `inProcessOpenConnectSupports` said no, as a clause that fits
+    /// mid-sentence. Named rather than generic because "some setting" sends the
+    /// user hunting through five tabs.
+    private static func inProcessRefusalNoun(_ c: SubprocessTunnelConfig) -> String {
+        if openconnectAuthMode(c) == "token" || c.pkcs11CertificateURI != nil || c.pkcs11KeyURI != nil {
+            return "SimpleVPN's built-in engine is built without smartcard support"
+        }
+        if !c.clientCertFile.isEmpty || !c.clientKeyFile.isEmpty { return "the built-in engine can't present a client certificate from a file" }
+        if !c.caFile.isEmpty { return "the built-in engine can't take a CA file" }
+        if c.proxyMode == .manual { return "the built-in engine can't reach the gateway through a specific proxy" }
+        if !c.csdWrapper.isEmpty || c.disableCSD { return "the built-in engine can't answer a host-checker challenge" }
+        if !c.usergroup.isEmpty { return "the built-in engine can't take a user group or path" }
+        if c.port != nil { return "the built-in engine can't take an explicit port" }
+        if !c.extraArgs.filter({ !$0.trimmingCharacters(in: .whitespaces).isEmpty }).isEmpty {
+            return "the built-in engine can't take extra arguments"
+        }
+        return "a setting on this VPN needs the tool (the Run In-Process row names which)"
     }
 
     /// Why the chosen PKCS#11 module can't be reached by `openconnect`, or nil.

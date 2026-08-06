@@ -224,6 +224,118 @@ struct OpenConnectArgvTests {
         }))
     }
 
+    /// Every SSL-VPN kind can go in-process, because the extension dispatches on
+    /// `VPNKind.openconnectProtocol` and that covers all seven. The connect path
+    /// used to name only fortinet / f5apm / anyconnect while `willRunInProcess`
+    /// promised all of them — the editor said "in-process", the connect quietly
+    /// spawned `openconnect` and demanded ocproxy. One rule now, asserted per kind.
+    @Test func everySSLVPNKindCanRunInProcess() {
+        let sslKinds = VPNKind.allCases.filter(\.isSSLVPN)
+        #expect(sslKinds.count == 7, "the seven SSL-VPN kinds")
+        for kind in sslKinds {
+            #expect(SubprocessTunnelManager.willRunInProcess(config {
+                $0.kind = kind; $0.preferInProcess = true
+            }), "\(kind.rawValue) should be able to run in-process")
+        }
+    }
+
+    // MARK: The transport must be able to carry traffic without root
+
+    /// `openconnect` configures a real tun, which needs root this app never takes.
+    /// `--script-tun --script "ocproxy -D <port>"` is the no-root path, and it is
+    /// appended only when ocproxy resolves — so ocproxy is REQUIRED on the
+    /// subprocess path, and its absence used to be a silent failure.
+    @Test func aSubprocessSSLVPNWithoutOcproxyIsRefusedNotLeftToFail() {
+        let c = config { _ in }   // no in-process, password sign-in
+        #expect(SubprocessTunnelManager.sslTransportBlockReason(
+            c, ocproxyAvailable: true, openconnectAvailable: true) == nil)
+        let reason = SubprocessTunnelManager.sslTransportBlockReason(
+            c, ocproxyAvailable: false, openconnectAvailable: true)
+        #expect(reason != nil)
+        // The fix it names is the bundled engine FIRST — Homebrew is the fallback,
+        // not the answer (ONTOLOGY: failure text names the fix).
+        #expect(reason?.contains("Run In-Process") == true)
+        #expect(reason?.contains("brew install ocproxy") == true)
+    }
+
+    /// Going in-process there is no tool and no tun of ours to make, so nothing
+    /// about ocproxy can block it — that is the whole point of the migration.
+    @Test func anInProcessSSLVPNNeedsNoToolAtAll() {
+        for kind in VPNKind.allCases.filter(\.isSSLVPN) {
+            let c = config { $0.kind = kind; $0.preferInProcess = true }
+            #expect(SubprocessTunnelManager.sslTransportBlockReason(
+                c, ocproxyAvailable: false, openconnectAvailable: false) == nil,
+                    "\(kind.rawValue) in-process must not require any tool")
+        }
+    }
+
+    /// The in-process→subprocess fallback is only a fallback if the subprocess can
+    /// carry traffic. Asked with `inProcess: false` (the engine was chosen and
+    /// failed to start) the answer must not say "turn on Run In-Process" — it is
+    /// already on, and advice that names a box the user already ticked is how
+    /// people learn to stop reading error messages.
+    @Test func theFallbackIsRefusedAndNeverToldToTickABoxAlreadyTicked() {
+        let c = config { $0.preferInProcess = true }
+        // As the connect path sees it: in-process, so nothing to block.
+        #expect(SubprocessTunnelManager.sslTransportBlockReason(
+            c, ocproxyAvailable: false, openconnectAvailable: true) == nil)
+        // As the fallback faces it: the subprocess needs ocproxy and hasn't got it.
+        let reason = SubprocessTunnelManager.sslTransportBlockReason(
+            c, inProcess: false, ocproxyAvailable: false, openconnectAvailable: true)
+        #expect(reason != nil)
+        #expect(reason?.contains("brew install ocproxy") == true)
+        #expect(reason?.contains("Turn on Run In-Process") == false)
+        // With ocproxy present the fallback is legitimate again.
+        #expect(SubprocessTunnelManager.sslTransportBlockReason(
+            c, inProcess: false, ocproxyAvailable: true, openconnectAvailable: true) == nil)
+    }
+
+    /// A smartcard tunnel can never run in-process (AMFI forbids `dlopen`ing the
+    /// provider module in the sysext, whatever TLS backend the xcframework is
+    /// built with), so ocproxy is a genuine requirement there — and the refusal
+    /// must NOT offer the toggle, which would still be false with it on.
+    @Test func aSmartcardTunnelIsToldTheToolIsRequiredNotOfferedTheToggle() {
+        let token = config {
+            $0.authMode = "token"
+            $0.pkcs11ModulePath = "/opt/homebrew/lib/libykcs11.dylib"
+            $0.pkcs11CertificateURI = "pkcs11:token=SimpleVPN;object=vpn"
+        }
+        #expect(!SubprocessTunnelManager.willRunInProcess(config {
+            $0.preferInProcess = true; $0.authMode = "token"
+            $0.pkcs11CertificateURI = "pkcs11:token=SimpleVPN;object=vpn"
+        }))
+        let reason = SubprocessTunnelManager.sslTransportBlockReason(
+            token, ocproxyAvailable: false, openconnectAvailable: true)
+        #expect(reason != nil)
+        #expect(reason?.contains("smartcard") == true)
+        #expect(reason?.contains("Run In-Process") == false,
+                "offering a toggle that cannot help is a lie")
+    }
+
+    /// The Fortinet-only `openfortivpn` fallback drives `pppd` — it has no
+    /// userspace mode, so there is no ocproxy equivalent and it simply needs
+    /// admin rights we don't take. Refuse it rather than let pppd fail.
+    @Test func theOpenfortivpnFallbackIsRefusedBecauseItNeedsRoot() {
+        let f = config { $0.kind = .fortinet }
+        let reason = SubprocessTunnelManager.sslTransportBlockReason(
+            f, ocproxyAvailable: true, openconnectAvailable: false)
+        #expect(reason?.contains("administrator rights") == true)
+        #expect(reason?.contains("Run In-Process") == true)
+        // With openconnect present it is the ordinary ocproxy story again.
+        #expect(SubprocessTunnelManager.sslTransportBlockReason(
+            f, ocproxyAvailable: true, openconnectAvailable: true) == nil)
+    }
+
+    /// A missing tool must name the tool and the fix. "The required command-line
+    /// tool isn't installed" sent nobody anywhere.
+    @Test func aMissingToolNamesTheToolAndTheFix() {
+        let reason = SubprocessTunnelManager.missingToolReason(config { _ in })
+        #expect(reason.contains("openconnect"))
+        #expect(reason.contains("Run In-Process"), "the bundled engine is the fix that needs no package manager")
+        // SSH is a macOS tool — Homebrew is not the answer there.
+        #expect(!SubprocessTunnelManager.missingToolReason(config { $0.kind = .ssh }).contains("brew"))
+    }
+
     // MARK: Catalog / manual contract for the SSL-VPN rows
 
     @Test func everyOpenConnectSpecIsNamedSummarizedAndDocumented() throws {

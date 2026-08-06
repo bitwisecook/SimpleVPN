@@ -277,7 +277,7 @@ flowchart LR
 | SSH Network Tunnel | same | the user's config, on a fixed on-link utun address | `Shared/SSHNetworkTunnelNetworkSettings.swift` |
 | IKEv2 / IPsec / L2TP | **an OS-owned interface we never see** | macOS, from `NEVPNProtocol*` | — (`NativeVPNManager`) |
 | SSH (`.ssh`) | **no interface at all** | — a local SOCKS port or named forwards | — |
-| OpenConnect SSL VPNs, **subprocess** | **no interface** in the shipped path | `ocproxy` gives a userspace SOCKS port | — |
+| OpenConnect SSL VPNs, **subprocess** (smartcard, or a knob the bridge can't carry) | **no interface** in the shipped path | `ocproxy` gives a userspace SOCKS port — **required**, not optional | — |
 
 Three rows in that table are the ones that do not fit the pattern, and they are the ones a reader
 will otherwise assume away:
@@ -298,18 +298,37 @@ will otherwise assume away:
    `--script-tun --script "ocproxy -D <port>"` whenever `ocproxy` is installed, which turns the SSL
    VPN into a userspace SOCKS proxy needing no root. Without `ocproxy` the argv omits it, and
    `openconnect` would then try to configure a real tun itself — which needs privileges this app does
-   not take. ❓ **There is no guard on that combination**: nothing refuses the connect or explains it
-   when `ocproxy` is absent, and the failure is left to the tool's own output. This is worth either a
-   block reason or a plain sentence in the editor.
+   not take. ✅ **`SubprocessTunnelManager.sslTransportBlockReason` now refuses that combination**
+   before anything is spawned, and the first fix it names is *Run In-Process*, not Homebrew: the
+   bundled engine has no privilege problem to solve. Homebrew is named only when the config uses
+   something the bridge genuinely cannot carry, because then the toggle would be a lie. The
+   Fortinet-only `openfortivpn` fallback is refused on the same grounds — it drives `pppd` and has no
+   userspace mode, so there is no ocproxy equivalent to reach for.
 
    The in-process alternative is the preferred path and the reason is quoted in the code: "That is a
-   FULL-ROUTES path and needs no privileged helper — NetworkExtension is the privilege." Whether a
-   profile takes it is `SubprocessTunnelManager.willRunInProcess`, and its refusals are specific —
-   an explicit port, a CA file, a usergroup, a client certificate on disk, a manual proxy, a CSD
-   wrapper, or **any smartcard sign-in**, which can never run in-process because our
-   `libopenconnect` is built against OpenSSL (PKCS#11 lives only in OpenConnect's GnuTLS/p11-kit
+   FULL-ROUTES path and needs no privileged helper — NetworkExtension is the privilege." **All seven
+   SSL-VPN kinds take it** — the provider dispatches on `VPNKind.openconnectProtocol`, which has
+   always covered all seven; the app's connect path used to name only `fortinet` / `f5apm` /
+   `ciscoAnyConnect`, so a GlobalProtect, Juniper, Pulse or Array tunnel was *told* it would run
+   in-process (`willRunInProcess` returns true for any `isSSLVPN`) and silently ran as a subprocess.
+   That divergence is gone: `willRunInProcess` is the single rule and the dispatch calls it.
+
+   Whether a profile takes it is therefore `SubprocessTunnelManager.willRunInProcess`, and its
+   refusals are specific — an explicit port, a CA file, a usergroup, a client certificate on disk, a
+   manual proxy, a CSD wrapper, or **any smartcard sign-in**, which can never run in-process because
+   our `libopenconnect` is built against OpenSSL (PKCS#11 lives only in OpenConnect's GnuTLS/p11-kit
    backend) and because loading a provider dylib into the packet tunnel would need a
    library-validation relaxation AMFI forbids there.
+
+   **Rebuilding the xcframework with GnuTLS + p11-kit would not change that**, and it is worth being
+   blunt about it because the reverse has been assumed: the TLS backend is the *lesser* of the two
+   obstacles. p11-kit's entire job is to `dlopen` a third-party provider module, and that `dlopen` is
+   what AMFI refuses inside the sysext-embedding app and its extension — with GnuTLS linked in, a
+   `pkcs11:` URI would stop saying "built without PKCS#11 support" and start failing to load the
+   module instead. So **the subprocess path cannot be retired for smartcard sign-in**, whatever the
+   xcframework is configured with, and `ocproxy` stays a real requirement for exactly that case.
+   `Docs/AuthSecPKCS11.md` records the AMFI constraint and the helper-process precedent
+   (`opnative-helper`) in full.
 
 ### 3.4 Addresses and MTU
 
