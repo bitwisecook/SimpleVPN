@@ -372,8 +372,21 @@ struct SignInSourceSummary: View {
                 }
             }
             Spacer(minLength: 8)
+            // NOT .borderless: a borderless text Button on macOS draws no chrome and
+            // no accent, so it renders as label-coloured text indistinguishable from
+            // the secondary caption beside it, and the only hint that it is a control
+            // is the cursor. Reported as "doesn't look like something a user could
+            // click", which was accurate.
+            //
+            // .bordered rather than .link, for two reasons that do not depend on
+            // reading the HIG a particular way. First, the HIG separates links
+            // (navigation, opening content) from buttons (performing an action), and
+            // this performs an action — it opens the chooser. Second and more
+            // concretely, the unavailable-source banner immediately above this row
+            // already offers a BORDERED "Change…" that does the same thing; two
+            // identical actions on one screen must not have two appearances.
             Button("Change\u{2026}", action: onChange)
-                .buttonStyle(.borderless)
+                .buttonStyle(.bordered)
                 .controlSize(.small)
                 .help("Choose a different way to sign in to this VPN")
                 .accessibilityLabel("Change how you sign in")
