@@ -241,9 +241,14 @@ enum ConnectListing {
     nonisolated struct Profile: Equatable, Sendable, Identifiable {
         let id: String
         let kind: VPNKind
-        init(id: String, kind: VPNKind) {
+        /// Where the user put this row, or nil if they never have — read from
+        /// `VPNUIPrefs.order`, the NE profiles' third of the one arrangement both
+        /// sidebars share. See `ConnectOrder`.
+        let order: Int?
+        init(id: String, kind: VPNKind, order: Int? = nil) {
             self.id = id
             self.kind = kind
+            self.order = order
         }
     }
 
@@ -253,19 +258,43 @@ enum ConnectListing {
     /// AGENTS.md applies to setting groups ("a group with nothing in it is omitted, never
     /// shown empty").
     ///
-    /// Within a section the order is profiles, then subprocess tunnels, then native VPNs.
-    /// That is the store order the list has always used; what changed is that it is now
-    /// asked twice, once per side of the line, instead of once per store.
+    /// WITHIN A SECTION, THE USER'S OWN ORDER WINS, and where they have not given one
+    /// the store order stands: profiles, then subprocess tunnels, then native VPNs.
+    /// That store order is what the list has always used, and it is still what a Mac
+    /// with no arrangement on it sees.
+    ///
+    /// The rank is a position among ALL rows rather than within this heading — see
+    /// `ConnectOrder` for why that is what survives a row changing section — so
+    /// sorting is by `(rank, store position)` and nothing about the global numbering
+    /// shows. Rows with no rank sort last, in store order, so a VPN added today
+    /// appears at the end of its section rather than taking somebody's first slot.
+    ///
+    /// SORTING CANNOT LOSE A ROW, which is the invariant `rowTags` is built on: this
+    /// is a permutation of the same tags the three filters produced, and
+    /// `ConnectListingTests.sectionsLoseNoRows` holds it.
     static func sections(profiles: [Profile],
                          tunnels: [SubprocessTunnelConfig],
                          native: [NativeVPNConfig]) -> [(scope: ConnectionScope, tags: [String])] {
         ConnectionScope.allCases.compactMap { scope in
-            var tags: [String] = []
-            tags += profiles.filter { ConnectionScope.of(profileKind: $0.kind) == scope }.map(\.id)
-            tags += tunnels.filter { ConnectionScope.of($0) == scope }.map { tag(forTunnel: $0.id) }
-            tags += native.filter { ConnectionScope.of(native: $0) == scope }.map { tag(forNative: $0.id) }
-            return tags.isEmpty ? nil : (scope, tags)
+            var rows: [(tag: String, order: Int?)] = []
+            rows += profiles.filter { ConnectionScope.of(profileKind: $0.kind) == scope }
+                .map { ($0.id, $0.order) }
+            rows += tunnels.filter { ConnectionScope.of($0) == scope }
+                .map { (tag(forTunnel: $0.id), $0.order) }
+            rows += native.filter { ConnectionScope.of(native: $0) == scope }
+                .map { (tag(forNative: $0.id), $0.order) }
+            return rows.isEmpty ? nil : (scope, arranged(rows))
         }
+    }
+
+    /// One section's rows in the arranged order. The store position is carried as the
+    /// tie-break because `sorted(by:)` is not documented to be stable, and an unstable
+    /// sort over a list where most ranks are nil would shuffle the unarranged rows on
+    /// every redraw.
+    private static func arranged(_ rows: [(tag: String, order: Int?)]) -> [String] {
+        rows.enumerated()
+            .sorted { ($0.element.order ?? Int.max, $0.offset) < ($1.element.order ?? Int.max, $1.offset) }
+            .map(\.element.tag)
     }
 
     /// Every row the connect list shows, in sidebar order.

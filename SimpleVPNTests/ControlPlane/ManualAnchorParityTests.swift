@@ -84,6 +84,11 @@ struct ManualAnchorParityTests {
         // App chapters
         "importing", "endpoints-map", "certificates", "pausing",
         "connection-problems", "privacy",
+        // Arranging the VPN list itself, and why a move keeps a VPN in its own group.
+        // PROSE, not a setting, for the same reason `endpoints-order` is: the order is
+        // not a value anybody types, it is the list — stored as a position on each VPN
+        // and reached by dragging a row or by Move Up / Move Down.
+        "vpn-order",
         // What a hand-made server order means and what it beats. PROSE, not a
         // setting: the order is not a value anybody types, it is the list itself —
         // stored as a position on each server's annotations, reached by dragging a

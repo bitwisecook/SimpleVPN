@@ -126,6 +126,28 @@ struct VPNUIPrefs: Codable, Sendable, Equatable {
     /// on the connection page.
     var showConnectionManager = false
 
+    /// WHERE THIS VPN SITS IN THE SIDEBAR, as the user arranged it. nil = never
+    /// placed by hand, which sorts after everything that was (see
+    /// `ConnectListing.sections`).
+    ///
+    /// IT LIVES HERE, on the per-VPN blob, rather than in one app-level list of ids,
+    /// for a reason that only shows up at the far end: `ConfigImport` gives every
+    /// imported VPN A NEW ID, so a stored list of ids would arrive on the other Mac
+    /// naming nothing and the arrangement would be lost by the one path that exists
+    /// to carry it. A rank each VPN carries survives that — and it round-trips with
+    /// no export code at all, because `ConfigDocument` writes this whole type
+    /// structurally (`structuralMapRedacting`).
+    ///
+    /// The same field, under the same name, is on `SubprocessTunnelConfig` and
+    /// `NativeVPNConfig`: the sidebar interleaves all three stores under one heading,
+    /// so an order only NE profiles carried could not order the list at all. It is
+    /// also the name `VPNEndpoint.order` already uses for a hand-made position, which
+    /// is the same idea one level down.
+    ///
+    /// Optional, and the ranks are GLOBAL across every row rather than per section —
+    /// see `ConnectOrder` for why that is what survives a VPN changing section.
+    var order: Int? = nil
+
     init() {}
 
     var isDefault: Bool { self == VPNUIPrefs() }

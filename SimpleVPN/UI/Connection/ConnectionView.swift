@@ -189,18 +189,30 @@ struct ConnectionView: View {
     /// That is the point: which of our three transports carries a connection is no longer
     /// visible in the sidebar, because it was never information the user could use.
     @ViewBuilder private func connectSection(_ scope: ConnectionScope) -> some View {
-        let profiles = vpn.profiles.filter { ConnectionScope.of(profileKind: $0.kind) == scope }
-        let others = otherConnections.filter { $0.scope == scope }
-        if !profiles.isEmpty || !others.isEmpty {
+        // ONE ForEach PER SECTION, over ConnectOrder's tags — not one per store.
+        //
+        // This window used to draw two ForEaches (profiles, then everything else), which
+        // had two consequences. The rows were in store order rather than the user's, so
+        // this sidebar and Manage VPNs DISAGREED about arrangement — the thing the user
+        // ruled out with "it should be in sync with the vpn configs window". And `onMove`
+        // only reorders within a single ForEach, so drag-to-reorder was not expressible
+        // here at all, which is what they reported.
+        //
+        // Both windows now read `ConnectOrder` and sort through `ConnectListing.sections`,
+        // and neither keeps order state of its own, so there is nothing left to diverge.
+        let order = ConnectOrder.of(vpn: vpn, tunnels: tunnels, native: nativeVPN)
+        let tags = order.tags(in: scope)
+        if !tags.isEmpty {
             Section {
-                ForEach(profiles) { p in
-                    VPNSidebarRow(vpn: vpn, profile: p, labelDefs: labels.labels(for: p.id), dotState: rowDot(p))
-                        .tag(p.id)
-                        .contextMenu { sidebarMenu(p) }
-                }
-                ForEach(others) { row in
-                    otherConnectionRow(row).tag(row.id)
-                }
+                ForEach(tags, id: \.self) { tag in sidebarRow(for: tag) }
+                    // Routed through `ConnectOrder.move` — the same `ReorderCommands` the
+                    // buttons and menu items use, so the index maths, the refusals and the
+                    // spoken announcement cannot fork into a second implementation. The
+                    // section-local indices are what make a cross-heading drop
+                    // UNREPRESENTABLE rather than merely rejected: a row's heading follows
+                    // its configuration, so moving one across would silently change what
+                    // connecting it does to this Mac.
+                    .onMove { from, to in order.move(in: scope, from: from, to: to) }
             } header: {
                 // A heading that regroups rows has to SAY what it groups: it is the only
                 // place the new question is asked out loud, and VoiceOver reads the
@@ -210,6 +222,22 @@ struct ConnectionView: View {
                     .help(scope.explanation)
                     .accessibilityLabel(scope.spokenHeader)
             }
+        }
+    }
+
+    /// The row for one arrangement tag, from whichever store owns it.
+    ///
+    /// A reorder moves rows and must change NO tag — the menu bar, the map and the
+    /// settings routes all select by these, so a tag that moved with a row would break
+    /// a route from the other window. `ConnectOrder` therefore orders tags and never
+    /// mints them.
+    @ViewBuilder private func sidebarRow(for tag: String) -> some View {
+        if let p = vpn.profiles.first(where: { $0.id == tag }) {
+            VPNSidebarRow(vpn: vpn, profile: p, labelDefs: labels.labels(for: p.id), dotState: rowDot(p))
+                .tag(p.id)
+                .contextMenu { sidebarMenu(p) }
+        } else if let row = otherConnections.first(where: { $0.id == tag }) {
+            otherConnectionRow(row).tag(row.id)
         }
     }
 

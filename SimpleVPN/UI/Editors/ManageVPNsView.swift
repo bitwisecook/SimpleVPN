@@ -85,6 +85,22 @@ struct ManageVPNsView: View {
                         .disabled(!canRemoveSelection)
                         .help("Remove the selected VPN")
                         .accessibilityLabel("Remove the selected VPN")
+                    // MOVE UP / MOVE DOWN, beside + and − — the System Settings idiom,
+                    // and the reason the drag is allowed to exist at all: a drag-only
+                    // order is unusable without a pointer (Docs/Accessibility.md rule
+                    // 7). Same words, same refusals and same announcement as the
+                    // context-menu items and as the drag, because all three are this
+                    // one `ReorderCommands`.
+                    //
+                    // NO KEY EQUIVALENT, and that is deliberate rather than an
+                    // oversight: the editor pane in THIS window shows the servers
+                    // table, whose own pair already claims ⌘⌥↑/⌘⌥↓, and
+                    // `Reorder.swift` states the rule — at most one pair per window may,
+                    // because two make the shortcut ambiguous. These stay Tab-reachable,
+                    // which is what rule 7 actually asks for; the main window's sidebar
+                    // has no servers table and is free to take the shortcut.
+                    ReorderButtons(commands: order.commands(for: selection))
+                        .help(ConnectOrderCopy.scopeHelp)
                     // "Export .ovpn…" USED TO BE HERE, on every selection regardless
                     // of kind — including F5 BIG-IP APM, which has no `.ovpn`
                     // representation at all (`.ovpn` is OpenVPN's format; OpenConnect
@@ -195,11 +211,22 @@ struct ManageVPNsView: View {
         }
     }
 
+    /// THE ONE ARRANGEMENT, built the same way the main window builds it. Both
+    /// sidebars go through `ConnectOrder.of`, which is what makes "in sync with the
+    /// VPN configs window" true by construction rather than by two views being written
+    /// to match. Built fresh on every read so it can never hold a stale position.
+    private var order: ConnectOrder {
+        ConnectOrder.of(vpn: vpn, tunnels: tunnels, native: nativeVPN)
+    }
+
     /// The sidebar list. Extracted from `body` because SwiftUI type-checks a
     /// `NavigationSplitView` plus its toolbar as one expression, and the added
     /// toolbar item pushed it past what the compiler will do in reasonable time.
     private var sidebarList: some View {
-                List(selection: $selection) {
+                // Read once and passed down: each section would otherwise rebuild the
+                // whole arrangement, and both would have to agree by luck.
+                let order = self.order
+                return List(selection: $selection) {
                     // THE HEADINGS THIS WINDOW USED TO HAVE: "VPNs", "Tunnels" and
                     // "Native (IKEv2 / IPsec)" — our three transports, named as though
                     // they were three kinds of thing the user owns. That is where the
@@ -212,8 +239,8 @@ struct ManageVPNsView: View {
                     // composition is a GROUP of VPNs rather than one connection, so it
                     // sits on a different axis and does not divide the list by anything
                     // about our code.
-                    scopeSection(.wholeMac)
-                    scopeSection(.localPort)
+                    scopeSection(.wholeMac, order)
+                    scopeSection(.localPort, order)
                     if !compositions.compositions.isEmpty {
                         Section("Compositions") {
                             ForEach(compositions.compositions) { comp in
@@ -227,15 +254,29 @@ struct ManageVPNsView: View {
     /// One heading and everything under it, from all three stores. Row layouts are
     /// unchanged — they were lifted out of the three old sections verbatim so this is a
     /// regrouping and nothing else.
-    @ViewBuilder private func scopeSection(_ scope: ConnectionScope) -> some View {
-        let profiles = vpn.profiles.filter { ConnectionScope.of(profileKind: $0.kind) == scope }
-        let subs = tunnels.tunnels.filter { ConnectionScope.of($0) == scope }
-        let natives = nativeVPN.configs.filter { ConnectionScope.of(native: $0) == scope }
-        if !profiles.isEmpty || !subs.isEmpty || !natives.isEmpty {
+    ///
+    /// ONE `ForEach` PER HEADING, and that is what makes the reorder possible rather
+    /// than merely tidy. It used to be three — profiles, then tunnels, then native
+    /// configs — and `onMove` reorders WITHIN a `ForEach`, so three of them would have
+    /// let a VPN move only among its own store's rows: you could not drag an SSH tunnel
+    /// above an OpenVPN profile, which is the whole point of a list that no longer
+    /// shows which transport carries a connection. Rows now come from the arrangement
+    /// as tags and each one is looked up in whichever store owns it.
+    ///
+    /// IT IS ALSO WHERE THE CROSS-SECTION REFUSAL COMES FROM. A `ForEach` is the unit
+    /// AppKit will drop into, so the drag cannot leave this heading — and a row's
+    /// heading says what connecting it does to this Mac (`ConnectionScope`), which is
+    /// not something a drag may change.
+    @ViewBuilder private func scopeSection(_ scope: ConnectionScope, _ order: ConnectOrder) -> some View {
+        let tags = order.tags(in: scope)
+        if !tags.isEmpty {
             Section {
-                ForEach(profiles) { p in profileRow(p) }
-                ForEach(subs) { t in tunnelRow(t) }
-                ForEach(natives) { c in nativeRow(c) }
+                ForEach(tags, id: \.self) { tag in row(for: tag) }
+                    // The PLATFORM'S reorder — routed through `ConnectOrder.move`,
+                    // which hands it to the same `ReorderCommands` the buttons and the
+                    // menu items use, so the announcement, the refusals and the index
+                    // maths cannot fork into a second implementation.
+                    .onMove { from, to in order.move(in: scope, from: from, to: to) }
             } header: {
                 // The heading names itself and says what puts a row under it, spoken as
                 // well as shown (Docs/Accessibility.md: nothing hover-only).
@@ -243,6 +284,20 @@ struct ManageVPNsView: View {
                     .help(scope.explanation)
                     .accessibilityLabel(scope.spokenHeader)
             }
+        }
+    }
+
+    /// The row for one arrangement tag, from whichever store owns it. The three row
+    /// builders are unchanged, including the `.tag(…)` each one applies: a reorder
+    /// moves rows and must change no tag, or a settings route from the other window
+    /// would select nothing.
+    @ViewBuilder private func row(for tag: String) -> some View {
+        if let t = tunnelBinding(for: tag) {
+            tunnelRow(t)
+        } else if let c = nativeBinding(for: tag) {
+            nativeRow(c)
+        } else if let p = vpn.profiles.first(where: { $0.id == tag }) {
+            profileRow(p)
         }
     }
 
@@ -254,6 +309,10 @@ struct ManageVPNsView: View {
         }
             .tag(p.id)
             .contextMenu {
+                // Right-clicking a row is what a Mac user tries first, and VO-⇧-M
+                // reaches it — but it is never the only path (the toolbar pair above is).
+                ReorderMenuItems(commands: order.commands(for: p.id))
+                Divider()
                 exportItems(for: p)
                 Button("Remove", role: .destructive) { Task { try? await vpn.remove(id: p.id) } }
             }
@@ -318,6 +377,8 @@ struct ManageVPNsView: View {
         .accessibilityLabel("\(t.name), \(t.kind.displayName)\(port.map { ", \($0)" } ?? ""), \(DotState.from(subprocess: st).accessibilityDescription)\(st.isFailed ? ", \(st.failureText ?? "failed")" : "")\(t.kind.maturityNotice.map { ", \($0.spokenValue)" } ?? "")")
         .tag(Self.tunnelTag + t.id)
         .contextMenu {
+            ReorderMenuItems(commands: order.commands(for: Self.tunnelTag + t.id))
+            Divider()
             Button("Remove", role: .destructive) {
                 tunnelManager.disconnect(t.id); tunnels.remove(t.id)
             }
@@ -349,6 +410,8 @@ struct ManageVPNsView: View {
         .accessibilityLabel("\(c.name), \(c.kind.displayName), \(DotState.from(status: isThis ? nativeVPN.status : .disconnected).accessibilityDescription)\(c.kind.maturityNotice.map { ", \($0.spokenValue)" } ?? "")")
         .tag(Self.nativeTag + c.id)
         .contextMenu {
+            ReorderMenuItems(commands: order.commands(for: Self.nativeTag + c.id))
+            Divider()
             Button("Remove", role: .destructive) { nativeVPN.remove(c.id) }
         }
     }

@@ -268,6 +268,17 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     // PIN — the keychain item "tunnel.<id>.pkcs11" — is deliberately NOT deleted
     // either; see `remove(_:)`.
 
+    /// WHERE THIS CONNECTION SITS IN THE SIDEBAR, as the user arranged it. nil =
+    /// never placed by hand, which sorts after everything that was.
+    ///
+    /// The same field, under the same name, is on `VPNUIPrefs` (the NE profiles) and
+    /// `NativeVPNConfig`: both sidebars interleave all three stores under one
+    /// heading, so an order only one store carried could not order the list.
+    /// `ConnectOrder` is the only thing that reads or writes it. Optional for the
+    /// `proxyPasswordInArgv` reason — a synthesized decoder has no default to fall
+    /// back on, so every config saved before today would fail to decode.
+    var order: Int? = nil
+
     var isDefault: Bool { self == SubprocessTunnelConfig(id: id) }
 
     // MARK: Legal ranges & closed value sets
@@ -608,6 +619,24 @@ final class SubprocessTunnelStore {
         else { tunnels.append(t) }
         persist()
     }
+    /// Write new sidebar positions for the tunnels named in `positions`, and persist
+    /// ONCE.
+    ///
+    /// A batch rather than a `save(_:)` per row on purpose: one drag renumbers every
+    /// row in the list (see `ConnectOrder`), and a per-row save would re-encode the
+    /// whole array N times and publish N intermediate orders — which the sidebar
+    /// would draw, so the rows would visibly hop on their way to where they were put.
+    /// Tunnels the map doesn't name are left exactly as they are.
+    func setOrder(_ positions: [String: Int]) {
+        var changed = false
+        for i in tunnels.indices {
+            guard let rank = positions[tunnels[i].id], tunnels[i].order != rank else { continue }
+            tunnels[i].order = rank
+            changed = true
+        }
+        if changed { persist() }
+    }
+
     func remove(_ id: String) {
         tunnels.removeAll { $0.id == id }
         // Delete the tunnel's keychain secrets too — password, proxy/jump passwords,

@@ -491,6 +491,14 @@ struct ConfigFormatTests {
         // surface does declare `ssh.server`, which is why only the `oc.` half shows
         // up here. Worth closing — in that catalog, not by renaming this key.
         "oc.server",
+        // WHERE THIS VPN SITS IN THE SIDEBAR (`ConnectOrder`). Not a gap: there is no
+        // row to give it, because the order is not a value anybody types — it is the
+        // list itself, arranged by dragging or by Move Up / Move Down. The file still
+        // has to carry it or an exported setup would arrive on the other Mac in a
+        // different order from the one it left in, which is the one thing the export
+        // exists to prevent. An NE profile's rank needs no entry here: it rides the
+        // `interface` block, which is written structurally rather than as settings.
+        "ssh.order", "oc.order", "native.order",
     ]
 
     /// A DISPLAY NAME IS NEVER A KEY. Keys are ids, which ONTOLOGY.md says never

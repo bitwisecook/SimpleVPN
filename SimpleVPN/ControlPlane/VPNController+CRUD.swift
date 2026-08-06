@@ -334,6 +334,32 @@ extension VPNController {
         uiPrefsCache[id] = prefs
     }
 
+    // MARK: Sidebar order (the part of the arrangement NE profiles carry)
+
+    /// Write new sidebar positions for the NE profiles named in `positions`.
+    ///
+    /// THE CACHE IS UPDATED FIRST, SYNCHRONOUSLY, and the saves follow. Each NE
+    /// profile is its own `NEVPNManager`, so N rows means N `saveToPreferences()`
+    /// round-trips and there is no batch write to be had; doing them before the UI
+    /// caught up would draw every intermediate order and the rows would visibly hop
+    /// on their way to where they were put. `uiPrefs(for:)` reads the cache, so
+    /// seeding it is what makes the drag land in one step.
+    ///
+    /// Profiles this map doesn't name are left alone — a section's move renumbers
+    /// every row, but a row whose rank hasn't changed is not worth an NE save.
+    func setSidebarOrder(_ positions: [String: Int]) async {
+        var pending: [(String, VPNUIPrefs)] = []
+        for (id, rank) in positions {
+            guard managers[id] != nil else { continue }
+            var prefs = uiPrefs(for: id)
+            guard prefs.order != rank else { continue }
+            prefs.order = rank
+            uiPrefsCache[id] = prefs
+            pending.append((id, prefs))
+        }
+        for (id, prefs) in pending { await setUIPrefs(prefs, for: id) }
+    }
+
     /// True while a session started with different overrides than are now saved —
     /// the "changes take effect on reconnect" signal.
     func hasPendingSettings(id: String) -> Bool {

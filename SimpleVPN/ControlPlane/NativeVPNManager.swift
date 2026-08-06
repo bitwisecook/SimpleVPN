@@ -66,6 +66,14 @@ struct NativeVPNConfig: Codable, Sendable, Equatable, Identifiable {
     var includeAllNetworks = false  // send *all* traffic (incl. local) into the tunnel
     var excludeLocalNetworks = true // keep LAN reachable when includeAllNetworks is on
 
+    /// WHERE THIS VPN SITS IN THE SIDEBAR, as the user arranged it. nil = never
+    /// placed by hand, which sorts after everything that was. The same field, under
+    /// the same name, is on `VPNUIPrefs` and `SubprocessTunnelConfig`, because both
+    /// sidebars interleave all three stores under one heading; `ConnectOrder` is the
+    /// only thing that reads or writes it. Optional so configs saved before the field
+    /// existed still decode (the `xauth` precedent).
+    var order: Int? = nil
+
     // MARK: Legal ranges (single source of truth for UI validation)
 
     /// `lifetimeMinutes` on both security associations. Apple's accepted window;
@@ -284,6 +292,21 @@ final class NativeVPNManager {
         if let i = store.firstIndex(where: { $0.id == c.id }) { store[i] = c } else { store.append(c) }
         persist()
     }
+
+    /// Write new sidebar positions for the configs named in `positions`, and persist
+    /// ONCE — the counterpart to `SubprocessTunnelStore.setOrder`, and a batch for the
+    /// same reason: one drag renumbers every row, and saving row by row would publish
+    /// (and draw) each intermediate order.
+    func setOrder(_ positions: [String: Int]) {
+        var changed = false
+        for i in store.indices {
+            guard let rank = positions[store[i].id], store[i].order != rank else { continue }
+            store[i].order = rank
+            changed = true
+        }
+        if changed { persist() }
+    }
+
     func remove(_ id: String) {
         store.removeAll { $0.id == id }
         // Both the persistent-reference copies (nativeService, keyed by the

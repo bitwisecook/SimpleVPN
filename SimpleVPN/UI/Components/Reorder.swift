@@ -121,16 +121,42 @@ nonisolated enum ReorderCopy {
         "Moved \(subject) to \(position(index, of: count))"
     }
 
+    /// The same confirmation IN A GROUPED LIST. "2 of 5" is a position within the
+    /// heading, so the heading is part of where the row landed — and without it the
+    /// number would appear to contradict the list the user can see.
+    static func landed(_ subject: String, at index: Int, of count: Int, in group: String) -> String {
+        "Moved \(subject) to \(position(index, of: count)) in \(group)"
+    }
+
     /// Why Move Up is unavailable on the first row — and Move Down on the last.
     /// A reason, not a dead button (Docs/Accessibility.md rule 5).
     static func alreadyFirst(_ subject: String) -> String { "\(subject) is already first." }
     static func alreadyLast(_ subject: String) -> String { "\(subject) is already last." }
+
+    /// The same two reasons IN A GROUPED LIST, which is the VPN sidebar: its rows are
+    /// ordered inside their own heading, so a bare "already last" said to somebody
+    /// looking at rows below it would be a lie about what the command does. Naming the
+    /// group is also the one place the user learns that the order is per-group at all
+    /// — which is the moment they bump into it.
+    static func alreadyFirst(_ subject: String, in group: String) -> String {
+        "\(subject) is already first in \(group)."
+    }
+    static func alreadyLast(_ subject: String, in group: String) -> String {
+        "\(subject) is already last in \(group)."
+    }
 
     /// Nothing is selected, so there is nothing to move.
     static let nothingSelected = "Choose a row first, then move it."
 
     /// One row cannot be moved on its own.
     static let onlyOne = "There is only one row, so there is no order to change."
+
+    /// …and one row under a heading cannot either. Said with the group's name for the
+    /// same reason as the two above: the list may be long while this part of it is one
+    /// row, and "there is only one row" would read as false.
+    static func onlyOne(in group: String) -> String {
+        "\(group) has only one row, so there is no order to change."
+    }
 
     /// The drag handle's own words. The handle is the ONE hover-discoverable part
     /// of this affordance, so it says what it is and points at the commands that
@@ -204,6 +230,15 @@ struct ReorderCommands {
     /// Why this list (or this row) cannot be reordered at all — an MDM lock, an
     /// active sort, a row the configuration pins. nil = it can move.
     var blocked: String?
+    /// THE GROUP THIS ROW IS ORDERED WITHIN, when the list is sectioned — the VPN
+    /// sidebar's "Whole-Mac VPNs" / "Local Ports". nil for a flat list.
+    ///
+    /// It exists because `index` and `count` are then section-local, so the ends of
+    /// the list are the ends of the SECTION: without the group's name, Move Down on
+    /// the last whole-Mac VPN would say "already last" while rows sat visibly below
+    /// it. It changes wording only — a grouped list refuses exactly the same moves as
+    /// a flat one.
+    var within: String?
     /// What to say when there is no selection. Lists with a selection model
     /// override the default; per-row controls never see it.
     var nothingSelected: String = ReorderCopy.nothingSelected
@@ -213,12 +248,14 @@ struct ReorderCommands {
     var move: (Int, Int) -> Void
 
     init(subject: String, index: Int?, count: Int, blocked: String? = nil,
+         within: String? = nil,
          nothingSelected: String = ReorderCopy.nothingSelected,
          move: @escaping (Int, Int) -> Void) {
         self.subject = subject
         self.index = index
         self.count = count
         self.blocked = blocked
+        self.within = within
         self.nothingSelected = nothingSelected
         self.move = move
     }
@@ -230,9 +267,15 @@ struct ReorderCommands {
 
     private func reason(delta: Int) -> String? {
         if let blocked { return blocked }
-        guard count > 1 else { return ReorderCopy.onlyOne }
+        guard count > 1 else {
+            return within.map { ReorderCopy.onlyOne(in: $0) } ?? ReorderCopy.onlyOne
+        }
         guard let index else { return nothingSelected }
         if Reorder.destination(from: index, delta: delta, count: count) == nil {
+            if let within {
+                return delta < 0 ? ReorderCopy.alreadyFirst(subject, in: within)
+                                 : ReorderCopy.alreadyLast(subject, in: within)
+            }
             return delta < 0 ? ReorderCopy.alreadyFirst(subject) : ReorderCopy.alreadyLast(subject)
         }
         return nil
@@ -250,7 +293,14 @@ struct ReorderCommands {
         move(index, to)
         // The user asked for this and it is finished: immediate, not debounced —
         // the click IS the debounce (Docs/Accessibility.md rule 2).
-        AccessibilityAnnouncer.sayNow(ReorderCopy.landed(subject, at: to, of: count))
+        AccessibilityAnnouncer.sayNow(landing(at: to))
+    }
+
+    /// What is said after a move — the group's name included where there is one, so
+    /// the pointer, the buttons, the menu and `onMove` all announce the same sentence.
+    private func landing(at to: Int) -> String {
+        if let within { return ReorderCopy.landed(subject, at: to, of: count, in: within) }
+        return ReorderCopy.landed(subject, at: to, of: count)
     }
 
     /// Move `subject` so it lands where `target` is now — the drop's shape, routed
@@ -261,7 +311,7 @@ struct ReorderCommands {
         let to = source < t ? t - 1 : t
         guard to != source else { return }
         move(source, to)
-        AccessibilityAnnouncer.sayNow(ReorderCopy.landed(subject, at: to, of: count))
+        AccessibilityAnnouncer.sayNow(landing(at: to))
     }
 }
 

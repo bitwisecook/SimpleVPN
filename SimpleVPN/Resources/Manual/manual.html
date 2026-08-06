@@ -106,6 +106,7 @@
 <nav aria-label="Table of contents">
   <h2>SimpleVPN</h2>
   <a href="#importing">Importing VPNs</a>
+  <a href="#vpn-order">Your Own VPN Order</a>
   <a href="#endpoints-map">Servers &amp; the Map</a>
   <a href="#endpoints-order">Your Own Server Order</a>
   <a href="#certificates">Certificates &amp; Keys</a>
@@ -400,6 +401,11 @@
   <li><strong>File ▸ Import</strong>, or the <strong>+</strong> button in Manage VPNs.</li>
 </ul>
 <p>SimpleVPN checks the file with the same parser the tunnel uses, so a file that imports will also connect. If you import a file you already have, nothing is duplicated — SimpleVPN tells you which VPN already has that configuration. A file with the same <em>name</em> but different contents imports alongside the original with a numbered name.</p>
+
+<h2 id="vpn-order">Your Own VPN Order</h2>
+<p>The VPN list starts in the order your VPNs were added, and you can put it in your own order instead. <strong>Manage VPNs</strong> is where you do it: drag a VPN up or down, use the up and down buttons beside <strong>+</strong> and <strong>&minus;</strong>, or right-click a VPN and choose Move Up or Move Down. All three do the same thing, and the order you arrange is <strong>the order everywhere</strong> — the main window&rsquo;s list shows the same arrangement, because there is only one.</p>
+<p>The list is grouped by what connecting something <em>does to this Mac</em>: <strong>Whole-Mac VPNs</strong> change where all this Mac&rsquo;s traffic goes, and <strong>Local Ports</strong> open a port that nothing uses until you point an app at it. <strong>Moving a VPN keeps it in its own group.</strong> That is deliberate: which group a VPN is in follows its own settings — an SSL VPN with <em>Run In-Process</em> turned on is a whole-Mac VPN, and the same VPN with it turned off is a local port — so dragging a row across the line would change what connecting it does, silently, by a gesture. The way to move it is the setting that decides it. The first VPN in a group has no Move Up, and the last has no Move Down; both say so rather than doing nothing.</p>
+<p>A VPN added later has no place in your arrangement yet, so it appears at the end of its group rather than taking somebody&rsquo;s first slot. Your arrangement travels with an <a href="#exporting">exported setup</a>, so a second Mac gets the list in the order you put it in.</p>
 
 <h2 id="endpoints-map">Servers &amp; the Map</h2>
 <p>A configuration file can list more than one server. By default SimpleVPN lets OpenVPN try them <em>in order</em> until one answers. The map and the server menu in the main window let you pin one server instead — useful to pick a nearby country or a server that works on your current network.</p>
