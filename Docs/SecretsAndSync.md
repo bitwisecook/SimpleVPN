@@ -73,12 +73,16 @@ vault.
 
 ```mermaid
 flowchart LR
-    F[".ovpn · wg-quick · .mobileconfig"] --> P["parse"]
+    F[".ovpn · wg-quick"] --> P["parse"]
     P --> SPLIT["split secret from public"]
     SPLIT -->|"secret blocks"| KC["keychain<br/><i>written FIRST</i>"]
     SPLIT -->|"the rest"| PROF["providerConfiguration"]
     KC -.->|"re-spliced at connect only"| ENG["engine"]
 ```
+
+**`.mobileconfig` is an export, not an import.** It used to be listed here as a third source; no code
+reads one to create a profile — `NativeVPNConfig.mobileconfig` only *writes* one, for L2TP. Corrected
+after `Docs/Networking.md` traced the actual path.
 
 **Secrets are stripped at import, before the profile is saved**, so key material never reaches
 `providerConfiguration` even momentarily. Eight `.ovpn` blocks are treated as secret — `<key>`,
@@ -106,7 +110,7 @@ flowchart LR
         B["wg-quick export ❌<br/><i>writes PrivateKey and<br/>PresharedKey in the clear</i>"]
     end
     subgraph next["Designed"]
-        C["JSON / YAML export 📐<br/><i>whole config, portable</i>"]
+        C["JSON / YAML export ✅<br/><i>whole config, portable</i>"]
         D["Encrypted archive 📐<br/><i>config + secrets, passphrase</i>"]
     end
 ```
@@ -123,9 +127,28 @@ to the receiving client, whereas an `.ovpn` without one still describes the serv
 probably explicit consent rather than omission — which is why it was not fixed by copying the `.ovpn`
 decision.
 
-📐 **JSON/YAML export/import of the whole configuration.** Human-readable and portable, secret-free by
-default, and the same serialisation the sync design needs — which is why it is worth building first
-even if sync never follows.
+✅ **JSON/YAML export/import of the whole configuration.** Human-readable and portable, secret-free
+with **no** opt-out, and the same serialisation the sync design needs — which is why it was worth
+building first even if sync never follows. Lives in `SimpleVPN/Portability/`.
+
+Two decisions in it that a reader of this document should know:
+
+- **Secret-free is proved, not asserted.** The exclusion test hands the exporter a snapshot whose
+  secrets are *present* and fails if a canary reaches either encoding — and separately asserts the
+  public `<ca>` and `cipher` line **survive**, because over-redaction is its own failure. A `Mirror`
+  walk fails the build if a field whose *name* looks like a secret is neither withheld nor recorded as
+  reviewed-not-secret with a reason, so next year's `rotationPassword` breaks the build until someone
+  classifies it, and is withheld at runtime meanwhile.
+- **Two key vocabularies, on purpose.** `settings:` uses the stable descriptor ids, which
+  `ONTOLOGY.md` records as the contract that never changes. But `custom-routing:`, `endpoints:` and
+  `interface:` carry the app's own persisted JSON keys verbatim, because those settings have no
+  descriptor ids and some are structures no flat id could name. Stated in the exported file's own
+  header so nobody has to infer it.
+
+Import produces a **plan**, never a change, and refuses anything that would weaken verification —
+`ssh.strict-host-key: no`, `StrictHostKeyChecking=no`, `--no-cert-check`, `tlsSkipVerify` and the rest
+of a declared token list, wherever they appear including inside the `.ovpn` text. The app has no
+option to disable certificate verification anywhere, and must not acquire one through a file format.
 
 📐 **Encrypted archive** for a real backup: config *and* secrets, under a passphrase the user chooses,
 AEAD, no opt-out on the encryption. This is the honest answer to "back up my whole setup" and it
@@ -212,7 +235,8 @@ never "only you can read it" unless that is precisely true.
 
 ## 5. The order to build it in 📐
 
-1. **JSON/YAML export/import** — useful alone, and it is the serialisation everything else needs.
+1. ~~**JSON/YAML export/import**~~ ✅ **built** — `SimpleVPN/Portability/`, Settings ▸ General ▸
+   Export & Import. It was useful alone, and it is the serialisation everything below needs.
 2. **Encrypted archive backup** — answers "back up my setup" with no cloud involved.
 3. **Fix `wg-quick` export** — a known leak, and it belongs with the export work.
 4. **Secrets sync via iCloud Keychain** — a migration rather than a new capability, since
