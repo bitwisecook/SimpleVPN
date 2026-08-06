@@ -266,6 +266,52 @@ extension VPNController {
         await setEndpointList(list, for: id)
     }
 
+    /// Write down the order the user put this VPN's servers in.
+    ///
+    /// One annotation per server, through `setEndpointList` — the same blob, the
+    /// same save, the same cache as a name or a corrected country. There is no
+    /// second store for order, and nothing here touches the configuration's own
+    /// `remote` lines: a position says which server the app OFFERS first, not what
+    /// the file says. That is what makes reordering a configuration-provided server
+    /// honest — its address is still the file's, and its lock rides with the row.
+    ///
+    /// Servers the caller didn't mention keep whatever they had, so a partial list
+    /// can't quietly unplace the rest.
+    func setEndpointOrder(_ orderedIDs: [String], for id: String) async {
+        let shown = endpoints(for: id)
+        var byID: [String: VPNEndpoint] = [:]
+        for e in endpointList(for: id).endpoints { byID[e.id] = e }
+        for (position, endpointID) in orderedIDs.enumerated() {
+            // The displayed list is what supplies host/port/proto for a server that
+            // has never been annotated before — an entry invented here would be a
+            // second, drifting copy of an address the .ovpn owns.
+            guard let base = byID[endpointID] ?? shown.first(where: { $0.id == endpointID }) else { continue }
+            var e = base
+            e.order = position
+            byID[endpointID] = e
+        }
+        var list = endpointList(for: id)
+        // Keep the stored list in the shown order where we know it: the tail of
+        // `VPNEndpointList.merged` (the hand-added servers) is emitted in stored
+        // order, so a stored list that disagrees with the user's would put a new
+        // server's position and its row in different places for one render.
+        let rank = Dictionary(uniqueKeysWithValues: orderedIDs.enumerated().map { ($1, $0) })
+        list.endpoints = byID.values.sorted {
+            (rank[$0.id] ?? Int.max, $0.id) < (rank[$1.id] ?? Int.max, $1.id)
+        }
+        await setEndpointList(list, for: id)
+    }
+
+    /// Go back to the automatic order (measured, else nearest). The counterpart to
+    /// `setEndpointOrder` and the reason a manual order is never a one-way door —
+    /// an annotation left with nothing but a cleared position stops being stored at
+    /// all (`VPNEndpointList.encodedBlob` drops it).
+    func clearEndpointOrder(for id: String) async {
+        var list = endpointList(for: id)
+        for i in list.endpoints.indices { list.endpoints[i].order = nil }
+        await setEndpointList(list, for: id)
+    }
+
     // MARK: Interface preferences (per-VPN optional controls)
 
 

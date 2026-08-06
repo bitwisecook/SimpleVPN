@@ -107,6 +107,7 @@
   <h2>SimpleVPN</h2>
   <a href="#importing">Importing VPNs</a>
   <a href="#endpoints-map">Servers &amp; the Map</a>
+  <a href="#endpoints-order">Your Own Server Order</a>
   <a href="#certificates">Certificates &amp; Keys</a>
   <a href="#pausing">Pausing a VPN</a>
   <a href="#connection-problems">Connection Problems</a>
@@ -317,6 +318,7 @@
   <a href="#cr-what-is-it">What This Is</a>
   <a href="#cr-routes-default">Unmatched Routes</a>
   <a href="#cr-route-rule">Route Rules</a>
+  <a href="#cr-rule-order">Rule Order</a>
   <a href="#cr-dns-default">Unmatched Resolvers</a>
   <a href="#cr-dns-rule">Resolver Rules</a>
   <a href="#cr-ignore-pushed-search">Ignore Pushed Search Domains</a>
@@ -400,6 +402,15 @@
 <h2 id="endpoints-map">Servers &amp; the Map</h2>
 <p>A configuration file can list more than one server. By default SimpleVPN lets OpenVPN try them <em>in order</em> until one answers. The map and the server menu in the main window let you pin one server instead — useful to pick a nearby country or a server that works on your current network.</p>
 <p>Choosing a server simply sets the <a href="#openvpn-server">Server</a>, <a href="#openvpn-port">Port</a> and <a href="#openvpn-protocol">Protocol</a> options for you; choosing <em>Automatic</em> clears them again. Server locations are country-level (see <a href="#privacy">Privacy Notes</a>), so pins sit at the centre of their country.</p>
+<h3 id="endpoints-order">Putting the servers in your own order</h3>
+<p>Left alone, SimpleVPN orders every server list for you: quickest first where it has measured them, nearest first where it hasn&rsquo;t, and anything it can neither measure nor place last. The footnote under each list says which of those you are looking at.</p>
+<p>In the VPN editor&rsquo;s <strong>Servers</strong> tab you can put them in your own order instead — drag a row, use the up and down buttons beside <strong>+</strong> and <strong>&minus;</strong> (&#8984;&#8997;&uarr; and &#8984;&#8997;&darr;), or right-click a row and choose Move Up or Move Down. Once you have, <strong>your order wins everywhere</strong>: the table and the server menus both show the list you arranged, in your order — the menus still head their sections with the region each server is in, so a region can appear more than once rather than your order being quietly rearranged into continents. Speed checks keep filling in the Speed column but stop rearranging the rows — the automatic ordering and a hand-made one cannot both be in charge, and yours is the one you asked for.</p>
+<p><strong>Use automatic order</strong> appears beside the buttons once you have arranged the list, and hands the ordering back to SimpleVPN.</p>
+<p>Two things worth knowing:</p>
+<ul>
+  <li>Servers that come from the VPN&rsquo;s configuration can be moved like any other. The lock on those rows is about <em>existence</em>, not position: only the configuration can add or remove them, and moving one changes the order SimpleVPN offers it in without touching the configuration file. Where OpenVPN itself falls back from one <code>remote</code> line to the next, it still follows the file.</li>
+  <li>A server that turns up later — because you re-imported a configuration that lists a new one — has no place in your order yet, so it sits at the end until you give it one, rather than taking somebody else&rsquo;s first-choice slot. The footnote says how many are waiting there.</li>
+</ul>
 
 <h2 id="certificates">Certificates &amp; Keys</h2>
 <p>The Certificates tab of the VPN editor shows what's embedded in the configuration — certificate authority, your client certificate and private key, and any extra TLS key — as readable cards: names, issuer, organisation, expiry, and the web addresses a certificate covers. A red badge means expired; an orange badge means it expires within 30 days.</p>
@@ -1486,6 +1497,16 @@ the device's protection intact at the cost of typing four to eight digits per co
   <tr><td>Add</td><td>Carry a network the VPN never offered.</td></tr>
 </table>
 <p>Changing a rule&rsquo;s action clears the field the new action doesn&rsquo;t use, so nothing invisible survives the change. A rule whose networks overlap a pushed route, or another rule, offers a button that draws the overlap for you. Rules with an error in them stay in your draft but are never applied.</p>
+<h3 id="cr-rule-order">The order matters: first match wins</h3>
+<p>The list is tried <strong>from the top down against each network the VPN offers, and the first rule that matches decides</strong>. Later rules that also match that network never run. Anything no rule mentions follows <a href="#cr-routes-default">Unmatched Routes</a> above. <strong>Add</strong> rules are the exception: they inject a network the VPN never offered, so they apply wherever they sit in the list.</p>
+<p>That makes the order part of what these rules <em>do</em>. Two rules for overlapping networks — say <code>Ignore 10.0.0.0/8</code> and <code>Replace 10.1.0.0/16</code> — send traffic to different places depending on which is above the other, so moving one is a change to your routing and not a change to your view of it. Every row therefore shows its position, and SimpleVPN marks a rule that can never match because an earlier one always will.</p>
+<p>Three ways to move a rule, all the same change:</p>
+<ul>
+  <li><strong>Drag it by its number</strong> — a line shows where it will land, so you can see which rule will win before you let go.</li>
+  <li><strong>The up and down buttons</strong> beside each rule. Reachable with Tab alone; the first rule&rsquo;s up button and the last rule&rsquo;s down button say why they are unavailable rather than doing nothing.</li>
+  <li><strong>Right-click the rule</strong> and choose Move Up or Move Down.</li>
+</ul>
+<p>A move is part of your draft exactly like any other edit here: <strong>Save</strong> keeps it, switching to another tab or closing the editor saves it too, and where the editor offers <strong>Revert</strong> that undoes it — the same as changing a rule&rsquo;s action or its network. A move is also its own undo: Move Down puts back what Move Up just did. The same applies to <a href="#cr-dns-rule">Resolver Rules</a>.</p>
 
 <h2 id="cr-dns-default">Unmatched Resolvers</h2>
 <p class="default">Default: Accept.</p>
@@ -1494,6 +1515,7 @@ the device's protection intact at the cost of typing four to eight digits per co
 <h2 id="cr-dns-rule">Resolver Rules</h2>
 <p class="default">Default: no rules — resolvers pass through unchanged.</p>
 <p>An ordered list that edits the DNS servers this VPN offers, with the same four actions as route rules: accept one, ignore one, replace one with another, or add a server of your own. Values are plain addresses.</p>
+<p>The order works exactly as it does for routes — <a href="#cr-rule-order">first match wins</a>, and rules move by dragging their number, by the up and down buttons beside them, or from the right-click menu.</p>
 <div class="warn">Replacing a VPN&rsquo;s DNS server with a public one means the names inside your organisation stop resolving — and it sends every lookup you make to whoever runs the server you chose.</div>
 
 <h2 id="cr-ignore-pushed-search">Ignore All Pushed Search Domains</h2>

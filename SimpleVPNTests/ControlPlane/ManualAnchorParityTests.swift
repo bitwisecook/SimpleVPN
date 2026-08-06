@@ -84,6 +84,15 @@ struct ManualAnchorParityTests {
         // App chapters
         "importing", "endpoints-map", "certificates", "pausing",
         "connection-problems", "privacy",
+        // What a hand-made server order means and what it beats. PROSE, not a
+        // setting: the order is not a value anybody types, it is the list itself —
+        // stored as a position on each server's annotations, reached by dragging a
+        // row or by Move Up / Move Down.
+        "endpoints-order",
+        // Why the rule lists are ordered lists: first match wins, so moving a rule
+        // changes where traffic goes. PROSE for the same reason — the order is the
+        // list, not a field. Both `cr.route-rule` and `cr.dns-rule` link into it.
+        "cr-rule-order",
         // Moving a whole setup to another Mac (Settings ▸ General ▸ Export & Import).
         // PROSE, not settings: the two controls are actions — a save panel and an
         // open panel — and the chapter is about what the file does and does not
