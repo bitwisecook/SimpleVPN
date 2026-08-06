@@ -41,6 +41,34 @@ flowchart LR
 the agent does the cryptography. That is why the seam can hold a hardware token and a password
 manager without either being a special case.
 
+### Migration status — the vocabulary is complete, the routing is not
+
+**`authPlan` returns only `.value` in production today.** Nothing constructs `.possession` or
+`.typedByDevice` outside tests. So:
+
+| | Through `authPlan` | Runs on its own path |
+|---|---|---|
+| The twelve password apps, typed, keychain, Touch ID keychain, Apple Passwords | ✅ | |
+| SSH agent, PKCS#11 token, security key (OTP) | | ⚠️ expressible, not routed |
+| OpenConnect SSO, Tailscale browser sign-in | | ❌ not modelled at all |
+
+This was deliberate, not an oversight. The three non-`.value` mechanisms are executed correctly by
+the code that owns the context — the engine's own configuration for a `pkcs11:` URI, the connect form
+for a focused field, `SSHAgent` for a socket — and routing them through the controller would have
+relocated working code for no behavioural gain. The value delivered was making them **expressible**,
+which the exhaustive `switch` over `AuthPlan` now enforces: a fourth delivery cannot be added without
+every consumer acknowledging it.
+
+The consequence to hold: this is a complete **vocabulary** and a partial **implementation**. Anyone
+reasoning about "all sources go through one seam" is right about the model and wrong about the call
+graph. Finishing the routing is a real piece of work, worth doing when something needs it — a second
+consumer of a plan, or a hardware source that must be selectable per profile — and not before.
+
+`.conductedByEngine` is the shape SSO and Tailscale's browser sign-in would take, and is deliberately
+absent: the engine authenticates and our role is to open a browser, so there is no credential to plan,
+name or arm. **A case with no producer is a promise**, and the three above are already the most of
+those this type should carry.
+
 ---
 
 ## Three axes, not a matrix
