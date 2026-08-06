@@ -173,6 +173,8 @@
   <a href="#wg-address">Addresses</a>
   <a href="#wg-allowed-ips">Allowed IPs</a>
   <a href="#wg-dns">DNS Servers</a>
+  <a href="#wg-search-domains">Search Domains</a>
+  <a href="#wg-local-lan">Allow local network access</a>
   <a href="#wg-mtu">MTU</a>
   <a href="#wg-keepalive">Persistent Keepalive</a>
   <a href="#wg-table">Routing Table</a>
@@ -288,7 +290,9 @@
   <a href="#px-default-route">Send All Traffic</a>
   <a href="#px-included">Networks Through the Proxy</a>
   <a href="#px-excluded">Networks Kept Direct</a>
+  <a href="#px-local-lan">Allow local network access</a>
   <a href="#px-dns">DNS Servers</a>
+  <a href="#px-search-domains">Search Domains</a>
   <a href="#px-mtu">MTU</a>
 
   <h2>SSH Network Tunnel</h2>
@@ -303,7 +307,9 @@
   <a href="#sshnet-send-all-traffic">Send All Traffic</a>
   <a href="#sshnet-routes">Networks Through the Tunnel</a>
   <a href="#sshnet-excluded-routes">Networks Kept Out</a>
+  <a href="#sshnet-local-lan">Allow local network access</a>
   <a href="#sshnet-dns">DNS Servers</a>
+  <a href="#sshnet-search-domains">Search Domains</a>
   <a href="#sshnet-far-side-dns">Resolve Names at the Server</a>
   <a href="#sshnet-far-side-resolver">Server-Side Resolver</a>
   <a href="#sshnet-mtu">MTU</a>
@@ -686,6 +692,17 @@
 <h2 id="wg-dns">DNS Servers</h2>
 <p class="default">Optional.</p>
 <p>DNS servers to use while connected — usually one inside the tunnel so that private names resolve. Leave empty to keep your current DNS. Multiple servers are comma-separated.</p>
+
+<h2 id="wg-search-domains">Search Domains</h2>
+<p class="default">Default: empty — only full names resolve.</p>
+<p>The domains to try when you type a short name. With <code>corp.example</code> listed, <code>nas</code> is looked up as <code>nas.corp.example</code>; without it, <code>nas</code> finds nothing while <code>nas.corp.example</code> works perfectly. That asymmetry is the commonest “DNS is broken on this VPN” report, and it is not a fault in the tunnel — a WireGuard configuration file has no line for a search list, so there is nothing for SimpleVPN to read from the file your provider gave you. Type them here, separated by commas, in the order you want them tried.</p>
+<p>Only used when <a href="#wg-dns">DNS Servers</a> is filled in: the search list belongs to the resolvers this tunnel advertises. Exporting the configuration for another WireGuard client leaves this out, because the format has nowhere to put it.</p>
+
+<h2 id="wg-local-lan">Allow local network access</h2>
+<p class="default">Default: off.</p>
+<p>Keeps the devices on the network you are physically on — printers, file servers, a NAS, smart-home gear — reachable while the tunnel is up. Turn it on if printing or local file shares stop working when you connect.</p>
+<p><strong>What leaves the tunnel:</strong> traffic to the networks your Mac's own interfaces are on, and to the addresses devices use to find each other (link-local and multicast, which is how AirPlay and Bonjour work). Nothing else. Anyone watching the network you are on can see that traffic, which is why it is off unless you ask for it, and why a workplace may prefer it off — with it on, an untrusted café network can also reach your Mac's own services.</p>
+<p>SimpleVPN works out which networks those are when the tunnel connects, from the interfaces that are actually up, and it never guesses at a wider range. Joining a different network later does not move the carve-out; reconnect to pick up the new one.</p>
 
 <h2 id="wg-mtu">MTU</h2>
 <p class="default">Default: auto-detected (usually 1420).</p>
@@ -1329,9 +1346,20 @@ the device's protection intact at the cost of typing four to eight digits per co
 <p>An exclusion that swallows part of an inclusion is legal and does something, just rarely what was meant, so SimpleVPN points it out without blocking it. The same goes for an exclusion that carves out one of your <a href="#px-dns">DNS servers</a>: the resolver still gets used, just directly, outside the proxy.</p>
 <p>One exclusion is added for you and needs no entry here: the <a href="#px-address">proxy's own address</a>. Traffic to the proxy must reach it directly — sending it through the tunnel the proxy is carrying would be a loop — so SimpleVPN resolves the proxy's host when the tunnel connects and keeps that address out of it.</p>
 
+<h2 id="px-local-lan">Allow local network access</h2>
+<p class="default">Default: off.</p>
+<p>Keeps the devices on the network you are physically on — printers, file servers, a NAS, smart-home gear — reachable while the tunnel is up. Turn it on if printing or local file shares stop working when you connect.</p>
+<p><strong>What leaves the tunnel:</strong> traffic to the networks your Mac's own interfaces are on, and to the addresses devices use to find each other (link-local and multicast, which is how AirPlay and Bonjour work). Nothing else. Anyone watching the network you are on can see that traffic, which is why it is off unless you ask for it.</p>
+<p>SimpleVPN works out which networks those are when the tunnel connects, from the interfaces that are actually up, and it never guesses at a wider range. It is the same mechanism as <a href="#px-excluded">Networks Kept Direct</a>, filled in for you — so you do not have to know your own subnet, and it follows you between networks as long as you reconnect. Virtual-machine and container networks are <em>not</em> included: those have their own offer, which names the guest and the subnet before it changes anything.</p>
+
 <h2 id="px-dns">DNS Servers</h2>
 <p class="default">Default: empty — keep this Mac&rsquo;s own DNS.</p>
 <p>Name servers to use while connected, separated by commas. Lookups to them go through the proxy too, so they don&rsquo;t leak past it. Each one must be an <em>address</em>, not a network — a prefix here is silently dropped by macOS and DNS then stops working with nothing said anywhere, which is why the field refuses it up front.</p>
+
+<h2 id="px-search-domains">Search Domains</h2>
+<p class="default">Default: empty — only full names resolve.</p>
+<p>The domains to try when you type a short name. With <code>corp.example</code> listed, <code>wiki</code> is looked up as <code>wiki.corp.example</code>; without it, <code>wiki</code> finds nothing while <code>wiki.corp.example</code> works. That asymmetry is the commonest “DNS is broken” report on this kind of tunnel, and there is nothing to learn the list from — a proxy hands out no configuration — so it is yours to state. Separate several with commas, in the order you want them tried.</p>
+<p>Only used when <a href="#px-dns">DNS Servers</a> is filled in: the search list belongs to the resolvers this tunnel advertises.</p>
 
 <h2 id="px-mtu">MTU</h2>
 <p class="default">Default: 1500.</p>
@@ -1405,11 +1433,22 @@ the device's protection intact at the cost of typing four to eight digits per co
 <p>Destinations that stay on your normal connection even when everything else goes through the tunnel — a local printer, a service that refuses connections from elsewhere.</p>
 <p>The SSH server's own address is always kept out, whether you list it or not.</p>
 
+<h2 id="sshnet-local-lan">Allow local network access</h2>
+<p class="default">Default: off.</p>
+<p>Keeps the devices on the network you are physically on — printers, file servers, a NAS, smart-home gear — reachable while the tunnel is up. Turn it on if printing or local file shares stop working when you connect.</p>
+<p><strong>What leaves the tunnel:</strong> traffic to the networks your Mac's own interfaces are on, and to the addresses devices use to find each other (link-local and multicast, which is how AirPlay and Bonjour work). Nothing else. Anyone watching the network you are on can see that traffic, which is why it is off unless you ask for it.</p>
+<p>SimpleVPN works out which networks those are when the tunnel connects, from the interfaces that are actually up, and never guesses at a wider range. It is the same mechanism as <a href="#sshnet-excluded-routes">Networks Kept Out</a>, filled in for you. Joining a different network later does not move the carve-out; reconnect to pick up the new one.</p>
+
 <h2 id="sshnet-dns">DNS Servers</h2>
 <p class="default">Optional.</p>
 <p>Resolvers to use while connected, like <code>1.1.1.1</code>. Lookups are carried over the SSH connection (as DNS over TCP), so they don't leak onto the local network.</p>
 <p>Enter just the address — a resolver is a single machine, not a network, so <code>1.1.1.1/32</code> is not valid here.</p>
 <p>Whatever you list has to be reachable <em>from the SSH server</em>. If it isn't, turn on <a href="#sshnet-far-side-dns">Resolve Names at the Server</a> instead. Leaving this empty keeps your Mac's current resolvers, which is fine when the server can reach them and a leak when it can't.</p>
+
+<h2 id="sshnet-search-domains">Search Domains</h2>
+<p class="default">Default: empty — only full names resolve.</p>
+<p>The domains to try when you type a short name. With <code>corp.example</code> listed, <code>nas</code> is looked up as <code>nas.corp.example</code>; without it, <code>nas</code> finds nothing while <code>nas.corp.example</code> works. Short internal names are most of the reason to run this kind of tunnel, and SSH hands out no configuration to learn the list from, so it is yours to state. Separate several with commas, in the order you want them tried.</p>
+<p>Used with <a href="#sshnet-dns">DNS Servers</a> and with <a href="#sshnet-far-side-dns">Resolve Names at the Server</a> alike: the search list belongs to the resolvers this tunnel advertises, whichever end answers them.</p>
 
 <h2 id="sshnet-far-side-dns">Resolve Names at the Server</h2>
 <p class="default">Default: off.</p>

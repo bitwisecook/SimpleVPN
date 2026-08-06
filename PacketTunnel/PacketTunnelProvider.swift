@@ -83,11 +83,31 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
             Self.log.log("divert plan: \(divert.outside.count) destination(s) around this VPN, \(divert.inbound.count) routed into it (kind \(kind.rawValue, privacy: .public))")
         }
 
+        // "Allow local network access": the prefixes this Mac's own interfaces are on,
+        // computed in the app at connect (LocalNetworkCarveOut) and carried in the
+        // session, because the app is unsandboxed and a silently-empty enumeration
+        // here would be a carve-out that looks applied and isn't. ABSENT ⇒ none, which
+        // is the fail-closed direction: traffic stays in the tunnel.
+        //
+        // The MDM gate is applied HERE and not in the app, for the same reason
+        // ForceKeepInsideVPN gates the divert plan here: this is the enforcement
+        // point, and a session must not be able to carve traffic out of a VPN the
+        // org insists everything stays inside. Each kind's own toggle is checked in
+        // its start path — the option only says WHICH prefixes are local.
+        var localNetworks = (options?[LocalNetworkCarveOut.optionKey] as? [String]) ?? []
+        if policyKeepInside, !localNetworks.isEmpty {
+            Self.log.log("local network access: refused by policy (ForceKeepInsideVPN)")
+            localNetworks = []
+        } else if !localNetworks.isEmpty {
+            Self.log.log("local network access: \(localNetworks.count) prefix(es) offered by the app")
+        }
+
         // WireGuard: one kind, in-process via the Go engine (wireguard-go's
         // device package inside libtsengine.a).
         if kind == .wireGuard {
             startWireGuard(conf: conf, options: options, profile: profile,
-                           divert: divert, completionHandler: completionHandler)
+                           divert: divert, localNetworks: localNetworks,
+                           completionHandler: completionHandler)
             return
         }
 
@@ -111,7 +131,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         // Proxy Tunnel: one kind, in-process via the Go tun2socks engine.
         if kind == .proxyTunnel {
             startProxyTunnel(conf: conf, options: options, profile: profile,
-                             divert: divert, completionHandler: completionHandler)
+                             divert: divert, localNetworks: localNetworks,
+                             completionHandler: completionHandler)
             return
         }
 
@@ -119,7 +140,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         // session this process owns (libssh). TCP only — SSH has no UDP channel.
         if kind == .sshNetworkTunnel {
             startSSHNetworkTunnel(conf: conf, options: options, profile: profile,
-                                  divert: divert, completionHandler: completionHandler)
+                                  divert: divert, localNetworks: localNetworks,
+                                  completionHandler: completionHandler)
             return
         }
 
@@ -157,7 +179,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         // overrides" — a settings problem must never break connecting.
         var overrides = OpenVPNOverrides.decode(from: conf?["overrides"] as? Data)
 
-        if policyKeepInside { overrides.allowUnusedAddrFamilies = .block }
+        if policyKeepInside {
+            overrides.allowUnusedAddrFamilies = .block
+            // Same gate as the divert plan, at the one place that can enforce it: with
+            // the engine's own local-LAN carve-out left on, a profile saved before the
+            // policy arrived would still route the LAN around the VPN.
+            overrides.allowLocalLanAccess = false
+        }
         Self.log.log("overrides: \(overrides.logDescription, privacy: .public) policyKeepInside=\(policyKeepInside) policyNoDiverts=\(policyNoDiverts)")
 
         // Session credentials arrive in-memory via startTunnel options — this
@@ -195,6 +223,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
 
         let b = OpenVPN3Bridge(provider: self, delegate: self)
         lock.lock(); bridge = b; startCompletion = completionHandler; lock.unlock()
+
+        // "Allow local network access" for this kind is the ENGINE's own feature:
+        // openvpn3 asks the tun builder for the local networks and turns them into
+        // net_gateway routes itself (tunprop.hpp, gated on allowLocalLanAccess). The
+        // builder is us, and it answered with an empty list — so the setting, its
+        // manual page and the Doctor's fix for "can't reach local devices" all did
+        // nothing at all. Seeded BEFORE connect, because the engine asks during the
+        // very first tun build.
+        b.localNetworks = localNetworks
+        if !localNetworks.isEmpty {
+            Self.log.log("local network access: \(localNetworks.joined(separator: ","), privacy: .public) offered to the engine")
+        }
 
         // Default-gateway ownership travels with the session so the ≤1-owner
         // invariant holds at the very first establish, before (or without) the app
@@ -343,6 +383,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
     /// other kind — never in providerConfiguration.
     private func startProxyTunnel(conf: [String: Any]?, options: [String: NSObject]?,
                                   profile: String, divert: DivertPlan,
+                                  localNetworks: [String],
                                   completionHandler: @escaping (Error?) -> Void) {
         var config = ProxyTunnelConfig.decode(from: conf?["proxytunnel"] as? Data)
         // Catch a bad upstream here so it becomes a settings message before any
@@ -388,7 +429,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         if !divert.outside.isEmpty {
             Self.log.log("divert (proxy): \(divert.outside.count) destination(s) routed around the VPN")
         }
-        let carveOuts = proxyCarveOuts + divert.outsideCIDRs
+        // "Allow local network access" (this VPN's own setting; the prefixes come from
+        // the app and are already policy-gated). Same list, same seam as every other
+        // connect-time carve-out, so it is re-passed by every live re-apply below.
+        let localCarveOuts = config.allowLocalNetworkAccess ? localNetworks : []
+        if !localCarveOuts.isEmpty {
+            Self.log.log("local network access (proxy): \(localCarveOuts.joined(separator: ","), privacy: .public) kept out of the tunnel")
+        }
+        let carveOuts = proxyCarveOuts + divert.outsideCIDRs + localCarveOuts
 
         let engine = ProxyTunnelEngine(provider: self, delegate: self)
         lock.lock(); pxEngine = engine; pxProxyHost = config.proxyHost
@@ -441,6 +489,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
     /// credential — never in providerConfiguration.
     private func startWireGuard(conf: [String: Any]?, options: [String: NSObject]?,
                                 profile: String, divert: DivertPlan,
+                                localNetworks: [String],
                                 completionHandler: @escaping (Error?) -> Void) {
         var config = WireGuardConfig.decode(from: conf?["wireguard"] as? Data)
         // Catch a bad config here so it becomes a settings message before any
@@ -481,7 +530,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         if !divert.outside.isEmpty {
             Self.log.log("divert (wireguard): \(divert.outside.count) destination(s) routed around the VPN")
         }
-        let carveOuts = divert.outsideCIDRs
+        // "Allow local network access": excluded routes only. The peer's cryptokey
+        // routing still permits these destinations — exactly like a WireGuard divert
+        // (§5.1) — so all that changes is that this host stops handing them to the
+        // tunnel. Merged into the one carve-out list every re-apply re-passes.
+        let localCarveOuts = config.allowLocalNetworkAccess ? localNetworks : []
+        if !localCarveOuts.isEmpty {
+            Self.log.log("local network access (wireguard): \(localCarveOuts.joined(separator: ","), privacy: .public) kept out of the tunnel")
+        }
+        let carveOuts = divert.outsideCIDRs + localCarveOuts
 
         let engine = WireGuardEngine(provider: self, delegate: self)
         lock.lock(); wgEngine = engine; wgConfig = config
@@ -542,6 +599,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
     /// absent pin is a refusal to connect rather than a permissive default.
     private func startSSHNetworkTunnel(conf: [String: Any]?, options: [String: NSObject]?,
                                        profile: String, divert: DivertPlan,
+                                       localNetworks: [String],
                                        completionHandler: @escaping (Error?) -> Void) {
         var config = SSHNetworkTunnelConfig.decode(from: conf?["sshnet"] as? Data)
         if let problem = config.connectProblem {
@@ -584,7 +642,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         if !divert.outside.isEmpty {
             Self.log.log("divert (sshnet): \(divert.outside.count) destination(s) routed around the VPN")
         }
-        let carveOuts = serverCarveOuts + divert.outsideCIDRs
+        // "Allow local network access" (this VPN's own setting; the prefixes come from
+        // the app and are already policy-gated). Joins the carve-out list the SSH
+        // server's own address is in, so every live re-apply re-passes both.
+        let localCarveOuts = config.allowLocalNetworkAccess ? localNetworks : []
+        if !localCarveOuts.isEmpty {
+            Self.log.log("local network access (sshnet): \(localCarveOuts.joined(separator: ","), privacy: .public) kept out of the tunnel")
+        }
+        let carveOuts = serverCarveOuts + divert.outsideCIDRs + localCarveOuts
 
         let engine = SSHNetworkTunnelEngine(provider: self, delegate: self)
         lock.lock(); snEngine = engine; snConfig = config

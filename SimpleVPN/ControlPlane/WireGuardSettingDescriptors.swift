@@ -56,6 +56,16 @@ enum WireGuardSettings {
         .init(id: "wg.dns", name: "DNS Servers",
               summary: "DNS servers to use while connected. Often points inside the tunnel so private names resolve.",
               group: .traffic, default: [String]()),
+        // A wg-quick file has no field for either of these two, which is exactly why
+        // they need one here: without a search list a short internal name never
+        // resolves over this kind, and without the carve-out a full tunnel takes the
+        // printer with it.
+        .init(id: "wg.search-domains", name: "Search Domains",
+              summary: "Domains to try when you type a short name, so \u{201C}nas\u{201D} finds nas.corp.example. Without one, only full names work.",
+              group: .traffic, default: [String]()),
+        .init(id: "wg.local-lan", name: "Allow local network access",
+              summary: "Keep printers, file shares and other devices on the network you're on reachable while connected. Traffic to them leaves your Mac outside the tunnel. Default: off.",
+              group: .traffic, default: false),
         .init(id: "wg.mtu", name: "MTU",
               summary: "Largest packet size on the tunnel, 1280–1500. Leave empty for the standard 1420; lower it (e.g. 1380) if some sites hang.",
               group: .traffic, default: Int?.none),

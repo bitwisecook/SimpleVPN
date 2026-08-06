@@ -386,6 +386,15 @@ extension VPNController {
         if ManagedPolicy.forceKeepInsideVPN { options["policyKeepInside"] = true as NSNumber }
         if ManagedPolicy.disableDivertRules { options["policyNoDiverts"] = true as NSNumber }
 
+        // "Allow local network access": the networks this Mac is on right now, for the
+        // engine's own carve-out (openvpn3 asks the tun builder for them and makes
+        // net_gateway routes itself). Computed HERE because this process is
+        // unsandboxed; re-computed per connect, never cached.
+        if overrides(for: id).allowLocalLanAccess == true {
+            let local = LocalNetworkCarveOut.live()
+            if !local.isEmpty { options[LocalNetworkCarveOut.optionKey] = local as NSArray }
+        }
+
         // Default-gateway ownership travels with the session so the extension sets
         // its suppress gate at establish — the ≤1-owner invariant then holds from
         // the very first tun build, before (or without) the app reconciling (RC3).

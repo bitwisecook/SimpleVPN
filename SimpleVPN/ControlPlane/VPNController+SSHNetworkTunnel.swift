@@ -283,6 +283,13 @@ extension VPNController {
             options["sshCertificatePEM"] = secrets.certificatePEM as NSString
         }
         if ManagedPolicy.forceKeepInsideVPN { options["policyKeepInside"] = true as NSNumber }
+        if ManagedPolicy.disableDivertRules { options["policyNoDiverts"] = true as NSNumber }
+        // "Allow local network access": the networks this Mac is on right now, computed
+        // in the app (unsandboxed) and gated again in the extension.
+        if config.allowLocalNetworkAccess {
+            let local = LocalNetworkCarveOut.live()
+            if !local.isEmpty { options[LocalNetworkCarveOut.optionKey] = local as NSArray }
+        }
         // Establish-time default-gateway ownership, same as OpenVPN (RC3).
         options["gatewayOwned"] = predictedGatewayOwned(id) as NSNumber
 

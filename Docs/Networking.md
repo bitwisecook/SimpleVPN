@@ -399,8 +399,7 @@ inside `includedRoutes`. It is **not** `includeAllNetworks`.
 `NativeVPNConfig.includeAllNetworks` (default **off**) and `.excludeLocalNetworks` (default **on**,
 and only meaningful when the first is on) are copied onto the `NEVPNProtocol` in
 `NativeVPNManager`, and the editor hides the second until the first is on. **No packet-tunnel kind
-sets either one.** A grep for them across the whole tree finds `NativeVPNManager`, `NativeVPNView`,
-`SettingVisibility` and one test — nothing in `PacketTunnel/` or `Shared/`.
+sets either one**, and that is a decision rather than an omission — see below.
 
 That is worth stating flatly, because the two are widely treated as *the* way an Apple-platform VPN
 says "everything, including LAN". For our own tunnels the equivalent decisions are made differently
@@ -409,7 +408,7 @@ and are ours to make:
 | Intent | Native kinds | Our packet-tunnel kinds |
 |---|---|---|
 | everything goes through the VPN | `includeAllNetworks = true` | a default route in `includedRoutes` |
-| keep the LAN reachable | `excludeLocalNetworks = true` | an **excluded route** per prefix (see below) |
+| keep the LAN reachable | `excludeLocalNetworks = true` | **"Allow local network access"** → computed **excluded routes** (below) |
 | change it while connected | **cannot** — fixed at connect | re-apply the settings, no reconnect |
 
 And that last row is why the Route mediator classifies the native kinds as `.limited` and tells the
@@ -418,12 +417,57 @@ live."* `Docs/LocalVirtualNetworks.md` refers to "an `includeAllNetworks` tunnel
 things a guest-network exclusion guards against; read alongside the code, that means **a native VPN
 configured that way**, not one of our own.
 
-There is no automatic "keep local networks out" for our packet tunnels. Local prefixes leave the
-tunnel only because something put them in `excludedRoutes`: the engine's own local routes (Tailscale
-hands us `localRoutes`), the user's `excludedRoutes` in a Proxy-Tunnel/SSH-Network-Tunnel config, a
-**divert rule** (§5), or the guest-network offer (§6). ❓ Whether a first-class "Allow local network
-access" control should exist for the packet-tunnel kinds is an open product question; `ONTOLOGY.md`
-already reserves the label for it.
+**Why `excludeLocalNetworks` is not the mechanism for our kinds.** It lives on `NEVPNProtocol`,
+which `NETunnelProviderProtocol` inherits — so a packet-tunnel profile *could* set it. The SDK ties
+it to the other property: `includeAllNetworks`'s own header documentation calls
+`excludeLocalNetworks` / `excludeAPNs` / `excludeCellularServices` "exclusions" from the traffic
+`includeAllNetworks` captures, and `NEPacketTunnelNetworkSettings` has no local-networks property at
+all. Our kinds never set `includeAllNetworks` (§4.1), so setting `excludeLocalNetworks` on them
+would be a property with nothing to modify — a control that reads as protection and changes no
+packet's path. ❓ Not measured against a live tunnel; the *documented* contract is what the choice
+rests on.
+
+### 4.2.1 "Allow local network access" ✅ — computed prefixes, one per kind's own seam
+
+`ONTOLOGY.md` binds the label; the mechanism is `Shared/LocalNetworkCarveOut.swift`, which decides
+once what "the local network" means: **the networks this Mac's own interfaces are on**, masked to
+their network address, plus the fixed link-local / multicast / broadcast ranges
+(`169.254.0.0/16`, `224.0.0.0/4`, `255.255.255.255/32`, `fe80::/10`, `ff00::/8`). Nothing is
+inferred from RFC 1918 — "you might have a `10.0.0.0/8` somewhere" is not evidence, and a carve-out
+wider than the truth sends traffic outside the tunnel that the user believes is inside it. Tunnel,
+loopback, and virtual-machine interfaces are excluded (`bridge0` is a real LAN, `bridge100`+ are
+guest networks with their own offer — §6 — so this rule takes exactly the bridges that one rejects).
+
+**Computed in the app, carried in the session.** The list rides `startTunnel(options:)` under
+`localNetworks`, like `gatewayOwned` and `policyKeepInside`: the app is unsandboxed and already
+enumerates interfaces, and an empty enumeration inside the sysext would be a carve-out that looks
+applied and is not. Absent ⇒ no carve-out, which is the fail-closed direction. The extension
+re-applies the MDM gate (`ForceKeepInsideVPN` drops the list, and forces
+`overrides.allowLocalLanAccess = false` for OpenVPN) because that is the enforcement point.
+
+| Kind | Setting | How the prefixes are applied |
+|---|---|---|
+| OpenVPN | `openvpn.local-lan` (**pre-existing**) | `tun_builder_get_local_networks` — **openvpn3 asks the builder** and makes `net_gateway` routes itself (`tunprop.hpp`, gated on `allowLocalLanAccess`) |
+| WireGuard | `wg.local-lan` | `extraExcludedRoutes`; `allowedIPs` untouched, so the peer still permits them and only this host's table changes (§5.1) |
+| Proxy Tunnel | `px.local-lan` | `extraExcludedRoutes`, beside the upstream proxy's own address |
+| SSH Network Tunnel | `sshnet.local-lan` | `extraExcludedRoutes`, beside the SSH server's own address |
+| Tailscale | — | the engine's `localRoutes`, plus `ts.exit-node-lan` while an exit node is on |
+| OpenConnect (in-process) | ❓ **none yet** | the mechanism is ready (the plan reaches the bridge the same way); the kind has no `oc.*` setting for it |
+| native IKEv2/IPsec/L2TP | `native.exclude-local` | `excludeLocalNetworks`, where the platform honours it |
+
+**OpenVPN's control existed and did nothing.** `openvpn.local-lan` →
+`OpenVPNOverrides.allowLocalLanAccess` → `Config::allowLocalLanAccess` has shipped for a long time,
+with a manual page, and the Doctor offers it as the fix for "can't reach local devices". But
+openvpn3 obtains the prefixes *from the tun builder*, `TunBuilderBase`'s default implementation
+returns an empty vector, and `OpenVPN3Bridge` did not override it — so the engine asked, got
+nothing, added no exclude route, and the LAN stayed captured. The setting, its documentation and the
+Doctor's fix were all silently inert. That override is now implemented.
+
+Local prefixes can still leave a tunnel for the older reasons, and those are unchanged: the engine's
+own local routes (Tailscale's `localRoutes`), the user's own `excludedRoutes` in a
+Proxy-Tunnel/SSH-Network-Tunnel config, a **divert rule** (§5), or the guest-network offer (§6). The
+carve-out above is deliberately the *same* `extraExcludedRoutes` seam as those, not a parallel one:
+one list, re-passed by every live re-apply, so a gateway or proxy hot-swap cannot drop half of it.
 
 ### 4.3 The carve-outs that are not the user's
 
@@ -455,20 +499,25 @@ entitled to?*
 | OpenVPN / OpenConnect, **owning the default** | the pushed servers | `[""]` — every lookup | the pushed search domains |
 | OpenVPN / OpenConnect, **split or demoted** | the pushed servers | **the search domains only** | the pushed search domains |
 | OpenVPN / OpenConnect, split with **no** search domains | — | — | **DNS is not asserted at all** |
-| WireGuard | `DNS=` | `[""]` — `wg-quick` semantics | **none set** |
-| Proxy Tunnel / SSH Network Tunnel | the config's resolvers | `[""]` | **none set** |
+| WireGuard | `DNS=` | `[""]`, or the search domains when demoted | `wg.search-domains` (**ours** — `wg-quick` has no key) |
+| Proxy Tunnel / SSH Network Tunnel | the config's resolvers | `[""]`, or the search domains when demoted | `px.search-domains` / `sshnet.search-domains` |
 | Tailscale | the netmap's nameservers (empty ⇒ *nothing asserted*) | the netmap's `matchDomains`, if any | the netmap's search domains |
 
 Four consequences worth naming:
 
 1. **A demoted tunnel cannot hijack every lookup.** Losing the gateway arbitration scopes its
    resolvers to its own search domains; with no search domains there is nothing safe to scope to, so
-   the tunnel's DNS is left off entirely rather than being narrowed to a guess.
-2. **WireGuard, the Proxy Tunnel and the SSH Network Tunnel set no search domains at all**, because
-   neither `wg-quick` nor those configs have a field for them. A short internal name will not resolve
-   over those kinds — a fully-qualified one will. This is the same shape of failure as the container
-   finding in §6, from a different cause, and it is the single most likely "DNS is broken" report on
-   those backends.
+   the tunnel's DNS is left off entirely rather than being narrowed to a guess. That rule now applies
+   to all six packet-tunnel kinds, because the three that had no search list have one.
+2. **The three kinds whose formats have no search-domain field carry one of ours.** `wg-quick`'s
+   `DNS=` line holds resolvers only, and a proxy or an SSH server pushes nothing at all — so
+   `WireGuardConfig.searchDomains`, `ProxyTunnelConfig.searchDomains` and
+   `SSHNetworkTunnelConfig.searchDomains` are SimpleVPN's own keys, normalised and validated in one
+   place (`DNSSearchDomains`, `Shared/DNSApply.swift`) so a domain cannot be spelled three ways
+   across three editors. Empty still means empty: nothing is invented. Until this existed, a short
+   internal name did not resolve over those kinds while a fully-qualified one did — the same shape of
+   failure as the container finding in §6, from a different cause, and the single most likely "DNS is
+   broken" report on those backends.
 3. **Tailscale with "accept DNS" off installs nothing.** An empty nameserver list means leave the
    Mac's resolvers alone — "installing an empty resolver would break every lookup on the machine".
 4. **A split tunnel needs host routes to its own resolvers.** Every builder adds a `/32` (or `/128`)
@@ -663,10 +712,20 @@ because it is safety-critical:
   that does not require knowing the utun's name.
 
 Every kind lands in exactly one participation bucket, with a user-facing reason when it cannot be the
-gateway — `.full` (real default-route capability), `.limited` (native kinds: fixed at connect),
-`.proxyOnly` (SSH and subprocess/ocproxy OpenConnect: no default route to hand out) and
-`.unsupported`. Note that **`.unsupported` is now unreachable**: its comment still says "WireGuard
-engine not built", and WireGuard has since been classified `.full`.
+gateway — `.full` (real default-route capability), `.limited` (native kinds: fixed at connect) and
+`.proxyOnly` (SSH: no default route to hand out). There is **no `.unsupported` bucket**: it existed
+for "WireGuard engine not built", an engine that has since shipped as `.full`, after which nothing
+returned it and the sentence it produced ("can't be controlled here") could never be shown. It is
+gone from all three mediators' classifiers, along with the two identical strings in
+`ProxyMediator`/`DNSMediator`. What makes that safe rather than a lost guard is that each classifier
+switches over `VPNKind` **exhaustively, with no `default` arm** — the compiler already forces a new
+kind to be given a bucket, which is the guarantee the spare case was standing in for.
+
+One inaccuracy in the bucket names is worth recording rather than leaving implied: `.proxyOnly` is
+documented as covering "SSH and subprocess/ocproxy OpenConnect", but `participation(for:)` takes only
+a `VPNKind` and returns `.full` for every OpenConnect kind. ❓ Whether a profile runs the subprocess
+`ocproxy` path is `SubprocessTunnelManager.willRunInProcess` — a property of the profile, not the
+kind — so today only `.ssh` actually reaches `.proxyOnly`.
 
 **Compositions** (`SimpleVPN/ControlPlane/VPNComposition.swift`) are the saved form of the multi-VPN
 case, with exactly the two relationships NE can deliver — `parallel` (routes merge by specificity;
@@ -777,6 +836,9 @@ treating it as a guest network would invite routing a real LAN around the VPN.
 * `gatewayOwned` rides `startTunnel`, so the ≤1-owner invariant holds at the **first** tun build.
 * Carve-out addresses are resolved **once** at connect (`getaddrinfo` blocks) and re-passed to every
   later settings build. Dropping them on a live re-apply reinstalls the SSH tunnel's own loop.
+* The local-network carve-out is enumerated **once**, in the app, at connect, and rides
+  `startTunnel` beside it — for the same reason and with the same consequence: it does not follow a
+  network change mid-session, and dropping it on a re-apply would silently close the LAN back up.
 * Divert plans are built **before** the engine dispatch, so every kind sees the same policy-gated
   value.
 * Engine dispatch happens **before** per-engine config validation. Checking for the OpenVPN `ovpn` key

@@ -331,6 +331,67 @@ import NetworkExtension
                 != SSHNetworkTunnelConfig.farSideResolverSentinel)
     }
 
+    // MARK: Search domains (SSH pushes nothing — Docs/Networking.md §4.4)
+
+    @Test func searchDomainsAreAssertedAlongsideTheCatchAll() throws {
+        var c = usable()
+        c.dnsServers = ["10.0.0.1"]
+        c.searchDomains = ["corp.example"]
+        let dns = try #require(SSHNetworkTunnelNetworkSettings.settings(for: c).dnsSettings)
+        // Short internal names are most of the reason to run this kind of tunnel.
+        #expect(dns.searchDomains == ["corp.example"])
+        #expect(dns.matchDomains == [""])
+    }
+
+    @Test func searchDomainsAlsoApplyToTheFarSideResolver() throws {
+        var c = usable()
+        c.useFarSideResolver = true
+        c.searchDomains = ["corp.example"]
+        let dns = try #require(SSHNetworkTunnelNetworkSettings.settings(for: c).dnsSettings)
+        #expect(dns.servers.first == SSHNetworkTunnelConfig.farSideResolverSentinel)
+        #expect(dns.searchDomains == ["corp.example"])
+    }
+
+    @Test func noSearchDomainsAssertsNoneRatherThanInventingOne() throws {
+        var c = usable()
+        c.dnsServers = ["10.0.0.1"]
+        let dns = try #require(SSHNetworkTunnelNetworkSettings.settings(for: c).dnsSettings)
+        #expect(dns.searchDomains == nil)
+    }
+
+    @Test func aDemotedTunnelWithSearchDomainsScopesToThemInsteadOfGoingDark() {
+        var c = usable()
+        c.dnsServers = ["10.0.0.1"]
+        c.searchDomains = ["corp.example"]
+        let s = SSHNetworkTunnelNetworkSettings.settings(for: c, suppressDefaultRoute: true)
+        #expect(s.dnsSettings?.matchDomains == ["corp.example"])
+    }
+
+    @Test func searchDomainsAreNormalisedAndValidatedOnSave() {
+        var c = usable()
+        c.searchDomains = [" .Corp.Example. ", "corp.example"]
+        #expect(c.normalized().searchDomains == ["corp.example"])
+        c.searchDomains = ["corp/example"]
+        #expect(c.connectProblem?.contains("slashes") == true)
+    }
+
+    // MARK: The local-network carve-out
+
+    @Test func localNetworkAccessIsOffByDefaultAndJoinsTheCarrierCarveOut() throws {
+        #expect(SSHNetworkTunnelConfig().allowLocalNetworkAccess == false)
+        let c = usable()
+        // The provider passes the SSH server's own address AND the local prefixes as
+        // one carve-out list, so a live re-apply cannot drop one and keep the other.
+        let carveOuts = ["203.0.113.9/32"]
+            + LocalNetworkCarveOut.prefixes(of: [.init(name: "en0", subnets: ["192.168.1.34/24"])])
+        let s = SSHNetworkTunnelNetworkSettings.settings(for: c, extraExcludedRoutes: carveOuts)
+        let v4 = try #require(s.ipv4Settings?.excludedRoutes).map(\.destinationAddress)
+        #expect(v4.contains("203.0.113.9"))
+        #expect(v4.contains("192.168.1.0"))
+        #expect(v4.contains("224.0.0.0"))
+        #expect(!v4.contains("0.0.0.0"))
+    }
+
     @Test func theMTUIsNeverReducedForEncapsulation() {
         // NOT a tautology: it is the regression guard for someone "helpfully"
         // subtracting an SSH overhead that does not exist on this path (the

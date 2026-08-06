@@ -210,7 +210,6 @@ final class DNSMediator {
         case .full: return nil
         case .limited: return "\(info.name) uses OS-managed DNS, fixed at connect."
         case .none: return "\(info.name) is a proxy with no DNS of its own."
-        case .unsupported: return "\(info.name) can't be controlled here (engine not built)."
         }
     }
 

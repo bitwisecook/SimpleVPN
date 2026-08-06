@@ -182,8 +182,17 @@ nonisolated enum RouteParticipation: Sendable, Equatable {
     /// not Routes (SSH, subprocess/ocproxy OpenConnect). Excluded from the gateway
     /// picker with a reason; never assigned a role.
     case proxyOnly
-    /// Cannot be controlled at all (WireGuard engine not built). Excluded cleanly.
-    case unsupported
+
+    // THERE IS NO `.unsupported` BUCKET, and its absence is the point. It existed for
+    // "WireGuard engine not built" — an engine that has since shipped — and then no
+    // kind returned it, so the case, the switch arm and the sentence it produced
+    // ("can't be controlled here (its engine isn't built in)") were unreachable: dead
+    // code whose comment still described a state the app had left behind. What makes
+    // it safe to remove rather than keep "for the next engine-less kind" is that
+    // `participation(for:)` switches over `VPNKind` EXHAUSTIVELY with no `default`
+    // arm — so the compiler already forces a new kind to be given a bucket, which is
+    // the guarantee the spare case was standing in for. A kind that genuinely cannot
+    // be controlled gets a bucket added back, with a true comment, at that moment.
 
     /// May this bucket be OFFERED in the default-gateway picker as a selectable owner?
     var isSelectableOwner: Bool { self == .full }

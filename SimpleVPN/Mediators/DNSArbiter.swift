@@ -222,9 +222,13 @@ nonisolated enum DNSParticipation: Sendable, Equatable {
     case limited
     /// No DNS of its own (SSH SOCKS, subprocess kinds) — excluded with a reason.
     case none
-    /// Engine not built — excluded cleanly. (No kind lands here today; kept so
-    /// the next engine-less kind gets the honest bucket rather than a lie.)
-    case unsupported
+
+    // No `.unsupported` bucket: it was "engine not built", nothing returned it, and
+    // the sentence it produced could never be shown. `classify(_:)` below switches
+    // over `VPNKind` exhaustively with no `default` arm, so a new kind is forced to
+    // pick a bucket by the compiler — which is what the spare case was standing in
+    // for. Removed here in step with `RouteParticipation`, so the three mediators'
+    // buckets stay readable side by side.
 
     /// Does this bucket contribute an intent to the split-DNS arbitration?
     var participatesInSplitDNS: Bool { self == .full }

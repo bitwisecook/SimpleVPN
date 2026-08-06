@@ -90,8 +90,16 @@ enum SSHNetSettings {
               summary: "Destinations that stay on your normal connection even when everything else goes through the tunnel. The SSH server's own address is always kept out.",
               group: .traffic, default: [String]()),
 
+        .init(id: "sshnet.local-lan", name: "Allow local network access",
+              summary: "Keep printers, file shares and other devices on the network you're on reachable while connected. Traffic to them leaves your Mac outside the tunnel. Default: off.",
+              group: .traffic, default: false),
+
         .init(id: "sshnet.dns", name: "DNS Servers",
               summary: "Resolvers to use while connected. Lookups are carried over the SSH connection, so they don't leak onto the local network.",
+              group: .traffic, default: [String]()),
+
+        .init(id: "sshnet.search-domains", name: "Search Domains",
+              summary: "Domains to try when you type a short name, so \u{201C}nas\u{201D} finds nas.corp.example. Without one, only full names work.",
               group: .traffic, default: [String]()),
 
         .init(id: "sshnet.far-side-dns", name: "Resolve Names at the Server",

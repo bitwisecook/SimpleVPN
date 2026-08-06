@@ -193,3 +193,48 @@ struct DNSMediatorTests {
         #expect(reqs["corp"]?.matchDomains == [""])
     }
 }
+
+// MARK: - Search domains (one spelling, three config formats)
+
+/// `DNSSearchDomains` exists because WireGuard, the Proxy Tunnel and the SSH Network
+/// Tunnel each carry their own list now, and a domain spelled three slightly
+/// different ways is a lookup that works on one kind and not the next.
+struct DNSSearchDomainTests {
+
+    @Test func normalisationTrimsDotsCaseAndDuplicatesButKeepsOrder() {
+        // Order is load-bearing: a stub resolver tries a search list in order, so
+        // re-sorting it would change which name wins.
+        #expect(DNSSearchDomains.normalized(["  .Corp.Example. ", "", "corp.example",
+                                             "Example.COM"])
+                == ["corp.example", "example.com"])
+        #expect(DNSSearchDomains.normalized([]).isEmpty)
+        #expect(DNSSearchDomains.normalized([".", "..", "   "]).isEmpty)
+    }
+
+    @Test func aPlainDomainIsAccepted() {
+        for good in ["corp.example", "example.com", "internal", "a-b.c_d.example",
+                     "corp.example.", ".corp.example"] {
+            #expect(DNSSearchDomains.problem(good) == nil, "\(good) should be accepted")
+        }
+    }
+
+    @Test func everyRefusalNamesWhatIsWrong() {
+        // macOS accepts an unusable search list in SILENCE and short names then simply
+        // never resolve — so each of these is refused at the editor, with a reason.
+        #expect(DNSSearchDomains.problem("")?.contains("corp.example.com") == true)
+        #expect(DNSSearchDomains.problem("corp example")?.contains("spaces") == true)
+        #expect(DNSSearchDomains.problem("https://corp.example")?.contains("URL") == true)
+        #expect(DNSSearchDomains.problem("corp.example/x")?.contains("slashes") == true)
+        #expect(DNSSearchDomains.problem("me@corp.example")?.contains("@") == true)
+        #expect(DNSSearchDomains.problem("*.corp.example")?.contains("wildcards") == true)
+        #expect(DNSSearchDomains.problem("corp..example")?.contains("empty part") == true)
+        #expect(DNSSearchDomains.problem(String(repeating: "a", count: 64) + ".example")?
+                    .contains("at most 63") == true)
+    }
+
+    @Test func theListCheckReportsTheFirstRealProblemAndIgnoresBlanks() {
+        #expect(DNSSearchDomains.problem(list: ["corp.example", "", "  "]) == nil)
+        #expect(DNSSearchDomains.problem(list: ["corp.example", "bad domain"])?
+                    .contains("spaces") == true)
+    }
+}

@@ -199,7 +199,6 @@ final class ProxyMediator {
         case .egressItself: return "\(info.name) is itself a proxy egress; it re-dials flows directly."
         case .limited: return "\(info.name) uses OS-managed proxy settings, fixed at connect."
         case .none: return "\(info.name) doesn't use a proxy."
-        case .unsupported: return "\(info.name) can't be controlled here (engine not built)."
         }
     }
 

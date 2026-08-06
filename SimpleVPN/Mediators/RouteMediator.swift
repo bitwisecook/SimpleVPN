@@ -291,8 +291,6 @@ final class RouteMediator {
             return "\(info.name) is an OS-managed VPN; its full/split routing is fixed at connect and can't be switched live."
         case .proxyOnly:
             return "\(info.name) is a proxy, not a full tunnel — it has no default route to hand out."
-        case .unsupported:
-            return "\(info.name) can't be controlled here (its engine isn't built in)."
         }
     }
 

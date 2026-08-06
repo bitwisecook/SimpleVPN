@@ -113,11 +113,23 @@ nonisolated struct ProxyTunnelConfig: Codable, Sendable, Equatable {
     /// proxy's own address is excluded automatically by the provider — these are
     /// extra carve-outs the user wants direct).
     var excludedRoutes: [String] = []
+    /// Keep this Mac's own network reachable while the tunnel is up: the networks
+    /// its interfaces are on, plus link-local and multicast, become excluded routes.
+    /// OFF by default because ON means traffic leaves the tunnel — see
+    /// `Shared/LocalNetworkCarveOut.swift` for exactly which prefixes and why they
+    /// are computed rather than guessed.
+    var allowLocalNetworkAccess: Bool = false
 
     /// DNS servers to advertise on the utun. Queries to these are carried
     /// through the proxy (SOCKS UDP, or DNS-over-TCP for a CONNECT proxy). Empty
     /// ⇒ leave the Mac's own resolvers alone.
     var dnsServers: [String] = []
+    /// Domains to append to a SHORT name before looking it up ("wiki" →
+    /// "wiki.corp.example"). Without at least one, only fully-qualified names
+    /// resolve through this tunnel — the failure `Docs/Networking.md` §4.4 names as
+    /// the most likely "DNS is broken" report on the kinds whose config format has
+    /// no field for one. A proxy pushes nothing, so these are the user's to state.
+    var searchDomains: [String] = []
 
     /// Tunnel MTU. 1500 is a safe utun default; the proxy re-segments anyway
     /// since flows are re-dialled as fresh TCP, so this rarely needs changing.
@@ -145,7 +157,10 @@ nonisolated struct ProxyTunnelConfig: Codable, Sendable, Equatable {
         includeDefaultRoute = (try? c.decodeIfPresent(Bool.self, forKey: .includeDefaultRoute)) ?? true
         includedRoutes = (try? c.decodeIfPresent([String].self, forKey: .includedRoutes)) ?? []
         excludedRoutes = (try? c.decodeIfPresent([String].self, forKey: .excludedRoutes)) ?? []
+        allowLocalNetworkAccess =
+            (try? c.decodeIfPresent(Bool.self, forKey: .allowLocalNetworkAccess)) ?? false
         dnsServers = (try? c.decodeIfPresent([String].self, forKey: .dnsServers)) ?? []
+        searchDomains = (try? c.decodeIfPresent([String].self, forKey: .searchDomains)) ?? []
         mtu = (try? c.decodeIfPresent(Int.self, forKey: .mtu)) ?? ProxyTunnelStartConfig.defaultMTU
     }
 }
@@ -195,6 +210,7 @@ extension ProxyTunnelConfig {
         n.includedRoutes = cleanList(includedRoutes)
         n.excludedRoutes = cleanList(excludedRoutes)
         n.dnsServers = cleanList(dnsServers)
+        n.searchDomains = DNSSearchDomains.normalized(searchDomains)
         if !Self.mtuRange.contains(n.mtu) { n.mtu = ProxyTunnelStartConfig.defaultMTU }
         // Included routes are meaningless under a full tunnel; keep them (the
         // user may toggle back) but never carry a stale credential-bearing URL.
@@ -400,6 +416,7 @@ extension ProxyTunnelConfig {
         // can't parse, so a typo showed up as "DNS stopped working", never as a
         // refused connect.
         if let p = Self.dnsServersProblem(dnsServers) { return p }
+        if let p = DNSSearchDomains.problem(list: searchDomains) { return p }
         return nil
     }
 }

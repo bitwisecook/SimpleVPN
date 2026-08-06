@@ -342,6 +342,73 @@ struct ProxyTunnelNetworkSettingsTests {
         let settings = ProxyTunnelNetworkSettings.settings(for: c)
         #expect(settings.dnsSettings == nil)
     }
+
+    // MARK: Search domains (a proxy pushes none — Docs/Networking.md §4.4)
+
+    @Test func searchDomainsAreAssertedAlongsideTheCatchAll() throws {
+        var c = ProxyTunnelConfig()
+        c.upstream = "socks5://proxy.example:1080"
+        c.dnsServers = ["10.0.0.1"]
+        c.searchDomains = ["corp.example"]
+        let dns = try #require(ProxyTunnelNetworkSettings.settings(for: c).dnsSettings)
+        // The whole point: a SHORT name resolves now, and the tunnel still claims
+        // every lookup rather than narrowing itself.
+        #expect(dns.searchDomains == ["corp.example"])
+        #expect(dns.matchDomains == [""])
+    }
+
+    @Test func noSearchDomainsAssertsNoneRatherThanInventingOne() throws {
+        var c = ProxyTunnelConfig()
+        c.upstream = "socks5://proxy.example:1080"
+        c.dnsServers = ["10.0.0.1"]
+        let dns = try #require(ProxyTunnelNetworkSettings.settings(for: c).dnsSettings)
+        #expect(dns.searchDomains == nil)
+    }
+
+    @Test func aDemotedTunnelWithSearchDomainsScopesToThemInsteadOfGoingDark() throws {
+        var c = ProxyTunnelConfig()
+        c.upstream = "socks5://proxy.example:1080"
+        c.dnsServers = ["10.0.0.1"]
+        c.searchDomains = ["corp.example"]
+        let s = ProxyTunnelNetworkSettings.settings(for: c, suppressDefaultRoute: true)
+        #expect(s.dnsSettings?.matchDomains == ["corp.example"])
+        // …and with NO list there is nothing safe to scope to, so DNS stays off.
+        c.searchDomains = []
+        #expect(ProxyTunnelNetworkSettings.settings(for: c, suppressDefaultRoute: true)
+                    .dnsSettings == nil)
+    }
+
+    @Test func searchDomainsAreNormalisedAndValidatedOnSave() {
+        var c = ProxyTunnelConfig()
+        c.upstream = "socks5://proxy.example:1080"
+        c.searchDomains = [" .Corp.Example. ", "corp.example", ""]
+        #expect(c.normalized().searchDomains == ["corp.example"])
+        c.searchDomains = ["corp example"]
+        #expect(c.connectProblem?.contains("spaces") == true)
+    }
+
+    // MARK: The local-network carve-out
+
+    @Test func localNetworkAccessIsOffByDefaultAndIsExcludedRoutesWhenOn() throws {
+        // OFF by default: ON means traffic leaves the tunnel.
+        #expect(ProxyTunnelConfig().allowLocalNetworkAccess == false)
+        var c = ProxyTunnelConfig()
+        c.upstream = "socks5://proxy.example:1080"
+        c.includeDefaultRoute = true
+        // The provider hands the computed prefixes in as extra carve-outs (its own
+        // merge needs a live tunnel; this is the settings half of that path).
+        let s = ProxyTunnelNetworkSettings.settings(
+            for: c, extraExcludedRoutes: LocalNetworkCarveOut.prefixes(of: [
+                .init(name: "en0", subnets: ["192.168.1.34/24"]),
+            ]))
+        let v4 = try #require(s.ipv4Settings?.excludedRoutes).map(\.destinationAddress)
+        #expect(v4.contains("192.168.1.0"))
+        #expect(v4.contains("224.0.0.0"))       // multicast — how Bonjour/AirPlay work
+        #expect(v4.contains("169.254.0.0"))     // link-local
+        #expect(!v4.contains("0.0.0.0"))        // never a default route
+        // The tunnel still carries everything else.
+        #expect(s.ipv4Settings?.includedRoutes?.contains { $0.destinationAddress == "0.0.0.0" } == true)
+    }
 }
 
 // MARK: - Editor advisories (the picker that used to lie, and the caveats)
