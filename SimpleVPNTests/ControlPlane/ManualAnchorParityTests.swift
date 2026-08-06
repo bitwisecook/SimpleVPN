@@ -95,6 +95,12 @@ struct ManualAnchorParityTests {
         "problem-idle", "problem-captive",
         // Per-engine introductions
         "ts-what-is-it", "cr-what-is-it", "sshnet-what-is-it",
+        // The WireGuard editor's two export ACTIONS (a save panel each), and the
+        // reason there are two: a `wg-quick` file without a private key is refused
+        // by the receiving client, so omission-with-no-opt-out is not available the
+        // way it is for `.ovpn`. Prose, not settings — nobody sets a value here, and
+        // what the chapter documents is which file contains what.
+        "wg-exporting",
         // What a security key is, and the difference between the code it types
         // for you and the certificate its PIV applet holds. The settings live
         // under "yk."; this is the chapter their help links into.

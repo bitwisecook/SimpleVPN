@@ -539,11 +539,19 @@ final class VPNController {
     /// which every write path already ends with.
     var ovpnTextCache: [String: String] = [:]
 
-    /// Profiles whose inline key material could NOT be moved into the keychain,
+    /// Profiles whose inline key material was NOT moved into the keychain,
     /// id → what to tell the user. Populated by `migrateInlineOVPNSecrets()`; the
-    /// point is that a failed migration is visible instead of silent, because the
+    /// point is that an unmigrated profile is visible instead of silent, because the
     /// alternative to being visible is a private key sitting in the preferences
     /// with nobody aware of it.
+    ///
+    /// TWO CAUSES, one badge. Either the migration FAILED (the keychain would not
+    /// take the material, or the rewrite would not save) and the copy names the fix,
+    /// or it was DECLINED BY POLICY under `lockConfiguration` and the copy names who
+    /// can change that instead — see the decision on `migrateInlineOVPNSecrets`. The
+    /// user-visible fact is identical in both cases ("this VPN's private key is
+    /// stored with its configuration"), which is why one badge is right; the
+    /// difference lives entirely in the reason string.
     var inlineSecretMigrationFailures: [String: String] = [:]
 
     /// Credentials mid-typing in the menu-bar dropdown. Memory only — they

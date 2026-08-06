@@ -44,6 +44,13 @@ struct WireGuardView: View {
     /// The saved-confirmation affordance every editor's primary action now has —
     /// three of six used to save with no visible acknowledgement at all.
     @State private var savedTick = false
+    /// Raised by "Export .conf with Keys…", never by the plain export. Consent is
+    /// asked BEFORE the save panel: asking after the user has already named a file
+    /// makes the question read as a formality to be dismissed.
+    @State private var showExportConsent = false
+    /// What the last export left out (or put in), said in the app as well as in the
+    /// file — a note inside a file nobody reopens tells nobody anything.
+    @State private var exportNotice: String?
 
     /// Which tab is showing. A binding, so a related-settings link or a search
     /// hit on the Custom Routing tab can select it (no TabView in the app could
@@ -174,17 +181,34 @@ struct WireGuardView: View {
             }
 
             Section {
+                // TWO actions, not one action with a checkbox — see
+                // `WireGuardConfig.exportText(includingSecrets:)` for the decision.
+                // The plain button cannot produce a file with a key in it, so there
+                // is no dialog for a hurried user to click through TO the leak; the
+                // leaky path is separately named and separately confirmed.
+                //
                 // The reason lived in the section footer, where a keyboard or
                 // VoiceOver user reaching the button never met it. It belongs ON
                 // the control (house rule: a dead control says why).
-                Button("Export .conf…") { export() }
-                    .disabled(exportDisabledReason != nil)
-                    .help(exportDisabledReason
-                          ?? "Write a standard wg-quick file for use with other WireGuard clients.")
-                    .accessibilityValue(exportDisabledReason.map { "unavailable — \($0)" } ?? "")
+                Button("Export .conf…") { export(includingSecrets: false) }
+                    .disabled(plainExportDisabledReason != nil)
+                    .help(plainExportDisabledReason
+                          ?? "Write a standard wg-quick file with no keys in it, for use with other WireGuard clients.")
+                    .accessibilityValue(plainExportDisabledReason.map { "unavailable — \($0)" } ?? "")
+                Button("Export .conf with Keys…") { showExportConsent = true }
+                    .disabled(keyExportDisabledReason != nil)
+                    .help(keyExportDisabledReason
+                          ?? "Write a wg-quick file that CONTAINS this VPN\u{2019}s keys, in the clear. SimpleVPN asks first and says what will be in the file.")
+                    .accessibilityValue(keyExportDisabledReason.map { "unavailable — \($0)" }
+                                        ?? "asks for confirmation, then writes a file containing this VPN\u{2019}s keys")
+                if let exportNotice {
+                    Label(exportNotice, systemImage: "checkmark.circle")
+                        .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             } footer: {
-                Text(exportDisabledReason
-                     ?? "Export produces a standard wg-quick file for use with other WireGuard clients.")
+                Text(plainExportDisabledReason
+                     ?? "\u{201C}Export .conf…\u{201D} leaves this VPN\u{2019}s keys out — wg-quick then refuses the file until a private key is pasted back in, which is why the second button exists. Either file says in its own header what is and is not in it.")
             }
         }
         .formStyle(.grouped)
@@ -235,6 +259,18 @@ struct WireGuardView: View {
             if case let .success(url) = result { importConf(url) }
         }
         .sheet(isPresented: $showPaste) { pasteSheet }
+        // The confirming button carries `.destructive`, and NOTHING carries
+        // `.keyboardShortcut(.defaultAction)`: Return/Escape both cancel, so the
+        // leaky outcome is unreachable without reading and aiming at it.
+        .confirmationDialog(exportTarget.exportConsentTitle,
+                            isPresented: $showExportConsent, titleVisibility: .visible) {
+            Button(exportTarget.exportConsentConfirmTitle, role: .destructive) {
+                export(includingSecrets: true)
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text(exportTarget.exportConsentMessage)
+        }
     }
 
     // MARK: Routing-table / firewall-mark rows (closed value sets, not free text)
@@ -486,11 +522,25 @@ struct WireGuardView: View {
         return WireGuardConfig.dnsOutsideAllowedIPs(dns: draft.dns, allowedIPs: draft.allowedIPs)
     }
 
-    /// Why Export is unavailable, in the user's language, or nil.
-    private var exportDisabledReason: String? {
-        if !hasPrivateKey { return "Set a private key above before exporting — wg-quick refuses a config without one." }
+    /// Why the secret-free export is unavailable, in the user's language, or nil.
+    ///
+    /// It does NOT require a private key. It used to, because export wrote one — a
+    /// file with no keys in it is a perfectly good description of the server half,
+    /// and refusing to write one when there is no key stored is refusing the one
+    /// export that could never leak anything.
+    private var plainExportDisabledReason: String? {
         if draft.peerPublicKey.trimmingCharacters(in: .whitespaces).isEmpty {
             return "Enter the peer public key above before exporting — wg-quick needs the server's key."
+        }
+        return nil
+    }
+
+    /// Why the with-keys export is unavailable — everything above, plus there has to
+    /// be a key to write.
+    private var keyExportDisabledReason: String? {
+        if let p = plainExportDisabledReason { return p }
+        if !hasPrivateKey && !hasPresharedKey {
+            return "This VPN has no keys stored, so there is nothing this would add — use \u{201C}Export .conf…\u{201D}."
         }
         return nil
     }
@@ -652,17 +702,40 @@ struct WireGuardView: View {
         }
     }
 
-    private func export() {
+    /// What an export would be OF: the draft with whatever is typed but unsaved
+    /// applied, so the consent dialog names exactly what the file will hold and the
+    /// exported file matches what Save would store.
+    private var exportTarget: WireGuardConfig {
+        var c = draft
+        if !newPrivateKey.isEmpty { c.privateKey = newPrivateKey }
+        if !newPresharedKey.isEmpty { c.presharedKey = newPresharedKey }
+        else if removePresharedKey { c.presharedKey = "" }
+        return c
+    }
+
+    /// The ONE export path. `includingSecrets` is decided by which button was
+    /// pressed and, for `true`, only after the confirmation above — the file's own
+    /// text is `WireGuardConfig.exportText(includingSecrets:)`, which is where the
+    /// headers and the redaction live so a test can hold them.
+    private func export(includingSecrets: Bool) {
+        let toExport = exportTarget
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "\(draft.name).conf"
         panel.allowedContentTypes = [UTType(filenameExtension: "conf") ?? .data]
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        var toExport = draft
-        if !newPrivateKey.isEmpty { toExport.privateKey = newPrivateKey }
-        // Export what Save would store — including an unsaved replacement or
-        // removal of the pre-shared key.
-        if !newPresharedKey.isEmpty { toExport.presharedKey = newPresharedKey }
-        else if removePresharedKey { toExport.presharedKey = "" }
-        try? toExport.serialize().write(to: url, atomically: true, encoding: .utf8)
+        do {
+            try toExport.exportText(includingSecrets: includingSecrets)
+                .write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            vpn.lastError = error.localizedDescription
+            return
+        }
+        // Say what happened, either way. "It contains your keys" is worth repeating
+        // outside the dialog the user just dismissed.
+        exportNotice = includingSecrets
+            ? "Wrote \(url.lastPathComponent) WITH this VPN\u{2019}s \(WireGuardConfig.humanList(toExport.presentSecretFields)) in it. Delete the file once the other client has \(toExport.presentSecretFields.count == 1 ? "it" : "them")."
+            : (toExport.exportOmissionNotice.isEmpty
+               ? "Wrote \(url.lastPathComponent)."
+               : toExport.exportOmissionNotice)
     }
 }

@@ -425,10 +425,33 @@ extension VPNController {
     /// the keychain) is the one outcome that would destroy a user's only copy of a
     /// client private key, and it is unreachable from here.
     ///
-    /// Under MDM `lockConfiguration` the rewrite is skipped entirely: the
-    /// administrator has said the stored configuration is not to be changed, and
-    /// this is a rewrite of it. Logged, not badged — it is a policy outcome, not a
-    /// failure the user can clear.
+    /// UNDER MDM `lockConfiguration` THE REWRITE IS SKIPPED, AND THE PROFILE IS
+    /// BADGED. Decided, not defaulted — `Docs/SecretsAndSync.md` §2 carries the
+    /// argument and the case against. In short:
+    ///
+    ///  • The inline key was delivered BY the organisation, INSIDE the profile the
+    ///    organisation pushed. The material is already within its own trust
+    ///    boundary, and the party who can actually fix it — by pushing a profile
+    ///    without the inline block, or by unlocking configuration — is that same
+    ///    organisation. That is what makes a managed profile different from a
+    ///    user's own, where nobody but us was ever going to fix it.
+    ///  • Every other `lockConfiguration` site in this app refuses to write. A
+    ///    single silent exception is how a policy stops meaning anything, and we
+    ///    cannot see why the lock was set: an administrator may be comparing the
+    ///    stored profile against a known-good baseline, in which case our rewrite
+    ///    reads as tampering.
+    ///  • A rewrite of managed state cannot be recalled, and a re-push would
+    ///    re-leak anyway.
+    ///
+    /// AND THE CASE AGAINST, which is real: moving a secret into the keychain is not
+    /// a *configuration* edit in the sense the policy means. The profile's meaning is
+    /// unchanged, the tunnel connects identically, and an administrator who locked
+    /// settings meant "the user must not change these values", not "the private key
+    /// must stay readable in the VPN preferences". Under that reading this preserves
+    /// a leak out of deference to a policy that never contemplated it. So the
+    /// outcome is not left silent: it is recorded in `inlineSecretMigrationFailures`
+    /// and badged in the VPN list exactly like a failed migration, because the one
+    /// thing this must not be is invisible.
     func migrateInlineOVPNSecrets() async {
         for profile in profiles where profile.kind == .openVPN {
             let id = profile.id
@@ -440,6 +463,13 @@ extension VPNController {
             }
             if ManagedPolicy.lockConfiguration {
                 Self.log.log("inline secrets left in place for \(id, privacy: .public): configuration is locked by policy")
+                // Badged, not merely logged: nobody reads the log, and an unread
+                // private key in the VPN preferences is the entire problem this
+                // migration exists to fix. The copy names the material in house
+                // terms, says who can change it, and does NOT offer the user a fix
+                // they do not have — a badge that suggests unlocking the keychain
+                // would send them chasing something that is not the cause.
+                inlineSecretMigrationFailures[id] = OVPNSecretMaterial.managedInlineSecretNotice(split.secrets.keys)
                 continue
             }
             guard let mgr = managers[id],

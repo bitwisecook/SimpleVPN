@@ -177,6 +177,7 @@
   <a href="#wg-keepalive">Persistent Keepalive</a>
   <a href="#wg-table">Routing Table</a>
   <a href="#wg-fwmark">Firewall Mark</a>
+  <a href="#wg-exporting">Exporting a Configuration</a>
 
   <h2>SSH Tunnels</h2>
   <a href="#ssh-server">Server Address</a>
@@ -729,6 +730,16 @@
 <h2 id="wg-keepalive">Persistent Keepalive</h2>
 <p class="default">Default: off.</p>
 <p>How often (in seconds) to send a tiny keepalive so NAT routers and firewalls don't forget the tunnel and drop it. <code>25</code> is the usual value when you're behind NAT; leave it off on a server with a stable public address.</p>
+
+<h2 id="wg-exporting">Exporting a Configuration</h2>
+<p>WireGuard settings can be written out as a standard <code>wg-quick</code> file, for a phone, a router, or another WireGuard client. There are two buttons, because there are genuinely two different files.</p>
+<ul>
+  <li><strong>Export .conf…</strong> writes everything <em>except</em> your keys. Safe to mail, keep, or commit &mdash; but <code>wg-quick</code> refuses a configuration with no private key, so the person receiving it has to paste one in before it will run. Use this to hand over the server details, the allowed networks and the DNS settings.</li>
+  <li><strong>Export .conf with Keys…</strong> writes a file that works as-is, because your private key (and pre-shared key, if you have one) are in it, unencrypted. SimpleVPN asks first and tells you exactly what will be in the file; the button that goes ahead says so too.</li>
+</ul>
+<p>Either file explains itself at the top, so you can tell them apart months later without opening the settings again &mdash; one says no secrets are in it, the other says in capitals that they are.</p>
+<div class="warn">A file with keys in it has none of the protection SimpleVPN gave them. Anyone who can read it can connect to this VPN as this Mac, and a copy in mail, a shared folder, a repository or a Time Machine backup cannot be recalled. Delete it once the other client has it &mdash; and if it does get out, generate a new key pair and register the new public key with your provider.</div>
+<p>On a Mac whose settings your organisation has locked, both buttons are unavailable along with the rest of the editor.</p>
 
 <!-- ══════════════════ SSH Tunnels ══════════════════
      Anchors are generated from the SSHSettings descriptor ids

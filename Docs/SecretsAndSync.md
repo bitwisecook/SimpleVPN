@@ -96,8 +96,47 @@ compare byte-for-byte, and only then rewrite the stored config. Any failure leav
 completely untouched — working, still leaky — and badges it. Losing somebody's only copy of a client
 key would be worse than the leak being fixed.
 
-❓ **Under `lockConfiguration` the rewrite is skipped**, so managed profiles keep inline keys
-indefinitely. A defensible reading of the policy, and one that needs an explicit decision.
+### Managed profiles: the rewrite is skipped, and the profile is badged ✅
+
+**Decided: under `lockConfiguration` SimpleVPN does not rewrite the stored configuration, and the
+profile carries a visible badge saying its key is stored alongside its settings.** It used to be
+skipped *silently*, logged and nothing more, which was the part that was actually wrong.
+
+The argument for leaving the profile alone:
+
+- **The material is already inside the trust boundary that produced it.** An MDM-delivered profile's
+  inline key was put there by the organisation, in a profile the organisation pushed to a Mac it
+  manages. This is the fact that makes a managed profile genuinely different from a user's own, where
+  nobody but SimpleVPN was ever going to fix it. Here the party who can fix it properly — by pushing
+  a profile that keeps the block out, or by unlocking configuration — is the same party that created
+  it.
+- **Every other `lockConfiguration` site in the app refuses to write.** A single silent exception is
+  how a policy stops meaning anything, and we cannot see *why* the lock was set: an administrator may
+  be comparing the stored profile against a known-good baseline, in which case a rewrite reads as
+  tampering rather than as hygiene.
+- **A rewrite of managed state cannot be recalled**, and a re-push re-leaks anyway.
+
+**And the case against, which is real and was nearly decisive.** Moving a secret into the keychain is
+not a *configuration* edit in the sense the policy means. The profile's meaning is unchanged, the
+tunnel connects identically, the engine gets a byte-identical configuration — and an administrator who
+locked settings meant "the user must not change these values", not "the private key must stay readable
+in the VPN preferences". Under that reading this preserves a leak out of deference to a policy that
+never contemplated it. Nor is "it will be re-pushed" a complete answer: many profiles are pushed once
+and never again, so a one-time strip would be a real reduction, not churn.
+
+What settles it is that the choice is not between *fixing* and *not fixing* — it is between two parties
+fixing it, and only one of them has the authority and the durable fix. So the outcome is made
+**visible instead of silent**: the same `key.slash.fill` badge a failed migration raises, on the same
+row, with copy that says the VPN works normally and names who can change it — and that deliberately
+does *not* offer the user the failure path's fix ("unlock your keychain and reopen SimpleVPN"), which
+would send them chasing a cause that is not the cause. `OVPNSecretMaterial.managedInlineSecretNotice`
+owns that wording; the decision itself is recorded on `VPNController.migrateInlineOVPNSecrets`.
+
+Two tests hold it, and the second is the one that matters most: `aLockedProfileIsLeftAloneAndBadged`
+pins the ordering in the source (the badge is set and the branch exits *before* anything touches the
+keychain or `providerConfiguration`), and `anUnmanagedProfileIsStillStripped` is its
+over-redaction counterpart — "leave it and badge it" must never become the universal answer, because
+that is the original bug wearing a warning label.
 
 ---
 
@@ -107,7 +146,7 @@ indefinitely. A defensible reading of the policy, and one that needs an explicit
 flowchart LR
     subgraph now["Today"]
         A[".ovpn export ✅<br/><i>omits secret blocks,<br/>header says what and how to restore</i>"]
-        B["wg-quick export ❌<br/><i>writes PrivateKey and<br/>PresharedKey in the clear</i>"]
+        B["wg-quick export ✅<br/><i>omits keys by default;<br/>a second, named action<br/>writes them after consent</i>"]
     end
     subgraph next["Designed"]
         C["JSON / YAML export ✅<br/><i>whole config, portable</i>"]
@@ -121,11 +160,57 @@ people click through, and once clicked the file exists. The material is recovera
 keychain; the issuer can reissue). Tunnelblick made the same call; Viscosity's plaintext tarball is
 the other road.
 
-❌ **`WireGuardView.export()` still writes `PrivateKey` and `PresharedKey` in the clear.** Known, not
-yet fixed, and the trade-off genuinely differs: a `wg-quick` file *without* a private key is useless
-to the receiving client, whereas an `.ovpn` without one still describes the server. So the answer is
-probably explicit consent rather than omission — which is why it was not fixed by copying the `.ovpn`
-decision.
+✅ **`wg-quick` export: omission by default, keys only by explicit consent.** It used to write
+`PrivateKey` and `PresharedKey` in the clear, unannounced, on the only export button there was.
+
+**Why not the `.ovpn` answer.** Both halves of the `.ovpn` argument fail here:
+
+- `wg-quick up` **refuses** a configuration with no `PrivateKey`, so a secret-free WireGuard file
+  cannot be used by the receiving client at all — where a secret-free `.ovpn` is still a working
+  description of the server.
+- A WireGuard public key is **derived from** the private key and registered against that peer on the
+  server. "Ask whoever set up the VPN to reissue it" is not something the user can do alone the way an
+  OpenVPN CA reissue is: a new key pair means the server's own peer entry has to change too.
+
+So omission-with-no-opt-out would mean the app can never move a working WireGuard VPN onto a phone or
+a second Mac, which is the commonest reason anyone exports one. **The argument that was rejected** is
+exactly that one — copy the `.ovpn` rule for consistency and accept the loss — and it was rejected
+because consistency between two exporters is worth less than the feature the rule would delete, and
+because the honest way to describe that rule would have been "SimpleVPN can import a WireGuard VPN but
+cannot export one".
+
+**What makes consent more than a dialog**, given that a dialog is a thing people click through:
+
+- **Two actions, not one action with a checkbox.** `Export .conf…` cannot produce a file with a key in
+  it — so there is no dialog whose default button leaks, and nothing to click *through* to. The leaky
+  path is a separately named button, `Export .conf with Keys…`.
+- **The confirmation is specific.** It names the material ("private key and pre-shared key"), the
+  consequence ("anyone who can read the file can connect to this VPN as this Mac"), the
+  irrevocability, and the safe alternative. No generic "are you sure" — asserted by test.
+- **The confirming button says what it does** — "Export With Private Key", never "OK" — carries the
+  destructive role, and nothing claims the default action, so Return and Escape both cancel.
+- **Consent is asked before the save panel**, not after: asking once the user has named a file makes
+  the question read as a formality on the way to a file they have already decided to create.
+- **Either file says what it contains in its own header**, which is the `.ovpn` exporter's precedent
+  and the half that survives the file being forwarded, renamed, or found in a backup by someone who
+  never saw the dialog. One says "No secrets are in this file"; the other says "THIS FILE CONTAINS
+  SECRETS" and tells the reader to delete it.
+- **The secret-free file is honest about being unusable as-is**: its header says wg-quick will refuse
+  it and where the key goes back. A silently incomplete configuration that fails on the other machine
+  with no explanation would be worse than the leak it replaced.
+
+Details worth knowing: the redacted body is literally `redactedForStorage()`'s output — one redaction,
+shared with the `providerConfiguration` guard — and a marker comment sits under `[Interface]` and
+`[Peer]` where each key belonged. Neither the redacted file nor the app's own notice ever writes the
+token `PrivateKey`, so a plain grep for it is a real check rather than one the explanatory prose
+defeats: the same discipline as `OVPNSecretMaterial` never writing `<key>`.
+
+Pinned by `SimpleVPNTests/Import/WireGuardExportTests.swift`, in the shape of
+`SimpleVPNTests/Portability/`'s exclusion tests: a canary private key and pre-shared key that must not
+reach the file, and the over-redaction counterpart asserting the endpoint, the peer's public key, the
+allowed networks, the MTU and both export-only settings **survive**. Plus source-level guards that
+nothing writes a raw `serialize()` to a file, that only the consented action passes
+`includingSecrets: true`, and that the consent precedes the save panel.
 
 ✅ **JSON/YAML export/import of the whole configuration.** Human-readable and portable, secret-free
 with **no** opt-out, and the same serialisation the sync design needs — which is why it was worth
@@ -237,12 +322,16 @@ never "only you can read it" unless that is precisely true.
 
 1. ~~**JSON/YAML export/import**~~ ✅ **built** — `SimpleVPN/Portability/`, Settings ▸ General ▸
    Export & Import. It was useful alone, and it is the serialisation everything below needs.
-2. **Encrypted archive backup** — answers "back up my setup" with no cloud involved.
-3. **Fix `wg-quick` export** — a known leak, and it belongs with the export work.
+2. ~~**Fix `wg-quick` export**~~ ✅ **built** — omission by default, keys by explicit consent (§3).
+3. **Encrypted archive backup** — answers "back up my setup" with no cloud involved. It is also the
+   thing that would let the consented `wg-quick` export become rarer: a passphrase-protected archive
+   is a better answer than a plaintext `.conf` for every case except "this other client only speaks
+   wg-quick", which is the case that keeps the consented export honest rather than lazy.
 4. **Secrets sync via iCloud Keychain** — a migration rather than a new capability, since
    `kSecAttrSynchronizable` forces the data-protection keychain and `BiometricCredentialStore`
    already writes there.
 5. **Config sync via CloudKit**, signed and chained, with the confirmation gate — last, because it
    carries the integrity design and the open CloudKit question.
 
-Steps 1–3 are worth doing whether or not sync is ever built, which is the argument for that order.
+Steps 1–3 are worth doing whether or not sync is ever built, which is the argument for that order —
+and two of the three are now done.

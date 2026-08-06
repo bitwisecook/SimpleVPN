@@ -167,6 +167,219 @@ extension WireGuardConfig {
         return next
     }
 
+    // MARK: Export — the ONE place that decides what leaves the Mac
+    //
+    // THE DECISION, AND WHY IT IS NOT THE `.ovpn` ONE. `Export .ovpn…` omits its
+    // secret blocks with no opt-out, because an `.ovpn` without a client key still
+    // usefully describes the server and the material is recoverable — it is in the
+    // keychain, and whoever issued the VPN can reissue it. Neither half holds here:
+    //
+    //  • `wg-quick up` REFUSES a configuration with no `PrivateKey`, so a
+    //    secret-free WireGuard file cannot be used by the receiving client at all.
+    //  • A WireGuard public key is DERIVED from the private key and registered
+    //    against the peer on the server. "Ask them to reissue it" is not something
+    //    the user can do alone the way an OpenVPN CA reissue is: a new key pair
+    //    means the server's own peer entry has to change too.
+    //
+    // So omission-with-no-opt-out would mean the app can never move a working
+    // WireGuard VPN onto a phone or a second Mac, which is the commonest reason
+    // anyone exports one. The answer is EXPLICIT CONSENT, built so that the leaky
+    // path cannot be reached by clicking through:
+    //
+    //  1. The default export (`includingSecrets: false`) leaves both keys out, and
+    //     is what the plain `Export .conf…` button does. No dialog, so there is
+    //     nothing to click through TO the leak.
+    //  2. Writing the keys is a SEPARATE, differently-named action whose
+    //     confirmation names the material, says what a holder of the file can do,
+    //     and says the file cannot be recalled — and whose confirming button says
+    //     what it will do, never "OK".
+    //  3. EITHER file says what it contains in its own header. That is the `.ovpn`
+    //     exporter's precedent and it is the half that survives the file being
+    //     forwarded, renamed, or found in a backup two years later.
+
+    /// The fields of a WireGuard configuration whose value is a secret. ONE list,
+    /// and it lives here because `Shared/` cannot see the app target's
+    /// `ConfigSecrets` — `WireGuardExportTests` asserts `ConfigSecrets.secretFields`
+    /// is a superset of it, so the two cannot drift apart in silence.
+    static let secretFieldNames = ["privateKey", "presharedKey"]
+
+    /// The house term for one of them (ONTOLOGY): a noun phrase with no article, and
+    /// deliberately the same nouns `ConfigSecrets.humanName` produces, so one VPN's
+    /// key is called one thing everywhere in the app.
+    static func humanName(forSecretField field: String) -> String {
+        switch field {
+        case "privateKey": "private key"
+        case "presharedKey": "pre-shared key"
+        default: field
+        }
+    }
+
+    /// Which secrets this configuration actually holds, in `secretFieldNames` order.
+    /// A key that was never set is nothing to warn about and nothing to explain —
+    /// the same rule the JSON/YAML exporter follows.
+    var presentSecretFields: [String] {
+        Self.secretFieldNames.filter { field in
+            switch field {
+            case "privateKey": !privateKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            case "presharedKey": !presharedKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            default: false
+            }
+        }
+    }
+
+    /// The line left where a secret went, so a reader of the exported file knows the
+    /// omission was deliberate and where the value belongs.
+    ///
+    /// It names the material in HOUSE TERMS and never writes the wg-quick key name,
+    /// for the same reason `OVPNSecretMaterial`'s marker never writes `<key>`: an
+    /// exported secret-free file must not contain the literal token `PrivateKey`
+    /// anywhere, so that "does this file mention a private key line at all" is a
+    /// question a plain grep — and the test that greps — can answer.
+    static let secretMarkerPrefix = "# SimpleVPN: this VPN\u{2019}s "
+    static let secretMarkerSuffix = " is kept in your keychain, not in this file."
+    static func secretMarker(for field: String) -> String {
+        "\(secretMarkerPrefix)\(humanName(forSecretField: field))\(secretMarkerSuffix)"
+    }
+
+    /// An English list of house terms ("private key and pre-shared key").
+    static func humanList(_ fields: [String]) -> String {
+        let names = fields.map { humanName(forSecretField: $0) }
+        switch names.count {
+        case 0: return ""
+        case 1: return names[0]
+        case 2: return "\(names[0]) and \(names[1])"
+        default: return names.dropLast().joined(separator: ", ") + " and " + names[names.count - 1]
+        }
+    }
+
+    /// The text `Export .conf…` writes.
+    ///
+    /// `includingSecrets: false` is the default everywhere and the only thing a
+    /// plain click can produce. It is still a real wg-quick file for everything that
+    /// is not a secret — the endpoint, the peer's public key, the allowed networks,
+    /// DNS, MTU, the routing table and the firewall mark all round-trip.
+    func exportText(includingSecrets: Bool) -> String {
+        let present = presentSecretFields
+        guard !present.isEmpty else {
+            // Nothing secret to decide about: no header, no notes, no lecture about
+            // a key this VPN never had.
+            return serialize()
+        }
+        if includingSecrets {
+            return Self.secretBearingHeader(present) + serialize()
+        }
+        return Self.secretFreeHeader(present) + Self.markedUpBody(redactedForStorage().serialize(),
+                                                                  omitting: present)
+    }
+
+    /// The redacted body with a marker line under the section each omitted key
+    /// belongs to, so the gap is visible where it matters rather than only in the
+    /// header.
+    private static func markedUpBody(_ body: String, omitting fields: [String]) -> String {
+        var out: [String] = []
+        for line in body.components(separatedBy: "\n") {
+            out.append(line)
+            let tag = line.trimmingCharacters(in: .whitespaces).lowercased()
+            if tag == "[interface]", fields.contains("privateKey") {
+                out.append(secretMarker(for: "privateKey"))
+            }
+            if tag == "[peer]", fields.contains("presharedKey") {
+                out.append(secretMarker(for: "presharedKey"))
+            }
+        }
+        return out.joined(separator: "\n")
+    }
+
+    /// The header of a file with the keys LEFT OUT. It has to say the receiving
+    /// client will refuse the file, because that is the whole difference from an
+    /// `.ovpn`: a silently unusable configuration that fails on the other machine
+    /// with no explanation is worse than one that explains itself.
+    private static func secretFreeHeader(_ omitted: [String]) -> String {
+        """
+        # ----------------------------------------------------------------------
+        # Exported by SimpleVPN. No secrets are in this file.
+        #
+        # Left out on purpose, because they are secrets: this VPN\u{2019}s
+        # \(humanList(omitted)). SimpleVPN keeps \(omitted.count == 1 ? "it" : "them") in your keychain and
+        # did not write \(omitted.count == 1 ? "it" : "them") here.
+        #
+        # wg-quick REFUSES a configuration with no private-key line, so put yours
+        # back under [Interface] before using this file \u{2014} paste it in by hand,
+        # or ask whoever set up this VPN.
+        # ----------------------------------------------------------------------
+
+        """
+    }
+
+    /// The header of a file that DOES carry the keys. Blunt on purpose: this is the
+    /// half of the consent that survives the file being forwarded, renamed, or found
+    /// in a backup by somebody who never saw the dialog.
+    private static func secretBearingHeader(_ present: [String]) -> String {
+        """
+        # ----------------------------------------------------------------------
+        # Exported by SimpleVPN. THIS FILE CONTAINS SECRETS.
+        #
+        # In the clear, below: this VPN\u{2019}s \(humanList(present)).
+        # Anyone who can read this file can connect to this VPN as this Mac.
+        #
+        # It has none of the protection SimpleVPN gave \(present.count == 1 ? "it" : "them") \u{2014} nothing here
+        # is encrypted, and a copy in mail, a shared folder, a repository or a
+        # backup cannot be recalled. Delete it once the other client has it.
+        # ----------------------------------------------------------------------
+
+        """
+    }
+
+    // MARK: The consent, in words
+
+    /// What the app asks before it writes a file with the keys in it.
+    ///
+    /// SPECIFIC, not generic. A consent dialog is a thing people click through, so
+    /// "Are you sure?" buys nothing: this names the material, says what someone
+    /// holding the file can do with it, says the file cannot be recalled, and points
+    /// at the safe action instead. The confirming button says what it does.
+    var exportConsentTitle: String {
+        "Write this VPN\u{2019}s \(Self.humanList(presentSecretFields)) to a file?"
+    }
+
+    var exportConsentMessage: String {
+        let present = presentSecretFields
+        let it = present.count == 1 ? "it" : "them"
+        return """
+            The file will contain this VPN\u{2019}s \(Self.humanList(present)) in the clear. \
+            Anyone who can read the file can connect to this VPN as this Mac.
+
+            It leaves every protection SimpleVPN has \u{2014} mail, a shared folder, a repository, \
+            a Time Machine backup \u{2014} and once the file exists it cannot be recalled. \
+            Delete it as soon as the other client has \(it).
+
+            To hand someone the settings without the \(present.count == 1 ? "key" : "keys"), \
+            use \u{201C}Export .conf…\u{201D} instead.
+            """
+    }
+
+    /// The confirming button. Never \u{201C}OK\u{201D}: it says the thing it will do, which is
+    /// the only wording a person skimming a dialog actually reads.
+    var exportConsentConfirmTitle: String {
+        switch presentSecretFields {
+        case ["privateKey"]: "Export With Private Key"
+        case ["presharedKey"]: "Export With Pre-shared Key"
+        default: "Export With Keys"
+        }
+    }
+
+    /// The sentence the app says after a secret-free export. Empty when there was
+    /// nothing to leave out — mirrors `OVPNSecretMaterial.exportOmissionNotice`,
+    /// because a note inside a file nobody reopens tells nobody anything.
+    var exportOmissionNotice: String {
+        let omitted = presentSecretFields
+        guard !omitted.isEmpty else { return "" }
+        return "Exported without this VPN\u{2019}s \(Self.humanList(omitted)) \u{2014} "
+            + "\(omitted.count == 1 ? "it stays" : "those stay") in your keychain. "
+            + "wg-quick refuses a configuration with no private-key line, so whoever "
+            + "receives this file has to paste one back in. The file says so too."
+    }
+
     /// What `setWireGuardSecrets` must be handed for the pre-shared key: nil =
     /// leave the stored one alone, "" = remove it, a value = replace it.
     ///

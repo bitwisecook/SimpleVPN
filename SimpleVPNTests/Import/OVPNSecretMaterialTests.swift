@@ -585,4 +585,111 @@ struct NoInliningRegressionTests {
         #expect(String(guardLine.prefix(0)) == "")
         #expect(migrate.contains("guard KeychainCredentialStore.saveAndVerifyOVPNInlineSecrets"))
     }
+
+    /// A MANAGED profile is left alone AND BADGED — the decision recorded on
+    /// `migrateInlineOVPNSecrets` and in `Docs/SecretsAndSync.md` §2. Pinned in the
+    /// source because it is an ORDERING and a side effect, neither of which shows up
+    /// in any value: the policy branch has to set the badge and `continue` before
+    /// anything touches the stored configuration.
+    @Test func aLockedProfileIsLeftAloneAndBadged() throws {
+        let crud = try #require(try Self.sources("SimpleVPN")["VPNController+CRUD.swift"])
+        let migrate = try #require(crud.range(of: "func migrateInlineOVPNSecrets()")
+            .map { String(crud[$0.lowerBound...]) })
+        let gate = try #require(migrate.range(of: "if ManagedPolicy.lockConfiguration {"))
+        let badge = try #require(migrate.range(of: "OVPNSecretMaterial.managedInlineSecretNotice"))
+        let rewrite = try #require(migrate.range(of: "conf[\"ovpn\"] = split.config"))
+        // The badge is inside the policy branch, and the branch leaves before the
+        // rewrite. A `continue` between them is what makes "left alone" true.
+        #expect(gate.upperBound < badge.lowerBound)
+        #expect(badge.upperBound < rewrite.lowerBound)
+        // The branch ends at its own `continue`, and that `continue` comes before
+        // anything that touches the keychain or the stored configuration — which is
+        // what makes "left alone" mean untouched rather than half-moved.
+        let exit = try #require(migrate.range(of: "continue", range: badge.upperBound..<migrate.endIndex))
+        let branch = migrate[gate.upperBound..<exit.upperBound]
+        #expect(!branch.contains("saveAndVerifyOVPNInlineSecrets"))
+        #expect(!branch.contains("conf[\"ovpn\"]"))
+        #expect(exit.upperBound < rewrite.lowerBound)
+    }
+
+    /// THE OVER-REDACTION COUNTERPART of the decision above, and the reason it needs
+    /// one: "leave it and badge it" must apply ONLY to a managed profile. If it ever
+    /// became the universal answer, every ordinary profile would keep its inline key
+    /// with a badge to show for it — which is the bug, wearing a warning label. So
+    /// the strip must still be there, and reachable.
+    @Test func anUnmanagedProfileIsStillStripped() throws {
+        let crud = try #require(try Self.sources("SimpleVPN")["VPNController+CRUD.swift"])
+        let migrate = try #require(crud.range(of: "func migrateInlineOVPNSecrets()")
+            .map { String(crud[$0.lowerBound...]) })
+        // The rewrite exists, is guarded by a VERIFIED keychain write, and the only
+        // thing that skips it is the policy check — no second early exit has crept in
+        // that would quietly stop migrating everybody.
+        #expect(migrate.contains("conf[\"ovpn\"] = split.config"))
+        #expect(migrate.contains("guard KeychainCredentialStore.saveAndVerifyOVPNInlineSecrets"))
+        #expect(migrate.components(separatedBy: "ManagedPolicy.lockConfiguration").count == 2,
+                "more than one policy gate in the migration — which one skips the strip?")
+    }
+}
+
+// MARK: - What a managed profile is TOLD
+
+struct ManagedInlineSecretNoticeTests {
+
+    /// The copy names the material in HOUSE TERMS, says the VPN still works, and
+    /// names the party who can change it. It must NOT offer the user a fix they do
+    /// not have: the failure copy says "unlock your keychain and reopen SimpleVPN",
+    /// and saying that here would send somebody chasing a cause that is not the cause.
+    @Test func theNoticeNamesTheMaterialTheStateAndWhoCanChangeIt() {
+        let notice = OVPNSecretMaterial.managedInlineSecretNotice(["key", "tls-crypt"])
+        #expect(notice.contains("private key"))
+        #expect(notice.contains("TLS key"))
+        #expect(notice.contains("stored with its configuration"))
+        #expect(notice.contains("your organization has locked"))
+        // Nothing is broken — a badge that implies breakage on a working VPN is a
+        // support ticket the app manufactured.
+        #expect(notice.contains("Nothing is broken"))
+        // Names what would change it, per ONTOLOGY's rule for any blocked state.
+        #expect(notice.contains("Whoever manages this Mac"))
+        #expect(notice.contains("unlocking settings"))
+        // …and NOT the fix that belongs to the other cause.
+        #expect(!notice.contains("Reopen SimpleVPN"))
+        #expect(!notice.lowercased().contains("unlocked, then"))
+        // Banned from UI copy, asserted rather than assumed.
+        #expect(!notice.lowercased().contains("credential"))
+        #expect(!notice.lowercased().contains("log in"))
+        // Never the OpenVPN tag names — house terms only.
+        #expect(!notice.contains("<key>"))
+        #expect(!notice.contains("tls-crypt"))
+    }
+
+    /// One tag reads as one thing, and the verb agrees. Two TLS-key tags are still
+    /// one "TLS key" to a person — the deduplication `humanNames` does.
+    @Test func theNoticeAgreesWithItselfGrammatically() {
+        let one = OVPNSecretMaterial.managedInlineSecretNotice(["key"])
+        #expect(one.contains("private key is stored"))
+        #expect(!one.contains("are stored"))
+        let two = OVPNSecretMaterial.managedInlineSecretNotice(["key", "secret"])
+        #expect(two.contains("are stored"))
+        // tls-auth and tls-crypt are both "TLS key": one noun, singular verb.
+        let deduped = OVPNSecretMaterial.managedInlineSecretNotice(["tls-auth", "tls-crypt"])
+        #expect(deduped.contains("TLS key is stored"))
+    }
+
+    /// Nothing inline means nothing to say. An empty badge reason renders no badge.
+    @Test func nothingInlineSaysNothing() {
+        #expect(OVPNSecretMaterial.managedInlineSecretNotice([]).isEmpty)
+        // A tag that is not one of ours is not a secret and raises no notice.
+        #expect(OVPNSecretMaterial.managedInlineSecretNotice(["ca", "cert"]).isEmpty)
+    }
+
+    /// The list comes from `OVPNSecretMaterial`'s own classification, never a second
+    /// copy of it — every secret tag has a house term, and no public tag does.
+    @Test func everySecretTagHasAHouseTermAndNoPublicTagDoes() {
+        for tag in OVPNSecretMaterial.secretTags {
+            let names = OVPNSecretMaterial.humanNames(for: [tag])
+            #expect(names.count == 1, "\(tag) has no house term")
+            #expect(names[0] != tag, "\(tag) is shown to the user as its own tag name")
+        }
+        #expect(OVPNSecretMaterial.humanNames(for: OVPNSecretMaterial.publicTags).isEmpty)
+    }
 }

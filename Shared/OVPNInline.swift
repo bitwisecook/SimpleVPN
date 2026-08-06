@@ -395,25 +395,57 @@ nonisolated enum OVPNSecretMaterial {
         """ + body
     }
 
+    /// An English list of DEDUPLICATED house terms for a set of tags, in
+    /// `secretTags` order: two TLS-key tags are one thing to a person, and the order
+    /// is the declared one so the same set always reads the same way.
+    static func humanNames<S: Sequence>(for tags: S) -> [String] where S.Element == String {
+        let present = Set(tags)
+        var names: [String] = []
+        for tag in secretTags where present.contains(tag) {
+            let name = humanName(for: tag)
+            if !names.contains(name) { names.append(name) }
+        }
+        return names
+    }
+
+    static func humanNameList<S: Sequence>(for tags: S) -> String where S.Element == String {
+        let names = humanNames(for: tags)
+        switch names.count {
+        case 0: return ""
+        case 1: return names[0]
+        case 2: return "\(names[0]) and \(names[1])"
+        default: return names.dropLast().joined(separator: ", ") + " and " + names[names.count - 1]
+        }
+    }
+
     /// The sentence the app says after an export that left something out.
     /// Empty when nothing was omitted.
     static func exportOmissionNotice(_ ovpn: String) -> String {
         let omitted = Set(split(ovpn).secrets.keys).union(markedTags(in: ovpn))
         guard !omitted.isEmpty else { return "" }
-        // Deduplicated house terms, in tag order: two TLS-key tags are one thing to
-        // a person.
-        var names: [String] = []
-        for tag in secretTags where omitted.contains(tag) {
-            let name = humanName(for: tag)
-            if !names.contains(name) { names.append(name) }
-        }
-        let list: String
-        switch names.count {
-        case 1: list = names[0]
-        case 2: list = "\(names[0]) and \(names[1])"
-        default: list = names.dropLast().joined(separator: ", ") + " and " + names[names.count - 1]
-        }
-        return "Exported without this VPN's \(list) — those stay in your keychain. "
+        return "Exported without this VPN's \(humanNameList(for: omitted)) — those stay in your keychain. "
             + "The file says what to add back."
+    }
+
+    /// What the VPN list says about a MANAGED profile whose inline secret blocks were
+    /// left where they are, because policy forbids rewriting the stored
+    /// configuration (`VPNController.migrateInlineOVPNSecrets`, and
+    /// `Docs/SecretsAndSync.md` §2 for the decision).
+    ///
+    /// It differs from the failure copy in the one way that matters: it does not
+    /// offer the user a fix, because they do not have one. Naming the party who does
+    /// is the honest ending, and the house rule for any blocked state is to say what
+    /// would change it.
+    static func managedInlineSecretNotice<S: Sequence>(_ tags: S) -> String where S.Element == String {
+        let names = humanNames(for: tags)
+        guard !names.isEmpty else { return "" }
+        let list = humanNameList(for: tags)
+        let isAre = names.count == 1 ? "is" : "are"
+        let it = names.count == 1 ? "it" : "them"
+        return "This VPN's \(list) \(isAre) stored with its configuration rather than in your "
+            + "keychain, because your organization has locked this VPN's settings and SimpleVPN "
+            + "will not rewrite them. Nothing is broken and the VPN works normally. Whoever "
+            + "manages this Mac can change it — by sending a configuration that keeps the \(list) "
+            + "out, or by unlocking settings so SimpleVPN can move \(it)."
     }
 }
