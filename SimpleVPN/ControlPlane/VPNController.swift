@@ -360,6 +360,26 @@ final class VPNController {
                 credentialSources[id] = CredentialSource.decode(from: proto?.providerConfiguration?["credsource"] as? Data)
                 let kind = (proto?.providerConfiguration?["vpnType"] as? String)
                     .flatMap(VPNKind.init(rawValue:)) ?? .openVPN
+                if kind == .openVPN {
+                    // The secret inline blocks, and the reassembled configuration
+                    // built from them once here rather than per view render. This is
+                    // the ONLY keychain read on the path — see ovpnSecretsCache.
+                    let secrets = KeychainCredentialStore.loadOVPNInlineSecrets(profile: id) ?? [:]
+                    ovpnSecretsCache[id] = secrets
+                    if let stored = proto?.providerConfiguration?["ovpn"] as? String {
+                        ovpnTextCache[id] = secrets.isEmpty
+                            ? OVPNSecretMaterial.stripMarkers(stored)
+                            : OVPNSecretMaterial.merge(stored, secrets: secrets)
+                    } else {
+                        ovpnTextCache.removeValue(forKey: id)
+                    }
+                } else {
+                    // Not an OpenVPN profile, so it has no inline material — and a
+                    // stale entry from a previous kind would make `ovpnText(id:)`
+                    // hand back something that is no longer stored.
+                    ovpnSecretsCache.removeValue(forKey: id)
+                    ovpnTextCache.removeValue(forKey: id)
+                }
                 if kind == .tailscale {
                     tailscaleConfigs[id] = TailscaleConfig.decode(from: proto?.providerConfiguration?["tailscale"] as? Data)
                 }
@@ -384,6 +404,11 @@ final class VPNController {
             if selectedID == nil || !profiles.contains(where: { $0.id == selectedID }) {
                 selectedID = profiles.first?.id
             }
+            // Any profile still carrying its private key inline gets it moved into
+            // the keychain now — write, read back, compare, and only then rewrite
+            // the stored configuration. See migrateInlineOVPNSecrets() for why that
+            // order is not negotiable. A no-op once every profile is clean.
+            await migrateInlineOVPNSecrets()
             Self.log.log("loadAll: \(self.profiles.count) profile(s)")
             controlEventSink?(.profilesChanged)
         } catch {
@@ -499,6 +524,27 @@ final class VPNController {
 
     /// Observable mirror of the persisted "uiprefs" blobs (see overridesCache).
     var uiPrefsCache: [String: VPNUIPrefs] = [:]   // was private(set) — internal for the +File split
+
+    /// This launch's copy of each OpenVPN profile's secret inline blocks — the
+    /// `<key>`/`<tls-crypt>` material that lives in the keychain instead of in
+    /// `providerConfiguration` (see `OVPNSecretMaterial`). MEMORY ONLY, filled from
+    /// the keychain by `loadAll()` because `ovpnText(id:)` is called from view
+    /// bodies and a keychain round-trip per render is not acceptable. Never
+    /// serialised, never logged, never sent anywhere except `startTunnel(options:)`.
+    var ovpnSecretsCache: [String: [String: String]] = [:]
+
+    /// Memo of the REASSEMBLED .ovpn per profile (stored text + the blocks above),
+    /// so a body that calls `ovpnText(id:)` several times does not re-splice each
+    /// time. Filled alongside `ovpnSecretsCache`; both are rebuilt by `loadAll()`,
+    /// which every write path already ends with.
+    var ovpnTextCache: [String: String] = [:]
+
+    /// Profiles whose inline key material could NOT be moved into the keychain,
+    /// id → what to tell the user. Populated by `migrateInlineOVPNSecrets()`; the
+    /// point is that a failed migration is visible instead of silent, because the
+    /// alternative to being visible is a private key sitting in the preferences
+    /// with nobody aware of it.
+    var inlineSecretMigrationFailures: [String: String] = [:]
 
     /// Credentials mid-typing in the menu-bar dropdown. Memory only — they
     /// survive the menu closing (the user popping over to their authenticator)

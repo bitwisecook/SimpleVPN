@@ -15,24 +15,12 @@ import Foundation
 import Security
 import CryptoKit
 
-// MARK: - Slots
-
-/// The four places a profile embeds crypto material.
-nonisolated enum CertSlot: String, CaseIterable, Identifiable, Sendable {
-    case ca, cert, key, tlsKey
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .ca: return "Certificate Authority"
-        case .cert: return "Client Certificate"
-        case .key: return "Private Key"
-        case .tlsKey: return "TLS Key"
-        }
-    }
-}
-
 // MARK: - Content sniffing
+//
+// `CertSlot` and `OVPNInline` used to live here. They are now in
+// `Shared/OVPNInline.swift` so the packet-tunnel extension can re-insert the
+// secret blocks it is handed at connect time without a second copy of this
+// CRLF-sensitive parsing.
 
 /// What a dropped/browsed file turned out to contain.
 nonisolated enum SniffedPayload {
@@ -243,132 +231,6 @@ nonisolated enum CertificateImport {
             guard let der = Data(base64Encoded: base64) else { return nil }
             return SecCertificateCreateWithData(nil, der as CFData)
         }
-    }
-}
-
-// MARK: - Profile inline blocks
-
-/// Read/rewrite the inline blocks of an .ovpn. Setting a block also removes the
-/// matching file-reference directive ("ca ca.crt") — after embedding, the file
-/// is self-contained.
-nonisolated enum OVPNInline {
-
-    static func tags(for slot: CertSlot, in ovpn: String) -> [String] {
-        switch slot {
-        case .ca: return ["ca"]
-        case .cert: return ["cert"]
-        case .key: return ["key"]
-        case .tlsKey: return ["tls-crypt", "tls-auth"]
-        }
-    }
-
-    /// The content of the first present tag for the slot (nil = nothing embedded).
-    static func block(for slot: CertSlot, in ovpn: String) -> (tag: String, content: String)? {
-        for tag in tags(for: slot, in: ovpn) {
-            if let c = block(tag, in: ovpn) { return (tag, c) }
-        }
-        return nil
-    }
-
-    static func block(_ tag: String, in ovpn: String) -> String? {
-        guard let open = ovpn.range(of: "<\(tag)>"),
-              let close = ovpn.range(of: "</\(tag)>", range: open.upperBound..<ovpn.endIndex) else { return nil }
-        return String(ovpn[open.upperBound..<close.lowerBound])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// Replace/insert (content != nil) or remove (content == nil) a block, and
-    /// drop any "tag <file>" reference lines for it.
-    static func setBlock(_ tag: String, content: String?, in ovpn: String) -> String {
-        var lines = ovpn.components(separatedBy: "\n")
-
-        // Trim with .whitespacesAndNewlines throughout: a CRLF profile leaves a
-        // trailing "\r" on every line, and .whitespaces does NOT strip it — so
-        // "<ca>\r" != "<ca>" and the old region would never be found, leaving a
-        // duplicate block on export (breaks the round-trip contract).
-        func norm(_ s: String) -> String { s.trimmingCharacters(in: .whitespacesAndNewlines) }
-
-        // Remove an existing <tag>…</tag> region.
-        if let open = lines.firstIndex(where: { norm($0) == "<\(tag)>" }),
-           let close = lines[open...].firstIndex(where: { norm($0) == "</\(tag)>" }) {
-            lines.removeSubrange(open...close)
-        }
-        // Remove file-reference directives ("ca ca.crt", "tls-auth ta.key 1"…).
-        lines.removeAll { line in
-            let t = norm(line)
-            return t == tag || t.hasPrefix("\(tag) ")
-        }
-
-        if let content {
-            while lines.last?.isEmpty == true { lines.removeLast() }
-            lines.append("<\(tag)>")
-            lines.append(content.trimmingCharacters(in: .whitespacesAndNewlines))
-            lines.append("</\(tag)>")
-        }
-        return lines.joined(separator: "\n")
-    }
-
-    /// Set (value != nil) or remove (nil) a simple single-line directive
-    /// ("key value"), replacing any existing occurrence. CRLF-safe. Used by the
-    /// Connection Doctor to apply fixes like `mssfix 1360`, `keepalive 10 60`,
-    /// `reneg-sec 0` that aren't ClientAPI overrides.
-    static func setDirective(_ key: String, _ value: String?, in ovpn: String) -> String {
-        var lines = ovpn.components(separatedBy: "\n")
-        lines.removeAll { line in
-            let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            return t == key || t.hasPrefix("\(key) ")
-        }
-        if let value {
-            while lines.last?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true { lines.removeLast() }
-            lines.append(value.isEmpty ? key : "\(key) \(value)")
-        }
-        return lines.joined(separator: "\n")
-    }
-
-    /// The value of a simple directive ("key value" → "value"), or nil. Bare
-    /// flags return "". CRLF-safe.
-    static func directiveValue(_ key: String, in ovpn: String) -> String? {
-        for line in ovpn.components(separatedBy: "\n") {
-            let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            if t == key { return "" }
-            if t.hasPrefix("\(key) ") { return String(t.dropFirst(key.count + 1)).trimmingCharacters(in: .whitespaces) }
-        }
-        return nil
-    }
-
-    /// Set (direction != nil) or remove (nil) the standalone key-direction
-    /// directive. CRLF-safe. Appended after any tls-auth block if newly added.
-    static func setKeyDirection(_ direction: String?, in ovpn: String) -> String {
-        var lines = ovpn.components(separatedBy: "\n")
-        lines.removeAll { $0.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("key-direction") }
-        if let direction {
-            while lines.last?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true { lines.removeLast() }
-            lines.append("key-direction \(direction)")
-        }
-        return lines.joined(separator: "\n")
-    }
-
-    /// tls-crypt vs tls-auth: what the profile already uses (directive or block).
-    static func tlsKeyMode(in ovpn: String) -> String? {
-        for tag in ["tls-crypt", "tls-auth"] {
-            if block(tag, in: ovpn) != nil { return tag }
-            if ovpn.components(separatedBy: "\n").contains(where: {
-                let t = $0.trimmingCharacters(in: .whitespacesAndNewlines)
-                return t == tag || t.hasPrefix("\(tag) ")
-            }) { return tag }
-        }
-        return nil
-    }
-
-    /// The profile's key-direction (from "key-direction" or a tls-auth direction arg).
-    static func keyDirection(in ovpn: String) -> String? {
-        for line in ovpn.components(separatedBy: "\n") {
-            let parts = line.trimmingCharacters(in: .whitespaces)
-                .split(separator: " ", omittingEmptySubsequences: true)
-            if parts.count >= 2, parts[0] == "key-direction" { return String(parts[1]) }
-            if parts.count >= 3, parts[0] == "tls-auth" { return String(parts[2]) }
-        }
-        return nil
     }
 }
 

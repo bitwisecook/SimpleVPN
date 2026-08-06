@@ -253,7 +253,13 @@ nonisolated struct SecretScrubber: Sendable {
     /// so leaving these to the entropy pass would produce a hundred tokens where
     /// one honest sentence belongs.
     private func redactBlocks(_ s: String) -> String {
-        var out = replace(s, #"-----BEGIN [A-Z0-9 ]+-----[\s\S]*?-----END [A-Z0-9 ]+-----"#) { _, _ in
+        // The label character class is deliberately WIDER than "uppercase PEM".
+        // It used to be `[A-Z0-9 ]+`, which does not match
+        // `-----BEGIN OpenVPN Static key V1-----` — the armour around a tls-crypt /
+        // tls-auth key, which is a shared symmetric key protecting the whole control
+        // channel. A blacklist that has never heard of a shape is the one your log
+        // line goes through, so mixed case, dots, dashes and underscores are all in.
+        var out = replace(s, #"-----BEGIN [A-Za-z0-9 ._-]+-----[\s\S]*?-----END [A-Za-z0-9 ._-]+-----"#) { _, _ in
             self.goneAs("redacted-key-material")
         }
         // PuTTY / .ppk private keys, which are not PEM.

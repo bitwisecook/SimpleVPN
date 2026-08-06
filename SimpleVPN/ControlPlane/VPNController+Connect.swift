@@ -366,6 +366,19 @@ extension VPNController {
         // over the keychain copy so the mapped 1Password field takes effect.
         if let p = raw.privateKeyPassphrase, !p.isEmpty { options["privateKeyPassword"] = p as NSString }
 
+        // The profile's secret inline blocks — `<key>`, `<tls-crypt>`, … — which are
+        // NOT in providerConfiguration (see OVPNSecretMaterial). openvpn3 takes the
+        // configuration as a string, so the extension splices them back into it and
+        // the material only ever exists in memory there. Same handoff as every other
+        // per-profile secret, for the same reason: the extension runs as root in the
+        // system context and cannot read the user's keychain.
+        let inlineSecrets = ovpnSecrets(for: id)
+        if !inlineSecrets.isEmpty {
+            options["ovpnInlineSecrets"] = inlineSecrets as NSDictionary
+            // Tag names only — the contents are the secret, the names are not.
+            Self.log.log("connect: re-inserting \(inlineSecrets.keys.sorted().joined(separator: ","), privacy: .public) for \(id, privacy: .public)")
+        }
+
         // Org policy travels with every session so the extension enforces it at
         // connect regardless of the persisted config (a profile saved before the
         // policy was pushed can't be used to leak). This is the real enforcement

@@ -61,10 +61,19 @@ extension VPNController {
         }
 
         // Same content as an existing VPN? Tell the user which one, import nothing.
-        let hash = ProfileEvaluation.contentHash(of: text)
+        //
+        // Hashed over the CANONICAL form, not the raw text: the secret blocks are
+        // stripped out of what gets stored, so a raw-text hash would stop matching
+        // the moment a profile was migrated and the same file would re-import as a
+        // second VPN. `canonicalIdentityText` replaces each secret block with a
+        // digest of it — stable across the strip, and still able to tell two
+        // profiles apart when the client key is the only difference.
+        let hash = ProfileEvaluation.contentHash(of: OVPNSecretMaterial.canonicalIdentityText(text))
         for p in profiles {
-            if let existing = ovpnText(id: p.id), !existing.isEmpty,
-               ProfileEvaluation.contentHash(of: existing) == hash {
+            guard let existing = storedOVPNText(id: p.id), !existing.isEmpty else { continue }
+            let existingHash = ProfileEvaluation.contentHash(
+                of: OVPNSecretMaterial.canonicalIdentityText(existing, secrets: ovpnSecrets(for: p.id)))
+            if existingHash == hash {
                 return .duplicate(existingID: p.id, existingName: p.name)
             }
         }
@@ -72,8 +81,14 @@ extension VPNController {
         // Different content but a clashing name gets a numbered suffix.
         let name = uniqueName(from: friendlyImportName(eval: eval, fallback: suggestedName))
         let server = eval.remoteHostOrNil ?? name
+        // The id is minted here rather than inside `importProfile` because the
+        // profile's secret inline blocks are keyed by it in the keychain and have to
+        // be written BEFORE the profile is saved — `importProfile` does that split
+        // itself, so the full text goes in and nothing secret comes out the other
+        // side. See its own doc comment.
+        let id = UUID().uuidString
         do {
-            let id = try await importProfile(name: name, ovpn: text, server: server)
+            _ = try await importProfile(name: name, ovpn: text, server: server, id: id)
             // A `static-challenge` directive means the server will demand a
             // one-time code — default the OTP requirement on so the field shows
             // and quick-connect never sends password-only. (Already-imported

@@ -101,6 +101,21 @@ nonisolated private let corpus: [Seeded] = [
            -----END OPENSSH PRIVATE KEY-----
            """,
            "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz"),
+    // An OpenVPN static key: the material behind `<tls-crypt>` / `<tls-auth>`, a
+    // shared symmetric key over the whole control channel. Its PEM label is MIXED
+    // CASE, which the block pass's old `[A-Z0-9 ]+` label class did not match — so
+    // this one shape walked straight through the redactor that every other kind of
+    // key material is caught by.
+    Seeded("OpenVPN static key (tls-crypt / tls-auth material)",
+           """
+           <tls-crypt>
+           -----BEGIN OpenVPN Static key V1-----
+           1f8a3c9e0b7d6452aa11bb22cc33dd44
+           55ee66ff778899aabbccddeeff001122
+           -----END OpenVPN Static key V1-----
+           </tls-crypt>
+           """,
+           "1f8a3c9e0b7d6452aa11bb22cc33dd44"),
     Seeded("PuTTY key file",
            """
            PuTTY-User-Key-File-3: ssh-ed25519

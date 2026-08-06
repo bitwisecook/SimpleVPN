@@ -20,20 +20,48 @@ extension VPNController {
     // MARK: CRUD
 
     /// Create a new target from an .ovpn. Returns the (stable) profile id.
+    ///
+    /// Takes the COMPLETE configuration text and splits its secret inline blocks out
+    /// itself — the keychain write happens before the profile is ever saved, so a
+    /// private key does not reach `providerConfiguration` even momentarily. `id` is a
+    /// parameter because the keychain item is keyed by it and has to be written
+    /// first, so the caller (`ProfileImport`) needs to know it in advance.
     @discardableResult
-    func importProfile(name: String, ovpn: String, server: String) async throws -> String {
-        let id = UUID().uuidString                       // stable id; name is editable separately
+    func importProfile(name: String, ovpn: String, server: String,
+                       id: String = UUID().uuidString) async throws -> String {
+        let split = OVPNSecretMaterial.split(ovpn)
+        var storedOVPN = ovpn
+        if !split.secrets.isEmpty {
+            if KeychainCredentialStore.saveAndVerifyOVPNInlineSecrets(profile: id, split.secrets) {
+                storedOVPN = split.config
+            } else {
+                // The file being imported may be the user's only copy of that key.
+                // Storing the profile intact is a leak; refusing the import, or
+                // storing it stripped, would be a loss. Import it, and SAY SO —
+                // `migrateInlineOVPNSecrets()` retries on the next load.
+                Self.log.error("import: keeping inline \(split.secrets.keys.sorted().joined(separator: ","), privacy: .public) in profile \(id, privacy: .public) — the keychain write could not be verified")
+                inlineSecretMigrationFailures[id] = "SimpleVPN couldn't copy this VPN's private key into your keychain, so the key is stored with the configuration instead. Make sure your login keychain is unlocked, then reopen SimpleVPN."
+            }
+        }
         let mgr = NETunnelProviderManager()
         let proto = NETunnelProviderProtocol()
         proto.providerBundleIdentifier = Self.providerBundleID
         proto.serverAddress = server
-        proto.providerConfiguration = ["ovpn": ovpn, "profile": id,
+        proto.providerConfiguration = ["ovpn": storedOVPN, "profile": id,
                                        "vpnType": VPNKind.openVPN.rawValue]
         mgr.protocolConfiguration = proto
         mgr.localizedDescription = name
         mgr.isEnabled = true
-        try await mgr.saveToPreferences()
-        try await mgr.loadFromPreferences()
+        do {
+            try await mgr.saveToPreferences()
+            try await mgr.loadFromPreferences()
+        } catch {
+            // No profile, so the keychain item above belongs to nothing: a private
+            // key with no owner and nothing in the UI able to delete it.
+            KeychainCredentialStore.deleteOVPNInlineSecrets(profile: id)
+            inlineSecretMigrationFailures.removeValue(forKey: id)
+            throw error
+        }
         await loadAll()
         selectedID = id
         Self.log.log("imported profile \(name, privacy: .public) id=\(id, privacy: .public)")
@@ -50,11 +78,30 @@ extension VPNController {
     }
 
     /// Replace a target's .ovpn (e.g. re-import), keeping its id/name/creds/logo/labels.
+    ///
+    /// The text handed in is COMPLETE — it is what `ovpnText(id:)` gave the caller,
+    /// so it carries the secret blocks. This is the one place they are taken back
+    /// out again before anything is persisted, which is what makes the Certificates
+    /// tab, the Configuration tab, the Doctor's fix-apply and its undo all
+    /// secret-free without any of them knowing about it.
     func updateOVPN(id: String, ovpn: String, server: String) async throws {
         guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
         guard let mgr = managers[id], let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { return }
+        let split = OVPNSecretMaterial.split(ovpn)
+        if split.secrets.isEmpty {
+            // The user cleared the Private Key / TLS Key slot. Drop the stored copy
+            // too, or reassembly would put it straight back.
+            KeychainCredentialStore.deleteOVPNInlineSecrets(profile: id)
+        } else {
+            // Write-then-rewrite, never the other way round: refuse the save
+            // outright rather than persist a configuration whose key is now
+            // nowhere. The editor shows the error and does not dismiss.
+            guard KeychainCredentialStore.saveAndVerifyOVPNInlineSecrets(profile: id, split.secrets) else {
+                throw err("Couldn't save this VPN's private key to your keychain, so nothing was changed. Make sure your login keychain is unlocked, then save again.")
+            }
+        }
         var conf = proto.providerConfiguration ?? [:]
-        conf["ovpn"] = ovpn; conf["profile"] = id
+        conf["ovpn"] = split.config; conf["profile"] = id
         proto.providerConfiguration = conf
         proto.serverAddress = server
         mgr.protocolConfiguration = proto
@@ -74,6 +121,7 @@ extension VPNController {
         try await mgr.removeFromPreferences()
         KeychainCredentialStore.deleteCredentials(profile: id)
         KeychainCredentialStore.deleteProfileSecrets(profile: id)
+        KeychainCredentialStore.deleteOVPNInlineSecrets(profile: id)
         KeychainCredentialStore.clearSession(profile: id)
         KeychainCredentialStore.deleteCredentials(profile: Self.tailscaleKeyProfile(id))
         KeychainCredentialStore.deleteCredentials(profile: Self.wireGuardKeyProfile(id))
@@ -89,6 +137,9 @@ extension VPNController {
         proxyTunnelStatuses[id] = nil
         appliedOverrides[id] = nil
         appliedOVPN[id] = nil
+        ovpnSecretsCache[id] = nil
+        ovpnTextCache[id] = nil
+        inlineSecretMigrationFailures[id] = nil
         endpointsCache[id] = nil
         await loadAll()
     }
@@ -313,9 +364,114 @@ extension VPNController {
         KeychainCredentialStore.loadCredentials(profile: id)
     }
 
-    /// The raw .ovpn text for a profile (for export).
+    // MARK: The .ovpn text — two of them, and the difference is the point
+
+    /// The COMPLETE .ovpn text for a profile: what is stored, with the secret
+    /// inline blocks put back from the keychain.
+    ///
+    /// This is the one every existing caller wants and gets, unchanged — the
+    /// evaluator (which reads `autologin` and `privateKeyPasswordRequired` off the
+    /// presence of `<key>`), the Certificates tab, the control-channel probe that
+    /// needs the tls-crypt key, the Doctor, endpoint scanning. Handing those a
+    /// configuration with a hole in it would have changed behaviour everywhere;
+    /// only what is PERSISTED changed.
+    ///
+    /// Never use this for anything that leaves the app. Export goes through
+    /// `exportableOVPNText(id:)`.
     func ovpnText(id: String) -> String? {
+        guard let stored = storedOVPNText(id: id) else { return nil }
+        if let cached = ovpnTextCache[id] { return cached }
+        let secrets = ovpnSecrets(for: id)
+        return secrets.isEmpty ? OVPNSecretMaterial.stripMarkers(stored)
+                               : OVPNSecretMaterial.merge(stored, secrets: secrets)
+    }
+
+    /// EXACTLY what sits in `providerConfiguration` — no reassembly. The thing the
+    /// secret-free invariant is about, and what migration and the tests inspect.
+    func storedOVPNText(id: String) -> String? {
         (managers[id]?.protocolConfiguration as? NETunnelProviderProtocol)?
             .providerConfiguration?["ovpn"] as? String
+    }
+
+    /// The text `Export .ovpn…` writes: secret-free, with a note in the file
+    /// saying what was left out and how to put it back. Built from the STORED
+    /// text, so the secret material is not even reassembled on this path — and
+    /// `exportText` splits again anyway, so a profile whose migration could not be
+    /// verified still exports safely.
+    func exportableOVPNText(id: String) -> String? {
+        storedOVPNText(id: id).map { OVPNSecretMaterial.exportText($0) }
+    }
+
+    /// This profile's keychain-held inline blocks. Cache-only: `ovpnText(id:)` is
+    /// called from view bodies, and a keychain round-trip per render is not that.
+    /// The cache is filled by `loadAll()`, same as every other blob mirror.
+    func ovpnSecrets(for id: String) -> [String: String] { ovpnSecretsCache[id] ?? [:] }
+
+    // MARK: Migration of profiles that still have their key inline
+
+    /// Move any still-inline secret blocks of every OpenVPN profile into the
+    /// keychain. Runs from `loadAll()`.
+    ///
+    /// THE ORDER IS THE WHOLE DESIGN, and it is write → verify → destroy:
+    ///
+    ///  1. write the blocks to the keychain;
+    ///  2. read them back and compare them byte-for-byte
+    ///     (`saveAndVerifyOVPNInlineSecrets`);
+    ///  3. only then rewrite `providerConfiguration` without them.
+    ///
+    /// Any step failing leaves the profile completely alone — still working, still
+    /// leaky, and recorded in `inlineSecretMigrationFailures` so it is visible
+    /// rather than silent. A half-migrated profile (removed from the text, not in
+    /// the keychain) is the one outcome that would destroy a user's only copy of a
+    /// client private key, and it is unreachable from here.
+    ///
+    /// Under MDM `lockConfiguration` the rewrite is skipped entirely: the
+    /// administrator has said the stored configuration is not to be changed, and
+    /// this is a rewrite of it. Logged, not badged — it is a policy outcome, not a
+    /// failure the user can clear.
+    func migrateInlineOVPNSecrets() async {
+        for profile in profiles where profile.kind == .openVPN {
+            let id = profile.id
+            guard let stored = storedOVPNText(id: id), !stored.isEmpty else { continue }
+            let split = OVPNSecretMaterial.split(stored)
+            guard !split.secrets.isEmpty else {
+                inlineSecretMigrationFailures.removeValue(forKey: id)
+                continue
+            }
+            if ManagedPolicy.lockConfiguration {
+                Self.log.log("inline secrets left in place for \(id, privacy: .public): configuration is locked by policy")
+                continue
+            }
+            guard let mgr = managers[id],
+                  let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { continue }
+
+            // What is inline wins over any earlier keychain copy — it is what the
+            // engine has actually been connecting with.
+            var blocks = KeychainCredentialStore.loadOVPNInlineSecrets(profile: id) ?? [:]
+            for (tag, body) in split.secrets { blocks[tag] = body }
+
+            guard KeychainCredentialStore.saveAndVerifyOVPNInlineSecrets(profile: id, blocks) else {
+                inlineSecretMigrationFailures[id] = "SimpleVPN couldn't copy this VPN's private key into your keychain, so it left the key where it was. Make sure your login keychain is unlocked, then reopen SimpleVPN."
+                continue
+            }
+            var conf = proto.providerConfiguration ?? [:]
+            conf["ovpn"] = split.config
+            proto.providerConfiguration = conf
+            mgr.protocolConfiguration = proto
+            do {
+                try await mgr.saveToPreferences()
+                try await mgr.loadFromPreferences()
+            } catch {
+                // The keychain copy is verified, so nothing is lost — the profile
+                // simply still carries its own copy. Try again next launch.
+                Self.log.error("inline secret strip could not be saved for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                inlineSecretMigrationFailures[id] = "SimpleVPN couldn't rewrite this VPN's saved configuration, so its private key is still stored with it. Reopen SimpleVPN to try again."
+                continue
+            }
+            ovpnSecretsCache[id] = blocks
+            ovpnTextCache[id] = OVPNSecretMaterial.merge(split.config, secrets: blocks)
+            inlineSecretMigrationFailures.removeValue(forKey: id)
+            Self.log.log("moved inline \(split.secrets.keys.sorted().joined(separator: ","), privacy: .public) out of profile \(id, privacy: .public)")
+        }
     }
 }

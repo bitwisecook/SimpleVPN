@@ -39,6 +39,10 @@ struct ManageVPNsView: View {
     @State private var exportDoc: OVPNDocument?
     @State private var exportName = "config"
     @State private var showExporter = false
+    /// What the pending export leaves out, in the user's words (empty = nothing).
+    /// A note in the file is not enough on its own — nobody opens the file they
+    /// just saved — so the app says it too, once, when the file is written.
+    @State private var exportOmission = ""
     @State private var seeded = false
     @State private var editingComposition: VPNComposition?
 
@@ -71,7 +75,7 @@ struct ManageVPNsView: View {
                         if let p = vpn.profiles.first(where: { $0.id == selection }) { export(p) }
                     }
                     .disabled(!vpn.profiles.contains { $0.id == selection })
-                    .help("Save the selected VPN's configuration as a file")
+                    .help("Save the selected VPN's configuration as a file. Its private key is not included \u{2014} that stays in your keychain.")
                     // Discoverable AND keyboard-reachable: a toolbar button here
                     // and ⌘⇧F in the VPN menu, both opening the same sheet.
                     Button {
@@ -99,7 +103,13 @@ struct ManageVPNsView: View {
                       allowsMultipleSelection: true) { result in
             if case let .success(urls) = result { importFiles(urls) }
         }
-        .fileExporter(isPresented: $showExporter, document: exportDoc, contentType: UI.ovpnType, defaultFilename: exportName + ".ovpn") { _ in }
+        .fileExporter(isPresented: $showExporter, document: exportDoc, contentType: UI.ovpnType, defaultFilename: exportName + ".ovpn") { result in
+            // Only on a file that actually got written, and only when something
+            // was held back.
+            if case .success = result, !exportOmission.isEmpty {
+                ToastCenter.shared.post(exportOmission, symbol: "key.slash", tint: .indigo, seconds: 10)
+            }
+        }
         .alert("Config Imported", isPresented: Binding(
             get: { ciscoNote != nil }, set: { if !$0 { ciscoNote = nil } })) {
             Button("OK", role: .cancel) { ciscoNote = nil }
@@ -146,6 +156,7 @@ struct ManageVPNsView: View {
                             HStack(spacing: 8) {
                                 VPNRow(profile: p, labelDefs: labels.labels(for: p.id))
                                 CertExpiryBadge(ovpn: vpn.ovpnText(id: p.id))
+                                InlineKeyStillStoredBadge(reason: vpn.inlineSecretMigrationFailures[p.id])
                             }
                                 .tag(p.id)
                                 .contextMenu {
@@ -622,9 +633,43 @@ struct ManageVPNsView: View {
         catch { vpn.lastError = error.localizedDescription }
     }
 
+    /// Export the selected VPN's configuration — WITHOUT its private key.
+    ///
+    /// `exportableOVPNText` is not `ovpnText`: it never reassembles the secret
+    /// blocks, and it puts a note in the file naming what was left out and how to
+    /// put it back. This used to hand `ovpnText` straight to the exporter, which
+    /// wrote the user's client private key to whatever file they chose, in the
+    /// clear, with no warning. See `OVPNSecretMaterial.exportText` for why omitting
+    /// beats asking.
     private func export(_ p: VPNController.Profile) {
-        guard let text = vpn.ovpnText(id: p.id) else { vpn.lastError = "No configuration to export"; return }
+        guard let text = vpn.exportableOVPNText(id: p.id) else {
+            vpn.lastError = "No configuration to export"; return
+        }
+        exportOmission = OVPNSecretMaterial.exportOmissionNotice(vpn.storedOVPNText(id: p.id) ?? "")
         exportDoc = OVPNDocument(text: text); exportName = p.name; showExporter = true
+    }
+}
+
+/// Shown when SimpleVPN could NOT move this VPN's private key into the keychain,
+/// so the key is still stored alongside the configuration. A failed migration that
+/// nobody can see is a private key sitting in the preferences with nobody aware of
+/// it, which is the whole problem the migration exists to fix.
+private struct InlineKeyStillStoredBadge: View {
+    let reason: String?
+
+    var body: some View {
+        if let reason {
+            Label {
+                Text("Private key stored with the configuration")
+            } icon: {
+                Image(systemName: "key.slash.fill")
+            }
+            .labelStyle(.iconOnly)
+            .foregroundStyle(.orange)
+            .help(reason)
+            .accessibilityLabel("Private key still stored with the configuration")
+            .accessibilityValue(reason)
+        }
     }
 }
 

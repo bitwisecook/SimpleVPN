@@ -125,9 +125,31 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
 
         // Config comes via providerConfiguration; credentials come via the shared keychain
         // (a read-once session secret the app wrote just before starting the tunnel).
-        guard let ovpn = conf?["ovpn"] as? String, !ovpn.isEmpty else {
+        guard let storedOVPN = conf?["ovpn"] as? String, !storedOVPN.isEmpty else {
             completionHandler(NSError(domain: "PacketTunnel", code: 1,
                 userInfo: [NSLocalizedDescriptionKey: "missing ovpn configuration"]))
+            return
+        }
+
+        // The stored configuration is SECRET-FREE by construction: `<key>`,
+        // `<tls-crypt>` and friends live in the app's keychain, not in
+        // providerConfiguration (see OVPNSecretMaterial for which blocks and why).
+        // openvpn3 takes the configuration as a string, so they are spliced back in
+        // here, in memory, from the startTunnel options — the same handoff the
+        // passwords already use, because this process runs as root in the SYSTEM
+        // context and cannot read the user's keychain. Nothing rewritten here is
+        // ever persisted.
+        var ovpn = storedOVPN
+        if let inline = options?["ovpnInlineSecrets"] as? [String: String], !inline.isEmpty {
+            ovpn = OVPNSecretMaterial.merge(ovpn, secrets: inline)
+            // Tag names only. The contents are the secret; the names are not.
+            Self.log.log("re-inserted inline \(inline.keys.sorted().joined(separator: ","), privacy: .public) into the configuration")
+        } else if !OVPNSecretMaterial.markedTags(in: storedOVPN).isEmpty {
+            // The configuration says a block was moved out and the app sent none.
+            // Say so plainly — the engine's own failure would be an opaque TLS error.
+            Self.log.error("configuration is missing \(OVPNSecretMaterial.markedTags(in: storedOVPN).sorted().joined(separator: ","), privacy: .public) and the app sent no replacement")
+            completionHandler(NSError(domain: "PacketTunnel", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "This VPN's private key wasn't available. Open SimpleVPN, unlock your login keychain, then connect again."]))
             return
         }
 

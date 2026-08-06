@@ -73,6 +73,57 @@ enum KeychainCredentialStore {
         delete(service: secretsService, account: profile)
     }
 
+    // MARK: The secret inline blocks lifted out of an OpenVPN profile
+    //
+    // An `.ovpn` can inline its client private key and its tls-crypt/tls-auth key.
+    // Those used to be stored verbatim in `providerConfiguration["ovpn"]`, which put
+    // a private key in the VPN preferences and wrote it out through Export.
+    // `OVPNSecretMaterial` (Shared/OVPNInline.swift) decides which blocks are secret
+    // and why; this is where they live instead. Keyed by profile id, tag → content.
+    //
+    // Its OWN service rather than a field on `ProfileSecrets`, deliberately: the
+    // editor rebuilds a whole `ProfileSecrets` from two form fields on every save
+    // (`EditVPNView.save()`), so a field added there would be silently wiped the
+    // first time somebody saved the Options tab — and the thing wiped would be the
+    // only copy of a private key.
+
+    private static let ovpnInlineService = "com.bragi0.SimpleVPN.ovpninline"
+
+    static func saveOVPNInlineSecrets(profile: String, _ blocks: [String: String]) throws {
+        if blocks.isEmpty { deleteOVPNInlineSecrets(profile: profile); return }
+        try set(service: ovpnInlineService, account: profile,
+                data: try JSONEncoder().encode(blocks))
+    }
+
+    static func loadOVPNInlineSecrets(profile: String) -> [String: String]? {
+        guard let d = get(service: ovpnInlineService, account: profile) else { return nil }
+        return try? JSONDecoder().decode([String: String].self, from: d)
+    }
+
+    static func deleteOVPNInlineSecrets(profile: String) {
+        delete(service: ovpnInlineService, account: profile)
+    }
+
+    /// Write the blocks and READ THEM BACK, returning true only when the stored
+    /// copy matches. The caller removes the material from the profile text on the
+    /// strength of this and nothing else — losing somebody's only copy of a client
+    /// private key is far worse than leaving it stored a while longer.
+    static func saveAndVerifyOVPNInlineSecrets(profile: String, _ blocks: [String: String]) -> Bool {
+        guard !blocks.isEmpty else { return false }
+        do { try saveOVPNInlineSecrets(profile: profile, blocks) }
+        catch {
+            log.error("ovpn inline secrets write failed for \(profile, privacy: .public)")
+            return false
+        }
+        guard let readBack = loadOVPNInlineSecrets(profile: profile), readBack == blocks else {
+            log.error("ovpn inline secrets read-back MISMATCH for \(profile, privacy: .public) — leaving the profile alone")
+            return false
+        }
+        // Tag names only. The block contents are the secret; their names are not.
+        log.log("ovpn inline secrets verified for \(profile, privacy: .public): \(blocks.keys.sorted().joined(separator: ","), privacy: .public)")
+        return true
+    }
+
     // MARK: Custom Routing proxy auth (Mediators/CustomRouting.swift `ProxyCustomization`)
     //
     // The model carries only a keychain REF (`authSource`) — never inline credentials.
@@ -112,20 +163,31 @@ enum KeychainCredentialStore {
 
     // MARK: Primitives
     //
-    // Everything lives in the DATA-PROTECTION keychain (kSecUseDataProtectionKeychain).
-    // That is the only keychain where kSecAttrAccessGroup sharing between the app
-    // and the sandboxed system extension is actually enforced by entitlement; items
-    // in the legacy login keychain are guarded by per-app ACLs the extension can't
-    // satisfy, which silently breaks the session handoff. Reads fall back to the
-    // legacy keychain once to migrate items written by older builds.
-
-    // The store is APP-ONLY. Since credentials reach the extension via
-    // startTunnel(options:) — the extension runs as root and can't read a user
-    // keychain anyway — there is no cross-process sharing to satisfy. So we use
-    // the plain (login) keychain, which a Developer-ID app can always read and
-    // write. The data-protection keychain + shared access group (an earlier
-    // attempt at extension sharing) silently failed writes for this app type
-    // and is only read now to migrate anything a 0.1(build16–22) left behind.
+    // This store is APP-ONLY and lives in the PLAIN (file/login) keychain.
+    //
+    // WHY app-only: every secret here reaches the extension through
+    // startTunnel(options:). The extension runs as root in the SYSTEM context and
+    // cannot read a user keychain at all, so there is no cross-process sharing for
+    // an access group to enforce. (An earlier design tried to share these items
+    // with the extension via kSecAttrAccessGroup; that is what the
+    // data-protection read-migration below is cleaning up after.)
+    //
+    // WHAT THIS COMMENT USED TO SAY, AND WHY IT WAS WRONG. It claimed the
+    // data-protection keychain "silently failed writes for this app type". That is
+    // NOT true, and believing it would rule out work that is actually available:
+    // `BiometricCredentialStore` (Credentials/CredentialProvider.swift) writes to
+    // the data-protection keychain with kSecUseDataProtectionKeychain and this same
+    // access group, and it is a shipped feature. Per TN3137 the old -34018 failures
+    // came from the entitlements not being validated by an EMBEDDED provisioning
+    // profile, and the app has shipped one (`Contents/embedded.provisionprofile`,
+    // from PROVISIONING_PROFILE_SPECIFIER in project.yml) since the sysext profiles
+    // landed. So the data-protection keychain is a CHOICE we have not needed here,
+    // not a door that is closed — which matters, because kSecAttrSynchronizable
+    // forces the data-protection keychain, so anything that wants iCloud sync one
+    // day is a migration rather than an impossibility.
+    //
+    // Reads still fall back to the data-protection keychain once, to migrate items
+    // a 0.1(build16–22) left behind.
 
     private static func appQuery(service: String, account: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
