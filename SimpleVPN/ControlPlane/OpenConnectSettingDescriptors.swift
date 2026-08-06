@@ -25,12 +25,28 @@ enum OpenConnectSettings {
 
         // MARK: Connection
 
+        // THE VALUE THE WHOLE VPN DEPENDS ON, and it had no spec — so it was
+        // invisible to settings search, unaddressable by the CLI and MDM, had no
+        // manual anchor behind a help button, and (the reason it was added) could
+        // not be REVEALED. The connect list's "this VPN has no server address yet"
+        // banner links straight to this row; without an id there was nowhere to
+        // link, and the banner would have degraded to "open the config window".
+        // AGENTS.md, "Adding a new engine's options", rule 5: every user-facing
+        // control gets a spec, including the ones that look like plumbing.
+        .init(id: "oc.server", name: "Server Address",
+              summary: "The VPN gateway to connect to — the name or address your administrator gave you.",
+              group: .connection, default: ""),
         .init(id: "oc.reconnect-timeout", name: "Reconnect Timeout",
               summary: "How long (0–86400 seconds) to keep retrying a dropped tunnel before giving up.",
               group: .connection, default: Int?.none),
 
         // MARK: Sign-In
 
+        // Spec'd for the same reason as `oc.server`: password sign-in cannot work
+        // without it, so the connect list has to be able to say so and point here.
+        .init(id: "oc.username", name: "Username",
+              summary: "Who you sign in as. Used by password sign-in — a client certificate or single sign-on identifies you instead.",
+              group: .signIn, default: ""),
         .init(id: "oc.password", name: "Password",
               summary: "The password for this VPN. Used by password sign-in only — a client certificate or single sign-on doesn't send it.",
               group: .signIn, default: ""),

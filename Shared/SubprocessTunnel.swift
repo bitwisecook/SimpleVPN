@@ -99,7 +99,7 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     // "whatever SSH_AUTH_SOCK says" — which for an app launched from the Dock is
     // macOS's own ssh-agent, NOT the vendor agent a shell profile points at. A
     // path is therefore how 1Password's or Secretive's keys become reachable at
-    // all. See Docs/SSHAgent.md.
+    // all. See Docs/AuthSecSSHAgent.md.
     var sshAgentSocket: String? = nil
     // SHA-256 host-key pin (hex, optional "SHA256:" prefix). Enforced by the
     // in-process libssh engine ONLY — /usr/bin/ssh has no pin-by-hash option,
@@ -384,6 +384,24 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
         let type = text.split(separator: " ", maxSplits: 1).first.map(String.init) ?? ""
         guard securityKeyTypes.contains(type) else { return nil }
         return "This is a hardware security key — you'll be asked to touch it each time this tunnel connects."
+    }
+
+    /// Why this pinned SSH host key isn't a fingerprint the in-process engine could
+    /// compare, or nil when it is (or the field is empty). BLOCKING, for the same
+    /// reason as `serverCertPinProblem`: a mistyped pin is not a warning but a
+    /// connection that always fails, a long way from the field that caused it.
+    ///
+    /// Lives here rather than in the editor because BOTH the editor's inline error
+    /// and the connect list's dead-Connect reason ask it (`SubprocessTunnelReadiness`),
+    /// and two spellings of one format rule is how they come to disagree.
+    static func sshPinnedHostKeyProblem(_ raw: String?) -> String? {
+        guard let pin = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !pin.isEmpty else { return nil }
+        // The stored form tolerates a "SHA256:" / "sha256:" prefix.
+        let body = pin.range(of: ":", options: .backwards)
+            .map { String(pin[$0.upperBound...]) } ?? pin
+        guard body.count != 64 || body.filter(\.isHexDigit).count != 64 else { return nil }
+        return "A pinned key is the SHA-256 fingerprint: 64 hex characters (an optional \u{201C}SHA256:\u{201D} prefix is fine)."
     }
 
     // MARK: The pinned server certificate (the ONE server-identity check)

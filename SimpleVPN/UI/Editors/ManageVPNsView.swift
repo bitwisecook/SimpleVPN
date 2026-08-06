@@ -31,8 +31,13 @@ struct ManageVPNsView: View {
     }
 
     /// Sidebar selection is tagged so rows never collide with NE profile ids.
-    private static let tunnelTag = "tunnel:"
-    private static let nativeTag = "native:"
+    ///
+    /// THE STRINGS COME FROM `ConnectListing` because the connect window's sidebar
+    /// uses the same ones, and a settings route travelling between the two windows is
+    /// resolved by tag. They used to be two private constants in two files that
+    /// happened to agree; agreeing by construction is cheaper than remembering to.
+    private static let tunnelTag = ConnectListing.tunnelTag
+    private static let nativeTag = ConnectListing.nativeTag
     @State private var showImporter = false
     @State private var showDiscover = false
     @State private var ciscoNote: String?
@@ -44,6 +49,11 @@ struct ManageVPNsView: View {
     /// just saved — so the app says it too, once, when the file is written.
     @State private var exportOmission = ""
     @State private var seeded = false
+    /// The settings route this window has already resolved a profile for. A route is
+    /// STICKY (see `SettingsRouter.route`), and two callers now act on it — the
+    /// generation change and this window appearing — so the generation is latched
+    /// here exactly as `SettingRevealScrollState` latches the reveal's own.
+    @State private var routedGeneration = 0
     @State private var editingComposition: VPNComposition?
 
     var body: some View {
@@ -129,6 +139,13 @@ struct ManageVPNsView: View {
         // "which VPN has this setting" and leaves the tab and the reveal to the
         // editor (SettingsEditorShell).
         .onChange(of: settingsRouter?.generation ?? 0) { selectProfileForRoute() }
+        // AND ON APPEAR, for the route that arrives from ANOTHER WINDOW. The connect
+        // list's "Fix This…" banner opens this window and then routes, so by the time
+        // this view exists the generation has already changed and the `onChange`
+        // above never fires for it — the same shape of miss `SettingsRevealScroll`
+        // documents for a cross-tab reveal. `selectProfileForRoute` acts at most once
+        // per generation, so having two callers is free.
+        .onAppear { selectProfileForRoute() }
         .alert("No VPN for that setting", isPresented: Binding(
             get: { settingsRouter?.unroutableMessage != nil },
             set: { if !$0 { settingsRouter?.unroutableMessage = nil } })) {
@@ -306,9 +323,18 @@ struct ManageVPNsView: View {
     /// following a Custom Routing relation never jumps you to a different VPN.
     private func selectProfileForRoute() {
         guard let router = settingsRouter, let route = router.route,
-              let surface = SettingSurface(rawValue: route.surface) else { return }
+              let surface = SettingSurface(rawValue: route.surface),
+              // At most once per route, so the `onAppear` caller can't re-select (or
+              // re-raise the unroutable alert) every time this window is reopened
+              // against a route that is deliberately sticky.
+              router.generation != routedGeneration else { return }
+        routedGeneration = router.generation
         if let wanted = route.profileID {
-            selection = wanted
+            // TRANSLATED, not assigned. A route names a profile by its own id; the
+            // sidebar selects tunnels and native configs behind a prefix, so an
+            // untranslated id matched no row and the editor never appeared. Nothing
+            // routed to one before the connect list's banner started doing it.
+            selection = sidebarTag(for: wanted) ?? wanted
             return
         }
         if let current = selection, tagMatches(current, surface: surface) { return }
@@ -319,6 +345,17 @@ struct ManageVPNsView: View {
             return
         }
         selection = tag
+    }
+
+    /// The sidebar selection tag for a profile id, across all three stores. VPN
+    /// profiles are selected by their bare id; tunnels and native configs live behind
+    /// a prefix. Returns nil when nothing by that id exists, so the caller can fall
+    /// back rather than clearing a good selection.
+    private func sidebarTag(for profileID: String) -> String? {
+        if vpn.profiles.contains(where: { $0.id == profileID }) { return profileID }
+        if tunnels.tunnels.contains(where: { $0.id == profileID }) { return Self.tunnelTag + profileID }
+        if nativeVPN.configs.contains(where: { $0.id == profileID }) { return Self.nativeTag + profileID }
+        return nil
     }
 
     /// Whether the currently-selected row's editor shows this surface.

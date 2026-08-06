@@ -52,23 +52,23 @@ struct NativeVPNView: View {
     /// nil once every field the active auth mode needs is filled in;
     /// otherwise a short caption naming what's missing, for both the Connect
     /// button's disabled state and a visible reason (never just a dead button).
+    ///
+    /// ONE DERIVATION, TWO READERS. The ladder this used to spell out now lives in
+    /// `NativeVPNReadiness.need(for:facts:)`, because the connect window's list needs
+    /// exactly the same answer for its own dead Connect button — and two spellings of
+    /// "is this VPN configured?" is the divergence that was just removed from the
+    /// connect path. The FACTS come from this editor's fields rather than the keychain:
+    /// a secret typed but not yet saved counts here and cannot be seen from the list.
+    ///
+    /// It also gained two states the hand-written version was missing, both of which
+    /// used to show a live Connect button that could only fail: L2TP (macOS gives an
+    /// app no way to connect one at all) and a build whose signing profile has no
+    /// Personal VPN capability.
     private var missingFieldCaption: String? {
-        // Was `.isEmpty` only: a typo'd server reached NEVPNManager and came
-        // back as an opaque IKE timeout.
-        if let p = draft.serverProblem { return p }
-        switch draft.kind {
-        case .ipsec:
-            if sharedSecret.isEmpty { return "Enter the shared secret (PSK) to connect." }
-        case .ikev2:
-            if draft.usesSharedSecret {
-                if secret.isEmpty { return "Enter the shared secret (PSK) to connect." }
-            } else {
-                if draft.username.isEmpty { return "Enter a username to connect." }
-                if secret.isEmpty { return "Enter a password to connect." }
-            }
-        default: break
-        }
-        return nil
+        NativeVPNReadiness.need(for: draft, facts: .init(
+            hasSecret: !secret.isEmpty,
+            hasGroupPSK: !sharedSecret.isEmpty,
+            hasPersonalVPNCapability: !manager.needsEntitlement))?.sentence
     }
 
     /// The OTHER native config currently occupying macOS's single personal-VPN

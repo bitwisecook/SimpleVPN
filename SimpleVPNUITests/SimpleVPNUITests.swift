@@ -188,6 +188,88 @@ final class SimpleVPNUITests: XCTestCase {
         try runAccessibilityAudit(on: app)
     }
 
+    // MARK: - Never hide a profile the user created
+
+    /// THE CONNECT LIST'S INVARIANT, checked against the real window.
+    ///
+    /// `ConnectListingTests` proves the decision; this proves the WINDOW obeys it —
+    /// that every row visible in the connect list offers a Connect or Disconnect
+    /// control, and that a Connect which is DISABLED carries a reason in its value.
+    ///
+    /// What it would have caught: a subprocess-backed profile used to be filtered out
+    /// of this list unless it was already running, so there was no row and therefore
+    /// no control — and the "absent button" failure mode this asserts against is the
+    /// same one, one level down. Both halves matter: a row with no control is
+    /// indistinguishable from a broken layout, and a dead control with no reason is
+    /// indistinguishable from a bug.
+    ///
+    /// Environment-independent by construction: it reads whatever this machine has
+    /// and skips when the window is showing a prompt instead of a list. It never
+    /// clicks Connect — no test may open a real tunnel.
+    @MainActor
+    func testEveryConnectListRowOffersAnActionThatSaysWhy() throws {
+        let app = try launchOrSkip()
+        let window = app.windows.firstMatch
+        let sidebar = window.outlines["Sidebar"]
+        try XCTSkipIf(!sidebar.waitForExistence(timeout: 10), """
+            No VPN list in this window: it is showing the extension-activation or \
+            empty-VPNs prompt, or this machine has exactly one VPN (the sidebar then \
+            starts closed — ConnectionView: "a list of one is noise").
+            """)
+
+        var rowsChecked = 0
+        for row in sidebar.descendants(matching: .outlineRow).allElementsBoundByIndex {
+            guard let snapshot = try? row.snapshot() else { continue }
+            let buttons = Self.flatten(snapshot).filter { $0.elementType == .button }
+            let actions = buttons.filter {
+                $0.label.hasPrefix("Connect") || $0.label.hasPrefix("Disconnect")
+                    || $0.label == "Cancel connecting"
+            }
+            // A section header is a row with no action, and the only one.
+            guard !actions.isEmpty else { continue }
+            rowsChecked += 1
+            for action in actions {
+                let value = (action.value as? String) ?? ""
+                XCTAssertFalse(value.isEmpty, """
+                    \u{201C}\(action.label)\u{201D} in the connect list has no value, so a listener \
+                    is told what it is and never what the connection is doing
+                    """)
+            }
+        }
+        // Every row that exists has an action. The count is the assertion: a row that
+        // slipped through with none would have been skipped by the `guard` above, so
+        // compare against what the sidebar actually holds.
+        let headerCount = sidebar.descendants(matching: .outlineRow).allElementsBoundByIndex
+            .compactMap { try? $0.snapshot() }
+            .filter { snapshot in
+                Self.flatten(snapshot).allSatisfy { node in
+                    node.elementType != .button
+                        || !(node.label.hasPrefix("Connect") || node.label.hasPrefix("Disconnect")
+                             || node.label == "Cancel connecting")
+                }
+            }
+            .count
+        let total = sidebar.descendants(matching: .outlineRow).count
+        XCTAssertEqual(rowsChecked, total - headerCount, """
+            \(total - headerCount - rowsChecked) row(s) in the connect list offer no Connect or \
+            Disconnect control at all — an absent action is indistinguishable from a broken layout
+            """)
+        try XCTSkipIf(rowsChecked == 0, "No VPNs are configured on this machine.")
+    }
+
+    /// Flatten an accessibility snapshot tree. (The VoiceOver walkthrough has its own
+    /// copy for the same reason: the two suites must not share mutable state.)
+    @MainActor
+    private static func flatten(_ snapshot: XCUIElementSnapshot) -> [XCUIElementSnapshot] {
+        var out: [XCUIElementSnapshot] = [snapshot]
+        var pending = snapshot.children
+        while let next = pending.popLast() {
+            out.append(next)
+            pending.append(contentsOf: next.children)
+        }
+        return out
+    }
+
     /// Launches the app and skips (rather than flakes) where no UI can appear.
     @MainActor
     private func launchOrSkip() throws -> XCUIApplication {

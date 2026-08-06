@@ -106,7 +106,10 @@ struct SubprocessTunnelView: View {
                            invalidMessage: "Enter a timeout between 1 and 600 seconds. Leave empty to use the system's own.")
                     jumpHostRows
                 } else if draft.kind.isSSLVPN {
-                    TextField("Server address", text: $draft.server, prompt: Text("vpn.example.com")).autocorrectionDisabled()
+                    // Through the spec machinery now (it was a bare TextField): the
+                    // connect list's "no server address yet" banner reveals this row,
+                    // which needs an id to scroll to, expand to and highlight.
+                    row("oc.server", text: $draft.server, prompt: "vpn.example.com")
                     portField
                     connectionProxyRows
                     // Connection LIFECYCLE, so it belongs here with the other
@@ -483,11 +486,11 @@ struct SubprocessTunnelView: View {
 
     /// Why the typed pin isn't a usable SHA-256 fingerprint, or nil when it is
     /// (or when the field is empty).
+    /// One format rule, in `SubprocessTunnelConfig`, shared with the connect list's
+    /// dead-Connect reason (`SubprocessTunnelReadiness`) — it used to be spelled out
+    /// here only, where nothing else could ask it.
     private var pinnedKeyError: String? {
-        guard let pin = SubprocessTunnelManager.sshPinnedKey(draft) else { return nil }
-        let hexCount = pin.filter(\.isHexDigit).count
-        guard pin.count != 64 || hexCount != 64 else { return nil }
-        return "A pinned key is the SHA-256 fingerprint: 64 hex characters (an optional “SHA256:” prefix is fine)."
+        SubprocessTunnelConfig.sshPinnedHostKeyProblem(draft.sshPinnedHostKey)
     }
 
     /// The jump-host rows live inside Connection — a jump host is part of how
@@ -894,7 +897,9 @@ struct SubprocessTunnelView: View {
                 Text("Single sign-on isn't available for \(draft.kind.displayName): openconnect has no browser sign-in flow for this protocol.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            TextField("Username", text: $draft.username).textContentType(.username)
+            // Spec'd for the same reason as `oc.server` — the connect list reveals
+            // this row when password sign-in has no username.
+            row("oc.username", text: $draft.username, prompt: "username")
             TextField("Realm / group (optional)", text: $draft.realm)
             passwordRows
 
@@ -1618,69 +1623,35 @@ struct SubprocessTunnelView: View {
     }
 
     /// Why Connect is disabled right now, or nil when it can go.
+    /// ONE DERIVATION, TWO READERS. This used to be a twenty-check ladder written out
+    /// here, in a view body, where nothing else could ask it — and then the connect
+    /// window needed the same answer for its own dead Connect button. Two spellings of
+    /// "is this tunnel configured?" is exactly the divergence that was just removed
+    /// from the connect path, so the ladder moved to
+    /// `SubprocessTunnelReadiness.need(for:facts:)` and this reads it.
+    ///
+    /// THE FACTS COME FROM THIS EDITOR'S FIELDS, not from the keychain, and that is the
+    /// whole reason `Facts` is a parameter: a password typed but not yet saved is a
+    /// password in hand here, while the connect list can only see what is stored. Same
+    /// rules, different evidence — which is what an injected-facts derivation is for.
     private var connectBlockedReason: String? {
-        if draft.kind == .ssh, draft.sshMode == .netTunnel {
-            return "Network tunnel (-w) requires root for the utun device — not supported in this build."
+        var facts = SubprocessTunnelReadiness.Facts(installedTools: TunnelCLI.installed())
+        facts.hasPassword = !password.isEmpty
+        facts.hasTokenSecret = !tokenSecret.isEmpty
+        facts.hasSmartcardPIN = !pkcs11PIN.isEmpty
+        if let need = SubprocessTunnelReadiness.need(for: draft, facts: facts) {
+            return need.sentence
         }
-        // A malformed pin, or a pin combined with an option only /usr/bin/ssh
-        // carries, would fail at connect — say so here instead (dead-button rule).
-        if draft.kind == .ssh, pinnedKeyError != nil {
-            return "The pinned host key isn't a valid SHA-256 fingerprint — fix it under Security."
-        }
-        if let reason = SubprocessTunnelManager.sshPinBlockReason(draft) {
-            return reason
-        }
-        // The chosen sign-in method missing its file(s) would fail at connect.
-        if draft.kind == .ssh, let reason = SubprocessTunnelManager.sshAuthBlockReason(draft) {
-            return reason
-        }
-        // One bad forward kills the whole session (ExitOnForwardFailure=yes).
-        if draft.kind == .ssh, draft.sshMode == .portForward,
-           let bad = SubprocessTunnelManager.invalidForwardLine(draft.forwards) {
-            return "Fix the forward “\(bad)” under Traffic — one bad forward stops the whole tunnel."
-        }
-        if usesSOCKSPort, let reason = socksPortError {
-            return reason
-        }
-        // A mistyped certificate pin is refused by openconnect at startup with an
-        // opaque certificate error — the ONE server-identity control these kinds
-        // have, so it gets the dead-button treatment the SSH pin already had.
-        if draft.kind.isSSLVPN, pinnedServerCertError != nil {
-            return "The pinned server certificate isn't a valid SHA-256 fingerprint — fix it under Security."
-        }
-        if !requiredCLI.isAvailable {
-            return "\(requiredCLI.rawValue) isn't installed. \(requiredCLI.installHint)"
-        }
-        if draft.server.isEmpty {
-            return "Enter the server address."
-        }
-        // A password inside the server/proxy address would be stored in the
-        // clear and land on the tool's command line.
-        if let reason = SubprocessTunnelManager.addressCredentialReason(draft) {
-            return reason
-        }
-        // The chosen sign-in method missing its material would fail at connect.
-        if let reason = SubprocessTunnelManager.sslAuthBlockReason(draft) {
-            return reason
-        }
-        // Smartcard sign-in with no PIN in hand: openconnect would prompt, find the
-        // pipe closed and die. Say the fix instead (dead-button rule).
-        if sslMethod == "token", pkcs11PIN.isEmpty {
-            return "Enter the smartcard PIN under Sign-In."
-        }
-        // A locked token cannot be unlocked from here, and further attempts do
-        // nothing but confuse — refuse rather than let the user spend them.
+        // THE ONE CHECK THAT CANNOT MOVE: it is not a fact about the configuration but
+        // about the HARDWARE in the slot right now, learned by a survey that only runs
+        // while this editor is open. A locked token cannot be unlocked from here and
+        // further attempts do nothing but spend retries, so refuse rather than let the
+        // user burn them.
         if sslMethod == "token",
            let blocked = (pkcs11Survey?.tokens ?? []).first(where: \.isBlocked) {
             return blocked.pinLocked
                 ? "The token “\(blocked.label)” has its PIN locked — unblock it with your PUK using the manufacturer's tool first."
                 : "The token “\(blocked.label)” has no PIN set yet — set one with the manufacturer's tool first."
-        }
-        // --token-mode without its seed would just die under --non-inter (the
-        // token isn't used under SSO, so it isn't required there either).
-        if draft.kind.isSSLVPN, SubprocessTunnelConfig.tokenModeRequiresSecret(draft.tokenMode),
-           tokenSecret.isEmpty, sslMethod != "sso" {
-            return "Verification-code token (\(draft.tokenMode.uppercased())) needs its secret — add it under Sign-In."
         }
         return nil
     }

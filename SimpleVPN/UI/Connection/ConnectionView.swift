@@ -18,6 +18,9 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+// The native personal VPNs are listed here too now, and connecting one takes the
+// same NEProxySettings its own editor builds.
+import NetworkExtension
 import os
 
 /// Settings key: open the live-details (inspector) pane when the window opens.
@@ -34,8 +37,25 @@ struct ConnectionView: View {
     @Environment(SubprocessTunnelManager.self) private var tunnelManager: SubprocessTunnelManager?
     @Environment(SubprocessTunnelStore.self) private var tunnels: SubprocessTunnelStore?
     @Environment(NativeVPNManager.self) private var nativeVPN: NativeVPNManager?
+    @Environment(SettingsRouter.self) private var settingsRouter: SettingsRouter?
+    /// Whether this window is the active one. Used as the "the user has been somewhere
+    /// else and come back" signal — see `refreshOtherNeeds`.
+    @Environment(\.controlActiveState) private var controlActiveState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showImporter = false
+    /// The connect list's selection when it lands on a row that is NOT an NE profile
+    /// — a subprocess tunnel or a native personal VPN. Kept separate from
+    /// `vpn.selectedID` on purpose: that id is read by the menu bar, the map and the
+    /// control plane, all of which mean "an NE profile", and putting a tunnel's id in
+    /// it would make every one of them look up something that isn't there.
+    @State private var otherSelection: String?
+    /// What each non-profile connection still needs, keyed by its selection tag.
+    ///
+    /// COMPUTED INTO STATE, never in `body`: the answer needs a keychain query for
+    /// the secret a tunnel's chosen method uses, and a view body runs on every
+    /// redraw. `refreshOtherNeeds()` is driven from the configs changing and from the
+    /// engines' live state, which is every moment the answer could have changed.
+    @State private var otherNeeds: [String: ConnectNeed] = [:]
     /// The right-hand live-details pane. Closed by default (simple window);
     /// the Settings toggle changes the launch state, the toolbar button the moment.
     @AppStorage(inspectorDefaultsKey) private var inspectorOpenByDefault = false
@@ -62,62 +82,207 @@ struct ConnectionView: View {
         return link?.dot(for: p.id) ?? .from(status: shown)
     }
 
-    /// Active non-OpenVPN tunnels (SSH / OpenConnect subprocess, native IKEv2) so a
-    /// live connection is visible and stoppable here, not only in Manage VPNs.
+    /// Whether the single native personal VPN slot is in use right now.
     private var nativeBackendActive: Bool {
         nativeVPN?.status == .connected || nativeVPN?.status == .connecting
     }
 
+    // MARK: - The connections that are not NE profiles
+
+    /// One row of the "Other Connections" section, flattened out of the two stores
+    /// behind it so the section body has one shape to draw and one place to read
+    /// readiness from.
+    private struct OtherConnection: Identifiable {
+        /// The sidebar selection tag (prefixed).
+        let id: String
+        /// The config's own id — what a settings route names.
+        let configID: String
+        let name: String
+        let kind: VPNKind
+        let dot: DotState
+        let isActive: Bool
+        /// The engine's last word: a failure message or a caution. nil when quiet.
+        let note: String?
+        let connect: () -> Void
+        let stop: () -> Void
+    }
+
+    /// EVERY subprocess tunnel and EVERY native VPN the user has created, running or
+    /// not.
+    ///
+    /// THE BUG THIS LINE IS. It used to read
+    /// `tunnels.filter { tunnelManager.isActive($0.id) }`, so a subprocess-backed
+    /// profile appeared in the connect window ONLY while already running — it could
+    /// never show up before you connected it, and could not be connected from here
+    /// because it was not here. A closed loop: the user added an F5 BIG-IP APM, saw
+    /// it in Manage VPNs, and could not find it in the main window. The native side
+    /// had the same shape one line down (only the ACTIVE config was listed).
+    ///
+    /// `vpn.profiles` were always listed whether connected or not, correctly. The
+    /// asymmetry was historical: this section was built as a LIVE STATUS strip and
+    /// then whole VPN kinds were filed into it. The rule now matches the rest of the
+    /// window — never hide a profile the user created.
+    private var otherConnections: [OtherConnection] {
+        var rows: [OtherConnection] = []
+        for t in tunnels?.tunnels ?? [] {
+            let live = tunnelManager?.live[t.id]
+            rows.append(OtherConnection(
+                id: ConnectListing.tunnelTag + t.id, configID: t.id, name: t.name, kind: t.kind,
+                dot: .from(subprocess: tunnelManager?.status(t.id) ?? .disconnected),
+                isActive: tunnelManager?.isActive(t.id) == true,
+                note: live?.status.failureText ?? live?.caution,
+                connect: { [weak tunnelManager] in
+                    // Everything this needs is stored: the readiness gate above has
+                    // already established that the password / PIN the configured
+                    // method uses is on file, so there is nothing to type here.
+                    tunnelManager?.connect(t, password: KeychainCredentialStore
+                        .loadCredentials(profile: "tunnel.\(t.id)")?.password)
+                },
+                stop: { [weak tunnelManager] in tunnelManager?.disconnect(t.id) }))
+        }
+        for c in nativeVPN?.configs ?? [] {
+            let isActive = nativeBackendActive && nativeVPN?.activeConfigID == c.id
+            rows.append(OtherConnection(
+                id: ConnectListing.nativeTag + c.id, configID: c.id, name: c.name, kind: c.kind,
+                dot: isActive ? .from(status: nativeVPN?.status ?? .disconnected) : .off,
+                isActive: isActive,
+                note: isActive ? nativeVPN?.lastError : nil,
+                connect: { [weak nativeVPN] in
+                    guard let nativeVPN else { return }
+                    let secrets = NativeVPNReadiness.storedSecrets(for: c)
+                    // The same three inputs the editor's own Connect gathers — the
+                    // stored secrets and this profile's Custom Routing proxy — read
+                    // here rather than passed in, so connecting from the list and
+                    // connecting from the editor start the tunnel identically.
+                    let proxy = nativeProxySettings(for: c.id)
+                    Task { await nativeVPN.connect(c, secret: secrets.base,
+                                                   sharedSecret: secrets.groupPSK,
+                                                   proxy: proxy) }
+                },
+                stop: { [weak nativeVPN] in nativeVPN?.disconnect() }))
+        }
+        return rows
+    }
+
     @ViewBuilder private var otherConnectionsSection: some View {
-        let subs = (tunnels?.tunnels ?? []).filter { tunnelManager?.isActive($0.id) == true }
-        if !subs.isEmpty || nativeBackendActive {
+        let rows = otherConnections
+        if !rows.isEmpty {
+            // NAME. "Other Connections" was honest while this section only ever held
+            // things that were RUNNING — it was the live-status strip. Now that it
+            // lists configured-but-idle profiles it is a list of VPNs like the one
+            // above it, and the split it draws is our implementation (packet-tunnel
+            // extension vs subprocess/native) rather than anything the user can act
+            // on. Re-cutting the sidebar on the question that DOES matter — does this
+            // capture my traffic system-wide, or hand me a local port — is queued
+            // separately (Q5); it moves rows between sections and needs ONTOLOGY.md
+            // definitions, so it is deliberately not done here.
             Section("Other Connections") {
-                ForEach(subs) { t in
-                    otherConnectionRow(name: t.name, kind: t.kind,
-                                       dot: .from(subprocess: tunnelManager?.status(t.id) ?? .disconnected)) {
-                        tunnelManager?.disconnect(t.id)
-                    }
-                }
-                if nativeBackendActive, let n = nativeVPN,
-                   let c = n.configs.first(where: { $0.id == n.activeConfigID }) {
-                    otherConnectionRow(name: c.name, kind: c.kind,
-                                       dot: .from(status: n.status)) { n.disconnect() }
+                ForEach(rows) { row in
+                    otherConnectionRow(row).tag(row.id)
                 }
             }
         }
     }
 
-    private func otherConnectionRow(name: String, kind: VPNKind, dot: DotState,
-                                    stop: @escaping () -> Void) -> some View {
-        let notice = kind.maturityNotice
+    private func otherConnectionRow(_ row: OtherConnection) -> some View {
+        let notice = row.kind.maturityNotice
+        let need = otherNeeds[row.id]
         return HStack(spacing: 8) {
-            StatusDot(state: dot)
+            StatusDot(state: row.dot)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 5) {
-                    Text(name).lineLimit(1)
-                    // A LIVE connection on a kind nobody has proven: the chip is
-                    // still true, and this is the moment a report is worth most.
+                    Text(row.name).lineLimit(1)
+                    // A kind nobody has proven: the chip is still true, and a row
+                    // that is only configured is exactly where somebody decides
+                    // whether to try it.
                     if let notice { MaturityBadge(notice: notice) }
                 }
-                Text(kind.displayName).font(.caption).foregroundStyle(.secondary)
+                // The kind, or — when something is missing — the one word that says
+                // so. The sidebar is 220pt wide, so the SENTENCE lives in the detail
+                // pane's banner and on this row's `.help`; what fits here is the
+                // fact that there is something to do.
+                Text(need.map { "\(row.kind.displayName) \u{00B7} \($0.statusWord)" }
+                     ?? row.kind.displayName)
+                    .font(.caption)
+                    .foregroundStyle(need == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.orange))
             }
             // One sentence per row; the (hidden) dot's state rides in words.
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("\(name), \(kind.displayName), \(dot.accessibilityDescription)\(notice.map { ", \($0.spokenValue)" } ?? "")")
+            .accessibilityLabel("\(row.name), \(row.kind.displayName), \(row.dot.accessibilityDescription)\(notice.map { ", \($0.spokenValue)" } ?? "")")
+            .accessibilityValue(need?.sentence ?? "")
             Spacer(minLength: 8)
-            Button(action: stop) {
-                Image(systemName: "stop.fill").frame(width: 22, height: 22).contentShape(Rectangle())
+            if row.isActive {
+                Button(action: row.stop) {
+                    Image(systemName: "stop.fill").frame(width: 22, height: 22).contentShape(Rectangle())
+                }
+                    .buttonStyle(.borderless).foregroundStyle(.secondary)
+                    .help("Disconnect")
+                    .accessibilityLabel("Disconnect \(row.name)")
+                    // Every other Connect/Disconnect control in the app reports the
+                    // live state in its value (rule 1). The words come from DotState,
+                    // which is the status vocabulary — there is no NEVPNStatus behind
+                    // a subprocess or native tunnel to read instead.
+                    .accessibilityValue(row.dot.accessibilityDescription)
+            } else {
+                // DISABLED, NEVER ABSENT — an absent button is indistinguishable
+                // from a broken layout, and this row exists precisely so that a
+                // profile which cannot connect yet is still visible and still says
+                // what it needs.
+                Button(action: row.connect) {
+                    Image(systemName: "play.fill").frame(width: 22, height: 22).contentShape(Rectangle())
+                }
+                    .buttonStyle(.borderless).foregroundStyle(.secondary)
+                    .disabled(need != nil)
+                    .help(need?.sentence ?? "Connect \(row.name)")
+                    .accessibilityLabel("Connect \(row.name)")
+                    // THE STATUS WORD FIRST, then the reason. A Connect control in
+                    // this window has to report the live state in its value from the
+                    // ONE vocabulary (rule 1, asserted by VoiceOverWalkthroughTests);
+                    // the sentence after it is what makes the disabled state
+                    // actionable rather than merely dimmed.
+                    .accessibilityValue(need?.spokenValue ?? row.dot.accessibilityDescription)
             }
-                .buttonStyle(.borderless).foregroundStyle(.secondary)
-                .help("Disconnect")
-                .accessibilityLabel("Disconnect \(name)")
-                // Every other Connect/Disconnect control in the app reports the live
-                // state in its value (rule 1); this one said what it was and then
-                // refused to say what the connection was doing. The words come from
-                // DotState, which is the status vocabulary — there is no NEVPNStatus
-                // behind a subprocess or native tunnel to read instead.
-                .accessibilityValue(dot.accessibilityDescription)
         }
+    }
+
+    /// This native VPN's Custom Routing proxy, as `NEVPNManager` wants it. Mirrors
+    /// `NativeVPNView.nativeProxySettings()` — one committed source, read at connect
+    /// time from the stored profile rather than from an editor's draft.
+    private func nativeProxySettings(for profileID: String) -> NEProxySettings? {
+        let auth = loadCustomRoutingProxyAuthFields(profileID: profileID)
+        return vpn.customRouting(for: profileID).proxy.nativeApplyRequest(
+            username: auth.username.isEmpty ? nil : auth.username,
+            password: auth.password.isEmpty ? nil : auth.password)?
+            .makeNEProxySettings()
+    }
+
+    /// Recompute what every non-profile connection still needs.
+    ///
+    /// One sweep of the installed command-line tools (rather than one per row), and
+    /// at most one keychain query per row — see `SubprocessTunnelReadiness.liveFacts`.
+    private func refreshOtherNeeds() {
+        let installed = TunnelCLI.installed()
+        let capability = !(nativeVPN?.needsEntitlement ?? false)
+        var needs: [String: ConnectNeed] = [:]
+        for t in tunnels?.tunnels ?? [] {
+            if let need = SubprocessTunnelReadiness.need(for: t, installedTools: installed) {
+                needs[ConnectListing.tunnelTag + t.id] = need
+            }
+        }
+        for c in nativeVPN?.configs ?? [] {
+            if let need = NativeVPNReadiness.need(for: c, hasPersonalVPNCapability: capability) {
+                needs[ConnectListing.nativeTag + c.id] = need
+            }
+        }
+        if needs != otherNeeds { otherNeeds = needs }
+    }
+
+    /// Take the user to the field that is missing: open Manage VPNs on this profile
+    /// and reveal the setting — which expands its section, scrolls it to centre and
+    /// highlights it. "Open the config window" is the weak version of this.
+    private func revealSetting(_ settingID: String, profileID: String) {
+        openWindow(id: "manage")
+        settingsRouter?.go(to: settingID, profileID: profileID)
     }
 
     /// Deliberately jargon-free: this says what macOS wants and what to do, in the words
@@ -230,6 +395,18 @@ struct ConnectionView: View {
             }
     }
 
+    /// "You have no VPNs at all" — the ONLY state that earns the empty-state page.
+    ///
+    /// It used to ask whether a subprocess tunnel or a native VPN was RUNNING, which
+    /// is the same mistake as the list filter: somebody whose only VPN was an F5
+    /// BIG-IP APM opened the app and was told "No VPNs Configured", with an Import
+    /// button, about a VPN they had just configured. Existence is the question.
+    private var hasNothingConfigured: Bool {
+        vpn.profiles.isEmpty
+            && (tunnels?.tunnels.isEmpty ?? true)
+            && (nativeVPN?.configs.isEmpty ?? true)
+    }
+
     @ViewBuilder private var content: some View {
         // The extension's state no longer gates the whole window. It used to open on
         // "System Extension Required", which is a demand made before the user has any
@@ -241,7 +418,7 @@ struct ConnectionView: View {
             if ext.needsApproval && !ext.isActivated {
                 ActivationPrompt(ext: ext)
                     .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
-            } else if vpn.profiles.isEmpty && !(tunnelManager?.hasActive ?? false) && !nativeBackendActive {
+            } else if hasNothingConfigured {
                 EmptyVPNsPrompt(importAction: { showImporter = true },
                                 manageAction: { openWindow(id: "manage") },
                                 dropAction: { vpn.handleImport(of: $0) })
@@ -255,13 +432,38 @@ struct ConnectionView: View {
         .animation(reduceMotion ? nil : .smooth(duration: 0.4), value: ext.isActivated)
     }
 
+    /// The connect list's selection, spanning THREE stores.
+    ///
+    /// One `List` has one selection, and the rows now come from `vpn.profiles`, the
+    /// subprocess store and the native store. A prefixed tag says which — and the
+    /// write side is what keeps `vpn.selectedID` honest: it only ever holds an NE
+    /// profile id, because the menu bar, the route graph and the control plane all
+    /// read it meaning exactly that.
+    private var listSelection: Binding<String?> {
+        Binding(get: { otherSelection ?? vpn.selectedID },
+                set: { new in
+                    if let new, ConnectListing.isOtherTag(new) {
+                        otherSelection = new
+                    } else {
+                        otherSelection = nil
+                        vpn.selectedID = new
+                    }
+                })
+    }
+
+    /// The selected non-profile connection, if that is what the selection names.
+    private var selectedOther: OtherConnection? {
+        guard let otherSelection else { return nil }
+        return otherConnections.first { $0.id == otherSelection }
+    }
+
     private var splitView: some View {
         // Two columns + a real inspector (not a third split column): the live
         // telemetry pane is optional detail, closed by default to keep the window
         // simple. Its trailing home and content are unchanged — only whether it's
         // open is new.
         NavigationSplitView(columnVisibility: $columnVisibility) {
-            List(selection: $vpn.selectedID) {
+            List(selection: listSelection) {
                 Section("VPNs") {
                     ForEach(vpn.profiles) { p in
                         VPNSidebarRow(vpn: vpn, profile: p, labelDefs: labels.labels(for: p.id), dotState: rowDot(p))
@@ -285,7 +487,15 @@ struct ConnectionView: View {
             }
         } detail: {
             Group {
-                if let p = vpn.selected {
+                if let row = selectedOther {
+                    OtherConnectionDetailView(
+                        name: row.name, kind: row.kind, dot: row.dot, isActive: row.isActive,
+                        need: otherNeeds[row.id], engineNote: row.note,
+                        connect: row.connect, stop: row.stop,
+                        reveal: { revealSetting($0, profileID: row.configID) },
+                        openSettings: { openWindow(id: "manage") })
+                        .id(row.id)
+                } else if let p = vpn.selected {
                     ConnectionDetailView(vpn: vpn, profile: p).id(p.id)
                 } else {
                     ContentUnavailableView("Select a VPN", systemImage: "network")
@@ -320,6 +530,26 @@ struct ConnectionView: View {
             // launch, so the user's own toggling always wins.
             showInspector = inspectorOpenByDefault
             if vpn.profiles.count <= 1 { columnVisibility = .detailOnly }
+        }
+        // What each non-profile connection still needs, gathered OUT of `body` (it
+        // costs a keychain query per row) and refreshed at every moment the answer
+        // could have changed: the configs themselves, and the engines' live state —
+        // which is what changes when the user saves a password in the editor and
+        // comes back here, or installs the tool a row was waiting for.
+        .task { refreshOtherNeeds() }
+        .onChange(of: tunnels?.tunnels ?? []) { refreshOtherNeeds() }
+        .onChange(of: nativeVPN?.configs ?? []) { refreshOtherNeeds() }
+        .onChange(of: tunnelManager?.live.mapValues(\.status) ?? [:]) { refreshOtherNeeds() }
+        .onChange(of: nativeVPN?.status ?? .invalid) { refreshOtherNeeds() }
+        // AND WHENEVER THIS WINDOW COMES BACK TO THE FRONT. The other triggers watch
+        // the CONFIG, and two of the things a need turns on are not in it: a secret in
+        // the keychain and a tool on disk. So saving a password in the editor without
+        // touching any other field, or `brew install openconnect` in Terminal, would
+        // otherwise leave the row insisting on something the user has just supplied —
+        // which is the same dead end as hiding it. Coming back to this window is
+        // exactly when that has happened.
+        .onChange(of: controlActiveState) { _, new in
+            if new != .inactive { refreshOtherNeeds() }
         }
         // The window keeps AppKit's stock `.inspector` resize behaviour: opening the
         // pane grows the window, closing it leaves the window as-is. Attempts to force
