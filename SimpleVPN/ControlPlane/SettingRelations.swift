@@ -177,6 +177,23 @@ nonisolated enum SettingRelations {
         // true if the resolver's own address is one of the networks carried.
         ["px.dns", "px.included", "px.excluded"],
 
+        // MARK: "Allow local network access" ↔ the carve-out it fills in for you
+        //
+        // The toggle writes the same kind of excluded route the user could type by
+        // hand, so each pair is "the automatic one" beside "the manual one" — which is
+        // how someone who found one gets to the other instead of doing both.
+        ["px.local-lan", "px.excluded", "px.default-route"],
+        ["sshnet.local-lan", "sshnet.excluded-routes", "sshnet.send-all-traffic"],
+        ["wg.local-lan", "wg.allowed-ips"],
+
+        // MARK: Search domains ↔ the resolvers they belong to
+        //
+        // A search list without resolvers does nothing, and resolvers without a search
+        // list resolve only fully-qualified names — the pairing is the whole point.
+        ["wg.search-domains", "wg.dns"],
+        ["px.search-domains", "px.dns"],
+        ["sshnet.search-domains", "sshnet.dns", "sshnet.far-side-dns"],
+
         // MARK: Custom Routing ↔ the kind's own Traffic settings
         //
         // Custom Routing is the ONE surface every kind has, and it edits exactly
@@ -204,6 +221,11 @@ nonisolated enum SettingRelations {
         ["cr.dns-rule", "px.dns"],
 
         ["cr.ignore-pushed-search", "cr.add-search-domains"],
+        // The three kinds whose own format has no search-domain field: Custom Routing
+        // can add search domains to what an engine pushed, and for these there is
+        // nothing pushed — so the kind's own list is where the answer is.
+        ["cr.add-search-domains", "wg.search-domains", "px.search-domains",
+         "sshnet.search-domains"],
         ["cr.ignore-pushed-match", "cr.match-domains"],
         // "Ignored while a PAC URL is set — that wins."
         ["cr.proxy-mode", "cr.proxy-manual-url", "cr.proxy-pac-url", "cr.proxy-auth"],

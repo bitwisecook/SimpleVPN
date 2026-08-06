@@ -521,6 +521,137 @@ struct WireGuardNetworkSettingsTests {
         #expect(v4.contains { $0.destinationAddress == "10.0.0.1" })
     }
 
+    // MARK: Search domains (wg-quick has no field for them — Docs/Networking.md §4.4)
+
+    @Test func searchDomainsAreAssertedAlongsideTheCatchAll() throws {
+        var c = fullTunnelConfig()
+        c.searchDomains = ["corp.example", "example.com"]
+        let s = try #require(WireGuardNetworkSettings.settings(for: c,
+                                                               resolvedEndpoint: "192.0.2.7:51820"))
+        // The whole point: a SHORT name now resolves, and the tunnel still claims
+        // every lookup (wg-quick DNS semantics) rather than narrowing itself.
+        #expect(s.dnsSettings?.searchDomains == ["corp.example", "example.com"])
+        #expect(s.dnsSettings?.matchDomains == [""])
+    }
+
+    @Test func noSearchDomainsAssertsNoneRatherThanInventingOne() throws {
+        let s = try #require(WireGuardNetworkSettings.settings(for: fullTunnelConfig(),
+                                                               resolvedEndpoint: "192.0.2.7:51820"))
+        #expect(s.dnsSettings?.searchDomains == nil)
+    }
+
+    @Test func aDemotedTunnelWithSearchDomainsScopesToThemInsteadOfGoingDark() throws {
+        var c = fullTunnelConfig()
+        c.searchDomains = ["corp.example"]
+        let s = try #require(WireGuardNetworkSettings.settings(for: c,
+                                                               resolvedEndpoint: "192.0.2.7:51820",
+                                                               suppressDefaultRoute: true))
+        // The OpenVPN/OpenConnect rule, now expressible here: keep the resolvers for
+        // this tunnel's OWN domains, never for every lookup on the Mac.
+        #expect(s.dnsSettings?.matchDomains == ["corp.example"])
+        #expect(s.dnsSettings?.searchDomains == ["corp.example"])
+    }
+
+    @Test func searchDomainsAreNormalisedOnSave() {
+        var c = fullTunnelConfig()
+        c.searchDomains = ["  .Corp.Example. ", "", "corp.example", "example.com"]
+        let n = c.normalized()
+        // Trimmed, lower-cased, dots stripped, empties dropped, duplicates collapsed —
+        // and the ORDER kept, because a stub resolver tries the list in order.
+        #expect(n.searchDomains == ["corp.example", "example.com"])
+    }
+
+    @Test func anUnusableSearchDomainBlocksTheConnectWithTheReason() {
+        var c = fullTunnelConfig()
+        // A real key, so the search list is the ONLY thing left to complain about.
+        c.peerPublicKey = Data(repeating: 1, count: WireGuardConfig.keyByteCount)
+            .base64EncodedString()
+        #expect(c.connectProblem == nil)
+        c.searchDomains = ["corp example"]
+        #expect(c.connectProblem?.contains("spaces") == true)
+    }
+
+    // MARK: Lenient decoding (a missing key must never mean a blank config)
+
+    @Test func aBlobWrittenBeforeAFieldExistedStillDecodesToItsRealValues() throws {
+        // The synthesized decoder throws `keyNotFound` for an absent key, and
+        // `decode(from:)` turns a throw into a BRAND-NEW config — so without the
+        // lenient decoder, adding any field silently wiped every stored WireGuard VPN
+        // (addresses, peer key, endpoint) on the first read by a newer build.
+        let old = """
+        {"id":"ABC","name":"Lab","addresses":["10.0.0.2/32"],"peerPublicKey":"PUB",
+         "endpoint":"vpn.example.com:51820","allowedIPs":["10.44.0.0/16"],"dns":["10.0.0.1"]}
+        """
+        let c = WireGuardConfig.decode(from: Data(old.utf8))
+        #expect(c.id == "ABC")
+        #expect(c.name == "Lab")
+        #expect(c.addresses == ["10.0.0.2/32"])
+        #expect(c.peerPublicKey == "PUB")
+        #expect(c.endpoint == "vpn.example.com:51820")
+        #expect(c.allowedIPs == ["10.44.0.0/16"])
+        #expect(c.dns == ["10.0.0.1"])
+        // The new fields take their documented defaults, not a decode failure.
+        #expect(c.searchDomains.isEmpty)
+        #expect(c.allowLocalNetworkAccess == false)
+    }
+
+    @Test func reImportingAConfKeepsTheSettingsTheFormatCannotCarry() {
+        // A `.conf` has no key for a search list or a local-network carve-out, so a
+        // file can never be an instruction to change them — taking the imported
+        // default would turn the carve-out off and throw the search list away.
+        var stored = fullTunnelConfig()
+        stored.searchDomains = ["corp.example"]
+        stored.allowLocalNetworkAccess = true
+        let fromFile = WireGuardConfig.parse(stored.serialize(), name: "Lab")
+        let merged = stored.applyingImport(fromFile, name: "Lab")
+        #expect(merged.searchDomains == ["corp.example"])
+        #expect(merged.allowLocalNetworkAccess)
+    }
+
+    @Test func anEmptyObjectDecodesToTheTypesOwnDefaults() {
+        let c = WireGuardConfig.decode(from: Data("{}".utf8))
+        #expect(c.allowedIPs == ["0.0.0.0/0", "::/0"])
+        #expect(c.name == "New WireGuard")
+        #expect(c.allowLocalNetworkAccess == false)
+    }
+
+    @Test func everyFieldStillRoundTrips() throws {
+        var c = WireGuardConfig()
+        c.name = "Lab"
+        c.addresses = ["10.0.0.2/32"]
+        c.dns = ["10.0.0.1"]
+        c.searchDomains = ["corp.example"]
+        c.allowLocalNetworkAccess = true
+        c.mtu = 1380
+        c.listenPort = 51821
+        c.fwMark = "0x1234"
+        c.table = "main"
+        c.peerPublicKey = "PUB"
+        c.endpoint = "vpn.example.com:51820"
+        c.allowedIPs = ["10.44.0.0/16"]
+        c.persistentKeepalive = 25
+        c.rawExtraPeers = ["[Peer]\nPublicKey = OTHER"]
+        let blob = try #require(c.encodedBlob())
+        #expect(WireGuardConfig.decode(from: blob) == c)
+    }
+
+    // MARK: The local-network carve-out (excluded routes only — see §5.1)
+
+    @Test func theLocalCarveOutOnlyChangesThisHostsRoutingTable() throws {
+        // The provider passes the computed prefixes as extra EXCLUDED routes; the
+        // peer's cryptokey routing still permits them, exactly like a WireGuard
+        // divert. Proven here because the provider's own merge needs a live tunnel.
+        let s = try #require(WireGuardNetworkSettings.settings(
+            for: fullTunnelConfig(), resolvedEndpoint: "192.0.2.7:51820",
+            extraExcludedRoutes: ["192.168.1.0/24", "fe80::/10"]))
+        #expect(s.ipv4Settings?.excludedRoutes?.contains {
+            $0.destinationAddress == "192.168.1.0" && $0.destinationSubnetMask == "255.255.255.0"
+        } == true)
+        #expect(s.ipv6Settings?.excludedRoutes?.contains { $0.destinationAddress == "fe80::" } == true)
+        // The allowed IPs (what the PEER carries) are untouched by the carve-out.
+        #expect(s.ipv4Settings?.includedRoutes?.contains { $0.destinationAddress == "0.0.0.0" } == true)
+    }
+
     @Test func bareAddressesGetTheirPrefix() {
         #expect(WireGuardNetworkSettings.withPrefixLength("10.0.0.2") == "10.0.0.2/32")
         #expect(WireGuardNetworkSettings.withPrefixLength("fd00::2") == "fd00::2/128")

@@ -233,6 +233,10 @@ nonisolated enum ConfigFieldNaming {
             "allowedIPs": "wg.allowed-ips",
             "persistentKeepalive": "wg.keepalive",
             "fwMark": "wg.fwmark",
+            // Named after what the user is deciding, and after OpenVPN's id for the
+            // same decision (`openvpn.local-lan`) — one concept, one id shape, in
+            // every namespace that has it.
+            "allowLocalNetworkAccess": "wg.local-lan",
         ],
         "ts.": [
             "controlURL": "ts.control-url",
@@ -246,12 +250,14 @@ nonisolated enum ConfigFieldNaming {
             "includeDefaultRoute": "px.default-route",
             "includedRoutes": "px.included",
             "excludedRoutes": "px.excluded",
+            "allowLocalNetworkAccess": "px.local-lan",
             "dnsServers": "px.dns",
         ],
         "sshnet.": [
             "pinnedHostKeySHA256": "sshnet.pinned-host-key",
             "includeDefaultRoute": "sshnet.send-all-traffic",
             "includedRoutes": "sshnet.routes",
+            "allowLocalNetworkAccess": "sshnet.local-lan",
             "dnsServers": "sshnet.dns",
             "useFarSideResolver": "sshnet.far-side-dns",
             "keepaliveSeconds": "sshnet.keepalive",

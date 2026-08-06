@@ -299,9 +299,12 @@ nonisolated enum ProxyParticipation: Sendable, Equatable {
     case limited
     /// No proxy of its own (Tailscale, WireGuard, the SSH network tunnel).
     case none
-    /// Engine not built — no kind lands here today; kept so the next
-    /// engine-less kind gets the honest bucket rather than a lie.
-    case unsupported
+
+    // No `.unsupported` bucket: it was "engine not built", nothing returned it, and
+    // the sentence it produced could never be shown. `classify(_:)` below switches
+    // over `VPNKind` exhaustively with no `default` arm, so the compiler already
+    // forces a new kind to pick a bucket — which is what the spare case was standing
+    // in for. Removed in step with `RouteParticipation` and `DNSParticipation`.
 
     /// Does this bucket contribute an intent to the system-proxy arbitration?
     var participates: Bool { self == .provider }

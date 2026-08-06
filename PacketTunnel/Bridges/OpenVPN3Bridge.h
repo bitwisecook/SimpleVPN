@@ -211,6 +211,21 @@ NS_SWIFT_SENDABLE
 /// side), merged into this tunnel's included routes. Same entry shape as above.
 - (void)setIncludedDestinations:(NSArray<NSDictionary<NSString *, id> *> *)dests;
 
+/// The networks THIS MAC is on, as CIDRs ("192.168.1.0/24", "fe80::/10"), for
+/// "Allow local network access" (`allowLocalLanAccess`). Set BEFORE connect.
+///
+/// This is openvpn3's own carve-out and openvpn3 asks the tun builder for the list:
+/// `TunProp::configure_builder` calls `tun_builder_get_local_networks` and turns
+/// each answer into a `net_gateway` route when — and only when —
+/// `Config::allowLocalLanAccess` is set (see
+/// Vendor/openvpn3-include/openvpn/tun/client/tunprop.hpp). The base class returns
+/// an empty vector, so a builder that does not answer makes the whole setting a
+/// silent no-op: the toggle, its manual page and the Doctor's "can't reach local
+/// devices" fix all did nothing. The list is computed in the APP
+/// (`Shared/LocalNetworkCarveOut.swift`) and carried in `startTunnel(options:)`,
+/// already gated by MDM policy — this bridge only hands back what it was given.
+@property (copy) NSArray<NSString *> *localNetworks;
+
 @end
 
 NS_ASSUME_NONNULL_END

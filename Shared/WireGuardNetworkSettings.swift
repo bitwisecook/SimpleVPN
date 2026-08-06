@@ -91,15 +91,28 @@ nonisolated enum WireGuardNetworkSettings {
         }
 
         // DNS. wg-quick semantics: a DNS= line makes those servers the
-        // resolver for everything (matchDomains "" is NE's catch-all). Same
-        // demotion rule as the proxy tunnel: only a mediator-demoted tunnel
-        // drops the catch-all, so a non-owner that lost the gateway
-        // arbitration can't hijack every lookup — the /32 routes above still
-        // keep its resolvers reachable for its own networks.
-        if !config.dns.isEmpty, !suppressDefaultRoute {
-            let dns = NEDNSSettings(servers: config.dns)
-            dns.matchDomains = [""]
-            s.dnsSettings = dns
+        // resolver for everything (matchDomains "" is NE's catch-all).
+        //
+        // SEARCH DOMAINS. `wg-quick` has no field for a search list, which is why
+        // this kind used to set none at all — and a tunnel with no search list
+        // resolves `nas.corp.example` and not `nas`, the single most likely "DNS is
+        // broken" report on it (Docs/Networking.md §4.4). SimpleVPN carries its own
+        // list in the saved config; empty stays empty, so nothing is invented.
+        //
+        // Demotion follows the same rule as OpenVPN/OpenConnect now that there is a
+        // list to scope to: a tunnel that lost the gateway arbitration keeps its
+        // resolvers for ITS OWN domains instead of claiming every lookup, and with no
+        // search domains there is nothing safe to scope to — so it asserts no DNS at
+        // all rather than narrowing to a guess. The /32 routes above keep those
+        // resolvers reachable either way.
+        if !config.dns.isEmpty {
+            let search = DNSSearchDomains.normalized(config.searchDomains)
+            if !suppressDefaultRoute || !search.isEmpty {
+                let dns = NEDNSSettings(servers: config.dns)
+                if !search.isEmpty { dns.searchDomains = search }
+                dns.matchDomains = suppressDefaultRoute ? search : [""]
+                s.dnsSettings = dns
+            }
         }
 
         // System proxy: the app-arbitrated decision. WireGuard pushes no proxy

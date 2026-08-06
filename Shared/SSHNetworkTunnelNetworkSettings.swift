@@ -112,11 +112,22 @@ nonisolated enum SSHNetworkTunnelNetworkSettings {
         // the resolver with matchDomains [""] (catch everything), except on a
         // mediator-DEMOTED tunnel, which must not hijack every lookup after losing
         // the gateway arbitration.
+        //
+        // SEARCH DOMAINS: SSH has no push channel, so this kind used to set none —
+        // and a tunnel with no search list resolves `nas.corp.example` but not `nas`
+        // (Docs/Networking.md §4.4), which is precisely the internal-name case this
+        // kind exists for. The user's own list is carried in the config; empty stays
+        // empty. A DEMOTED tunnel with a list scopes its resolvers to it rather than
+        // dropping DNS outright; with none, there is nothing safe to scope to.
         let dnsList = resolvers(for: config)
-        if !dnsList.isEmpty, !suppressDefaultRoute {
-            let dns = NEDNSSettings(servers: dnsList)
-            dns.matchDomains = [""]
-            s.dnsSettings = dns
+        if !dnsList.isEmpty {
+            let search = DNSSearchDomains.normalized(config.searchDomains)
+            if !suppressDefaultRoute || !search.isEmpty {
+                let dns = NEDNSSettings(servers: dnsList)
+                if !search.isEmpty { dns.searchDomains = search }
+                dns.matchDomains = suppressDefaultRoute ? search : [""]
+                s.dnsSettings = dns
+            }
         }
 
         if let proxySettings { s.proxySettings = proxySettings }

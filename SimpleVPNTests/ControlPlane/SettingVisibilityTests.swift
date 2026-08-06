@@ -234,6 +234,21 @@ struct SettingRenderingTests {
         return out
     }
 
+    /// Settings that are declared, documented and addressable but have NO row yet.
+    /// THE LIST IS THE POINT — the same device as `ConfigFormatTests.idsWithNoDescriptor`:
+    /// being on it is a deliberate act that shows up in a diff, not a silent exemption.
+    ///
+    /// Both entries are the WireGuard halves of two carve-outs that landed for every
+    /// other packet-tunnel kind at once: the local-network carve-out (which
+    /// `wg-quick` has no concept of) and the search list (which its `DNS=` line cannot
+    /// carry). Config field, plumbing, manual page, portability id and CLI/MDM name
+    /// are all in place; the two `EngineSettingRow`s belong in `WireGuardView`'s
+    /// Traffic section, which was owned by another change in flight when these
+    /// shipped. Delete both lines with those rows.
+    static let unrenderedByDesign: Set<String> = [
+        "wg.local-lan", "wg.search-domains",
+    ]
+
     /// EVERY id on EVERY registered surface must be referenced by a view. The
     /// reverse of `ManualAnchorParityTests`: that one proves a spec is documented,
     /// this one proves it is on a screen.
@@ -256,8 +271,14 @@ struct SettingRenderingTests {
                 }
             }
         }
-        #expect(unrendered.isEmpty,
-                "declared but never rendered — searchable, documented, and on no screen: \(unrendered.sorted().joined(separator: ", "))")
+        let unexpected = Set(unrendered).subtracting(Self.unrenderedByDesign)
+        #expect(unexpected.isEmpty,
+                "declared but never rendered — searchable, documented, and on no screen: \(unexpected.sorted().joined(separator: ", "))")
+        // …and the list stays honest in the other direction: an entry whose row HAS
+        // landed must come off it, or it hides the next real gap.
+        let stale = Self.unrenderedByDesign.subtracting(unrendered)
+        #expect(stale.isEmpty,
+                "these now have rows — remove them from unrenderedByDesign: \(stale.sorted().joined(separator: ", "))")
     }
 
     /// The app-level surface's settings are generated per vendor and per declared

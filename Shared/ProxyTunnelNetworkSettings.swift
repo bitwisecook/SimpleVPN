@@ -113,10 +113,22 @@ nonisolated enum ProxyTunnelNetworkSettings {
         // (suppressDefaultRoute) drops the catch-all, so a non-owner that lost the
         // gateway arbitration can't hijack every lookup — its included routes still
         // carry their own traffic.
-        if !config.dnsServers.isEmpty, !suppressDefaultRoute {
-            let dns = NEDNSSettings(servers: config.dnsServers)
-            dns.matchDomains = [""]
-            s.dnsSettings = dns
+        //
+        // SEARCH DOMAINS: a proxy pushes nothing, so this kind used to set none —
+        // and a tunnel with no search list resolves `wiki.corp.example` but not
+        // `wiki` (Docs/Networking.md §4.4). The user's own list is carried in the
+        // config; empty stays empty. A DEMOTED tunnel with a list scopes its
+        // resolvers to it (the OpenVPN/OpenConnect rule) instead of dropping DNS
+        // outright; with no list there is nothing safe to scope to, so it still
+        // asserts nothing rather than narrowing to a guess.
+        if !config.dnsServers.isEmpty {
+            let search = DNSSearchDomains.normalized(config.searchDomains)
+            if !suppressDefaultRoute || !search.isEmpty {
+                let dns = NEDNSSettings(servers: config.dnsServers)
+                if !search.isEmpty { dns.searchDomains = search }
+                dns.matchDomains = suppressDefaultRoute ? search : [""]
+                s.dnsSettings = dns
+            }
         }
 
         // System proxy: the app-arbitrated decision (owner egress only). A proxy tunnel

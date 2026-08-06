@@ -127,10 +127,24 @@ nonisolated struct SSHNetworkTunnelConfig: Codable, Sendable, Equatable {
     /// extra carve-outs the user wants direct.
     var excludedRoutes: [String] = []
 
+    /// Keep this Mac's own network reachable while the tunnel is up: the networks
+    /// its interfaces are on, plus link-local and multicast, become excluded routes.
+    /// OFF by default because ON means traffic leaves the tunnel — see
+    /// `Shared/LocalNetworkCarveOut.swift` for exactly which prefixes and why they
+    /// are computed rather than guessed.
+    var allowLocalNetworkAccess: Bool = false
+
     /// DNS servers to advertise on the utun. Each query is carried as
     /// DNS-over-TCP through the session to the resolver the guest addressed.
     /// Empty ⇒ leave the Mac's own resolvers alone (and see `dnsWarning`).
     var dnsServers: [String] = []
+    /// Domains to append to a SHORT name before looking it up ("nas" → "nas.corp
+    /// .example"). Without at least one, only fully-qualified names resolve over
+    /// this tunnel — the failure `Docs/Networking.md` §4.4 names as the most likely
+    /// "DNS is broken" report on the kinds whose config format has no field for it.
+    /// SSH has no push channel, so there is nothing to learn them from: they are the
+    /// user's to state.
+    var searchDomains: [String] = []
     /// Resolve names AT THE SERVER: advertise the sentinel address below and
     /// forward every query addressed to it to `farSideResolver` as the SSH server
     /// sees it. This is the shape SSH is uniquely good at and a SOCKS proxy
@@ -191,7 +205,10 @@ nonisolated struct SSHNetworkTunnelConfig: Codable, Sendable, Equatable {
         includeDefaultRoute = (try? c.decodeIfPresent(Bool.self, forKey: .includeDefaultRoute)) ?? true
         includedRoutes = (try? c.decodeIfPresent([String].self, forKey: .includedRoutes)) ?? []
         excludedRoutes = (try? c.decodeIfPresent([String].self, forKey: .excludedRoutes)) ?? []
+        allowLocalNetworkAccess =
+            (try? c.decodeIfPresent(Bool.self, forKey: .allowLocalNetworkAccess)) ?? false
         dnsServers = (try? c.decodeIfPresent([String].self, forKey: .dnsServers)) ?? []
+        searchDomains = (try? c.decodeIfPresent([String].self, forKey: .searchDomains)) ?? []
         useFarSideResolver = (try? c.decodeIfPresent(Bool.self, forKey: .useFarSideResolver)) ?? false
         farSideResolver = (try? c.decodeIfPresent(String.self, forKey: .farSideResolver))
             ?? Self.defaultFarSideResolver
@@ -252,6 +269,7 @@ extension SSHNetworkTunnelConfig {
         n.includedRoutes = cleanList(includedRoutes)
         n.excludedRoutes = cleanList(excludedRoutes)
         n.dnsServers = cleanList(dnsServers)
+        n.searchDomains = DNSSearchDomains.normalized(searchDomains)
         if n.port != 0, !Self.portRange.contains(n.port) { n.port = 0 }
         if !Self.mtuRange.contains(n.mtu) { n.mtu = SSHNetworkTunnelStartConfig.defaultMTU }
         if !Self.keepaliveRange.contains(n.keepaliveSeconds) { n.keepaliveSeconds = 30 }
@@ -431,6 +449,7 @@ extension SSHNetworkTunnelConfig {
         if let p = Self.routesProblem(includedRoutes) { return p }
         if let p = Self.routesProblem(excludedRoutes) { return p }
         if let p = Self.dnsServersProblem(dnsServers) { return p }
+        if let p = DNSSearchDomains.problem(list: searchDomains) { return p }
         if useFarSideResolver, let p = Self.farSideResolverProblem(farSideResolver) { return p }
         return nil
     }

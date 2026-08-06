@@ -112,6 +112,25 @@ public:
     bool tun_builder_exclude_route(const std::string &address, int prefix, int, bool ipv6) override {
         [bridge() tunExcludeRoute:@(address.c_str()) prefix:prefix ipv6:ipv6]; return true;
     }
+    // "Allow local network access" (Config::allowLocalLanAccess). openvpn3 asks the
+    // BUILDER which networks are local and turns each answer into a `net_gateway`
+    // route itself (TunProp::configure_builder → tunprop.hpp). The base class returns
+    // an empty vector, and this override was missing — so the whole setting was a
+    // silent no-op. The list is decided in the app and handed over in the session
+    // (already policy-gated); the engine still decides whether to ASK, so an
+    // allowLocalLanAccess=false profile carves nothing out even with a list here.
+    std::vector<std::string> tun_builder_get_local_networks(bool ipv6) override {
+        std::vector<std::string> out;
+        for (NSString *cidr in [bridge() localNetworks]) {
+            if (cidr.length == 0) continue;
+            // The engine wants the two families separately; ours are mixed. A colon
+            // is the only thing that distinguishes them in a CIDR.
+            const bool entryIsIPv6 = [cidr rangeOfString:@":"].location != NSNotFound;
+            if (entryIsIPv6 != ipv6) continue;
+            out.emplace_back(cidr.UTF8String);
+        }
+        return out;
+    }
     bool tun_builder_set_dns_options(const DnsOptions &dns) override {
         for (const auto &kv : dns.servers)
             for (const auto &addr : kv.second.addresses)

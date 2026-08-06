@@ -167,6 +167,18 @@ extension VPNController {
         if !secrets.presharedKey.isEmpty {
             options["wgPresharedKey"] = secrets.presharedKey as NSString
         }
+        // Org policy travels with EVERY session, not just OpenVPN's: the extension
+        // gates the divert plan and the local-network carve-out on these, and this
+        // path passed neither — so a WireGuard profile's `.outside` diverts escaped
+        // ForceKeepInsideVPN and DisableDivertRules entirely.
+        if ManagedPolicy.forceKeepInsideVPN { options["policyKeepInside"] = true as NSNumber }
+        if ManagedPolicy.disableDivertRules { options["policyNoDiverts"] = true as NSNumber }
+        // "Allow local network access": the networks this Mac is on right now, computed
+        // in the app (unsandboxed) and gated again in the extension.
+        if config.allowLocalNetworkAccess {
+            let local = LocalNetworkCarveOut.live()
+            if !local.isEmpty { options[LocalNetworkCarveOut.optionKey] = local as NSArray }
+        }
         // Establish-time default-gateway ownership, same as OpenVPN (RC3).
         options["gatewayOwned"] = predictedGatewayOwned(id) as NSNumber
 

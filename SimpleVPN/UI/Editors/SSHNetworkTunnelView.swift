@@ -34,6 +34,7 @@ struct SSHNetworkTunnelView: View {
     @State private var includedText = ""
     @State private var excludedText = ""
     @State private var dnsText = ""
+    @State private var searchDomainsText = ""
     @State private var loaded = false
     @State private var saving = false
     @State private var savedTick = false
@@ -157,11 +158,28 @@ struct SSHNetworkTunnelView: View {
                 if let p = excludedProblem { fieldProblem(p) }
                 if let w = overlapWarning { SettingCaveat(w) }
 
+                EngineSettingRow(spec: Self.specs["sshnet.local-lan"],
+                                 value: draft.allowLocalNetworkAccess) {
+                    Toggle(isOn: $draft.allowLocalNetworkAccess) {
+                        EngineSettingLabel(spec: Self.specs["sshnet.local-lan"],
+                                           value: draft.allowLocalNetworkAccess)
+                    }
+                }
+                // ON means traffic leaves the tunnel, so the row says what leaves
+                // rather than describing the mechanism.
+                if draft.allowLocalNetworkAccess { SettingCaveat(Self.localNetworkCaveat) }
+
                 EngineSettingRow(spec: Self.specs["sshnet.dns"], value: dnsText) {
                     labeledField(Self.specs["sshnet.dns"], $dnsText, prompt: "1.1.1.1, 8.8.8.8",
                                  problem: dnsProblem)
                 }
                 if let p = dnsProblem { fieldProblem(p) }
+
+                EngineSettingRow(spec: Self.specs["sshnet.search-domains"], value: searchDomainsText) {
+                    labeledField(Self.specs["sshnet.search-domains"], $searchDomainsText,
+                                 prompt: "corp.example, example.com", problem: searchDomainsProblem)
+                }
+                if let p = searchDomainsProblem { fieldProblem(p) }
 
                 EngineSettingRow(spec: Self.specs["sshnet.far-side-dns"],
                                  value: draft.useFarSideResolver) {
@@ -376,6 +394,15 @@ struct SSHNetworkTunnelView: View {
         let list = ProxyTunnelConfig.splitRoutes(dnsText)
         return list.isEmpty ? nil : SSHNetworkTunnelConfig.dnsServersProblem(list)
     }
+    private var searchDomainsProblem: String? {
+        DNSSearchDomains.problem(list: ProxyTunnelConfig.splitRoutes(searchDomainsText))
+    }
+    /// What ON actually does, in the one sentence that matters: the consequence,
+    /// not the mechanism (ONTOLOGY.md, "Writing help text").
+    private static let localNetworkCaveat =
+        "Traffic to the network you're on \u{2014} and to the addresses devices use to find each other "
+        + "\u{2014} leaves your Mac outside the tunnel, where anyone on that network can see it. "
+        + "Everything else still goes through the tunnel."
     private var farSideProblem: String? {
         draft.useFarSideResolver
             ? SSHNetworkTunnelConfig.farSideResolverProblem(draft.farSideResolver) : nil
@@ -416,6 +443,7 @@ struct SSHNetworkTunnelView: View {
         if let p = includedProblem { return p }
         if let p = excludedProblem { return p }
         if let p = dnsProblem { return p }
+        if let p = searchDomainsProblem { return p }
         if let p = farSideProblem { return p }
         if let p = pinProblem { return p }
         return nil
@@ -434,6 +462,7 @@ struct SSHNetworkTunnelView: View {
         includedText = draft.includedRoutes.joined(separator: ", ")
         excludedText = draft.excludedRoutes.joined(separator: ", ")
         dnsText = draft.dnsServers.joined(separator: ", ")
+        searchDomainsText = draft.searchDomains.joined(separator: ", ")
         status = vpn.sshNetworkTunnelStatuses[profileID]
         customRouting = vpn.customRouting(for: profileID)
         (crProxyAuthUsername, crProxyAuthPassword) = loadCustomRoutingProxyAuthFields(profileID: profileID)
@@ -468,6 +497,7 @@ struct SSHNetworkTunnelView: View {
         draft.includedRoutes = ProxyTunnelConfig.splitRoutes(includedText)
         draft.excludedRoutes = ProxyTunnelConfig.splitRoutes(excludedText)
         draft.dnsServers = ProxyTunnelConfig.splitRoutes(dnsText)
+        draft.searchDomains = ProxyTunnelConfig.splitRoutes(searchDomainsText)
         // normalized() on every save path (the OpenVPNOverrides rule).
         draft = draft.normalized()
         do {

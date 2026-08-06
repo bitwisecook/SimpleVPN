@@ -30,6 +30,21 @@ nonisolated struct WireGuardConfig: Codable, Sendable, Equatable, Identifiable {
     var privateKey = ""
     var addresses: [String] = []     // e.g. "10.0.0.2/32"
     var dns: [String] = []
+    /// Domains to append to a SHORT name before looking it up ("nas" →
+    /// "nas.corp.example"). `wg-quick` has no field for a search list — its `DNS=`
+    /// line carries resolvers only — so without this a short internal name never
+    /// resolves over a WireGuard tunnel while its FQDN does (Docs/Networking.md
+    /// §4.4). SimpleVPN's own key in the saved config; nothing is written to an
+    /// exported `.conf`, because there is no wg-quick key to write it to.
+    var searchDomains: [String] = []
+    /// Keep this Mac's own network reachable while the tunnel is up: the networks
+    /// its interfaces are on, plus link-local and multicast, become excluded routes.
+    /// OFF by default because ON means traffic leaves the tunnel — see
+    /// `Shared/LocalNetworkCarveOut.swift` for exactly which prefixes and why they
+    /// are computed rather than guessed. (`wg-quick` has no equivalent either; the
+    /// peer's cryptokey routing still permits these destinations, only this host's
+    /// routing table stops handing them to the tunnel.)
+    var allowLocalNetworkAccess: Bool = false
     var mtu: Int? = nil
     var listenPort: Int? = nil
     var fwMark: String = ""          // FwMark (hex/int) — mark on outgoing packets
@@ -46,6 +61,47 @@ nonisolated struct WireGuardConfig: Codable, Sendable, Equatable, Identifiable {
     var rawExtraPeers: [String] = []
 
     var isFullTunnel: Bool { allowedIPs.contains { $0 == "0.0.0.0/0" || $0 == "::/0" } }
+
+    init() {}
+
+    /// A fresh config under a given name — the shape `parse` builds. Spelled out
+    /// because declaring the decoder below suppresses the memberwise initializer.
+    init(name: String) { self.name = name }
+
+    // LENIENT DECODING, and it is not a nicety. The synthesized `init(from:)` does
+    // NOT fall back to a property's default value: a stored blob written before a
+    // field existed fails with `keyNotFound`, and `decode(from:)` below turns that
+    // into a BRAND-NEW EMPTY CONFIG — a WireGuard VPN silently losing its addresses,
+    // peer key and endpoint the first time a newer app (or extension) reads it.
+    // Every other config type in Shared already spells this out
+    // (`ProxyTunnelConfig`, `SSHNetworkTunnelConfig`, `TailscaleConfig`,
+    // `OpenVPNOverrides`); this one was the exception, and adding a field to it was a
+    // latent data-loss bug waiting for the next release.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decodeIfPresent(String.self, forKey: .id)) ?? UUID().uuidString
+        name = (try? c.decodeIfPresent(String.self, forKey: .name)) ?? "New WireGuard"
+        privateKey = (try? c.decodeIfPresent(String.self, forKey: .privateKey)) ?? ""
+        addresses = (try? c.decodeIfPresent([String].self, forKey: .addresses)) ?? []
+        dns = (try? c.decodeIfPresent([String].self, forKey: .dns)) ?? []
+        searchDomains = (try? c.decodeIfPresent([String].self, forKey: .searchDomains)) ?? []
+        allowLocalNetworkAccess =
+            (try? c.decodeIfPresent(Bool.self, forKey: .allowLocalNetworkAccess)) ?? false
+        mtu = try? c.decodeIfPresent(Int.self, forKey: .mtu)
+        listenPort = try? c.decodeIfPresent(Int.self, forKey: .listenPort)
+        fwMark = (try? c.decodeIfPresent(String.self, forKey: .fwMark)) ?? ""
+        table = (try? c.decodeIfPresent(String.self, forKey: .table)) ?? ""
+        peerPublicKey = (try? c.decodeIfPresent(String.self, forKey: .peerPublicKey)) ?? ""
+        presharedKey = (try? c.decodeIfPresent(String.self, forKey: .presharedKey)) ?? ""
+        endpoint = (try? c.decodeIfPresent(String.self, forKey: .endpoint)) ?? ""
+        // A stored config with no allowed IPs at all carries nothing; the type's own
+        // default (a full tunnel) is the honest reading of "absent", and it is what
+        // every wg-quick file that omits the key means.
+        allowedIPs = (try? c.decodeIfPresent([String].self, forKey: .allowedIPs))
+            ?? ["0.0.0.0/0", "::/0"]
+        persistentKeepalive = try? c.decodeIfPresent(Int.self, forKey: .persistentKeepalive)
+        rawExtraPeers = (try? c.decodeIfPresent([String].self, forKey: .rawExtraPeers)) ?? []
+    }
 }
 
 extension WireGuardConfig {
@@ -158,12 +214,20 @@ extension WireGuardConfig {
     ///
     /// `name` is the imported file's name when there is one (a file import), nil
     /// when the text came from the paste sheet and the VPN keeps the name it has.
+    ///
+    /// The same reasoning covers the two settings that are OURS and have no wg-quick
+    /// key at all — the search list and the local-network carve-out. A `.conf` cannot
+    /// express either, so a file can never be an instruction to change them, and
+    /// taking the imported (default) value would silently turn the carve-out off and
+    /// throw the search list away on any re-import.
     func applyingImport(_ imported: WireGuardConfig, name: String?) -> WireGuardConfig {
         var next = imported
         next.id = id                                    // identity is never imported
         next.name = name ?? self.name
         if next.privateKey.isEmpty { next.privateKey = privateKey }
         if next.presharedKey.isEmpty { next.presharedKey = presharedKey }
+        next.searchDomains = searchDomains
+        next.allowLocalNetworkAccess = allowLocalNetworkAccess
         return next
     }
 
@@ -488,6 +552,7 @@ nonisolated extension WireGuardConfig {
         n.addresses = cleanList(addresses)
         n.allowedIPs = cleanList(allowedIPs)
         n.dns = cleanList(dns)
+        n.searchDomains = DNSSearchDomains.normalized(searchDomains)
         if let v = n.mtu, !Self.mtuRange.contains(v) { n.mtu = nil }
         if let v = n.listenPort, !Self.listenPortRange.contains(v) { n.listenPort = nil }
         if let v = n.persistentKeepalive, !Self.keepaliveRange.contains(v) { n.persistentKeepalive = nil }
@@ -711,6 +776,7 @@ nonisolated extension WireGuardConfig {
             return "Add at least one allowed network (0.0.0.0/0, ::/0 sends everything)."
         }
         if let p = Self.routesProblem(allowedIPs) { return p }
+        if let p = DNSSearchDomains.problem(list: searchDomains) { return p }
         // Only when one is actually present in this (usually redacted) copy —
         // the connect flow validates what the user typed separately.
         if let p = Self.keyProblem(presharedKey) { return p }
