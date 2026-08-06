@@ -8,8 +8,33 @@
 //  direct-tcpip channel:
 //    • SOCKS proxy (-D)   — a SOCKS5 server on socksPort
 //    • port-forward (-L)  — a fixed local→remote mapping
-//  The net-tunnel (-w) mode is NOT served here — it still runs through /usr/bin/ssh
-//  (`SubprocessTunnelManager`, `-o Tunnel=point-to-point -w any:any`). The bridge's
+//  TWO ENTRY POINTS, one per SSH mode, and they differ only in which listeners get
+//  opened after the session is up: `startSOCKS` (mode `.socks`) and
+//  `startPortForwards` (mode `.portForward`). Port-forward mode used to shell out
+//  to /usr/bin/ssh purely because nothing here called `addForward` at CONNECT time
+//  — the live add/remove path had done it for months. That gap is closed, so an
+//  ordinary -L/-D profile needs no external ssh at all.
+//
+//  WHAT IS NOT SUPPORTED IN-PROCESS. Each one is REFUSED BY NAME rather than quietly
+//  downgraded — a forward reported active over a port that was never bound is the
+//  worst outcome available here. `SubprocessTunnelManager.willRunInProcessSSH` is the
+//  one place that decides, and it routes these to /usr/bin/ssh, which does carry
+//  them:
+//    • reverse forwards (-R) — NOT SUPPORTED YET. The server listens and opens
+//      channels back to us, which needs `ssh_channel_listen_forward` /
+//      `ssh_channel_open_forward_port` in SSHBridge (the vendored library exports
+//      both) plus an accept poll on the session queue. The bridge has neither, so
+//      `addForward` refuses "R" with `reverseForwardUnsupported`.
+//    • a jump host — NOT SUPPORTED YET. Needs a NESTED session: authenticate to the
+//      bastion, open a direct-tcpip channel to the target, then hand that channel's
+//      fd to a second session via SSH_OPTIONS_FD.
+//    • raw `ssh.extra-options` — no in-process equivalent BY CONSTRUCTION, not
+//      unfinished work: the same reasoning as OpenConnect's `extraArgs`. They can
+//      rewrite the DATA path (`ProxyCommand`, `Ciphers`, `Tunnel`), so honouring a
+//      "known subset" would silently ignore the rest.
+//  The net-tunnel (-w) mode is NOT served here either — it still runs through
+//  /usr/bin/ssh (`SubprocessTunnelManager`, `-o Tunnel=point-to-point -w any:any`)
+//  and needs root for its utun, which this build does not take. The bridge's
 //  tun@openssh.com channel (`openTunChannelMode:`) is built but has no caller yet;
 //  the SSH Network Tunnel kind uses per-flow direct-tcpip instead (see
 //  PacketTunnel/Engines/SSHNetworkTunnelEngine.swift), which needs no server-side
@@ -131,6 +156,55 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
     /// session is up (or throws). Channels are opened lazily per connection.
     func startSOCKS(_ config: Config) async throws {
         publish(.connecting)
+        try await establishSession(config)
+        do {
+            try await startListener(port: config.socksPort)
+        } catch {
+            // Publish the real reason (typically EADDRINUSE) and rethrow so the
+            // caller can fall back — never report Connected over a dead listener.
+            publish(.failed("SOCKS listener failed: \(error.localizedDescription)"))
+            throw error
+        }
+        if stopped { throw CancellationError() }   // stop() during listener startup
+        publish(.connected)
+    }
+
+    /// Establish the SSH session and open every forward the profile asks for —
+    /// the port-forward mode's entry point, the twin of `startSOCKS`. `forwards`
+    /// is already parsed (`SubprocessTunnelManager.parseForward`), so the flag is
+    /// one of L/D/R and the spec is plausible.
+    ///
+    /// ALL-OR-NOTHING, deliberately: this mirrors `ssh -o ExitOnForwardFailure=yes`,
+    /// which is what the subprocess path has always been built with. A tunnel
+    /// reporting Connected while one of the ports it was asked for never bound is
+    /// the silent-failure case this engine exists to avoid, so the first refusal
+    /// tears the whole connect down and NAMES the forward that did it — the user
+    /// otherwise has five rows and no idea which port is taken. (Forwards added
+    /// LATER, while connected, are per-row instead: see `addForward`, whose
+    /// failures land in that row's badge and leave the session up.)
+    func startPortForwards(_ config: Config,
+                           forwards: [(flag: String, spec: String)]) async throws {
+        publish(.connecting)
+        try await establishSession(config)
+        for fw in forwards {
+            do {
+                try await addForward(flag: fw.flag, spec: fw.spec)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                let reason = "Forward “\(fw.flag) \(fw.spec)” couldn't start: \(error.localizedDescription)"
+                publish(.failed(reason))
+                throw SSHForwardError(reason)
+            }
+        }
+        if stopped { throw CancellationError() }   // stop() during listener startup
+        publish(.connected)
+    }
+
+    /// Handshake, host-key verification, sign-in, then the switch to non-blocking
+    /// data mode and the keepalive timer — everything both entry points need
+    /// before they differ, which is only in WHICH listeners they then open.
+    private func establishSession(_ config: Config) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             ssh.async {
                 let s = SSHSession()
@@ -169,16 +243,6 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
             ssh.async { self.session?.disconnect(); self.session = nil }
             throw CancellationError()
         }
-        do {
-            try await startListener(port: config.socksPort)
-        } catch {
-            // Publish the real reason (typically EADDRINUSE) and rethrow so the
-            // caller can fall back — never report Connected over a dead listener.
-            publish(.failed("SOCKS listener failed: \(error.localizedDescription)"))
-            throw error
-        }
-        if stopped { throw CancellationError() }   // stop() during listener startup
-        publish(.connected)
     }
 
     /// One sign-in attempt, in the order it will be made.
@@ -366,9 +430,7 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
 
     /// Add a forward to the running session. "D" opens another SOCKS listener,
     /// "L" a fixed local→remote listener; both reuse the direct-tcpip pump.
-    /// "R" would need a `ssh_channel_listen_forward` accept loop the data
-    /// pump doesn't run — refused honestly so the caller can say "reconnect
-    /// required" (the subprocess path supports it live).
+    /// "R" is NOT SUPPORTED in-process and is refused by name — see the header.
     func addForward(flag: String, spec: String) async throws {
         let key = "\(flag) \(spec)"
         switch flag {
@@ -386,10 +448,26 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
             try await startForwardListener(key: key, port: localPort) { [weak self] conn in
                 self?.handleLocalForward(conn, host: host, port: remotePort)
             }
+        case "R":
+            // NOT SUPPORTED YET, and refused rather than dropped. A reverse forward
+            // is the one direction where the SERVER listens and opens channels back
+            // to us, which needs `ssh_channel_listen_forward` /
+            // `ssh_channel_open_forward_port` in SSHBridge plus an accept poll on the
+            // session queue. None of that exists, so there is nothing to fall back
+            // to — a forward reported as active while the port was never bound is the
+            // silent failure this refusal exists to prevent.
+            throw SSHForwardError(Self.reverseForwardUnsupported)
         default:
-            throw SSHForwardError("Reverse forwards (-R) need a reconnect on the in-process engine.")
+            throw SSHForwardError("“\(flag)” isn't a forward the built-in SSH engine knows — use L or D.")
         }
     }
+
+    /// Why a reverse forward can't be served, in the shape `-w`'s refusal uses: name
+    /// what is unsupported and what to do instead, and promise nothing. Shared with
+    /// `SubprocessTunnelManager` so the connect gate, the editor and this engine all
+    /// say the same sentence.
+    nonisolated static let reverseForwardUnsupported =
+        "Reverse forwards (-R) aren’t supported yet — the built-in SSH engine can’t ask the server to listen. Use a local (L) or dynamic (D) forward instead, or remove the reverse forward."
 
     /// Tear down a live forward added with `addForward`. Keyed by the same
     /// normalized "FLAG spec" line.

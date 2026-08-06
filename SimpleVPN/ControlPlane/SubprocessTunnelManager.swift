@@ -130,7 +130,18 @@ final class SubprocessTunnelManager {
             live[config.id] = Live(status: .failed(reason))
             return
         }
-        if config.kind == .ssh, config.sshMode == .socks, Self.inProcessSSHSupports(config) {
+        // A forward line neither path can honour. Checked HERE, before the dispatch,
+        // because both paths need it now: it used to live in `connectSubprocess`,
+        // which was the only place a port-forward tunnel could go. The in-process
+        // engine is handed already-parsed specs, so an unparseable line would
+        // otherwise be silently dropped rather than reported.
+        if config.kind == .ssh, config.sshMode == .portForward,
+           let bad = Self.invalidForwardLine(config.forwards) {
+            live[config.id] = Live(status: .failed(
+                "Invalid forward “\(bad)” — use “L localPort:host:port”, “R remotePort:host:port” or “D port”."))
+            return
+        }
+        if Self.willRunInProcessSSH(config) {
             connectInProcessSSH(config, password: password)
             return
         }
@@ -546,7 +557,7 @@ final class SubprocessTunnelManager {
         connectSubprocess(config, password: nil, command: Self.cookieCommand(for: config, auth: auth))
     }
 
-    /// The in-process libssh engine speaks plain host + auth + SOCKS only. Any
+    /// The in-process libssh engine speaks plain host + auth + local listeners. Any
     /// knob it can't express must route to /usr/bin/ssh instead — silently
     /// dropping a jump host would dial the target directly and bypass the
     /// bastion, and raw ssh_config options would just be ignored.
@@ -554,10 +565,64 @@ final class SubprocessTunnelManager {
     /// in-process since the libssh migration; keepalive and compression now do
     /// too — `SSHTunnelEngine.Config.keepaliveInterval` / `.compression` — so
     /// neither forces the subprocess any more.)
+    ///
+    /// TWO CLAUSES, and they are different in kind. A **jump host** is missing work
+    /// with a known shape: a nested session (authenticate to the bastion, open a
+    /// direct-tcpip channel to the target, hand that channel's fd to a second
+    /// session through `SSH_OPTIONS_FD`). **`sshExtraOptions`** is not missing work
+    /// at all — arbitrary ssh_config keywords have no in-process equivalent by
+    /// construction, exactly as `extraArgs` has none for OpenConnect: honouring "a
+    /// known subset" would mean silently ignoring the rest, which is the one thing
+    /// this predicate exists to prevent. Both of them can change the DATA path (a
+    /// bastion is where the bytes go; `ProxyCommand`, `Tunnel`, `Ciphers` rewrite
+    /// how they get there), which is why neither may be waved through.
+    ///
+    /// Mode is deliberately NOT considered here — see `willRunInProcessSSH`, which
+    /// composes this with the per-mode question and is what callers should ask.
     static func inProcessSSHSupports(_ c: SubprocessTunnelConfig) -> Bool {
         if c.useJumpHost, !c.jumpHost.isEmpty { return false }
         if c.sshExtraOptions.contains(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) { return false }
         return true
+    }
+
+    /// Whether an SSH tunnel will ACTUALLY be carried by the in-process libssh
+    /// engine — the single rule `connect` dispatches on and `sshPinBlockReason`
+    /// refuses by, in the shape `willRunInProcess` established for the SSL kinds.
+    /// One predicate, because two spellings of "will this run in-process?" is how
+    /// the OpenConnect surface came to tell users one thing and do another.
+    ///
+    /// Per mode:
+    ///  • `.socks` — always, since the libssh migration.
+    ///  • `.portForward` — yes for **-L** and **-D**, which are the same direct-tcpip
+    ///    pump the SOCKS path uses and the same code the live add/remove path has run
+    ///    for months. NOT for **-R**, which is not supported in-process yet: a reverse
+    ///    forward has the SERVER listening on our behalf, needing
+    ///    `ssh_channel_listen_forward` / `ssh_channel_open_forward_port` in `SSHBridge`
+    ///    plus an accept poll on the session queue, and the bridge has neither. Such a
+    ///    profile keeps running /usr/bin/ssh, which really does support it — a routing
+    ///    decision, not a silent downgrade.
+    ///  • `.netTunnel` — never. `-w` needs root for its utun and this build does not
+    ///    take that privilege; `ConnectListing` blocks the mode outright.
+    ///
+    /// An UNPARSEABLE forward line answers false so the config reaches the one place
+    /// that refuses it by name (`connect`'s `invalidForwardLine` guard) rather than
+    /// being quietly skipped by an engine that only sees parsed specs.
+    static func willRunInProcessSSH(_ c: SubprocessTunnelConfig) -> Bool {
+        guard c.kind == .ssh else { return false }
+        switch c.sshMode {
+        case .socks:
+            break
+        case .portForward:
+            for line in c.forwards {
+                let t = line.trimmingCharacters(in: .whitespaces)
+                guard !t.isEmpty else { continue }
+                guard let fw = parseForward(t) else { return false }
+                if fw.flag == "R" { return false }
+            }
+        case .netTunnel:
+            return false
+        }
+        return inProcessSSHSupports(c)
     }
 
     /// The tunnel's sign-in method, normalized: "" = automatic.
@@ -608,24 +673,63 @@ final class SubprocessTunnelManager {
     }
 
     /// Why a pinned-host-key config can't connect right now, or nil when it can.
-    /// The pin is only enforceable by the in-process engine (SOCKS mode, no
-    /// jump host / compression / extra options); anything else must be refused
-    /// honestly — the single rule the editor's caveat and connect() both use.
+    /// The single rule the editor's caveat, the connect list and `connect` all use.
+    ///
+    /// THE REASON THIS GATE EXISTS is one fact about the other path, and it is worth
+    /// stating because the gate looks like paranoia otherwise: **/usr/bin/ssh has no
+    /// pin-by-hash option**. There is no `-o FingerprintSHA256=…`; the only trust
+    /// input it takes is a known_hosts file. So a pinned profile that routed to the
+    /// subprocess would connect with the pin UNCHECKED while the editor showed a pin
+    /// — a security control that silently isn't one, which is strictly worse than
+    /// not offering it. (`sshCommonOptions` says the same thing from the other side:
+    /// the pin is deliberately absent from the argv it builds.) The in-process
+    /// engine does check it, in `SSHBridge.verifyHostKeyWithKnownHosts:pin:strict:`,
+    /// before authenticating.
+    ///
+    /// WHICH MAKES THE GATE EXACTLY "will this run in-process?" — nothing more. It
+    /// used to spell that as `sshMode != .socks`, which was true only because
+    /// port-forward mode had no in-process entry point; now that `.portForward`
+    /// runs on the engine for -L/-D, an -L profile with a pin is enforceable and is
+    /// no longer refused. The clause was never about SOCKS, and relaxing it here is
+    /// correct precisely BECAUSE the premise ("the subprocess can't check a pin")
+    /// still holds for everything it still refuses.
     static func sshPinBlockReason(_ c: SubprocessTunnelConfig) -> String? {
         guard c.kind == .ssh, sshPinnedKey(c) != nil else { return nil }
-        if c.sshMode != .socks {
-            return "A pinned host key is only enforced in SOCKS proxy mode (the built-in SSH engine). Switch the mode, or clear the pin under Security."
+        guard !willRunInProcessSSH(c) else { return nil }
+        // Which of the reasons it was, so the message names the setting to change.
+        if c.sshMode == .netTunnel {
+            return "A pinned host key can't be enforced in network tunnel mode — that runs through /usr/bin/ssh, which has no pin-by-hash option. Choose SOCKS proxy or port forwards, or clear the pin under Security."
         }
         if !inProcessSSHSupports(c) {
             return "A pinned host key can't be combined with a jump host or extra options — those run through /usr/bin/ssh, which can't check the pin. Clear the pin under Security, or remove the conflicting option."
         }
-        return nil
+        if c.sshMode == .portForward, invalidForwardLine(c.forwards) != nil {
+            return "A pinned host key can't be enforced while a forward is invalid — fix the forward under Traffic, or clear the pin under Security."
+        }
+        return "A pinned host key can't be combined with a reverse forward (-R) — those aren't supported by the built-in engine yet, so the tunnel runs through /usr/bin/ssh, which has no pin-by-hash option. Remove the reverse forward, or clear the pin under Security."
     }
 
     private func connectInProcessSSH(_ config: SubprocessTunnelConfig, password: String?) {
         let engine = SSHTunnelEngine()
         sshEngines[config.id] = engine
-        live[config.id] = Live(status: .connecting, socksPort: config.socksPort)
+        // WHAT THE TUNNEL OFFERS THE MAC, per mode — and only SOCKS mode offers a
+        // port. `socksPort` is what surfaces the proxy in the UI and what
+        // `setSystemProxyLive` points the system at, so setting it for a
+        // port-forward tunnel would advertise a listener that was never opened.
+        let inSOCKSMode = config.sshMode == .socks
+        // Seed the per-forward states so the editor's row badges show the initial
+        // set as pending until the engine confirms them. This is item 3 of the
+        // in-process port-forward work: the subprocess path derives these by
+        // SCRAPING ssh's output (`onLine`'s readiness marker flips pending→active),
+        // and there is no output to scrape in-process, so the engine's own result
+        // sets them directly below.
+        let forwards: [(flag: String, spec: String)] = inSOCKSMode ? [] :
+            config.forwards.compactMap { Self.parseForward($0.trimmingCharacters(in: .whitespaces)) }
+        var initialForwards: [String: ForwardPhase] = [:]
+        for fw in forwards { initialForwards["\(fw.flag) \(fw.spec)"] = .pending }
+        live[config.id] = Live(status: .connecting,
+                               socksPort: inSOCKSMode ? config.socksPort : nil,
+                               forwardStates: initialForwards)
         let cfg = SSHTunnelEngine.Config(
             host: config.server, port: config.port ?? 22,
             // ssh defaults a blank user to the local account; authenticating as
@@ -647,7 +751,13 @@ final class SubprocessTunnelManager {
             compression: config.compression)
         Task { [weak self] in
             do {
-                try await engine.startSOCKS(cfg)
+                // The ONLY difference between the two modes: which listeners the
+                // engine opens once the session is up.
+                if inSOCKSMode {
+                    try await engine.startSOCKS(cfg)
+                } else {
+                    try await engine.startPortForwards(cfg, forwards: forwards)
+                }
                 guard let self else { return }
                 // If the user disconnected while we were connecting, `disconnect`
                 // already cleared the engine — don't resurrect a .connected status
@@ -655,7 +765,12 @@ final class SubprocessTunnelManager {
                 guard self.sshEngines[config.id] === engine else { engine.stop(); return }
                 var l = self.live[config.id] ?? Live()
                 l.status = .connected
-                if config.setSystemProxy {
+                // `startPortForwards` is all-or-nothing (ssh's
+                // ExitOnForwardFailure=yes), so reaching here means every seeded
+                // row bound. Set them directly — the subprocess path reaches the
+                // same state by scraping a readiness line off stdout.
+                l.forwardStates = l.forwardStates.mapValues { $0 == .pending ? .active : $0 }
+                if inSOCKSMode, config.setSystemProxy {
                     Self.setSystemSOCKS(port: config.socksPort, enabled: true)
                     self.proxiedIDs.insert(config.id)
                 }
@@ -689,12 +804,8 @@ final class SubprocessTunnelManager {
     private func connectSubprocess(_ config: SubprocessTunnelConfig, password: String?,
                                    command: (String, [String], Data?)? = nil) {
         guard tasks[config.id] == nil else { return }
-        if config.kind == .ssh, config.sshMode == .portForward,
-           let bad = Self.invalidForwardLine(config.forwards) {
-            live[config.id] = Live(status: .failed(
-                "Invalid forward “\(bad)” — use “L localPort:host:port”, “R remotePort:host:port” or “D port”."))
-            return
-        }
+        // (An invalid forward line is refused in `connect`, before the dispatch —
+        // both paths need that check now, so it lives in the one place both reach.)
         guard let (path, baseArgs, stdin) = command
                 ?? Self.command(for: config, password: password) else {
             // Name the tool and the fix — "the required command-line tool" sends

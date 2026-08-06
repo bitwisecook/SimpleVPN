@@ -276,7 +276,7 @@ flowchart LR
 | Proxy Tunnel | same | the user's config, on a fixed on-link utun address | `Shared/ProxyTunnelNetworkSettings.swift` |
 | SSH Network Tunnel | same | the user's config, on a fixed on-link utun address | `Shared/SSHNetworkTunnelNetworkSettings.swift` |
 | IKEv2 / IPsec / L2TP | **an OS-owned interface we never see** | macOS, from `NEVPNProtocol*` | — (`NativeVPNManager`) |
-| SSH (`.ssh`) | **no interface at all** | — a local SOCKS port or named forwards | — |
+| SSH (`.ssh`) | **no interface at all** | — a local SOCKS port or named forwards (`-D`/`-L` in-process; `-R`, a jump host or extra options route to `/usr/bin/ssh`) | — |
 | OpenConnect SSL VPNs, **subprocess** (one of four knobs the bridge can't carry) | **no interface** in the shipped path | `ocproxy` gives a userspace SOCKS port — **required**, not optional | — |
 
 Three rows in that table are the ones that do not fit the pattern, and they are the ones a reader
@@ -288,12 +288,52 @@ will otherwise assume away:
    with a user-facing sentence instead of a control that would do nothing. They also share one
    `NEVPNManager.shared()`, so **only one native configuration can exist at a time** — an OS limit,
    not ours.
-2. **The `.ssh` kind is not a tunnel in this document's sense.** It is a subprocess (or the
-   in-process libssh engine) offering a SOCKS5 listener or `-L`/`-R` forwards. There is no utun and
-   nothing routes into it. Its `-w` point-to-point mode *would* need a utun, and both the editor and
-   the connect gate refuse it in as many words: "Network tunnel (-w) requires root for the utun
-   device — not supported in this build". A `tun@openssh.com` channel exists in the bridge with **no
-   caller**.
+2. **The `.ssh` kind is not a tunnel in this document's sense.** It is the in-process libssh engine
+   (or, for what that engine does not carry, a `/usr/bin/ssh` subprocess) offering a SOCKS5 listener
+   or `-L`/`-D`/`-R` forwards. There is no utun and nothing routes into it. Its `-w` point-to-point
+   mode *would* need a utun, and both the editor and the connect gate refuse it in as many words:
+   "Network tunnel (-w) requires root for the utun device — not supported in this build". A
+   `tun@openssh.com` channel exists in the bridge with **no caller**.
+
+   **Which engine carries an SSH tunnel is `SubprocessTunnelManager.willRunInProcessSSH`, and it is
+   the only place that decides** — the same single-predicate discipline `willRunInProcess` enforces
+   for the SSL kinds, and for the same reason: two spellings of "will this run in-process?" is how
+   that surface came to tell users one thing and do another. In-process now covers **SOCKS (`-D`)
+   mode and port-forward mode's `L`/`D` rows**. Port forwards used to shell out for a reason that
+   was never a capability limit: `SSHTunnelEngine` had `addForward`/`startForwardListener`/
+   `handleLocalForward` and had been using them for live add-and-remove while connected for months,
+   but nothing called them at CONNECT time, so `connect` dispatched only on `sshMode == .socks`.
+   `startPortForwards` is that missing entry point, and it is all-or-nothing to mirror the
+   subprocess's `ExitOnForwardFailure=yes`.
+
+   **Three things the in-process engine does NOT carry, each refused by name rather than downgraded:**
+
+   1. **Reverse forwards (`-R`) — not supported yet.** The server listens and opens channels back to
+      us, which needs `ssh_channel_listen_forward` plus `ssh_channel_open_forward_port` in
+      `SSHBridge` (the vendored libssh exports both, and `ssh_packet_channel_open` /
+      `ssh_message_queue` are compiled in even at `WITH_SERVER=OFF`, so the library side is ready)
+      and an accept poll on the session queue. `addForward` refuses `"R"` with
+      `SSHTunnelEngine.reverseForwardUnsupported`.
+   2. **A jump host — not supported yet.** Needs a *nested* session: authenticate to the bastion,
+      open a direct-tcpip channel to the target, then hand that channel's fd to a second session via
+      `SSH_OPTIONS_FD`. Silently dropping it would dial the target directly and bypass the bastion.
+   3. **Raw `sshExtraOptions`** — no in-process equivalent *by construction*, not unfinished work;
+      the same reasoning as `extraArgs` for OpenConnect. Arbitrary `ssh_config` keywords can rewrite
+      the data path (`ProxyCommand`, `Ciphers`, `Tunnel`), so honouring "a known subset" would
+      silently ignore the rest.
+
+   The first two are **known gaps that still work**, because `/usr/bin/ssh` ships with macOS and does
+   carry them: such a profile is *routed* to the tool, not refused. What that costs is the host-key
+   pin — `ssh` has no pin-by-hash option, so `sshPinBlockReason` refuses a pinned profile that would
+   land there rather than let it connect unpinned. Both gaps are documented in `manual.html`
+   (`#ssh-forwards`, `#ssh-proxy-jump`) so a user meets them as a stated limit rather than a
+   surprise.
+
+   **The pin gate is exactly "will this run in-process?", and nothing more.** It used to read
+   `sshMode != .socks`, which was true only *because* port-forward mode had no in-process entry
+   point — it was never a statement about SOCKS. Now that `-L`/`-D` run on the engine, a pinned
+   port-forward profile is enforceable and is no longer refused; the clause that remains refuses the
+   cases where the premise still holds.
 3. **A subprocess OpenConnect never gets a utun either — in practice.** `openconnectArgs` appends
    `--script-tun --script "ocproxy -D <port>"` whenever `ocproxy` is installed, which turns the SSL
    VPN into a userspace SOCKS proxy needing no root. Without `ocproxy` the argv omits it, and

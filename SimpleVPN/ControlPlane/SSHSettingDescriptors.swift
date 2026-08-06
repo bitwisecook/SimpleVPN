@@ -17,8 +17,14 @@
 //    • the pinned host key is enforced by the IN-PROCESS engine only
 //      (/usr/bin/ssh has no pin-by-hash option) — `sshPinBlockReason` refuses
 //      a config that would silently connect unpinned;
-//    • a jump host and raw `ssh.extra-options` are the SUBPROCESS's alone —
-//      `inProcessSSHSupports` routes those configs to /usr/bin/ssh.
+//    • a jump host, a REVERSE forward (-R) and raw `ssh.extra-options` are the
+//      SUBPROCESS's alone — `willRunInProcessSSH` routes those configs to
+//      /usr/bin/ssh. The first two are not-supported-yet gaps in the engine (a
+//      nested session; `ssh_channel_listen_forward` plus an accept poll); the third
+//      has no in-process equivalent by construction. All three are stated as limits
+//      in the manual rather than left to be discovered.
+//  SOCKS mode and port-forward mode's -L/-D rows both run in-process, so the pin
+//  is enforceable in both — it is `willRunInProcessSSH`, not the mode, that decides.
 //  `ssh.keepalive` and `ssh.compression` used to be a third asymmetry (honoured
 //  by the tool, silently ignored in-process); they are now implemented in the
 //  engine as well — a keepalive timer on the session queue sending

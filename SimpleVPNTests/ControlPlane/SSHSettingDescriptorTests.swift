@@ -402,8 +402,34 @@ struct SSHSettingDescriptorTests {
         #expect(SubprocessTunnelManager.sshPinBlockReason(c) != nil)
         c.useJumpHost = false; c.jumpHost = ""
 
-        // Port-forward mode runs the subprocess — blocked.
+        // Raw ssh_config options likewise.
+        c.sshExtraOptions = ["Ciphers aes128-ctr"]
+        #expect(SubprocessTunnelManager.sshPinBlockReason(c) != nil)
+        c.sshExtraOptions = []
+
+        // PORT-FORWARD MODE IS NO LONGER A BLOCK for -L/-D: the in-process engine
+        // opens those listeners itself now (`SSHTunnelEngine.startPortForwards`),
+        // so the pin is enforced and the profile is not pushed to /usr/bin/ssh.
+        // This assertion used to read `!= nil`, and the ONLY reason it did was that
+        // port-forward mode had no in-process entry point — never anything about
+        // SOCKS.
         c.sshMode = .portForward
+        c.forwards = ["L 8080:internal.example.com:80", "D 1080"]
+        #expect(SubprocessTunnelManager.sshPinBlockReason(c) == nil)
+
+        // A REVERSE forward still is: it isn't supported in-process yet, so that
+        // profile runs /usr/bin/ssh, which has no pin-by-hash option.
+        c.forwards = ["L 8080:internal.example.com:80", "R 9090:localhost:9090"]
+        #expect(SubprocessTunnelManager.sshPinBlockReason(c) != nil)
+
+        // …and so is an unparseable line, which reaches neither engine.
+        c.forwards = ["nonsense"]
+        #expect(SubprocessTunnelManager.sshPinBlockReason(c) != nil)
+        c.forwards = []
+        c.sshMode = .socks
+
+        // Network tunnel mode needs root for its utun and stays on /usr/bin/ssh.
+        c.sshMode = .netTunnel
         #expect(SubprocessTunnelManager.sshPinBlockReason(c) != nil)
         c.sshMode = .socks
 
@@ -411,6 +437,78 @@ struct SSHSettingDescriptorTests {
         c.sshPinnedHostKey = nil
         c.compression = true
         #expect(SubprocessTunnelManager.sshPinBlockReason(c) == nil)
+    }
+
+    /// The one predicate `connect` dispatches on and `sshPinBlockReason` refuses by.
+    /// Pure, so which engine a profile lands on is testable without a server — which
+    /// matters here because almost nothing else about the SSH path is.
+    /// A reverse forward is refused BY NAME, not silently dropped — and the sentence
+    /// says it isn't supported yet without promising when. This is the `-w` shape.
+    @Test func aReverseForwardIsRefusedWithItsOwnReason() async {
+        let engine = SSHTunnelEngine()
+        await #expect(throws: SSHForwardError.self) {
+            try await engine.addForward(flag: "R", spec: "9090:localhost:9090")
+        }
+        let reason = SSHTunnelEngine.reverseForwardUnsupported
+        #expect(reason.contains("aren’t supported yet"))
+        // Names what to do instead, and commits to no timeline.
+        #expect(reason.contains("local (L) or dynamic (D)"))
+        #expect(!reason.lowercased().contains("coming soon"))
+    }
+
+    @Test func inProcessSSHCoversLocalAndDynamicForwardsButNotReverse() {
+        var c = SubprocessTunnelConfig()
+        c.kind = .ssh
+        c.server = "ssh.example.com"
+
+        // SOCKS: the original in-process mode.
+        #expect(SubprocessTunnelManager.willRunInProcessSSH(c))
+
+        // Port forwards: -L and -D are the same direct-tcpip pump.
+        c.sshMode = .portForward
+        c.forwards = ["L 8080:internal:80", "8081:internal:81", "D 1080"]
+        #expect(SubprocessTunnelManager.willRunInProcessSSH(c))
+
+        // No forwards at all is still a legitimate in-process session.
+        c.forwards = []
+        #expect(SubprocessTunnelManager.willRunInProcessSSH(c))
+
+        // -R is not supported in-process yet — /usr/bin/ssh keeps that profile.
+        c.forwards = ["R 9090:localhost:9090"]
+        #expect(!SubprocessTunnelManager.willRunInProcessSSH(c))
+
+        // One -R among several -L lines still routes the WHOLE profile out: a session
+        // is one session, and half of it running in-process is not a thing.
+        c.forwards = ["L 8080:internal:80", "R 9090:localhost:9090"]
+        #expect(!SubprocessTunnelManager.willRunInProcessSSH(c))
+
+        // Case and the optional leading dash don't smuggle an -R past the check.
+        c.forwards = ["-r 9090:localhost:9090"]
+        #expect(!SubprocessTunnelManager.willRunInProcessSSH(c))
+
+        // An unparseable line answers false so `connect` refuses it by name rather
+        // than the engine silently skipping it.
+        c.forwards = ["L 8080:internal:80", "nonsense"]
+        #expect(!SubprocessTunnelManager.willRunInProcessSSH(c))
+
+        // -w needs root for its utun; this build doesn't take that privilege.
+        c.forwards = []
+        c.sshMode = .netTunnel
+        #expect(!SubprocessTunnelManager.willRunInProcessSSH(c))
+
+        // And the two settings the engine can't express still route out, whatever
+        // the mode.
+        c.sshMode = .socks
+        c.useJumpHost = true; c.jumpHost = "bastion.example.com"
+        #expect(!SubprocessTunnelManager.willRunInProcessSSH(c))
+        c.useJumpHost = false; c.jumpHost = ""
+        c.sshExtraOptions = ["ProxyCommand /bin/nc %h %p"]
+        #expect(!SubprocessTunnelManager.willRunInProcessSSH(c))
+        c.sshExtraOptions = []
+
+        // Not an SSH profile at all.
+        c.kind = .wireGuard
+        #expect(!SubprocessTunnelManager.willRunInProcessSSH(c))
     }
 
     /// A hardware security key (`sk-ssh-ed25519@openssh.com` / `sk-ecdsa…`) is a
