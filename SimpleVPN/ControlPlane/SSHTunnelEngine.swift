@@ -19,7 +19,7 @@
 //  sign-in asks whichever agent `agentSocketPath` names (1Password, Secretive,
 //  KeePassXC, ssh-agent) and, on failure, asks that agent what went wrong so the
 //  user is told which of the three agent failures it was — see SSHAgent.swift and
-//  Docs/SSHAgent.md.
+//  Docs/AuthSecSSHAgent.md.
 //
 //  Concurrency model: the session runs BLOCKING through handshake/host-key/auth,
 //  then switches to NON-BLOCKING (`enterDataMode`) for the data pump. Every libssh
@@ -99,7 +99,7 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
         /// `IdentityAgent`). nil/empty = whatever `SSH_AUTH_SOCK` says, which in a
         /// windowed app is macOS's own ssh-agent — 1Password, Secretive and
         /// friends listen in their own containers, so pointing at them takes an
-        /// explicit path. See Docs/SSHAgent.md.
+        /// explicit path. See Docs/AuthSecSSHAgent.md.
         var agentSocketPath: String? = nil
         /// Key-exchange preference (OpenSSH KexAlgorithms syntax); nil = libssh default.
         var kexAlgorithms: String? = nil

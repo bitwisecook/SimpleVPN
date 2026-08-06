@@ -28,7 +28,7 @@
 //     list, every parser and every classification runs with no tool present.
 //
 //  What a human with KeePassXC installed still has to confirm is the short list in
-//  Docs/KeePassDatabaseFile.md. Nothing in this file claims that work has been done.
+//  Docs/AuthPwdKeePassFile.md. Nothing in this file claims that work has been done.
 //
 
 import Foundation
@@ -275,7 +275,7 @@ struct KeePassDatabaseFileTests {
     ///
     /// A `chmod 000` file is the same syscall outcome (`stat` ok, `open` EACCES) and is
     /// what makes this testable here; the TCC half of it needs a human with a database
-    /// in a protected folder (Docs/KeePassDatabaseFile.md's manual list).
+    /// in a protected folder (Docs/AuthPwdKeePassFile.md's manual list).
     @Test func aFileMacOSWillNotLetUsOpenIsAPermissionStateNotAnEmptyDatabase() throws {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent(UUID().uuidString)

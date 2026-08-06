@@ -78,7 +78,7 @@
 //  network. `connectAndPrepare` synchronises the local vault when the last sync is
 //  over an hour old and auto-sync has not been switched off, so `dcli password` is
 //  sometimes a sync as well as a read. That is why the fetch deadline is generous
-//  and why the recipe in Docs/Dashlane.md suggests `dcli configure disable-auto-sync
+//  and why the recipe in Docs/AuthPwdDashlane.md suggests `dcli configure disable-auto-sync
 //  true` plus a scheduled `dcli sync` for anyone who wants connects to be purely
 //  local. It also means sync's own progress lines land on stdout ahead of the JSON,
 //  which is exactly why `DashlaneWire` reads the LAST JSON array rather than the

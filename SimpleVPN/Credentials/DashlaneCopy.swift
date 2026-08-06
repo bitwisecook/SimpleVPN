@@ -21,7 +21,7 @@
 //   • A FETCH CAN GO TO THE NETWORK. Dashlane's tool re-synchronises the local copy
 //     of the vault about once an hour, so an occasional connect is a sync as well as
 //     a read. Anybody who would rather that never happened can switch it off, and
-//     the recipe in Docs/Dashlane.md says how.
+//     the recipe in Docs/AuthPwdDashlane.md says how.
 //
 
 import Foundation

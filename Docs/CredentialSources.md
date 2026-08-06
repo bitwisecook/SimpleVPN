@@ -4,6 +4,43 @@ One map of every way SimpleVPN can get a sign-in, what each actually supplies, a
 has really been proven. Per-vendor setup lives in that vendor's own doc; this is the
 overview and the honesty ledger.
 
+## The per-source docs — one index, two families
+
+Every source with a doc of its own is listed here, and the filename prefix says which
+family it belongs to. The distinction is not cosmetic: **a password app hands over a
+secret; a security source proves possession without releasing one.** That is the
+`.value` versus `.possession` split in `Docs/AuthArchitecture.md`, which is where the
+reasoning lives — it is why a single `resolve() -> RawCredentials` seam could not express
+all of them, and it is not restated here.
+
+**`AuthPwd*` — password apps** (all ten; each doc ends in a manual test recipe):
+
+| Doc | Source |
+|---|---|
+| `AuthPwd1Password.md` | 1Password, over the app's signed IPC |
+| `AuthPwdBitwarden.md` | Bitwarden, over `bw serve` |
+| `AuthPwdDashlane.md` | Dashlane, over `dcli` |
+| `AuthPwdKeePassFile.md` | a KeePass `.kdbx` file — also Strongbox and KeePassium |
+| `AuthPwdKeePassXC.md` | KeePassXC, over its browser protocol |
+| `AuthPwdKeeper.md` | Keeper, through Keeper Commander |
+| `AuthPwdLastPass.md` | LastPass, over `lpass` |
+| `AuthPwdPassbolt.md` | Passbolt — a server, not a file |
+| `AuthPwdPasswordStore.md` | `pass` / `gopass`, read with `gpg` |
+| `AuthPwdProtonPass.md` | Proton Pass, over `pass-cli` |
+
+**`AuthSec*` — security sources**, which never hand over bytes:
+
+| Doc | Source |
+|---|---|
+| `AuthSecPKCS11.md` | smartcards, PIV and HSMs — SimpleVPN names a key, the module signs |
+| `AuthSecSSHAgent.md` | an SSH agent — it signs, and decides whether to |
+| `AuthSecYubiKey.md` | security keys, including the one that *types* its answer |
+
+Two sources deliberately have no doc of their own, because they have no vendor to
+describe: **typing it each time** and **Save in SimpleVPN** (the Apple keychain). Apple
+Passwords is covered below rather than separately — it is an AutoFill row, and the reason
+is the first of the three findings.
+
 ## The rule that shapes all of it
 
 **SimpleVPN never bundles or installs a vendor's tool.** It runs a program you installed

@@ -18,7 +18,7 @@
 //
 //  There is no hardware token on a build machine, so nothing here touches one. What
 //  is REALLY exercised (against SoftHSM, out of band) versus fixture-driven is
-//  recorded in Docs/PKCS11.md — read that before trusting either claim.
+//  recorded in Docs/AuthSecPKCS11.md — read that before trusting either claim.
 //
 
 import Foundation

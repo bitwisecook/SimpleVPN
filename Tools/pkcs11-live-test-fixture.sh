@@ -9,7 +9,7 @@
 #
 # THIS IS A TEST DEPENDENCY ONLY. Nothing SoftHSM installs ends up in the app, and
 # SimpleVPN never bundles a provider module for anyone's hardware (AGENTS.md /
-# Docs/PKCS11.md). Remove it all again with:
+# Docs/AuthSecPKCS11.md). Remove it all again with:
 #
 #     ./Tools/pkcs11-live-test-fixture.sh --remove
 #

@@ -27,7 +27,7 @@
 //  and not in Shared/. The SSH kinds that authenticate in the app (SOCKS proxy /
 //  port forwards, and the staged SSH probe) can use an agent; the SSH Network
 //  Tunnel kind, whose session lives in the extension, cannot — see
-//  Docs/SSHAgent.md.
+//  Docs/AuthSecSSHAgent.md.
 //
 //  THE AGENT PROTOCOL, in the two messages we need (draft-miller-ssh-agent):
 //    request:  uint32 length | byte 11 (REQUEST_IDENTITIES)
@@ -253,7 +253,7 @@ nonisolated struct SSHAgentProbe: Sendable {
     ///
     /// An explicit path WINS on purpose: a GUI app's inherited `SSH_AUTH_SOCK` is
     /// macOS's own ssh-agent, which is almost never where the interesting keys
-    /// are (see Docs/SSHAgent.md).
+    /// are (see Docs/AuthSecSSHAgent.md).
     func resolvedSocketPath(configured: String?) -> String? {
         let explicit = (configured ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if !explicit.isEmpty { return (explicit as NSString).expandingTildeInPath }

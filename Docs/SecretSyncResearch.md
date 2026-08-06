@@ -548,7 +548,7 @@ environments" because one config file works for every user.
 
 For us that would make a profile **secret-free and portable by construction** — it says *which* identity
 it needs, not *what* the key is — and it unifies the inline-key case with the PKCS#11/smartcard case that
-`Docs/PKCS11.md` currently keeps on a separate path. That is a bigger change than the strip and should not
+`Docs/AuthSecPKCS11.md` currently keeps on a separate path. That is a bigger change than the strip and should not
 block it, but it is the direction the strip should be shaped towards, so the reference left behind in the
 `.ovpn` should be a **selector**, not an opaque keychain row id.
 
@@ -829,7 +829,7 @@ away: it salted the precomputation that produced the live hardcoded 16-byte cons
 - Passepartout — https://passepartoutvpn.app/ · source — https://github.com/passepartoutvpn/passepartout-apple
 
 **In-tree references**
-`Docs/CredentialSources.md` · `Docs/PolicyRouting.md` · `Docs/PKCS11.md` · `Docs/MDM.md` · `ONTOLOGY.md` ·
+`Docs/CredentialSources.md` · `Docs/PolicyRouting.md` · `Docs/AuthSecPKCS11.md` · `Docs/MDM.md` · `ONTOLOGY.md` ·
 `Shared/KeychainCredentialStore.swift` · `Shared/SSHHostKeyDecision.swift` ·
 `SimpleVPN/Credentials/CredentialProvider.swift` · `SimpleVPN/Import/CertificateImport.swift` ·
 `SimpleVPN/Import/ProfileImport.swift` · `SimpleVPN/ControlPlane/VPNController+CRUD.swift` ·

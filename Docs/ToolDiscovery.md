@@ -61,7 +61,7 @@ presented as a real one sends people looking in the wrong place.
 exist and both are built, but they need different things: the **KeePassXC** row talks to the
 *running app* over the socket below and needs no binary whatever, while the **KeePass
 database file** row (which also serves Strongbox and KeePassium — see
-`Docs/KeePassDatabaseFile.md`) cannot work without one. The vendor recorded here is what
+`Docs/AuthPwdKeePassFile.md`) cannot work without one. The vendor recorded here is what
 decides which row is told "found at …, but not somewhere SimpleVPN will run it from", so
 attaching it to the socket row would put that sentence on the one row it cannot help.
 
@@ -100,7 +100,7 @@ version-reported for diagnostics only; there is no path for a user to set.
   no-trailing-slash form; see the comment there.
 - **Unconfirmed:** the 1Password 7 bundle id, and the transport `op` ↔ app IPC uses.
 
-### Bitwarden (`bw`) — adapter built (`Docs/Bitwarden.md`)
+### Bitwarden (`bw`) — adapter built (`Docs/AuthPwdBitwarden.md`)
 
 | Install method | Path | Source |
 |---|---|---|
@@ -117,7 +117,7 @@ documents no destination. A guessed path presented as a documented one is worse 
 
 There is **no discoverable artefact for `bw serve`** — no config file, no pid file, no socket — so
 "is the service running" cannot be a file check. It is one loopback `GET /status`, which is why it
-belongs to the deep scan rather than the cheap one. See `Docs/Bitwarden.md`.
+belongs to the deep scan rather than the cheap one. See `Docs/AuthPwdBitwarden.md`.
 
 The standalone zip's "add it to your PATH" is precisely the case that produces
 `toolOutsideAllowList`: it works for the user's shell and not for us, and the fix is one field.
