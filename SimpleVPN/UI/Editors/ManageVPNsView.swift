@@ -48,6 +48,10 @@ struct ManageVPNsView: View {
     /// A note in the file is not enough on its own — nobody opens the file they
     /// just saved — so the app says it too, once, when the file is written.
     @State private var exportOmission = ""
+    /// The WireGuard VPN whose WITH-KEYS export is awaiting consent, or nil. Consent
+    /// is asked BEFORE the save panel: asking after the user has already named a file
+    /// makes the question read as a formality to be dismissed.
+    @State private var wgKeyExportTarget: String?
     @State private var seeded = false
     /// The settings route this window has already resolved a profile for. A route is
     /// STICKY (see `SettingsRouter.route`), and two callers now act on it — the
@@ -81,11 +85,20 @@ struct ManageVPNsView: View {
                         .disabled(!canRemoveSelection)
                         .help("Remove the selected VPN")
                         .accessibilityLabel("Remove the selected VPN")
-                    Button("Export .ovpn…") {
-                        if let p = vpn.profiles.first(where: { $0.id == selection }) { export(p) }
-                    }
-                    .disabled(!vpn.profiles.contains { $0.id == selection })
-                    .help("Save the selected VPN's configuration as a file. Its private key is not included \u{2014} that stays in your keychain.")
+                    // "Export .ovpn…" USED TO BE HERE, on every selection regardless
+                    // of kind — including F5 BIG-IP APM, which has no `.ovpn`
+                    // representation at all (`.ovpn` is OpenVPN's format; OpenConnect
+                    // takes command-line arguments and has no config file). So the
+                    // item either did nothing or wrote a file that is not a real
+                    // thing, on a control whose subject was ambiguous anyway: a
+                    // toolbar acts on the WINDOW, and this window has a sidebar.
+                    //
+                    // It is a right-click on the row now — unambiguous by
+                    // construction — and offered only where a format exists
+                    // (`exportItems`). Never a DISABLED item either: for an export
+                    // that can never exist for a kind, absence is correct; disabled
+                    // is for something that could work once configured.
+                    //
                     // Discoverable AND keyboard-reachable: a toolbar button here
                     // and ⌘⇧F in the VPN menu, both opening the same sheet.
                     Button {
@@ -119,6 +132,25 @@ struct ManageVPNsView: View {
             if case .success = result, !exportOmission.isEmpty {
                 ToastCenter.shared.post(exportOmission, symbol: "key.slash", tint: .indigo, seconds: 10)
             }
+        }
+        // THE CONSENT PATH, UNWEAKENED by the move off the editor pane. The confirming
+        // button carries `.destructive`, and NOTHING carries
+        // `.keyboardShortcut(.defaultAction)`: Return and Escape both cancel, so the
+        // leaky outcome is unreachable without reading and aiming at it. The title and
+        // message name exactly which secrets this VPN would put in the file.
+        .confirmationDialog(wgConsentTarget?.exportConsentTitle ?? "",
+                            isPresented: Binding(get: { wgKeyExportTarget != nil },
+                                                 set: { if !$0 { wgKeyExportTarget = nil } }),
+                            titleVisibility: .visible) {
+            if let id = wgKeyExportTarget, let c = wgConsentTarget {
+                Button(c.exportConsentConfirmTitle, role: .destructive) {
+                    wgKeyExportTarget = nil
+                    exportWireGuard(id, includingSecrets: true)
+                }
+            }
+            Button("Cancel", role: .cancel) { wgKeyExportTarget = nil }
+        } message: {
+            Text(wgConsentTarget?.exportConsentMessage ?? "")
         }
         .alert("Config Imported", isPresented: Binding(
             get: { ciscoNote != nil }, set: { if !$0 { ciscoNote = nil } })) {
@@ -222,9 +254,39 @@ struct ManageVPNsView: View {
         }
             .tag(p.id)
             .contextMenu {
-                Button("Export .ovpn…") { export(p) }
+                exportItems(for: p)
                 Button("Remove", role: .destructive) { Task { try? await vpn.remove(id: p.id) } }
             }
+    }
+
+    /// The export actions THIS object has, and no others.
+    ///
+    /// KIND-AWARE BY CONSTRUCTION. `.ovpn` is OpenVPN's format and `.conf` is
+    /// WireGuard's; the other packet-tunnel kinds (Tailscale, Proxy Tunnel, SSH
+    /// Network Tunnel) have no interchange format, so they get nothing — not a
+    /// disabled item. This is also where WireGuard's TWO exports live now, and they
+    /// are still two: the plain one CANNOT produce a file with a key in it, so there
+    /// is no dialog for a hurried user to click through to a leak, and the one that
+    /// can is separately named and separately confirmed
+    /// (`WireGuardConfig.exportText(includingSecrets:)` owns that decision).
+    @ViewBuilder private func exportItems(for p: VPNController.Profile) -> some View {
+        if vpn.isWireGuard(p.id) {
+            let c = wireGuardExportTarget(p.id)
+            // Not disabled with a reason, because a reason on a context-menu item is
+            // unreadable — the row simply doesn't offer what it can't write yet, and
+            // the editor's own Peer Public Key row is where that gap is visible.
+            if !c.peerPublicKey.trimmingCharacters(in: .whitespaces).isEmpty {
+                Button("Export .conf\u{2026}") { exportWireGuard(p.id, includingSecrets: false) }
+                if !c.presentSecretFields.isEmpty {
+                    Button("Export .conf with Keys\u{2026}") { wgKeyExportTarget = p.id }
+                }
+            }
+        } else if vpn.isTailscale(p.id) || vpn.isProxyTunnel(p.id) || vpn.isSSHNetworkTunnel(p.id) {
+            // No interchange format exists for these. Absence is the honest answer.
+            EmptyView()
+        } else {
+            Button("Export .ovpn\u{2026}") { export(p) }
+        }
     }
 
     @ViewBuilder private func tunnelRow(_ t: SubprocessTunnelConfig) -> some View {
@@ -671,8 +733,10 @@ struct ManageVPNsView: View {
         } else if let id = selection, vpn.isSSHNetworkTunnel(id) {
             SSHNetworkTunnelView(vpn: vpn, profileID: id).id(id)
         } else if let id = selection, vpn.profiles.contains(where: { $0.id == id }) {
-            EditVPNView(vpn: vpn, labels: labels, profileID: id, embedded: true,
-                        onSaved: { if totalVPNCount <= 1 { dismissWindow() } })
+            // No `onSaved:` any more — under live save this window would have closed
+            // itself the first time focus left a field. Leaving is the close button's
+            // job; the sidebar is how you move between VPNs.
+            EditVPNView(vpn: vpn, labels: labels, profileID: id, embedded: true)
                 .id(id)   // fresh editor state per VPN
         } else {
             ContentUnavailableView("No VPN Selected", systemImage: "network",
@@ -714,6 +778,55 @@ struct ManageVPNsView: View {
         }
         exportOmission = OVPNSecretMaterial.exportOmissionNotice(vpn.storedOVPNText(id: p.id) ?? "")
         exportDoc = OVPNDocument(text: text); exportName = p.name; showExporter = true
+    }
+
+    // MARK: WireGuard .conf export (moved off the editor pane — see `exportItems`)
+
+    /// What a WireGuard export would be OF: the STORED config with its keys read
+    /// back from the keychain. Reading storage rather than an open editor's draft is
+    /// what makes this an action on the OBJECT — it gives the same file whether the
+    /// editor is open or not, and under live-save the stored config is what the user
+    /// has typed anyway.
+    private func wireGuardExportTarget(_ id: String) -> WireGuardConfig {
+        vpn.wireGuardConfig(for: id).withSecretsFromKeychain()
+    }
+
+    /// The config the pending consent dialog is about, or nil.
+    private var wgConsentTarget: WireGuardConfig? {
+        wgKeyExportTarget.map { wireGuardExportTarget($0) }
+    }
+
+    /// The ONE WireGuard export path. `includingSecrets` is decided by which menu
+    /// item was chosen and, for `true`, only after the confirmation below — the
+    /// file's own text is `WireGuardConfig.exportText(includingSecrets:)`, which is
+    /// where the headers and the redaction live so a test can hold them.
+    private func exportWireGuard(_ id: String, includingSecrets: Bool) {
+        let toExport = wireGuardExportTarget(id)
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "\(toExport.name.isEmpty ? vpn.displayName(for: id) : toExport.name).conf"
+        panel.allowedContentTypes = [UTType(filenameExtension: "conf") ?? .data]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try toExport.exportText(includingSecrets: includingSecrets)
+                .write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            vpn.lastError = error.localizedDescription
+            return
+        }
+        // Say what happened, either way — a note inside a file nobody reopens tells
+        // nobody anything, and "it contains your keys" is worth repeating outside the
+        // dialog the user just dismissed. The toast is the pane-independent home for
+        // this now that the export is a menu item rather than a button with a caption
+        // under it.
+        let notice = includingSecrets
+            ? "Wrote \(url.lastPathComponent) WITH this VPN\u{2019}s \(WireGuardConfig.humanList(toExport.presentSecretFields)) in it. Delete the file once the other client has \(toExport.presentSecretFields.count == 1 ? "it" : "them")."
+            : (toExport.exportOmissionNotice.isEmpty
+               ? "Wrote \(url.lastPathComponent)."
+               : toExport.exportOmissionNotice)
+        ToastCenter.shared.post(notice,
+                                symbol: includingSecrets ? "key.fill" : "key.slash",
+                                tint: includingSecrets ? .red : .indigo,
+                                seconds: 10)
     }
 }
 

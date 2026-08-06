@@ -49,7 +49,23 @@ struct OpenVPNOptionsForm: View {
         Form {
             if let search { SettingsSearchSection(search: search) }
             connectionSection
-            signInSection
+            // THE SIGN-IN GROUP IS NOT HERE. Its three settings —
+            // `openvpn.retry-on-auth-failed`, `openvpn.autologin-sessions` and
+            // `openvpn.private-key-password` — are rendered by EditVPNView's SIGN-IN
+            // TAB now (`OpenVPNSignInOverrides` below), where a person looking for
+            // "how this VPN signs in" actually looks.
+            //
+            // They were here because they are engine overrides, which is a fact about
+            // our implementation and not about what the user is doing (ONTOLOGY.md
+            // rule 1) — and the Sign-In tab carried an "Also in Options ▸ Sign-In"
+            // signpost apologising for it, which is what prompted "what is this also
+            // in Sign In bit about? why is that there?". Moving the rows deleted the
+            // signpost rather than relocating it.
+            //
+            // They MOVED, they were not duplicated: the reveal scrolls via
+            // `.id(settingID)`, and two views sharing one id makes `scrollTo`
+            // ambiguous. The ids are unchanged (CLI/MDM/manual-anchor contract);
+            // `SettingSurface.tabOverrides` is what tells navigation the new tab.
             trafficSection
             securitySection
             advancedSection
@@ -83,7 +99,7 @@ struct OpenVPNOptionsForm: View {
         SettingsSection(group: .connection, draft: draft) {
             SettingRow(id: "openvpn.server", draft: $draft, context: context) {
                 if let eval = evaluation, !eval.serverList.isEmpty {
-                    Picker(selection: optionalString(\.server)) {
+                    SettingPicker(selection: optionalString(\.server)) {
                         Text(defaultLabel(eval.remoteHostOrNil)).tag(String?.none)
                         ForEach(eval.serverList, id: \.server) { entry in
                             Text(entry.friendlyName.isEmpty ? entry.server : entry.friendlyName)
@@ -121,7 +137,7 @@ struct OpenVPNOptionsForm: View {
             }
 
             SettingRow(id: "openvpn.ip-version", draft: $draft, context: context) {
-                Picker(selection: $draft.ipVersion) {
+                SettingPicker(selection: $draft.ipVersion) {
                     Text("Automatic").tag(OpenVPNOverrides.IPVersion?.none)
                     Text("IPv4 only").tag(OpenVPNOverrides.IPVersion?.some(.v4))
                     Text("IPv6 only").tag(OpenVPNOverrides.IPVersion?.some(.v6))
@@ -145,7 +161,7 @@ struct OpenVPNOptionsForm: View {
         // Never silently rewrite a stored choice: UDP stays listed while selected,
         // with the caveat above explaining why it won't be used.
         let udpUnavailable = context.proxyConfigured && draft.proto != .udp
-        return Picker(selection: $draft.proto) {
+        return SettingPicker(selection: $draft.proto) {
             Text(defaultLabel(evaluation?.remoteProtoDisplay)).tag(OpenVPNOverrides.TransportProto?.none)
             Text("Adaptive").tag(OpenVPNOverrides.TransportProto?.some(.adaptive))
             if !udpUnavailable {
@@ -169,7 +185,7 @@ struct OpenVPNOptionsForm: View {
         let known = Self.connTimeoutChoices.compactMap(\.0)
         let isCustom = connTimeoutCustom || draft.connTimeout.map { !known.contains($0) } ?? false
         VStack(alignment: .leading, spacing: 6) {
-            Picker(selection: connTimeoutSelection(known: known)) {
+            SettingPicker(selection: connTimeoutSelection(known: known)) {
                 ForEach(Self.connTimeoutChoices, id: \.0) { value, title in
                     Text(value == nil ? "\(title) (default)" : title).tag(CustomChoice.preset(value))
                 }
@@ -215,30 +231,6 @@ struct OpenVPNOptionsForm: View {
             })
     }
 
-    // MARK: Sign-In
-
-    @ViewBuilder private var signInSection: some View {
-        SettingsSection(group: .signIn, draft: draft) {
-            SettingRow(id: "openvpn.retry-on-auth-failed", draft: $draft, context: context) {
-                settingToggle("openvpn.retry-on-auth-failed", \.retryOnAuthFailed,
-                              default: OpenVPNOverrides.EngineDefaults.retryOnAuthFailed)
-            }
-            SettingRow(id: "openvpn.autologin-sessions", draft: $draft, context: context) {
-                settingToggle("openvpn.autologin-sessions", \.autologinSessions,
-                              default: OpenVPNOverrides.EngineDefaults.autologinSessions)
-            }
-            SettingRow(id: "openvpn.private-key-password", draft: $draft, context: context) {
-                LabeledContent {
-                    SecureField("", text: $privateKeyPassword, prompt: Text("required"))
-                        .multilineTextAlignment(.trailing)
-                        .frame(maxWidth: 260).frame(maxWidth: .infinity, alignment: .trailing)
-                } label: {
-                    SettingLabel(id: "openvpn.private-key-password", draft: draft)
-                }
-            }
-        }
-    }
-
     // MARK: Traffic
 
     @ViewBuilder private var trafficSection: some View {
@@ -248,7 +240,7 @@ struct OpenVPNOptionsForm: View {
                               default: OpenVPNOverrides.EngineDefaults.allowLocalLanAccess)
             }
             SettingRow(id: "openvpn.unused-families", draft: $draft, context: context) {
-                Picker(selection: $draft.allowUnusedAddrFamilies) {
+                SettingPicker(selection: $draft.allowUnusedAddrFamilies) {
                     Text("Default — let the server decide").tag(OpenVPNOverrides.AddrFamilyPolicy?.none)
                     Text("Allowed outside the VPN").tag(OpenVPNOverrides.AddrFamilyPolicy?.some(.allow))
                     Text("Blocked").tag(OpenVPNOverrides.AddrFamilyPolicy?.some(.block))
@@ -273,7 +265,7 @@ struct OpenVPNOptionsForm: View {
     @ViewBuilder private var securitySection: some View {
         CollapsibleSettingsSection(group: .security, draft: draft) {
             SettingRow(id: "openvpn.tls-version-min", draft: $draft, context: context) {
-                Picker(selection: $draft.tlsVersionMin) {
+                SettingPicker(selection: $draft.tlsVersionMin) {
                     Text("Default").tag(OpenVPNOverrides.TLSVersionMin?.none)
                     Text("TLS 1.3").tag(OpenVPNOverrides.TLSVersionMin?.some(.tls1_3))
                     Text("TLS 1.2").tag(OpenVPNOverrides.TLSVersionMin?.some(.tls1_2))
@@ -288,7 +280,7 @@ struct OpenVPNOptionsForm: View {
             certProfileRow
 
             SettingRow(id: "openvpn.compression", draft: $draft, context: context) {
-                Picker(selection: $draft.compression) {
+                SettingPicker(selection: $draft.compression) {
                     Text("Off — recommended (default)").tag(OpenVPNOverrides.Compression?.none)
                     // The engine's own "no" is the SAME state as leaving this
                     // unset (ovpncli.cpp only calls parse_compression_mode for a
@@ -378,7 +370,7 @@ struct OpenVPNOptionsForm: View {
     /// (legacy-default / preferred-default; Suite B has no default form).
     @ViewBuilder private var certProfileRow: some View {
         SettingRow(id: "openvpn.tls-cert-profile", draft: $draft, context: context) {
-            Picker(selection: certProfileBase) {
+            SettingPicker(selection: certProfileBase) {
                 Text("Default").tag(CertBase?.none)
                 Text("Modern — 2048-bit RSA, SHA-256 or better").tag(CertBase?.some(.preferred))
                 Text("Legacy — allows weak certificates").tag(CertBase?.some(.legacy))
@@ -540,7 +532,7 @@ struct OpenVPNOptionsForm: View {
                                   default: OpenVPNOverrides.EngineDefaults.disableClientCert)
                 }
                 SettingRow(id: "openvpn.key-direction", draft: $draft, context: context) {
-                    Picker(selection: $draft.defaultKeyDirection) {
+                    SettingPicker(selection: $draft.defaultKeyDirection) {
                         Text("Bidirectional (default)").tag(Int?.none)
                         Text("0").tag(Int?.some(0))
                         Text("1").tag(Int?.some(1))
@@ -557,7 +549,7 @@ struct OpenVPNOptionsForm: View {
         let known = [1, 3, 9]
         let isCustom = sslDebugCustom || draft.sslDebugLevel.map { !known.contains($0) } ?? false
         VStack(alignment: .leading, spacing: 6) {
-            Picker(selection: Binding<CustomChoice>(
+            SettingPicker(selection: Binding<CustomChoice>(
                 get: {
                     if sslDebugCustom { return .custom }
                     if let v = draft.sslDebugLevel, !known.contains(v) { return .custom }
@@ -653,6 +645,65 @@ struct OpenVPNOptionsForm: View {
     }
 }
 
+// MARK: - The Sign-In group, rendered on the Sign-In TAB
+
+/// The three OpenVPN engine options that are about SIGNING IN, as a section
+/// `EditVPNView`'s Sign-In tab renders — see the note in `OpenVPNOptionsForm.body`
+/// for why they are not in the Options form any more.
+///
+/// It lives in THIS file because `SettingRow`, `SettingsSection` and `settingToggle`
+/// are the OpenVPN registry's own keypath-bound machinery and are private here. It
+/// takes the same three bindings the options form does, from the same owner
+/// (`EditVPNView`), so there is one draft and one save path — the rows changed tab,
+/// nothing changed about how they persist.
+struct OpenVPNSignInOverrides: View {
+    @Binding var draft: OpenVPNOverrides
+    /// The private key's password: a SECRET, so it lives in the keychain and never in
+    /// the overrides blob. Being a secret is the strongest reason it belongs on the
+    /// Sign-In tab rather than filed as an engine option.
+    @Binding var privateKeyPassword: String
+    let evaluation: ProfileEvaluation?
+
+    @Environment(PolicyStore.self) private var policyStore
+
+    private var context: SettingsContext {
+        SettingsContext(evaluation: evaluation, draft: draft, policy: policyStore.policy)
+    }
+
+    var body: some View {
+        SettingsSection(group: .signIn, draft: draft) {
+            SettingRow(id: "openvpn.retry-on-auth-failed", draft: $draft, context: context) {
+                Toggle(isOn: Binding(
+                    get: { draft.retryOnAuthFailed ?? OpenVPNOverrides.EngineDefaults.retryOnAuthFailed },
+                    set: { on in
+                        draft.retryOnAuthFailed =
+                            on == OpenVPNOverrides.EngineDefaults.retryOnAuthFailed ? nil : on
+                    })) {
+                    SettingLabel(id: "openvpn.retry-on-auth-failed", draft: draft)
+                }
+            }
+            SettingRow(id: "openvpn.autologin-sessions", draft: $draft, context: context) {
+                Toggle(isOn: Binding(
+                    get: { draft.autologinSessions ?? OpenVPNOverrides.EngineDefaults.autologinSessions },
+                    set: { on in
+                        draft.autologinSessions =
+                            on == OpenVPNOverrides.EngineDefaults.autologinSessions ? nil : on
+                    })) {
+                    SettingLabel(id: "openvpn.autologin-sessions", draft: draft)
+                }
+            }
+            SettingRow(id: "openvpn.private-key-password", draft: $draft, context: context) {
+                LabeledContent {
+                    SecureField("", text: $privateKeyPassword, prompt: Text("required"))
+                        .settingValue()
+                } label: {
+                    SettingLabel(id: "openvpn.private-key-password", draft: draft)
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Row & section building blocks
 
 /// A section for one setting group: header shows the title and a change count.
@@ -743,9 +794,6 @@ private struct SettingRow<Control: View, Caveat: View>: View {
     }
 
     private var descriptor: SettingDescriptor { OpenVPNSettings.byID[id]! }
-    /// Keyboard focus for a search/related-link reveal — same contract as
-    /// EngineSettingRow's (UI/Components/SettingReveal.swift).
-    @FocusState private var controlFocused: Bool
 
     var body: some View {
         switch descriptor.availability(in: context) {
@@ -758,59 +806,33 @@ private struct SettingRow<Control: View, Caveat: View>: View {
         }
     }
 
+    /// The layout, the "?", the summary, the red need caption and the reveal identity
+    /// all come from `SettingRowLayout` — the SAME one `EngineSettingRow` uses. This
+    /// row is only the part that differs: descriptor availability, and a
+    /// "Reset to Default" that needs the keypath-bound registry.
     @ViewBuilder private func rowBody(disabledReason: String?) -> some View {
-        VStack(alignment: .leading, spacing: 6) {   // match EngineSettingRow
-            // Control and the help button share the top line, so every "?" lines up
-            // in one column with each row's value/control.
-            HStack(alignment: .center, spacing: 8) {
-                // A dead control says why in all three channels, exactly like
-                // EngineSettingRow: the visible summary, the tooltip, and the
-                // control's own accessibilityValue.
-                if let reason = disabledReason {
-                    control
-                        .disabled(true)
-                        .accessibilityValue("unavailable — \(reason)")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .settingRevealFocus(id, focused: $controlFocused)
-                } else {
-                    control
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .settingRevealFocus(id, focused: $controlFocused)
-                }
-                ManualLink(setting: descriptor)
-            }
-            Text(disabledReason ?? descriptor.summary)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        SettingRowLayout(setting: descriptor, disabledReason: disabledReason) {
+            control
+        } caveat: {
             caveat
         }
-        .padding(.vertical, 6)   // grouped-form rows with stacked summary need extra air
-        .help(disabledReason ?? descriptor.summary)
-        // The `.id` + highlight pair used to be written out here, which is why
-        // only this form could be searched. It is one shared modifier now — and
-        // the highlight is an animated PULSE plus keyboard/VoiceOver focus
-        // (UI/Components/SettingReveal.swift), not a static colour wash.
-        .settingReveal(id)
         .contextMenu {
             Button("Reset to Default") { descriptor.reset(&draft) }
                 .disabled(!descriptor.isSet(draft))
         }
-        .accessibilityElement(children: .contain)
     }
 }
 
-/// A setting's label, bold while overridden (the Xcode build-settings idiom).
+/// A setting's label, bold while overridden (the Xcode build-settings idiom), red
+/// while the connect path is waiting on it. One definition with every other
+/// catalog's — see `SettingNameLabel`.
 struct SettingLabel: View {
     let id: String
     let draft: OpenVPNOverrides
 
     var body: some View {
         let d = OpenVPNSettings.byID[id]!
-        Text(d.name).bold(d.isSet(draft))
-            // Bold weight is invisible to VoiceOver — say the state too.
-            .accessibilityLabel(d.isSet(draft) ? "\(d.name), changed from default" : d.name)
+        SettingNameLabel(settingID: id, name: d.name, changed: d.isSet(draft))
     }
 }
 

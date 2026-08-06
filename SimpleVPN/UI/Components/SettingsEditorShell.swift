@@ -40,8 +40,11 @@ private struct SettingsEditorShell: ViewModifier {
                 // A reveal may name a setting on the OTHER tab (a Traffic ↔ Custom
                 // Routing relation, or a search hit). Select it, or the scroll
                 // lands on a row nobody is looking at.
+                // Per SETTING, not per surface: three `openvpn.*` options are rendered
+                // on the Sign-In tab, so resolving by surface would select Options and
+                // scroll to a row that isn't on it (`SettingSurface.tabOverrides`).
                 guard let id = search.revealTargetID,
-                      let wanted = SettingSurface.owning(id)?.tab else { return }
+                      let wanted = SettingSurface.tab(forSettingID: id) else { return }
                 if tab != wanted { tab = wanted }
             }
             // Back navigation asks for a TAB directly, because it can name one that

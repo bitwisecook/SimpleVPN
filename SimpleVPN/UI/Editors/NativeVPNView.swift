@@ -25,9 +25,6 @@ struct NativeVPNView: View {
     /// exported .mobileconfig carries them in different payload dictionaries.
     @State private var pppPassword = ""
     @State private var loaded = false
-    /// The saved-confirmation affordance every editor's primary action now has —
-    /// three of six used to save with no visible acknowledgement at all.
-    @State private var savedTick = false
     @State private var customRouting = CustomRoutingProfile()
     @State private var crProxyAuthUsername = ""
     @State private var crProxyAuthPassword = ""
@@ -113,7 +110,7 @@ struct NativeVPNView: View {
             Section("Connection") {
                 TextField("Name", text: $draft.name)
                 EngineSettingRow(spec: Self.specs["native.protocol"], value: draft.kind) {
-                    Picker(selection: $draft.kind) {
+                    SettingPicker(selection: $draft.kind) {
                         Text("IKEv2").tag(VPNKind.ikev2)
                         Text("IPsec (IKEv1)").tag(VPNKind.ipsec)
                         Text("L2TP / IPsec").tag(VPNKind.l2tp)
@@ -231,19 +228,33 @@ struct NativeVPNView: View {
         .padding(.top, 10)
         .navigationTitle(draft.name)
         .task { loadOnce() }
-        .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button { save() } label: {
-                    savedTick ? Label("Saved", systemImage: "checkmark")
-                              : Label("Save", systemImage: "checkmark")
-                }
-                    .buttonStyle(.glassProminent)   // primary action — one idiom in every editor
-                    .disabled(saveDisabledReason != nil)
-                    // A dead Save must say why — hover AND VoiceOver.
-                    .help(saveDisabledReason ?? "Save changes to this VPN")
-                    .accessibilityValue(saveDisabledReason.map { "unavailable — \($0)" } ?? "")
-            }
-        }
+        // LIVE SAVE — no confirming button in any editor now. See `SettingCommit`.
+        .savesSettingsLive { save() }
+        // RED ON THE FIELD THAT IS HOLDING THE CONNECTION UP, from `NativeVPNReadiness`
+        // — the SAME answer the connect list's disabled Connect and its "Fix This…"
+        // banner are built from. See `SettingNeeds` for why it must not come from a
+        // second, hand-maintained list of required ids.
+        .settingNeeds(needs)
+    }
+
+    /// Which row has to be filled in before this VPN can connect, and why.
+    ///
+    /// `NativeVPNReadiness.need` already answers exactly this — one `ConnectNeed`
+    /// carrying the sentence AND the `settingID` at fault — so the editor reads it
+    /// rather than restating it. `hasSecret`/`hasGroupPSK` come from the editor's OWN
+    /// fields rather than the keychain: what is typed and not yet committed counts as
+    /// present, or a user who has just filled a password in would be told it is
+    /// missing until focus left the field.
+    private var needs: SettingNeeds {
+        let facts = NativeVPNReadiness.Facts(
+            hasSecret: !secret.isEmpty,
+            hasGroupPSK: !sharedSecret.isEmpty,
+            // Not a per-VPN question, and never the field a person can fix — asserted
+            // true so a build without the capability doesn't redden an unrelated row.
+            hasPersonalVPNCapability: true)
+        guard let need = NativeVPNReadiness.need(for: draft, facts: facts),
+              let id = need.settingID else { return SettingNeeds() }
+        return SettingNeeds(byID: [id: need.sentence])
     }
 
     @ViewBuilder private var authSection: some View {
@@ -459,7 +470,7 @@ struct NativeVPNView: View {
 
     private func enumRow(_ id: String, _ binding: Binding<String>, _ options: [(String, String)]) -> some View {
         EngineSettingRow(spec: Self.specs[id], value: binding.wrappedValue) {
-            Picker(selection: binding) {
+            SettingPicker(selection: binding) {
                 ForEach(options, id: \.0) { Text($0.1).tag($0.0) }
             } label: { EngineSettingLabel(spec: Self.specs[id], value: binding.wrappedValue) }
         }
@@ -650,7 +661,12 @@ struct NativeVPNView: View {
             .makeNEProxySettings()
     }
 
+    /// Store what the editor holds. Called on field blur, on submit, and on close
+    /// (`savesSettingsLive`), and still directly by the L2TP export — which is why it
+    /// has to be idempotent. Validity-gated: an invalid draft is HELD, not stored.
     private func save() {
+        guard !ManagedPolicy.lockConfiguration else { return }
+        guard saveDisabledReason == nil else { return }
         if draft.kind == .ipsec { draft.usesSharedSecret = true }
         manager.save(draft)
         // Emptying a secret field REMOVES the stored secret (SubprocessTunnelView's
@@ -672,14 +688,9 @@ struct NativeVPNView: View {
             customRouting = await commitCustomRouting(vpn, profileID: id, profile: toCommit,
                                                       proxyAuthUsername: user, proxyAuthPassword: pass)
         }
-        // Acknowledge the save on the button, the way Tailscale/Proxy Tunnel and
-        // the OpenVPN editor do — a Save that changes nothing on screen reads as
-        // a Save that didn't happen.
-        savedTick = true
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(2))
-            savedTick = false
-        }
+        // No "Saved" transient: it reused the SAME `checkmark` glyph as "Save" in an
+        // icon-only toolbar, so a successful save was invisible to a sighted user
+        // while VoiceOver heard "Saved". Deleting the button deleted the bug.
     }
 
     private func exportMobileconfig() {

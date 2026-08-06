@@ -24,7 +24,6 @@ struct TailscaleView: View {
     @State private var advertiseText = ""
     @State private var loaded = false
     @State private var saving = false
-    @State private var savedTick = false
     @State private var status: TailscaleStatus?
     @State private var prefsError: String?
     @State private var customRouting = CustomRoutingProfile()
@@ -51,7 +50,7 @@ struct TailscaleView: View {
             Section("Connection") {
                 TextField("Name", text: $name)
                 EngineSettingRow(spec: Self.specs["ts.preset"], value: draft.preset) {
-                    Picker(selection: $draft.preset) {
+                    SettingPicker(selection: $draft.preset) {
                         ForEach(TailscaleConfig.Preset.allCases, id: \.self) {
                             Text($0.displayName).tag($0)
                         }
@@ -255,17 +254,10 @@ struct TailscaleView: View {
         .navigationTitle(name.isEmpty ? "Tailscale" : name)
         .task { loadOnce() }
         .task(id: profileID) { await pollStatus() }
-        .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button { Task { await save() } } label: {
-                    savedTick ? Label("Saved", systemImage: "checkmark") : Label("Save", systemImage: "checkmark")
-                }
-                .buttonStyle(.glassProminent)
-                .disabled(saveDisabledReason != nil)
-                .help(saveDisabledReason ?? "Save changes to this VPN")
-                .accessibilityValue(saveDisabledReason ?? "")
-            }
-        }
+        // LIVE SAVE — no confirming button in any editor now. See `SettingCommit`.
+        .savesSettingsLive { Task { await save() } }
+        // RED ON THE FIELD THAT IS HOLDING THE CONNECTION UP — see `SettingNeeds`.
+        .settingNeeds(needs)
         .safeAreaInset(edge: .bottom) {
             if ManagedPolicy.lockConfiguration {
                 Label("Connection settings are managed by your organization and can't be changed here.",
@@ -331,7 +323,7 @@ struct TailscaleView: View {
             }
         } else {
             EngineSettingRow(spec: spec, value: draft.exitNode) {
-                Picker(selection: $draft.exitNode) {
+                SettingPicker(selection: $draft.exitNode) {
                     Text("Choose…").tag("")
                     ForEach(nodes) { node in
                         Text(node.pickerLabel + (node.online ? "" : " (offline)")).tag(node.id)
@@ -343,28 +335,14 @@ struct TailscaleView: View {
         }
     }
 
-    /// The house text-field idiom: `LabeledContent` with a trailing plain field,
-    /// as used by the OpenVPN, WireGuard, SSH and OpenConnect editors. This form
-    /// used `.roundedBorder` full-width fields, so the same control looked
-    /// different depending on which editor you happened to open.
+    /// The house text-field idiom — one of the five copies of it that now forward to
+    /// the shared `SettingValueField`. This one is where the EMPTY-title +
+    /// `prompt:` rule was first got right ("Name on the Network  Jim-s-MacBook-Pro
+    /// Jim-s-MacBook-Pro" was the symptom); the shared field enforces it for all of
+    /// them.
     private func labeledField(_ spec: EngineSettingSpec, _ binding: Binding<String>,
                               prompt: String, problem: String? = nil) -> some View {
-        LabeledContent {
-            // EMPTY title + a real `prompt:`. A TextField's first argument is its
-            // TITLE, and inside LabeledContent SwiftUI DRAWS that title next to
-            // the value — so passing the example here rendered it as content:
-            // "Name on the Network   Jim-s-MacBook-Pro   Jim-s-MacBook-Pro"
-            // (the example happens to equal the value). `prompt:` is the real
-            // placeholder: visible only while the field is empty.
-            TextField("", text: binding, prompt: Text(prompt))
-                .multilineTextAlignment(.trailing)
-                .autocorrectionDisabled()
-                .accessibilityLabel(spec.name)
-                .accessibilityValue(problem.map { "\(binding.wrappedValue). Problem: \($0)" }
-                                    ?? binding.wrappedValue)
-        } label: {
-            EngineSettingLabel(spec: spec, value: binding.wrappedValue)
-        }
+        SettingValueField(spec: spec, text: binding, prompt: prompt, problem: problem)
     }
 
     @ViewBuilder private func networkSection(_ status: TailscaleStatus) -> some View {
@@ -420,6 +398,22 @@ struct TailscaleView: View {
         TailscaleConfig.authKeyWarning(authKey, preset: draft.preset)
     }
 
+    /// Which row has to be filled in before this VPN can connect, and why.
+    ///
+    /// One derivation, two consumers: `saveDisabledReason` below refuses to STORE the
+    /// same faults this reddens. There is deliberately no separate list of "required"
+    /// ids — see `SettingNeeds`. Tailscale's own service has one address and asks for
+    /// nothing, so the only genuinely required field is Headscale's control server.
+    private var needs: SettingNeeds {
+        var out: [String: String] = [:]
+        if draft.preset == .headscale, let p = draft.controlURLProblem {
+            out["ts.control-url"] = p
+        }
+        if let p = draft.exitNodeSelectionProblem { out["ts.exit-node-machine"] = p }
+        if let p = advertiseProblem { out["ts.advertise-routes"] = p }
+        return SettingNeeds(byID: out)
+    }
+
     private var saveDisabledReason: String? {
         if saving { return "Saving…" }
         if name.trimmingCharacters(in: .whitespaces).isEmpty { return "Give this VPN a name first." }
@@ -454,7 +448,13 @@ struct TailscaleView: View {
         }
     }
 
+    /// Store what the editor holds. Called on field blur, on submit, and on close
+    /// (`savesSettingsLive`) — never from a button, because there isn't one.
+    /// Idempotent and validity-gated: an invalid draft is HELD here, not rewritten
+    /// and not stored.
     private func save() async {
+        guard !ManagedPolicy.lockConfiguration else { return }
+        guard saveDisabledReason == nil else { return }
         saving = true
         defer { saving = false }
         draft.advertiseRoutes = TailscaleConfig.splitRoutes(advertiseText)
@@ -482,9 +482,9 @@ struct TailscaleView: View {
             customRouting = await commitCustomRouting(vpn, profileID: profileID, profile: customRouting,
                                                       proxyAuthUsername: crProxyAuthUsername,
                                                       proxyAuthPassword: crProxyAuthPassword)
-            savedTick = true
-            try? await Task.sleep(for: .seconds(2))
-            savedTick = false
+            // No "Saved" transient: it reused the SAME glyph as "Save" in an
+            // icon-only toolbar, so a successful save was invisible to a sighted user
+            // while VoiceOver heard "Saved". Deleting the button deleted the bug.
         } catch {
             vpn.report(error, profile: profileID)
         }

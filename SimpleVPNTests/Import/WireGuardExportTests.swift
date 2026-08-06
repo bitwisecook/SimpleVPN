@@ -350,31 +350,64 @@ struct WireGuardExportCallSiteTests {
     /// `includingSecrets: false`, and only the separately-named action can pass
     /// `true` — so there is no dialog whose default button produces a file with a
     /// key in it.
+    /// THE HOST MOVED, THE INVARIANTS DID NOT. Both exports used to be buttons in a
+    /// section of `WireGuardView`; they are now items in the VPN's own context menu in
+    /// `ManageVPNsView`, because a toolbar or a pane acts on the WINDOW while a
+    /// right-click acts on the OBJECT. Everything below is the same guard against the
+    /// same bug, pointed at the new call site.
+    private static let exportHost = "SimpleVPN/UI/Editors/ManageVPNsView.swift"
+
     @Test func onlyTheConsentedActionAsksForSecrets() throws {
-        let view = try Self.source("SimpleVPN/UI/Editors/WireGuardView.swift")
-        #expect(view.contains("Button(\"Export .conf…\") { export(includingSecrets: false) }"))
+        let view = try Self.source(Self.exportHost)
+        #expect(view.contains("Button(\"Export .conf\\u{2026}\") { exportWireGuard(p.id, includingSecrets: false) }"))
         // The one `includingSecrets: true` is inside the confirmation's own button.
-        let consented = view.components(separatedBy: "export(includingSecrets: true)")
+        let consented = view.components(separatedBy: "includingSecrets: true")
         #expect(consented.count == 2, "there is more than one consented export call site")
         let before = try #require(consented.first)
-        let dialog = try #require(before.range(of: ".confirmationDialog(exportTarget.exportConsentTitle"))
+        let dialog = try #require(before.range(of: ".confirmationDialog(wgConsentTarget?.exportConsentTitle"))
         #expect(dialog.upperBound < before.endIndex)
         // …and it is the DESTRUCTIVE role, with nothing claiming the default action:
         // Return and Escape must both cancel.
         #expect(before.contains("role: .destructive"))
-        #expect(!view.contains("Button(exportTarget.exportConsentConfirmTitle) "))
+        #expect(!view.contains("Button(c.exportConsentConfirmTitle) "))
     }
 
     /// The consent is asked BEFORE the save panel. Asking after the user has already
     /// named a file makes the question read as a formality on the way to a file they
     /// have decided to create.
     @Test func consentComesBeforeTheSavePanel() throws {
-        let view = try Self.source("SimpleVPN/UI/Editors/WireGuardView.swift")
-        #expect(view.contains("Button(\"Export .conf with Keys…\") { showExportConsent = true }"))
-        let export = try #require(view.range(of: "private func export(includingSecrets: Bool)")
+        let view = try Self.source(Self.exportHost)
+        #expect(view.contains("Button(\"Export .conf with Keys\\u{2026}\") { wgKeyExportTarget = p.id }"))
+        let export = try #require(view.range(of: "private func exportWireGuard(_ id: String, includingSecrets: Bool)")
             .map { String(view[$0.lowerBound...]) })
-        // The panel is inside export(); the consent gate is outside it, on the button.
+        // The panel is inside exportWireGuard(); the consent gate is outside it, on the
+        // menu item.
         #expect(export.contains("NSSavePanel()"))
-        #expect(!export.contains("showExportConsent = true"))
+        #expect(!export.contains("wgKeyExportTarget = p.id"))
+    }
+
+    /// KIND-AWARENESS, which is the other half of the move. `.ovpn` is OpenVPN's format
+    /// and `.conf` is WireGuard's; a kind with no interchange format is offered
+    /// NOTHING, never a disabled item — an F5 BIG-IP APM page offering "Export .ovpn…"
+    /// is what prompted this ("what's the >> Export ovpn doing on an f5 APM page").
+    @Test func exportIsOfferedOnlyWhereAFormatExists() throws {
+        let view = try Self.source(Self.exportHost)
+        // The `.ovpn` item is inside the kind-aware builder…
+        let items = try #require(view.range(of: "private func exportItems(for p: VPNController.Profile)")
+            .map { String(view[$0.lowerBound...]) })
+        #expect(items.contains("Export .ovpn"))
+        #expect(items.contains("vpn.isWireGuard(p.id)"))
+        // …the kinds with no format are named and given EmptyView…
+        #expect(items.contains("vpn.isTailscale(p.id) || vpn.isProxyTunnel(p.id) || vpn.isSSHNetworkTunnel(p.id)"))
+        // …and the subprocess and native rows never offer one at all, so an SSL-VPN
+        // (F5 APM, FortiGate, AnyConnect…) cannot be handed an .ovpn action.
+        for row in ["private func tunnelRow(", "private func nativeRow("] {
+            let start = try #require(view.range(of: row))
+            let body = String(view[start.lowerBound...]).components(separatedBy: "\n    @ViewBuilder").first ?? ""
+            #expect(!body.contains("exportItems"), "\(row) offers an export it has no format for")
+            #expect(!body.contains("Export ."), "\(row) offers an export it has no format for")
+        }
+        // And the toolbar no longer carries one: it acted on the window, not the object.
+        #expect(!view.contains("Button(\"Export .ovpn\\u{2026}\") {\n                        if let p ="))
     }
 }

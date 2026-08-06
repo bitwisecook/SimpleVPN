@@ -403,11 +403,18 @@ struct SettingRevealTests {
     /// scroll does not exist (or is not on screen) when the reveal fires.
     @Test func aRevealForAFormThatIsNotOnScreenYetStillScrollsWhenItAppears() {
         let search = openVPNEditorSearch()
-        search.activeTab = .signIn
+        search.activeTab = .options
 
         #expect(search.reveal(id: "openvpn.private-key-password"))
         // The destination is NOT the tab the user is on, so the shell must switch —
         // which is what leaves the scroll host arriving late.
+        //
+        // The private key's password MOVED to the Sign-In tab (it is a secret, and it
+        // belongs with signing in rather than in a bucket called Options), so this
+        // reveal now goes the other way. `tab(forSettingID:)` is what has to be asked:
+        // the SURFACE still says `.options`, because it is right for every other
+        // `openvpn.*` id — see `SettingSurface.tabOverrides`.
+        #expect(SettingSurface.tab(forSettingID: "openvpn.private-key-password") == .signIn)
         #expect(SettingSurface.owning("openvpn.private-key-password")?.tab == .options)
 
         // Hoisted out of `#expect`: these are mutating calls, and the macro captures

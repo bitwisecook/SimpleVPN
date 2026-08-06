@@ -23,7 +23,13 @@ actually on.
    - *User-initiated*: `AccessibilityAnnouncer.sayNow(_:)` for a reveal or completion the
      user just asked for. Immediate — the click is the debounce. Wave-3 users: options-form
      search reveal ("Showing Compression, in Security"), endpoint scan completion, import
-     success, embedded-editor "Saved", composition full-tunnel conflict, "Log copied".
+     success, composition full-tunnel conflict, "Log copied".
+     - The embedded editor's **"Saved"** announcement is GONE with the Save button. The
+       editors are live-save now (`SettingCommit`): a field commits when you leave it and
+       the editor commits when it closes, so there is no discrete save event to announce
+       and announcing every blur would be chatter. What VoiceOver hears instead is what a
+       sighted user sees: the value staying put, and — when a field is holding the
+       connection up — that field's own "needs a value" (see rule 5).
 3. **The status vocabulary is `DotState`** (App/ContentView.swift). Six states — off / busy /
    connected / paused / degraded / captive-portal — each with a color, an SF-symbol *shape*
    (`symbolName`, drawn when Differentiate Without Color is on), and
@@ -43,8 +49,16 @@ actually on.
    `accessibilityValue` ("…Problem: not a valid setup key") or the combined row sentence,
    *and* the visible error `Label` announces its role ("Problem: …" / "Error: …") — never
    only red/orange text somewhere else. **A disabled button says why**: the same reason
-   string goes to `.help` (hover) and `.accessibilityValue` (VoiceOver) — see the Save
-   buttons in every editor.
+   string goes to `.help` (hover) and `.accessibilityValue` (VoiceOver) — see the Connect
+   buttons and the editors' export actions.
+   - **A REQUIRED FIELD IS NOT RED ALONE.** `SettingNeeds` reddens the row the connect path
+     is waiting on, and colour is the least of the three channels it uses: the row renders
+     `SettingNeedLabel` — visible text naming what is missing and what clears it — the
+     control's `accessibilityValue` says "needed — <reason>", and the row's name label
+     appends "needs a value". The RED IS DERIVED, never declared: it comes from the same
+     `ConnectNeed.settingID` / `SettingFault.settingID` the connect list's disabled Connect
+     is built from, so "the connect list says X is missing" and "the editor reddens Y"
+     cannot disagree.
 6. **Custom-drawn surfaces are navigable structures, not labeled pictures.** Canvas/graph
    views expose children and rotors (Routes window: "VPNs" and "Problems" rotors, one
    element per card/edge/drift line, custom actions matching clicks). Swift Charts get
@@ -126,8 +140,11 @@ The contract, per surface kind:
   `attemptConnect`, which routes through `connectTask` so an Enter-initiated connect is
   cancellable like a clicked one). Outside a field, the visibly prominent button owns
   Return via `.keyboardShortcut(.defaultAction)` — Connect in the detail header, Scan /
-  Run / Open / Import / Save in their sheets. One default action per window, always the
-  `.glassProminent` button.
+  Run / Open / Import in their sheets, and "Done" in the standalone VPN editor window.
+  One default action per window, always the `.glassProminent` button.
+  - In a setting field, Return SUBMITS, which under live save also COMMITS
+    (`savesSettingsLive` → `.onSubmit(of: .text)`). No editor has a Save button for Return
+    to own any more.
 - **ESC**: every sheet and popover closes on ESC — a `.cancelAction` shortcut on its
   Cancel/Done button (or `.onExitCommand` where Done already owns Return). ESC also
   cancels an in-flight connect (the ✕ beside the "Connecting…" pill carries
@@ -169,8 +186,8 @@ The contract, per surface kind:
 | Connection telemetry / interface traffic | `AXChartDescriptor` audio graphs, combined stat rows. |
 | Routes window | Named container "Route diagram"; one element per card with label+value+actions; "VPNs"/"Problems" rotors; drift lines are rotor entries; edges: dash + symbol + words, DWC dash rhythms; keyboard pan/zoom. |
 | Gateway bar | Value = owner in words; announcer speaks gateway changes. |
-| Manage VPNs | Combined rows for every store (NE, tunnels, native, compositions) incl. status words; toolbar +/−/Export; composition row menu; sidebar initial focus. |
-| Editors (OpenVPN options, Tailscale, WireGuard, Proxy, SSH Network Tunnel, Subprocess, Native, Certificates, Custom Routing, Composition) | Labels from the descriptor/spec registries (`SettingDescriptor.name`, `EngineSettingSpec.name`); bold "changed" state spoken ("changed from default"); errors in field values + "Problem:" labels; disabled Save/Connect explain themselves; rule rows read as sentences. Live status a row discovers for itself rides that row's own value — the SSH agent row speaks what the agent holds ("Your SSH agent has 3 keys: …" / "No SSH agent is running") in the field's `accessibilityValue`, with the on-screen label `accessibilityHidden` so it isn't said twice, and pairs its colour with a per-state SF Symbol. |
+| Manage VPNs | Combined rows for every store (NE, tunnels, native, compositions) incl. status words; toolbar +/− and "Find a setting"; **export is a per-row context-menu action, offered only for a kind that has a format** (`.ovpn` for OpenVPN, `.conf` × 2 for WireGuard, nothing for the rest) — it was a toolbar button acting on the window, which said nothing about WHICH VPN it meant; composition row menu; sidebar initial focus. |
+| Editors (OpenVPN options, Tailscale, WireGuard, Proxy, SSH Network Tunnel, Subprocess, Native, Certificates, Custom Routing, Composition) | Labels from the descriptor/spec registries (`SettingDescriptor.name`, `EngineSettingSpec.name`); bold "changed" state spoken ("changed from default"); errors in field values + "Problem:" labels; a required-and-empty row says so in WORDS as well as in red (`SettingNeedLabel`, and "needs a value" on the row's name); disabled Connect and export actions explain themselves; rule rows read as sentences. **There is no Save button in any editor** — they are live-save (`SettingCommit`), so nothing announces "Saved" and nothing has a disabled-Save reason to speak. Live status a row discovers for itself rides that row's own value — the SSH agent row speaks what the agent holds ("Your SSH agent has 3 keys: …" / "No SSH agent is running") in the field's `accessibilityValue`, with the on-screen label `accessibilityHidden` so it isn't said twice, and pairs its colour with a per-state SF Symbol. |
 | Import / discovery | Import success announced; candidate rows as sentences; "Create <what>" buttons; scan completion announced. |
 | Network Tools | Mediator cards read as sentences with named Re-assert buttons; probe/DNS/traceroute/path rows as sentences ("no reply", "the answer macOS used"); latency audio graph; named pickers and port fields. |
 | Traffic log | Rows as sentences (columns inlined, glyphs translated); filled/hollow activity dot; per-row actions menu named; ESC closes. |
@@ -228,8 +245,8 @@ your ears. Any failure — yours or the gate's — is release-blocking, same as 
 | 6 | **Use the rotor** (VO-U → "VPNs", then "Problems") | The diagram is a named container ("Route diagram") with children; every button inside is named; at least one card carries both a name and a value | The rotors themselves: that "VPNs" and "Problems" are offered, and that a healthy connection lists no problems |
 | 7 | **Read the throughput chart** (inspector) | The live-details toggle is named and reports whether the pane is showing | The audio graph — needs a live connection, and tones are heard, not read. Confirm the summary sentence names the current rates |
 | 8 | **Pause or disconnect** | Every status phrase on screen comes from one vocabulary; VPN ▸ Disconnect is enabled exactly when the Connect controls report something active | The announcement: its wording, that it arrives without moving focus, and that reconnect churn doesn't spam |
-| 9 | **Open Manage VPNs** (⇧⌘M) | ⇧⌘M opens it; every sidebar row reads as one sentence including a `DotState` status word; every "Help for X" button names a setting that is on screen under that name; a disabled Save carries its reason in its value | That focus starts in the sidebar list, and that Tab reaches the editor |
-| 10 | **Break a setting** (invalid control URL in a Tailscale/Headscale editor) | — | All of it: type the bad value and hear the field's own value speak the problem, and Save explain itself. Automating this would mean editing one of your real VPNs |
+| 9 | **Open Manage VPNs** (⇧⌘M) | ⇧⌘M opens it; every sidebar row reads as one sentence including a `DotState` status word; every "Help for X" button names a setting that is on screen under that name; the Sign-In tab now HAS "Help for…" buttons — the three moved settings' plus the sign-in source's — where it previously had none; right-clicking a row offers export only where a format exists | That focus starts in the sidebar list, that Tab reaches the editor, and that LEAVING a field commits it with no announcement and no Save button to look for |
+| 10 | **Break a setting** (invalid control URL in a Tailscale/Headscale editor), then **empty a required one** (a WireGuard peer public key) | — | All of it: type the bad value and hear the field's own value speak the problem; then clear the required field and hear "needs a value" on its name plus the `SettingNeedLabel` sentence — and confirm the malformed value is NOT stored while the empty one still reddens. Automating this would mean editing one of your real VPNs |
 | 11 | **Custom Routing** | It is its own named tab, and both tabs are reachable; any rule row already present reads as a sentence. The neighbouring tab differs by editor: the six tunnel editors lead with **"Settings"**, the OpenVPN editor with **"General"** (General · Servers · Sign-In · Options · Certificates · Configuration · Custom Routing) — the test accepts either, because Manage VPNs seeds its selection from the OpenVPN store. Each rule list's add action is a `+` in its section header, beside the `?`, carrying the full sentence as both `.help` and `.accessibilityLabel` so it is never glyph-only; an empty list answers with a spelled-out button inside a container whose label is the explanation, so the button stays its one reachable child | Adding a rule that overlaps a pushed route, and hearing the overlap explained ("…overlaps a pushed route"). Also: reach **both** add actions with the keyboard from an empty Routes list and an empty DNS list — the header `+` and the empty state's own button — since a glyph beside a `?` is the case most likely to read as decoration |
 | 12 | **Settings** (⌘,) | The window opens from the menu or ⌘,; all five group headings (General · Menu Bar & Icons · Updates · Privacy · Advanced) are on screen under those names; the Labels tab is reachable and its per-label controls name which label they edit | Actually toggling a checkbox and renaming a label, and hearing the change confirmed |
 | 13 | **Network Tools** (⇧⌘T) | ⇧⌘T opens it; the host field is named "Host or IP to test" (it used to be nameless — VoiceOver read its example, "example.com", as its name); the three Re-assert buttons name their subject; EVERY disabled control in the window carries its reason in its value; the DNS card names the resolvers macOS is actually using | Hearing the scan FINISH (the completion announcement) and the latency audio graph |

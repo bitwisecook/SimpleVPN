@@ -760,26 +760,42 @@ nonisolated extension WireGuardConfig {
     /// Why the whole config can't connect (the connect-flow gate), or nil.
     /// Deliberately does NOT check the private key: that lives in the keychain,
     /// not in this (redacted) value — the connect flow checks it separately.
-    var connectProblem: String? {
+    ///
+    /// DERIVED from `connectFault` so that the sentence the connect path refuses with
+    /// and the row the editor reddens can never name different fields. See
+    /// `Shared/SettingFault.swift`.
+    var connectProblem: String? { connectFault?.sentence }
+
+    /// The same gate, WITH the field to blame — what the editor's red required-field
+    /// marking is driven from (`SettingNeeds`). The order is the order a person can
+    /// act on: identify the peer, reach it, address yourself, then choose what to send.
+    var connectFault: SettingFault? {
         if peerPublicKey.trimmingCharacters(in: .whitespaces).isEmpty {
-            return "Enter the server peer's public key."
+            return SettingFault("wg.public-key", "Enter the server peer's public key.")
         }
         // A truncated key is accepted by every layer until the handshake, where
         // it fails silently — so it's refused here, with the endpoint.
-        if let p = Self.keyProblem(peerPublicKey) { return p }
-        if let p = Self.endpointProblem(endpoint) { return p }
+        if let p = Self.keyProblem(peerPublicKey) { return SettingFault("wg.public-key", p) }
+        // `endpointProblem` answers for the EMPTY field too ("Enter the server's
+        // address as host:port…"), which is what makes the one field a WireGuard VPN
+        // cannot work without turn red before anything has been typed.
+        if let p = Self.endpointProblem(endpoint) { return SettingFault("wg.endpoint", p) }
         if addresses.isEmpty {
-            return "Add this device's tunnel address (like 10.0.0.2/32) — it's in the config your provider gave you."
+            return SettingFault("wg.address",
+                                "Add this device's tunnel address (like 10.0.0.2/32) \u{2014} it's in the config your provider gave you.")
         }
-        if let p = Self.addressesProblem(addresses) { return p }
+        if let p = Self.addressesProblem(addresses) { return SettingFault("wg.address", p) }
         if allowedIPs.isEmpty {
-            return "Add at least one allowed network (0.0.0.0/0, ::/0 sends everything)."
+            return SettingFault("wg.allowed-ips",
+                                "Add at least one allowed network (0.0.0.0/0, ::/0 sends everything).")
         }
-        if let p = Self.routesProblem(allowedIPs) { return p }
-        if let p = DNSSearchDomains.problem(list: searchDomains) { return p }
+        if let p = Self.routesProblem(allowedIPs) { return SettingFault("wg.allowed-ips", p) }
+        if let p = DNSSearchDomains.problem(list: searchDomains) {
+            return SettingFault("wg.search-domains", p)
+        }
         // Only when one is actually present in this (usually redacted) copy —
         // the connect flow validates what the user typed separately.
-        if let p = Self.keyProblem(presharedKey) { return p }
+        if let p = Self.keyProblem(presharedKey) { return SettingFault("wg.preshared-key", p) }
         return nil
     }
 

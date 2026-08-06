@@ -37,7 +37,6 @@ struct SSHNetworkTunnelView: View {
     @State private var searchDomainsText = ""
     @State private var loaded = false
     @State private var saving = false
-    @State private var savedTick = false
     @State private var checkingHostKey = false
     @State private var hostKeyReport: VPNController.SSHNetHostKeyReport?
     @State private var status: SSHNetworkTunnelStatus?
@@ -77,7 +76,7 @@ struct SSHNetworkTunnelView: View {
                                  prompt: NSUserName(), accessibilityLabel: "SSH username")
                 }
                 EngineSettingRow(spec: Self.specs["sshnet.auth-method"], value: draft.authMethod) {
-                    Picker(selection: $draft.authMethod) {
+                    SettingPicker(selection: $draft.authMethod) {
                         ForEach(SSHNetworkTunnelConfig.AuthMethod.allCases, id: \.self) {
                             Text($0.displayName).tag($0)
                         }
@@ -218,7 +217,7 @@ struct SSHNetworkTunnelView: View {
             Section("Security") {
                 EngineSettingRow(spec: Self.specs["sshnet.host-key-policy"],
                                  value: draft.hostKeyPolicy) {
-                    Picker(selection: $draft.hostKeyPolicy) {
+                    SettingPicker(selection: $draft.hostKeyPolicy) {
                         ForEach(SSHNetworkTunnelConfig.HostKeyPolicy.allCases, id: \.self) {
                             Text($0.displayName).tag($0)
                         }
@@ -316,17 +315,12 @@ struct SSHNetworkTunnelView: View {
         .navigationTitle(name.isEmpty ? "SSH Network Tunnel" : name)
         .task { loadOnce() }
         .task(id: profileID) { await pollStatus() }
-        .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button { Task { await save() } } label: {
-                    savedTick ? Label("Saved", systemImage: "checkmark") : Label("Save", systemImage: "checkmark")
-                }
-                .buttonStyle(.glassProminent)
-                .disabled(saveDisabledReason != nil)
-                .help(saveDisabledReason ?? "Save changes to this VPN")
-                .accessibilityValue(saveDisabledReason ?? "")
-            }
-        }
+        // LIVE SAVE — no confirming button in any editor now. See `SettingCommit`.
+        .savesSettingsLive { Task { await save() } }
+        // RED ON THE FIELD THAT IS HOLDING THE CONNECTION UP, from the connect gate
+        // itself (`SSHNetworkTunnelConfig.connectFault`) rather than a second list of
+        // "required" ids — see `SettingNeeds`.
+        .settingNeeds(needs)
         .safeAreaInset(edge: .bottom) {
             if ManagedPolicy.lockConfiguration {
                 Label("Connection settings are managed by your organization and can't be changed here.",
@@ -449,6 +443,22 @@ struct SSHNetworkTunnelView: View {
         return nil
     }
 
+    /// Which row has to be filled in before this VPN can connect, and why — straight
+    /// off `SSHNetworkTunnelConfig.connectFault`, which is the same gate
+    /// `VPNController+SSHNetworkTunnel.connect` throws on. Asked of a draft carrying
+    /// the editor's OWN text fields (they are only folded into `draft` on save), so a
+    /// field the user has just typed into counts as filled in.
+    private var needs: SettingNeeds {
+        var probe = draft
+        probe.port = Int(portText) ?? (portText.isEmpty ? 0 : -1)
+        probe.includedRoutes = ProxyTunnelConfig.splitRoutes(includedText)
+        probe.excludedRoutes = ProxyTunnelConfig.splitRoutes(excludedText)
+        probe.dnsServers = ProxyTunnelConfig.splitRoutes(dnsText)
+        probe.searchDomains = ProxyTunnelConfig.splitRoutes(searchDomainsText)
+        guard let fault = probe.connectFault, let id = fault.settingID else { return SettingNeeds() }
+        return SettingNeeds(byID: [id: fault.sentence])
+    }
+
     private func loadOnce() {
         guard !loaded else { return }
         loaded = true
@@ -490,7 +500,13 @@ struct SSHNetworkTunnelView: View {
         }
     }
 
+    /// Store what the editor holds. Called on field blur, on submit, and on close
+    /// (`savesSettingsLive`) — never from a button, because there isn't one.
+    /// Idempotent and validity-gated: an invalid draft is HELD here, not rewritten
+    /// and not stored.
     private func save() async {
+        guard !ManagedPolicy.lockConfiguration else { return }
+        guard saveDisabledReason == nil else { return }
         saving = true
         defer { saving = false }
         draft.port = Int(portText.trimmingCharacters(in: .whitespaces)) ?? 0
@@ -510,9 +526,10 @@ struct SSHNetworkTunnelView: View {
             customRouting = await commitCustomRouting(vpn, profileID: profileID, profile: customRouting,
                                                       proxyAuthUsername: crProxyAuthUsername,
                                                       proxyAuthPassword: crProxyAuthPassword)
-            savedTick = true
-            try? await Task.sleep(for: .seconds(2))
-            savedTick = false
+            // No "Saved" transient: it reused the SAME `checkmark` glyph as "Save"
+            // in an icon-only toolbar, so a successful save was invisible to a
+            // sighted user while VoiceOver heard "Saved". Deleting the button
+            // deleted the bug.
         } catch {
             vpn.report(error, profile: profileID)
         }
@@ -530,25 +547,15 @@ struct SSHNetworkTunnelView: View {
     static var specs: EngineSettingCatalog { SSHNetSettings.catalog }
 
     @ViewBuilder private func fieldProblem(_ text: String) -> some View {
-        Label(text, systemImage: "exclamationmark.triangle.fill")
-            .font(.callout).foregroundStyle(.orange)
-            .accessibilityLabel("Problem: \(text)")
+        SettingProblemLabel(text)
     }
 
-    /// The house text-field idiom (`LabeledContent` + trailing plain field).
+    /// The house text-field idiom — one of the five copies of it that now forward to
+    /// the shared `SettingValueField` (UI/Components/SettingValueRow.swift).
     private func labeledField(_ spec: EngineSettingSpec, _ binding: Binding<String>,
                               prompt: String, problem: String? = nil,
                               accessibilityLabel: String? = nil) -> some View {
-        LabeledContent {
-            TextField(prompt, text: binding)
-                .multilineTextAlignment(.trailing)
-                .autocorrectionDisabled()
-                // The title is an EXAMPLE value — the spec name is the name.
-                .accessibilityLabel(accessibilityLabel ?? spec.name)
-                .accessibilityValue(problem.map { "\(binding.wrappedValue). Problem: \($0)" }
-                                    ?? binding.wrappedValue)
-        } label: {
-            EngineSettingLabel(spec: spec, value: binding.wrappedValue)
-        }
+        SettingValueField(spec: spec, text: binding, prompt: prompt, problem: problem,
+                          spokenName: accessibilityLabel)
     }
 }

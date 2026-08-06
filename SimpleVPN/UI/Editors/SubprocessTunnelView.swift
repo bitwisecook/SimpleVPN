@@ -251,7 +251,7 @@ struct SubprocessTunnelView: View {
     @ViewBuilder private var sshTrafficSection: some View {
         Section("Traffic") {
             EngineSettingRow(spec: spec("ssh.mode"), value: draft.sshMode) {
-                Picker(selection: $draft.sshMode) {
+                SettingPicker(selection: $draft.sshMode) {
                     ForEach(SSHMode.allCases, id: \.self) { Text($0.label).tag($0) }
                 } label: { EngineSettingLabel(spec: spec("ssh.mode"), value: draft.sshMode) }
                 .pickerStyle(.segmented)
@@ -276,7 +276,7 @@ struct SubprocessTunnelView: View {
     @ViewBuilder private var sshSignInSection: some View {
         Section("Sign-In") {
             EngineSettingRow(spec: spec("ssh.auth-method"), value: sshMethod) {
-                Picker(selection: Binding(
+                SettingPicker(selection: Binding(
                     get: { sshMethod },
                     set: { draft.sshAuthMethod = $0.isEmpty ? nil : $0 })) {
                     Text("Automatic").tag("")
@@ -446,7 +446,7 @@ struct SubprocessTunnelView: View {
     @ViewBuilder private var sshSecuritySection: some View {
         Section("Security") {
             EngineSettingRow(spec: spec("ssh.strict-host-key"), value: draft.strictHostKey) {
-                Picker(selection: $draft.strictHostKey) {
+                SettingPicker(selection: $draft.strictHostKey) {
                     Text("Trust on first use").tag("accept-new")
                     Text("Only known hosts").tag("yes")
                     Text("Never check (unsafe)").tag("no")
@@ -921,7 +921,7 @@ struct SubprocessTunnelView: View {
             // Software verification-code token (secret stored in the keychain).
             EngineSettingRow(spec: Self.specs["oc.token-mode"], value: draft.tokenMode,
                              disabledReason: tokenUnused) {
-                Picker(selection: $draft.tokenMode) {
+                SettingPicker(selection: $draft.tokenMode) {
                     Text("None").tag("")
                     Text("TOTP").tag("totp")
                     Text("HOTP").tag("hotp")
@@ -1481,7 +1481,7 @@ struct SubprocessTunnelView: View {
                 // openconnect accepts a CLOSED set here — free text let a typo
                 // through to be refused at startup with an opaque error.
                 EngineSettingRow(spec: Self.specs["oc.os"], value: draft.spoofOS) {
-                    Picker(selection: $draft.spoofOS) {
+                    SettingPicker(selection: $draft.spoofOS) {
                         Text("Don't say (this Mac)").tag("")
                         ForEach(SubprocessTunnelConfig.spoofOSValues, id: \.self) {
                             Text(Self.spoofOSLabel($0)).tag($0)
@@ -1550,7 +1550,7 @@ struct SubprocessTunnelView: View {
                 // rewritten (the spoofOS rule), so an existing profile carrying it is
                 // caveated below instead of being silently reinterpreted.
                 EngineSettingRow(spec: spec("oc.compression"), value: draft.ocCompression) {
-                    Picker(selection: $draft.ocCompression) {
+                    SettingPicker(selection: $draft.ocCompression) {
                         Text("Default").tag("")
                         Text("None").tag("none")
                         Text("Stateless").tag("stateless")
@@ -1742,12 +1742,14 @@ struct SubprocessTunnelView: View {
         EngineSettingRow(spec: spec(id), value: text.wrappedValue,
                          disabledReason: disabled) {
             VStack(alignment: .leading, spacing: 4) {
-                LabeledContent {
-                    TextField(prompt, text: text).multilineTextAlignment(.trailing).autocorrectionDisabled()
-                        // Validation rides the field's value (Docs/Accessibility.md).
-                        .accessibilityValue([text.wrappedValue, warning, note]
-                            .compactMap { $0 }.joined(separator: ". "))
-                } label: { EngineSettingLabel(spec: spec(id), value: text.wrappedValue) }
+                // The fifth copy of the house text row, forwarding to the shared
+                // `SettingValueField` — which is also what moved the example out of
+                // the field's TITLE (where LabeledContent drew it as though it were
+                // the value) and into `prompt:`. The warning and note stay here:
+                // they are this editor's own two extra caption channels.
+                SettingValueField(spec: spec(id), text: text, prompt: prompt,
+                                  extraSpoken: [warning, note].compactMap { $0 }
+                                                              .joined(separator: ". "))
                 if let warning, disabled == nil {
                     Label(warning, systemImage: "exclamationmark.triangle.fill")
                         .font(.callout).foregroundStyle(.orange)

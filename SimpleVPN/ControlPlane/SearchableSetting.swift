@@ -205,6 +205,33 @@ enum SettingSurface: String, CaseIterable, Identifiable {
         }
     }
 
+    /// The tab a PARTICULAR setting is rendered on — `owning(id)?.tab` unless that
+    /// setting is one of the exceptions below.
+    ///
+    /// It has to be per-setting rather than per-surface because three `openvpn.*`
+    /// engine options MOVED tabs: a private key's password belongs with signing in,
+    /// not in a bucket called Options, and the user asked "what is this 'also in Sign
+    /// In' bit about? why is that there?" — the signpost existed only because the
+    /// settings were filed by implementation (engine overrides) rather than by what
+    /// the person is doing (ONTOLOGY.md rule 1: the user's concept beats ours).
+    ///
+    /// THE IDS DO NOT CHANGE, because ids are the CLI/MDM/manual-anchor contract.
+    /// Only the heading they appear under, and the tab a reveal has to select first —
+    /// which is what this map exists to keep correct. `SettingSurface.tab` stays as
+    /// the per-surface answer because it is right for every other id on the surface.
+    static let tabOverrides: [String: SettingsTab] = [
+        "openvpn.retry-on-auth-failed": .signIn,
+        "openvpn.autologin-sessions": .signIn,
+        "openvpn.private-key-password": .signIn,
+    ]
+
+    /// Which tab holds this setting. THE call for anything that navigates; the
+    /// per-surface `tab` is only correct for a surface with no exceptions.
+    static func tab(forSettingID settingID: String) -> SettingsTab? {
+        if let moved = tabOverrides[settingID] { return moved }
+        return owning(settingID)?.tab
+    }
+
     /// The surface an id belongs to, from its namespace alone.
     ///
     /// LONGEST prefix wins, and that is load-bearing rather than tidy: "sshnet."
@@ -385,8 +412,12 @@ final class SettingsRouter {
     /// namespace, so callers never have to know either.
     func go(to settingID: String, profileID: String? = nil) {
         guard let surface = SettingSurface.owning(settingID) else { return }
+        // `tab(forSettingID:)`, not `surface.tab`: three OpenVPN options are rendered
+        // on the Sign-In tab now, and routing to them by surface would select Options
+        // and land on a row that isn't there.
         let wanted = SettingsRoute(settingID: settingID, surface: surface.rawValue,
-                                   tab: surface.tab, profileID: profileID)
+                                   tab: SettingSurface.tab(forSettingID: settingID) ?? surface.tab,
+                                   profileID: profileID)
         // An app-level setting travels on its own channel — see `appSettingsRoute`.
         if surface.isAppLevel {
             appSettingsRoute = wanted

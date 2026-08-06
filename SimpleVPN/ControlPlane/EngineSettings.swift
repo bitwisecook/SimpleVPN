@@ -93,6 +93,12 @@ struct EngineSettingCatalog: Sendable {
 /// A labelled row: the engine supplies the control; this adds the bold-on-change
 /// label, the plain-English summary, and the manual deep-link — identical in feel
 /// to the OpenVPN options rows.
+///
+/// THE LAYOUT IS NOT HERE any more. It is `SettingRowLayout`
+/// (UI/Components/SettingValueRow.swift), shared with the OpenVPN options form's
+/// `SettingRow`, so the two cannot drift again — and so the red required-field
+/// marking landed in both at once. What stays here is the only part that could never
+/// merge: where "changed" comes from.
 struct EngineSettingRow<Control: View>: View {
     let spec: EngineSettingSpec
     var changed: Bool = false
@@ -102,46 +108,14 @@ struct EngineSettingRow<Control: View>: View {
     var disabledReason: String? = nil
     @ViewBuilder let control: Control
 
-    /// Keyboard focus for the search/related-link reveal. Lives here rather than
-    /// at each call site, so ONE edit gave every row in five editors a focusable
-    /// jump target (see UI/Components/SettingReveal.swift).
-    @FocusState private var controlFocused: Bool
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .center, spacing: 8) {
-                // NOTE for callers: a bare TextField whose title is an example
-                // value ("https://vpn.example.com") makes that example its
-                // VoiceOver name — wrap fields in LabeledContent { … } label: {
-                // EngineSettingLabel(spec:) } (the WireGuard pattern) or add
-                // .accessibilityLabel(spec.name) to the field.
-                if let reason = disabledReason {
-                    control
-                        .disabled(true)
-                        .accessibilityValue("unavailable — \(reason)")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .settingRevealFocus(spec.id, focused: $controlFocused)
-                } else {
-                    control
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .settingRevealFocus(spec.id, focused: $controlFocused)
-                }
-                ManualLink(setting: spec)
-            }
-            Text(disabledReason ?? spec.summary)
-                .font(.callout).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        // NOTE for callers: the control must be a value in the VALUE column —
+        // `SettingValueField`, `SettingPicker`, a `Toggle`, or your own
+        // `LabeledContent`. A bare `TextField` or `Picker` is neither right-aligned
+        // nor correctly named to VoiceOver; see SettingValueRow.swift's header.
+        SettingRowLayout(setting: spec, disabledReason: disabledReason) {
+            control
         }
-        .padding(.vertical, 6)
-        .help(disabledReason ?? spec.summary)
-        // Identity for the scroll, the pulse and VoiceOver focus. INSIDE the
-        // shared row, so adding search to an editor is one line in that editor
-        // rather than a `.id()` on every row it renders.
-        .settingReveal(spec.id)
-        // Group the control with its summary so the explanation is the element
-        // VoiceOver reaches next, matching SettingRow in the OpenVPN form.
-        .accessibilityElement(children: .contain)
     }
 
     /// The row's control label, bold when the value differs from the default.
@@ -161,7 +135,9 @@ extension EngineSettingRow {
     }
 }
 
-/// Convenience: a plain label for a spec (bold when changed), matching SettingLabel.
+/// Convenience: a plain label for a spec (bold when changed, red when the connect
+/// path is waiting on it), matching `SettingLabel`. Both render `SettingNameLabel`,
+/// which is the one definition of what a setting's name looks like and sounds like.
 struct EngineSettingLabel: View {
     let spec: EngineSettingSpec
     var changed = false
@@ -178,8 +154,6 @@ struct EngineSettingLabel: View {
     }
 
     var body: some View {
-        Text(spec.name).bold(changed)
-            // Bold weight is invisible to VoiceOver — say the state too.
-            .accessibilityLabel(changed ? "\(spec.name), changed from default" : spec.name)
+        SettingNameLabel(settingID: spec.id, name: spec.name, changed: changed)
     }
 }

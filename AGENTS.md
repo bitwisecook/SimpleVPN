@@ -329,17 +329,35 @@ string, a manual heading, an error sentence.
    is dead documentation. Register the new catalog in that test's `catalogs` table (and any
    prose-only chapter in `proseAnchors`) — that registration is what makes the reverse
    check total.
-4. Disabled Save/Connect buttons must say why (`.help` + `.accessibilityValue`);
-   validation errors ride the field's `accessibilityValue` (see Docs/Accessibility.md).
+4. Disabled Connect buttons and export actions must say why (`.help` +
+   `.accessibilityValue`); validation errors ride the field's `accessibilityValue` (see
+   Docs/Accessibility.md). A required-and-empty row says so in words as well as in red,
+   and the red is DERIVED from the connect gate (`SettingNeeds`), never declared.
 5. **Every user-facing control gets a spec** — including the ones that look like plumbing:
    secrets (`wg.private-key`, `native.password`), master toggles that gate other rows
    (`openvpn.proxy-enabled`), and the value the whole VPN depends on. An unspec'd control
    is invisible to SettingsSearch, unaddressable by the CLI and MDM, and has no manual
    anchor behind its help button. Keychain-backed and UI-state controls use
    `SettingDescriptor`'s closure initializer rather than a keypath.
-6. **Primary action, one idiom:** `.buttonStyle(.glassProminent)` plus the `savedTick`
-   Save→Saved affordance. A Save that changes nothing on screen reads as one that
-   didn't happen.
+6. **THERE IS NO SAVE BUTTON.** Every config surface is LIVE SAVE
+   (`UI/Components/SettingValueRow.swift` → `SettingCommit`): a field commits when focus
+   leaves it or it is submitted, and the whole editor commits when it closes or the
+   sidebar switches profile. A commit must be IDEMPOTENT and VALIDITY-GATED — a malformed
+   value is HELD in the editor, never stored and never silently rewritten.
+   - It is safe because an edit updates the STORED profile only; the running tunnel keeps
+     its settings until reconnect. The hazard of live-applying network config is applying
+     it NOW, and we do not. State that wherever a commit is written.
+   - `savedTick` and every "Saved" transient are GONE. The old ✓ used the SAME glyph for
+     "Save" and "Saved" in an icon-only toolbar, so a successful save was invisible to a
+     sighted user while VoiceOver heard "Saved" — deleting the button deleted the bug.
+   - The window's close button is the close affordance. A LABELLED "Done"
+     (`.glassProminent`, `.confirmationAction`) is allowed only where there is no sidebar
+     to leave by — today the standalone VPN editor window. Never a bare tick: an
+     accent-filled circular icon button is an iOS idiom, and it fights Liquid Glass, whose
+     material is meant to carry the emphasis.
+   - **Export is an action on the OBJECT, not the window** — a row's context menu, and
+     only for a kind that HAS a format. Absence, never a disabled item, for a format that
+     can never exist.
 
 ## Accessibility — a first-class requirement, not a pass
 

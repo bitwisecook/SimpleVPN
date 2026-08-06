@@ -98,7 +98,7 @@ struct YubiKeySignInSection: View {
         EngineSettingRow(spec: specs["yk.mechanism"],
                          changed: specs["yk.mechanism"].isChanged(config.mechanism),
                          disabledReason: locked ? enableDisabledReason : nil) {
-            Picker(selection: $config.mechanism) {
+            SettingPicker(selection: $config.mechanism) {
                 ForEach(YubiKeyCodeMechanism.allCases) { mechanism in
                     Text(mechanism.title).tag(mechanism)
                 }
@@ -126,7 +126,7 @@ struct YubiKeySignInSection: View {
                             ? "This VPN\u{2019}s own configuration asks the server for the code "
                                 + "separately, so there is nothing to join."
                             : (locked ? enableDisabledReason : nil)) {
-            Picker(selection: $config.delivery) {
+            SettingPicker(selection: $config.delivery) {
                 ForEach(YubiKeyCodeDelivery.allCases) { delivery in
                     Text(delivery.title).tag(delivery)
                 }
@@ -172,7 +172,7 @@ struct YubiKeySignInSection: View {
         EngineSettingRow(spec: specs["yk.slot"],
                          changed: specs["yk.slot"].isChanged(config.slot),
                          disabledReason: locked ? enableDisabledReason : nil) {
-            Picker(selection: $config.slot) {
+            SettingPicker(selection: $config.slot) {
                 ForEach(YubiKeySlot.allCases, id: \.self) { slot in
                     Text("\(slot.displayName) \u{2014} \(slot.touchDescription)").tag(slot)
                 }

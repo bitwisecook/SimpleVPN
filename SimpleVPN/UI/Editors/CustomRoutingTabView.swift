@@ -423,7 +423,7 @@ struct CustomRoutingTabView: View {
         Section("Custom Routing — Routes") {
             EngineSettingRow(spec: Self.specs["cr.routes-default"],
                              value: profile.routes.defaultDisposition) {
-                Picker(selection: $profile.routes.defaultDisposition) {
+                SettingPicker(selection: $profile.routes.defaultDisposition) {
                     Text("Accept").tag(UnmatchedDisposition.accept)
                     Text("Ignore (allow-list)").tag(UnmatchedDisposition.ignore)
                 } label: {
@@ -888,7 +888,7 @@ struct CustomRoutingTabView: View {
         Section("Custom Routing — DNS") {
             EngineSettingRow(spec: Self.specs["cr.dns-default"],
                              value: profile.dns.defaultDisposition) {
-                Picker(selection: $profile.dns.defaultDisposition) {
+                SettingPicker(selection: $profile.dns.defaultDisposition) {
                     Text("Accept").tag(UnmatchedDisposition.accept)
                     Text("Ignore (allow-list)").tag(UnmatchedDisposition.ignore)
                 } label: {
@@ -1144,7 +1144,7 @@ struct CustomRoutingTabView: View {
     @ViewBuilder private var proxySection: some View {
         Section("Custom Routing — Proxy") {
             EngineSettingRow(spec: Self.specs["cr.proxy-mode"], value: profile.proxy.mode) {
-                Picker(selection: $profile.proxy.mode) {
+                SettingPicker(selection: $profile.proxy.mode) {
                     Text("Use pushed proxy").tag(ProxyCustomization.Mode.accept)
                     Text("Ignore (direct)").tag(ProxyCustomization.Mode.ignore)
                     Text("Custom").tag(ProxyCustomization.Mode.custom)

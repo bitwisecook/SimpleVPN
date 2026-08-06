@@ -6,9 +6,14 @@
 //  group order, AGENTS.md "Config surfaces": Connection → Sign-In → …):
 //   • General        — name, logo, labels
 //   • Servers        — endpoints (the Connection story)
-//   • Sign-In        — credentials + credential sources (adapts to the profile:
-//                      hidden for autologin, username locked when pinned)
-//   • Options        — per-VPN OpenVPN engine overrides (OpenVPNOptionsForm)
+//   • Sign-In        — how this VPN signs in: the sign-in source, the saved
+//                      username/password, the verification code, AND the three
+//                      engine options that are about signing in (retry after a
+//                      failed sign-in, server session tokens, the private key's
+//                      password — `OpenVPNSignInOverrides`). Adapts to the
+//                      profile: hidden for autologin, username locked when pinned
+//   • Options        — per-VPN OpenVPN engine overrides (OpenVPNOptionsForm),
+//                      minus its Sign-In group, which is on the Sign-In tab
 //   • Certificates   — certificate/key wells with rich parsed cards
 //   • Configuration  — the raw .ovpn text (source of truth)
 //  The profile is re-evaluated with the real engine parser as the text changes,
@@ -22,13 +27,19 @@ struct EditVPNView: View {
     @Bindable var vpn: VPNController
     @Bindable var labels: LabelStore
     let profileID: String
-    /// true when hosted as the Manage window's detail pane (no sheet chrome:
-    /// flexible size, Revert instead of Cancel, Save doesn't dismiss).
+    /// true when hosted as the Manage window's detail pane: no sheet chrome, flexible
+    /// size, and NO confirming control at all — the sidebar is how you move between
+    /// VPNs and the window's close button is how you leave. (This used to say "Revert
+    /// instead of Cancel, Save doesn't dismiss", which was a deliberate choice about a
+    /// Save button that no longer exists: everything is live-save now, so there is
+    /// nothing for Revert to be coherent about and nothing for Save to fail to
+    /// dismiss. See `SettingCommit`.)
     var embedded = false
-    /// Called after a successful embedded save. `dismiss()` is a no-op in a
-    /// split-view detail, so the parent (Manage VPNs) decides what "done"
-    /// means — e.g. close the window when it holds only this one VPN.
-    var onSaved: (() -> Void)? = nil
+    // `onSaved` IS GONE. It existed so the Manage VPNs window could close itself when
+    // the only VPN was saved — behaviour that made sense when Save was a discrete act
+    // and makes none under live save, where every field commits as you leave it: the
+    // window would have closed on the first Tab. Closing is the window's own
+    // affordance now.
 
     @Environment(\.dismiss) private var dismiss
     @Environment(ProfileEvaluator.self) private var evaluator
@@ -65,7 +76,6 @@ struct EditVPNView: View {
     @State private var saving = false
     @State private var saveError: String?
     /// Brief "Saved" confirmation for the embedded editor, which stays open.
-    @State private var savedTick = false
 
     // Snapshots of the persisted config as loaded, so we can tell whether the user
     // has diverged from it. If a Doctor fix / undo / other editor changes the
@@ -352,16 +362,29 @@ struct EditVPNView: View {
                 Button("OK", role: .cancel) { saveError = nil }
             } message: { Text(saveError ?? "") }
             .fileImporter(isPresented: $showLogoImporter, allowedContentTypes: [.image], onCompletion: importLogo)
+            // LIVE SAVE — see `SettingCommit`. Every field commits when you leave it,
+            // and the whole editor commits when it goes away.
+            .savesSettingsLive { Task { await commit() } }
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    if embedded {
-                        Button("Revert") { loaded = false; load() }
-                    } else {
-                        Button("Cancel") { dismiss() }
-                            .keyboardShortcut(.cancelAction)
-                    }
+                // NO SAVE BUTTON, and NO REVERT.
+                //
+                // "the tick on the pane seems to do nothing" was accurate: it saved
+                // without dismissing, and its "Saved" state reused the SAME
+                // `checkmark` glyph as "Save", so a successful save was invisible.
+                // "Revert" is incoherent under live save unless it means "undo
+                // everything since I opened this", which needs a snapshot on open and
+                // an undo that reaches further back than the user expects — the header
+                // note that called Revert deliberate is gone with the button.
+                //
+                // EMBEDDED (the Manage VPNs pane) gets no confirming control at all:
+                // the sidebar is how you move between VPNs, and the WINDOW's close
+                // button is how you leave. In its own window there is one labelled
+                // "Done", which is what the user expected a tick to mean ("save and
+                // close this settings window") — labelled rather than a glyph, because
+                // reading the tick as a no-op is exactly what happened.
+                if !embedded {
+                    ToolbarItem(placement: .confirmationAction) { doneButton }
                 }
-                ToolbarItem(placement: .confirmationAction) { saveButton }
             }
             .safeAreaInset(edge: .bottom) {
                 if ManagedPolicy.lockConfiguration {
@@ -386,7 +409,11 @@ struct EditVPNView: View {
                idealWidth: 620,
                minHeight: embedded ? 500 : 680,
                idealHeight: 700)
-        .disabled(saving)
+        // NOT `.disabled(saving)` any more. A commit runs every time focus leaves a
+        // field now, so disabling the whole editor for its duration would take the
+        // controls away from under someone who had just pressed Tab — the commit is
+        // supposed to be invisible. `saving` is still what stops a SECOND commit
+        // overlapping the first (`saveDisabledReason`), which is the part that mattered.
         .sheet(isPresented: $showFieldMap) {
             OnePasswordFieldMapSheet(itemTitle: opItemTitle, fields: opFields,
                                      roles: applicableRoles, mapping: $fieldMap)
@@ -473,23 +500,25 @@ struct EditVPNView: View {
 
     @ViewBuilder private var credentialsTab: some View {
         Form {
-            // Three sign-in settings live on the OPTIONS tab, because they are
-            // engine overrides: keep retrying after a failed sign-in, server
-            // session tokens, and the private key's password. Someone looking for
-            // them on the tab called "Sign-In" could not find them — so this tab
-            // now says where they are and takes you there.
-            Section {
-                SettingJumpLink(title: "Keep retrying after a failed sign-in",
-                                settingID: "openvpn.retry-on-auth-failed")
-                SettingJumpLink(title: "Use server session tokens",
-                                settingID: "openvpn.autologin-sessions")
-                SettingJumpLink(title: "Private Key Password",
-                                settingID: "openvpn.private-key-password")
-            } header: {
-                Text("Also in Options \u{25B8} Sign-In")
-            } footer: {
-                Text("These three are engine options, so they live on the Options tab. Choosing one opens it there.")
-            }
+            // THE THREE SETTINGS ARE HERE NOW, not signposted from here.
+            //
+            // This tab used to open with an "Also in Options ▸ Sign-In" block whose
+            // whole content was three jump links, plus a footer explaining that the
+            // settings live somewhere else "because they are engine options". That is
+            // a fact about our implementation offered as an answer to the user, which
+            // ONTOLOGY.md rule 1 forbids and which they queried directly: "what is
+            // this also in Sign In bit about? why is that there?".
+            //
+            // So the rows MOVED (not copied — one `.id(settingID)` per setting, or
+            // `scrollTo` becomes ambiguous), the signpost is gone rather than
+            // relocated, and the ids are untouched because they are the CLI/MDM and
+            // manual-anchor contract. Each of the three brings its own "?" with it,
+            // which is the other half of "why are there no ? on the sign-in tab":
+            // a "?" is not something a row opts into, it is what a spec-backed row
+            // gets — and until now this tab had no spec-backed rows at all.
+            OpenVPNSignInOverrides(draft: $draft, privateKeyPassword: $privateKeyPassword,
+                                   evaluation: evaluation)
+                .disabled(ManagedPolicy.lockConfiguration)
             if evaluation?.autologin == true {
                 Section {
                     Label("This VPN signs in automatically — no username or password is needed.",
@@ -732,10 +761,21 @@ struct EditVPNView: View {
 
     @ViewBuilder private var credentialSourceSection: some View {
         Section("Credential Source") {
-            Picker("Get credentials from", selection: $credentialKind) {
-                ForEach(CredentialSourceKind.allCases, id: \.self) { kind in
-                    Label(kind.displayName, systemImage: kind.systemImage).tag(kind)
+            // THE "?" THIS TAB WAS MISSING. These rows are hand-written rather than
+            // spec-backed — a per-VPN sign-in source is not an engine setting and has
+            // no id in any catalog — so they get the ManualLink form that takes an
+            // anchor directly, pointed at the chapter that explains what a sign-in
+            // source is and how SimpleVPN reaches one. The row is the value; the "?"
+            // sits beside it in the same column as every other tab's.
+            HStack(alignment: .center, spacing: 8) {
+                SettingPicker(selection: $credentialKind) {
+                    ForEach(CredentialSourceKind.allCases, id: \.self) { kind in
+                        Label(kind.displayName, systemImage: kind.systemImage).tag(kind)
+                    }
+                } label: {
+                    Text("Get sign-in from")
                 }
+                ManualLink(anchor: "creds-what-is-it", settingName: "Sign-In Source")
             }
             .onChange(of: credentialKind) { _, kind in
                 sourceTest = .idle
@@ -1668,35 +1708,24 @@ struct EditVPNView: View {
         return nil
     }
 
-    /// Shown on the Save button when the config saves fine but won't connect yet.
+    /// Shown when the config stores fine but won't connect yet — a validity statement,
+    /// which under live save is the only thing a "save" affordance still has to say.
     private var saveWarning: String? {
         evaluation?.error == true
-            ? "Saved settings will be kept, but this VPN won't connect until the configuration problem below is fixed."
+            ? "Settings are kept, but this VPN won't connect until the configuration problem below is fixed."
             : nil
     }
 
-    private var saveButton: some View {
-        Button { Task { await save() } } label: {
-            // Embedded (the Manage pane) doesn't close on save, so success has to be
-            // visible somehow — otherwise Save looks like it did nothing.
-            if savedTick {
-                Label("Saved", systemImage: "checkmark")
-            } else {
-                Text("Save")
-            }
-        }
-        .buttonStyle(.glassProminent)
-        .disabled(saveDisabledReason != nil)
-        .help(saveDisabledReason ?? saveWarning ?? (embedded ? "Save changes to this VPN" : "Save and close"))
-        // The reason a dead Save is dead (or the saves-but-won't-connect
-        // warning) must reach VoiceOver, not just the hover tooltip.
-        .accessibilityValue(saveDisabledReason ?? saveWarning ?? "")
-        .animation(.snappy(duration: 0.2), value: savedTick)
-        // The embedded editor doesn't close on save; the tick is its only
-        // confirmation — say it too.
-        .onChange(of: savedTick) { _, ticked in
-            if ticked { AccessibilityAnnouncer.sayNow("Saved") }
-        }
+    /// "Done" — LABELLED, and only in the standalone window. It commits (a no-op if
+    /// every field has already committed on blur) and closes. It is not a Save: there
+    /// is nothing unsaved for it to rescue, which is why there is no "Saved" state and
+    /// no tick.
+    private var doneButton: some View {
+        Button("Done") { Task { await commit(); dismiss() } }
+            .buttonStyle(.glassProminent)
+            .keyboardShortcut(.defaultAction)
+            .help(saveWarning ?? "Close this window \u{2014} your changes are already saved")
+            .accessibilityValue(saveWarning ?? "changes are saved as you make them")
     }
 
     /// Touch ID protection toggle. The migration sources the secret from the
@@ -1760,7 +1789,23 @@ struct EditVPNView: View {
         (crProxyAuthUsername, crProxyAuthPassword) = loadCustomRoutingProxyAuthFields(profileID: profileID)
     }
 
-    private func save() async {
+    /// Store what the editor holds. Called on field blur, on submit, on close
+    /// (`savesSettingsLive`) and by "Done" — never by a Save button, because there
+    /// isn't one.
+    ///
+    /// IDEMPOTENT and VALIDITY-GATED, the two properties live save needs. It does NOT
+    /// dismiss: closing is the window's job now, which is what makes the same function
+    /// safe to call from a focus change.
+    ///
+    /// The gate is deliberately NARROW — a name, and nothing else. A configuration
+    /// that won't connect yet must still be STORED: an imported `.conf` that references
+    /// certificate FILES (`ca /etc/openvpn/ca.crt`) fails the engine's evaluation
+    /// because we only hold the text, and refusing to store it would mean a
+    /// half-fixed config could never be kept. Storage is live; validity is surfaced
+    /// separately — by the banner below, by each row's own problem caption, and by
+    /// `ConnectListing`, which lists the profile with Connect disabled and a reason.
+    private func commit() async {
+        guard saveDisabledReason == nil else { return }
         saving = true; defer { saving = false }
         if !name.isEmpty { try? await vpn.rename(id: profileID, to: name) }
 
@@ -1847,15 +1892,10 @@ struct EditVPNView: View {
         customRouting = await commitCustomRouting(vpn, profileID: profileID, profile: customRouting,
                                                   proxyAuthUsername: crProxyAuthUsername,
                                                   proxyAuthPassword: crProxyAuthPassword)
-        if embedded {
-            savedTick = true
-            // Long enough to SEE the tick, then done. dismiss() is a no-op in a
-            // split-view detail, so ALSO tell the parent — it closes the window
-            // when this is the only VPN.
-            Task { try? await Task.sleep(for: .seconds(0.7)); dismiss(); onSaved?() }
-        } else {
-            dismiss()
-        }
+        // NO DISMISS, and no "Saved" transient. Committing is not leaving — this runs
+        // every time a field loses focus, so dismissing here would close the editor
+        // out from under someone who merely pressed Tab. Closing is the window's own
+        // affordance ("Done", or the close button).
     }
 
     private func importLogo(_ result: Result<URL, Error>) { if case let .success(u) = result { importLogoFile(u) } }

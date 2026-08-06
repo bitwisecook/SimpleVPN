@@ -238,16 +238,12 @@ struct SettingRenderingTests {
     /// THE LIST IS THE POINT — the same device as `ConfigFormatTests.idsWithNoDescriptor`:
     /// being on it is a deliberate act that shows up in a diff, not a silent exemption.
     ///
-    /// Both entries are the WireGuard halves of two carve-outs that landed for every
-    /// other packet-tunnel kind at once: the local-network carve-out (which
-    /// `wg-quick` has no concept of) and the search list (which its `DNS=` line cannot
-    /// carry). Config field, plumbing, manual page, portability id and CLI/MDM name
-    /// are all in place; the two `EngineSettingRow`s belong in `WireGuardView`'s
-    /// Traffic section, which was owned by another change in flight when these
-    /// shipped. Delete both lines with those rows.
-    static let unrenderedByDesign: Set<String> = [
-        "wg.local-lan", "wg.search-domains",
-    ]
+    /// EMPTY, and the reverse check below is what keeps it honest in both directions.
+    /// It held `wg.local-lan` and `wg.search-domains` — the WireGuard halves of two
+    /// carve-outs that landed for every other packet-tunnel kind at once — until their
+    /// rows reached `WireGuardView`'s Traffic section, which is the entry condition for
+    /// coming off this list.
+    static let unrenderedByDesign: Set<String> = []
 
     /// EVERY id on EVERY registered surface must be referenced by a view. The
     /// reverse of `ManualAnchorParityTests`: that one proves a spec is documented,

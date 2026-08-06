@@ -432,25 +432,40 @@ extension SSHNetworkTunnelConfig {
     }
 
     /// Why the whole config can't connect (the connect-flow gate), or nil.
-    nonisolated var connectProblem: String? {
-        if let p = serverProblem { return p }
+    /// DERIVED from `connectFault` so the sentence the connect path refuses with and
+    /// the row the editor reddens can never name different fields.
+    nonisolated var connectProblem: String? { connectFault?.sentence }
+
+    /// The same gate, WITH the field to blame — what the editor's red required-field
+    /// marking is driven from (`SettingNeeds`). See `Shared/SettingFault.swift`.
+    nonisolated var connectFault: SettingFault? {
+        if let p = serverProblem { return SettingFault("sshnet.server", p) }
         if username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "Enter the login name to use on the server."
+            return SettingFault("sshnet.username", "Enter the login name to use on the server.")
         }
         if port != 0, !Self.portRange.contains(port) {
-            return "\(port) isn't a valid port — use 1 to 65535."
+            return SettingFault("sshnet.port", "\(port) isn't a valid port — use 1 to 65535.")
         }
         // The extension is PIN-ONLY, so a `.pinned` config with no usable pin can
         // never connect. The other two policies resolve their pin at connect.
-        if hostKeyPolicy == .pinned, let p = Self.pinProblem(pinnedHostKeySHA256) { return p }
-        if !includeDefaultRoute, includedRoutes.isEmpty {
-            return "Add at least one network to route through the tunnel, or turn on \u{201C}Send all traffic\u{201D}."
+        if hostKeyPolicy == .pinned, let p = Self.pinProblem(pinnedHostKeySHA256) {
+            return SettingFault("sshnet.pinned-host-key", p)
         }
-        if let p = Self.routesProblem(includedRoutes) { return p }
-        if let p = Self.routesProblem(excludedRoutes) { return p }
-        if let p = Self.dnsServersProblem(dnsServers) { return p }
-        if let p = DNSSearchDomains.problem(list: searchDomains) { return p }
-        if useFarSideResolver, let p = Self.farSideResolverProblem(farSideResolver) { return p }
+        if !includeDefaultRoute, includedRoutes.isEmpty {
+            return SettingFault("sshnet.routes",
+                                "Add at least one network to route through the tunnel, or turn on \u{201C}Send all traffic\u{201D}.")
+        }
+        if let p = Self.routesProblem(includedRoutes) { return SettingFault("sshnet.routes", p) }
+        if let p = Self.routesProblem(excludedRoutes) {
+            return SettingFault("sshnet.excluded-routes", p)
+        }
+        if let p = Self.dnsServersProblem(dnsServers) { return SettingFault("sshnet.dns", p) }
+        if let p = DNSSearchDomains.problem(list: searchDomains) {
+            return SettingFault("sshnet.search-domains", p)
+        }
+        if useFarSideResolver, let p = Self.farSideResolverProblem(farSideResolver) {
+            return SettingFault("sshnet.far-side-resolver", p)
+        }
         return nil
     }
 }

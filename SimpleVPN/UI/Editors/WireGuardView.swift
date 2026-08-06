@@ -41,16 +41,6 @@ struct WireGuardView: View {
     /// this a user could never take it off again (and clearing must really
     /// clear, not leave the old key in the keychain and in use).
     @State private var removePresharedKey = false
-    /// The saved-confirmation affordance every editor's primary action now has —
-    /// three of six used to save with no visible acknowledgement at all.
-    @State private var savedTick = false
-    /// Raised by "Export .conf with Keys…", never by the plain export. Consent is
-    /// asked BEFORE the save panel: asking after the user has already named a file
-    /// makes the question read as a formality to be dismissed.
-    @State private var showExportConsent = false
-    /// What the last export left out (or put in), said in the app as well as in the
-    /// file — a note inside a file nobody reopens tells nobody anything.
-    @State private var exportNotice: String?
 
     /// Which tab is showing. A binding, so a related-settings link or a search
     /// hit on the Custom Routing tab can select it (no TabView in the app could
@@ -137,6 +127,37 @@ struct WireGuardView: View {
                 ForEach(uncoveredDNS, id: \.self) { server in
                     SettingCaveat(WireGuardConfig.dnsCoverageWarning(server))
                 }
+                // THE TWO ROWS THAT LANDED LAST. Both carve-outs shipped for every
+                // other packet-tunnel kind at once — config field, plumbing, manual
+                // page, portability id, CLI/MDM name — and could not get their rows
+                // because this file was owned by another change in flight. They sat
+                // behind `SettingRenderingTests.unrenderedByDesign`, whose reverse
+                // check fails the moment they appear; those two lines are deleted
+                // with this change.
+                //
+                // Neither has a wg-quick field, which is exactly why they need one
+                // here: a `.conf` cannot carry a search list (its `DNS=` line has no
+                // room for one) and has no concept of a local-network carve-out at
+                // all. Same shape and same order as SSHNetworkTunnelView's pair.
+                EngineSettingRow(spec: Self.specs["wg.search-domains"], value: draft.searchDomains) {
+                    listField(Self.specs["wg.search-domains"], $draft.searchDomains,
+                              prompt: "corp.example, example.com",
+                              problem: searchDomainsProblem)
+                }
+                problemLabel(searchDomainsProblem)
+                EngineSettingRow(spec: Self.specs["wg.local-lan"],
+                                 value: draft.allowLocalNetworkAccess) {
+                    Toggle(isOn: $draft.allowLocalNetworkAccess) {
+                        EngineSettingLabel(spec: Self.specs["wg.local-lan"],
+                                           value: draft.allowLocalNetworkAccess)
+                    }
+                }
+                // ON means traffic leaves the tunnel, so the row says what leaves
+                // rather than describing the mechanism (the SSH Network Tunnel row
+                // says it the same way).
+                if draft.allowLocalNetworkAccess {
+                    SettingCaveat("Traffic to the network you're on \u{2014} printers, file shares, your router \u{2014} leaves this Mac outside the tunnel while this is on. Anything watching that network can see it.")
+                }
                 // ONE MTU control across every engine that has one (MTUField).
                 EngineSettingRow(spec: Self.specs["wg.mtu"], value: draft.mtu) {
                     MTUField(spec: Self.specs["wg.mtu"], value: $draft.mtu,
@@ -180,36 +201,14 @@ struct WireGuardView: View {
                 Text(Self.exportOnlyHelp)
             }
 
-            Section {
-                // TWO actions, not one action with a checkbox — see
-                // `WireGuardConfig.exportText(includingSecrets:)` for the decision.
-                // The plain button cannot produce a file with a key in it, so there
-                // is no dialog for a hurried user to click through TO the leak; the
-                // leaky path is separately named and separately confirmed.
-                //
-                // The reason lived in the section footer, where a keyboard or
-                // VoiceOver user reaching the button never met it. It belongs ON
-                // the control (house rule: a dead control says why).
-                Button("Export .conf…") { export(includingSecrets: false) }
-                    .disabled(plainExportDisabledReason != nil)
-                    .help(plainExportDisabledReason
-                          ?? "Write a standard wg-quick file with no keys in it, for use with other WireGuard clients.")
-                    .accessibilityValue(plainExportDisabledReason.map { "unavailable — \($0)" } ?? "")
-                Button("Export .conf with Keys…") { showExportConsent = true }
-                    .disabled(keyExportDisabledReason != nil)
-                    .help(keyExportDisabledReason
-                          ?? "Write a wg-quick file that CONTAINS this VPN\u{2019}s keys, in the clear. SimpleVPN asks first and says what will be in the file.")
-                    .accessibilityValue(keyExportDisabledReason.map { "unavailable — \($0)" }
-                                        ?? "asks for confirmation, then writes a file containing this VPN\u{2019}s keys")
-                if let exportNotice {
-                    Label(exportNotice, systemImage: "checkmark.circle")
-                        .font(.callout).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            } footer: {
-                Text(plainExportDisabledReason
-                     ?? "\u{201C}Export .conf…\u{201D} leaves this VPN\u{2019}s keys out — wg-quick then refuses the file until a private key is pasted back in, which is why the second button exists. Either file says in its own header what is and is not in it.")
-            }
+            // EXPORT IS NOT HERE ANY MORE. It is a right-click on the VPN in the
+            // sidebar (`ManageVPNsView.exportItems`), because a toolbar or a pane
+            // acts on the WINDOW while a context menu acts on the OBJECT — and with
+            // a sidebar present "export" in the window was ambiguous about which VPN
+            // it meant. Both actions moved, and the two stayed TWO: the plain one
+            // cannot produce a file with a key in it, so there is no dialog for a
+            // hurried user to click through TO the leak, and the leaky one is
+            // separately named and separately confirmed.
         }
         .formStyle(.grouped)
         .revealsSettings()
@@ -241,36 +240,18 @@ struct WireGuardView: View {
         .padding(.top, 10)
         .navigationTitle(draft.name)
         .task { loadOnce() }
-        .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button { save() } label: {
-                    savedTick ? Label("Saved", systemImage: "checkmark")
-                              : Label("Save", systemImage: "checkmark")
-                }
-                    .buttonStyle(.glassProminent)   // primary action — one idiom in every editor
-                    .disabled(saveDisabledReason != nil)
-                    // A dead Save must say why — hover AND VoiceOver (house rule).
-                    .help(saveDisabledReason ?? "Save changes to this VPN")
-                    .accessibilityValue(saveDisabledReason.map { "unavailable — \($0)" } ?? "")
-            }
-        }
+        // LIVE SAVE. There is no confirming button in any editor now — see
+        // `SettingCommit` for why, and for the three rules that make it safe.
+        .savesSettingsLive { save() }
+        // RED ON THE FIELD THAT IS HOLDING THE CONNECTION UP, from the connect gate
+        // itself rather than a second hand-maintained list of "required" ids — see
+        // `SettingNeeds` and `WireGuardConfig.connectFault`.
+        .settingNeeds(needs)
         .fileImporter(isPresented: $showImporter,
                       allowedContentTypes: [UTType(filenameExtension: "conf") ?? .data, .data, .plainText]) { result in
             if case let .success(url) = result { importConf(url) }
         }
         .sheet(isPresented: $showPaste) { pasteSheet }
-        // The confirming button carries `.destructive`, and NOTHING carries
-        // `.keyboardShortcut(.defaultAction)`: Return/Escape both cancel, so the
-        // leaky outcome is unreachable without reading and aiming at it.
-        .confirmationDialog(exportTarget.exportConsentTitle,
-                            isPresented: $showExportConsent, titleVisibility: .visible) {
-            Button(exportTarget.exportConsentConfirmTitle, role: .destructive) {
-                export(includingSecrets: true)
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text(exportTarget.exportConsentMessage)
-        }
     }
 
     // MARK: Routing-table / firewall-mark rows (closed value sets, not free text)
@@ -287,7 +268,7 @@ struct WireGuardView: View {
         let word = draft.table.trimmingCharacters(in: .whitespaces).lowercased()
         let isCustom = !draft.table.isEmpty && word != "auto" && word != "off"
         VStack(alignment: .leading, spacing: 6) {
-            Picker(selection: Binding<String>(
+            SettingPicker(selection: Binding<String>(
                 get: { isCustom ? "custom" : word },
                 set: { choice in
                     switch choice {
@@ -338,7 +319,7 @@ struct WireGuardView: View {
         let word = draft.fwMark.trimmingCharacters(in: .whitespaces).lowercased()
         let isCustom = !draft.fwMark.isEmpty && word != "off"
         VStack(alignment: .leading, spacing: 6) {
-            Picker(selection: Binding<String>(
+            SettingPicker(selection: Binding<String>(
                 get: { isCustom ? "custom" : word },
                 set: { choice in
                     switch choice {
@@ -514,35 +495,18 @@ struct WireGuardView: View {
     private var allowedIPsProblem: String? {
         draft.allowedIPs.isEmpty ? nil : WireGuardConfig.routesProblem(draft.allowedIPs)
     }
+    /// The search list, checked by the SAME validator the three kinds that carry one
+    /// share (`DNSSearchDomains.problem(list:)`) — macOS accepts an unusable search
+    /// list in silence, and short names then simply never resolve.
+    private var searchDomainsProblem: String? {
+        DNSSearchDomains.problem(list: draft.searchDomains)
+    }
     /// Resolvers the peer's Allowed IPs don't cover — see
     /// `WireGuardConfig.dnsOutsideAllowedIPs` for why that breaks DNS silently.
     /// Only computed once both lists parse, so a half-typed CIDR doesn't shout.
     private var uncoveredDNS: [String] {
         guard allowedIPsProblem == nil else { return [] }
         return WireGuardConfig.dnsOutsideAllowedIPs(dns: draft.dns, allowedIPs: draft.allowedIPs)
-    }
-
-    /// Why the secret-free export is unavailable, in the user's language, or nil.
-    ///
-    /// It does NOT require a private key. It used to, because export wrote one — a
-    /// file with no keys in it is a perfectly good description of the server half,
-    /// and refusing to write one when there is no key stored is refusing the one
-    /// export that could never leak anything.
-    private var plainExportDisabledReason: String? {
-        if draft.peerPublicKey.trimmingCharacters(in: .whitespaces).isEmpty {
-            return "Enter the peer public key above before exporting — wg-quick needs the server's key."
-        }
-        return nil
-    }
-
-    /// Why the with-keys export is unavailable — everything above, plus there has to
-    /// be a key to write.
-    private var keyExportDisabledReason: String? {
-        if let p = plainExportDisabledReason { return p }
-        if !hasPrivateKey && !hasPresharedKey {
-            return "This VPN has no keys stored, so there is nothing this would add — use \u{201C}Export .conf…\u{201D}."
-        }
-        return nil
     }
 
     /// Why Save is unavailable, in the user's language, or nil when it can go.
@@ -556,6 +520,7 @@ struct WireGuardView: View {
         if let p = presharedKeyProblem { return p }
         if let p = addressProblem { return p }
         if let p = allowedIPsProblem { return p }
+        if let p = searchDomainsProblem { return p }
         // Both used to be absent here while `normalized()` quietly REWROTE them
         // on save (an out-of-range MTU became "engine default", an unrecognised
         // Table became "not set"). Blocking with the reason is the house rule; a
@@ -566,14 +531,34 @@ struct WireGuardView: View {
         return nil
     }
 
-    /// One amber caption for a field's problem, or nothing. Same shape as the
-    /// control-URL problem in TailscaleView.
-    @ViewBuilder private func problemLabel(_ problem: String?) -> some View {
-        if let problem {
-            Label(problem, systemImage: "exclamationmark.triangle.fill")
-                .font(.callout).foregroundStyle(.orange)
-                .accessibilityLabel("Problem: \(problem)")
+    /// Which row has to be filled in before this VPN can connect, and why.
+    ///
+    /// STRAIGHT OFF THE CONNECT GATE (`connectFault`), which is the same answer
+    /// `ConnectionDetailView` and `VPNController+WireGuard.connect` refuse with. A
+    /// second list of "required settings" maintained here is exactly the divergence
+    /// this app keeps being bitten by — the connect list saying one field is missing
+    /// while the editor reddens another — so there isn't one.
+    ///
+    /// The private key is added separately BECAUSE the gate cannot see it: it lives in
+    /// the keychain, not in the (redacted) config, so the connect flow checks it on
+    /// its own. Without this the one field a WireGuard VPN most obviously needs would
+    /// be the only one that never went red.
+    private var needs: SettingNeeds {
+        var out: [String: String] = [:]
+        if !hasPrivateKey {
+            out["wg.private-key"] = "This device's own private key isn't set yet \u{2014} paste the one from the config your provider gave you."
         }
+        if let fault = draft.connectFault, let id = fault.settingID {
+            out[id] = fault.sentence
+        }
+        return SettingNeeds(byID: out)
+    }
+
+    /// One amber caption for a field's problem, or nothing — now the shared
+    /// `SettingProblemLabel`, which four editors had written out separately with
+    /// three different symbols between them.
+    @ViewBuilder private func problemLabel(_ problem: String?) -> some View {
+        SettingProblemLabel(problem)
     }
 
     // MARK: Spec catalog + typed field helpers
@@ -590,36 +575,22 @@ struct WireGuardView: View {
     static let exportOnlyHelp =
         "Only applies to configurations you export for other WireGuard clients — SimpleVPN's own engine doesn't use it."
 
+    // These three were three of the FIVE near-identical copies of one text row
+    // (see UI/Components/SettingValueRow.swift's header for the other two and for
+    // why five copies is how "values aren't right-aligned" survived being reported
+    // twice). They forward to the shared field now and exist only to keep this
+    // form's ~15 call sites reading in its own terms.
     private func textField(_ spec: EngineSettingSpec, _ binding: Binding<String>, prompt: String,
-                           problem: String? = nil, help: String? = nil) -> some View {
-        LabeledContent {
-            TextField(prompt, text: binding).multilineTextAlignment(.trailing).autocorrectionDisabled()
-                // The title is an EXAMPLE value — the spec name is the name.
-                .accessibilityLabel(spec.name)
-                // Validation rides the field's value (Docs/Accessibility.md).
-                .accessibilityValue(problem.map { "\(binding.wrappedValue). Problem: \($0)" } ?? binding.wrappedValue)
-                .help(help ?? spec.summary)
-        } label: { EngineSettingLabel(spec: spec, value: binding.wrappedValue) }
+                           problem: String? = nil) -> some View {
+        SettingValueField(spec: spec, text: binding, prompt: prompt, problem: problem)
     }
     private func monoField(_ spec: EngineSettingSpec, _ binding: Binding<String>, prompt: String,
                            problem: String? = nil) -> some View {
-        LabeledContent {
-            TextField(prompt, text: binding).font(.callout.monospaced()).multilineTextAlignment(.trailing).autocorrectionDisabled()
-                .accessibilityLabel(spec.name)
-                .accessibilityValue(problem.map { "Problem: \($0)" } ?? "")
-        } label: { EngineSettingLabel(spec: spec, value: binding.wrappedValue) }
+        SettingValueField(spec: spec, text: binding, prompt: prompt, problem: problem, mono: true)
     }
     private func listField(_ spec: EngineSettingSpec, _ binding: Binding<[String]>, prompt: String,
                            problem: String? = nil) -> some View {
-        LabeledContent {
-            TextField(prompt, text: Binding(
-                get: { binding.wrappedValue.joined(separator: ", ") },
-                set: { binding.wrappedValue = $0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } }))
-                .multilineTextAlignment(.trailing).autocorrectionDisabled()
-                .accessibilityLabel(spec.name)
-                .accessibilityValue(problem.map { "\(binding.wrappedValue.joined(separator: ", ")). Problem: \($0)" }
-                                    ?? binding.wrappedValue.joined(separator: ", "))
-        } label: { EngineSettingLabel(spec: spec, value: binding.wrappedValue) }
+        SettingValueField(spec: spec, list: binding, prompt: prompt, problem: problem)
     }
 
     /// Whether a private key is available for export — either already in the
@@ -658,7 +629,17 @@ struct WireGuardView: View {
                                      name: name)
     }
 
+    /// Store what the editor holds. Called on field blur, on submit, and on close
+    /// (`savesSettingsLive`) — never from a button, because there isn't one.
+    ///
+    /// IDEMPOTENT and VALIDITY-GATED, which are the two properties live save needs:
+    /// all three paths can fire for one edit, and a draft that would not survive
+    /// `saveDisabledReason` is HELD here rather than stored. Holding rather than
+    /// rewriting matters: `normalized()` used to quietly rewrite an out-of-range MTU
+    /// on save, and a silent rewrite of a stored value is never the house rule.
     private func save() {
+        guard !ManagedPolicy.lockConfiguration else { return }
+        guard saveDisabledReason == nil else { return }
         // Captured BEFORE the fields are consumed: an explicit Remove is the only
         // thing that clears the stored pre-shared key.
         let removingPSK = removePresharedKey && newPresharedKey.isEmpty
@@ -682,9 +663,9 @@ struct WireGuardView: View {
             presharedKey: WireGuardConfig.presharedKeyToSave(draft: draft.presharedKey,
                                                              removing: removingPSK),
             for: profileID)
-        // Fire-and-forget: save() is called synchronously from a plain Button
-        // action; both persists are idempotent, and CustomRoutingTabView's own
-        // onDisappear covers the case where the view closes before this lands.
+        // Fire-and-forget: save() is called synchronously from a focus change; both
+        // persists are idempotent, and CustomRoutingTabView's own onDisappear covers
+        // the case where the view closes before this lands.
         let toSave = draft
         let user = crProxyAuthUsername, pass = crProxyAuthPassword
         let toCommit = customRouting
@@ -694,48 +675,10 @@ struct WireGuardView: View {
             customRouting = await commitCustomRouting(vpn, profileID: profileID, profile: toCommit,
                                                       proxyAuthUsername: user, proxyAuthPassword: pass)
         }
-        // Acknowledge the save on the button, like every other editor.
-        savedTick = true
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(2))
-            savedTick = false
-        }
+        // NO "Saved" TRANSIENT. There was one, and it used the same `checkmark` glyph
+        // as "Save" in an icon-only toolbar — so a successful save was invisible to a
+        // sighted user while VoiceOver heard "Saved". Deleting the button deleted the
+        // bug; what the user sees now is the value staying put.
     }
 
-    /// What an export would be OF: the draft with whatever is typed but unsaved
-    /// applied, so the consent dialog names exactly what the file will hold and the
-    /// exported file matches what Save would store.
-    private var exportTarget: WireGuardConfig {
-        var c = draft
-        if !newPrivateKey.isEmpty { c.privateKey = newPrivateKey }
-        if !newPresharedKey.isEmpty { c.presharedKey = newPresharedKey }
-        else if removePresharedKey { c.presharedKey = "" }
-        return c
-    }
-
-    /// The ONE export path. `includingSecrets` is decided by which button was
-    /// pressed and, for `true`, only after the confirmation above — the file's own
-    /// text is `WireGuardConfig.exportText(includingSecrets:)`, which is where the
-    /// headers and the redaction live so a test can hold them.
-    private func export(includingSecrets: Bool) {
-        let toExport = exportTarget
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "\(draft.name).conf"
-        panel.allowedContentTypes = [UTType(filenameExtension: "conf") ?? .data]
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            try toExport.exportText(includingSecrets: includingSecrets)
-                .write(to: url, atomically: true, encoding: .utf8)
-        } catch {
-            vpn.lastError = error.localizedDescription
-            return
-        }
-        // Say what happened, either way. "It contains your keys" is worth repeating
-        // outside the dialog the user just dismissed.
-        exportNotice = includingSecrets
-            ? "Wrote \(url.lastPathComponent) WITH this VPN\u{2019}s \(WireGuardConfig.humanList(toExport.presentSecretFields)) in it. Delete the file once the other client has \(toExport.presentSecretFields.count == 1 ? "it" : "them")."
-            : (toExport.exportOmissionNotice.isEmpty
-               ? "Wrote \(url.lastPathComponent)."
-               : toExport.exportOmissionNotice)
-    }
 }

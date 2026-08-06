@@ -404,19 +404,28 @@ extension ProxyTunnelConfig {
             .filter { !$0.isEmpty }
     }
 
-    /// Why the whole config can't connect (the connect-flow gate), or nil.
-    nonisolated var connectProblem: String? {
-        if let p = upstreamProblem { return p }
+    /// Why the whole config can't connect (the connect-flow gate), or nil. DERIVED
+    /// from `connectFault` so the sentence the connect path refuses with and the row
+    /// the editor reddens can never name different fields.
+    nonisolated var connectProblem: String? { connectFault?.sentence }
+
+    /// The same gate, WITH the field to blame — what the editor's red required-field
+    /// marking is driven from (`SettingNeeds`). See `Shared/SettingFault.swift`.
+    nonisolated var connectFault: SettingFault? {
+        if let p = upstreamProblem { return SettingFault("px.address", p) }
         if !includeDefaultRoute, includedRoutes.isEmpty {
-            return "Add at least one network to route through the proxy, or turn on \u{201C}Send all traffic\u{201D}."
+            return SettingFault("px.included",
+                                "Add at least one network to route through the proxy, or turn on \u{201C}Send all traffic\u{201D}.")
         }
-        if let p = Self.routesProblem(includedRoutes) { return p }
-        if let p = Self.routesProblem(excludedRoutes) { return p }
+        if let p = Self.routesProblem(includedRoutes) { return SettingFault("px.included", p) }
+        if let p = Self.routesProblem(excludedRoutes) { return SettingFault("px.excluded", p) }
         // DNS was skipped entirely: NEDNSSettings silently drops a server it
         // can't parse, so a typo showed up as "DNS stopped working", never as a
         // refused connect.
-        if let p = Self.dnsServersProblem(dnsServers) { return p }
-        if let p = DNSSearchDomains.problem(list: searchDomains) { return p }
+        if let p = Self.dnsServersProblem(dnsServers) { return SettingFault("px.dns", p) }
+        if let p = DNSSearchDomains.problem(list: searchDomains) {
+            return SettingFault("px.search-domains", p)
+        }
         return nil
     }
 }

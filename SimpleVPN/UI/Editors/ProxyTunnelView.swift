@@ -31,7 +31,6 @@ struct ProxyTunnelView: View {
     @State private var searchDomainsText = ""
     @State private var loaded = false
     @State private var saving = false
-    @State private var savedTick = false
     @State private var status: ProxyTunnelStatus?
     @State private var customRouting = CustomRoutingProfile()
     @State private var crProxyAuthUsername = ""
@@ -54,7 +53,7 @@ struct ProxyTunnelView: View {
             Section("Connection") {
                 TextField("Name", text: $name)
                 EngineSettingRow(spec: Self.specs["px.kind"], value: preset) {
-                    Picker(selection: $preset) {
+                    SettingPicker(selection: $preset) {
                         ForEach(ProxyTunnelConfig.Preset.allCases, id: \.self) {
                             Text($0.displayName).tag($0)
                         }
@@ -252,17 +251,12 @@ struct ProxyTunnelView: View {
         .navigationTitle(name.isEmpty ? "Proxy Tunnel" : name)
         .task { loadOnce() }
         .task(id: profileID) { await pollStatus() }
-        .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button { Task { await save() } } label: {
-                    savedTick ? Label("Saved", systemImage: "checkmark") : Label("Save", systemImage: "checkmark")
-                }
-                .buttonStyle(.glassProminent)
-                .disabled(saveDisabledReason != nil)
-                .help(saveDisabledReason ?? "Save changes to this VPN")
-                .accessibilityValue(saveDisabledReason ?? "")
-            }
-        }
+        // LIVE SAVE — no confirming button in any editor now. See `SettingCommit`.
+        .savesSettingsLive { Task { await save() } }
+        // RED ON THE FIELD THAT IS HOLDING THE CONNECTION UP, from the connect gate
+        // itself (`ProxyTunnelConfig.connectFault`) rather than a second list of
+        // "required" ids — see `SettingNeeds`.
+        .settingNeeds(needs)
         .safeAreaInset(edge: .bottom) {
             if ManagedPolicy.lockConfiguration {
                 Label("Connection settings are managed by your organization and can't be changed here.",
@@ -353,6 +347,22 @@ struct ProxyTunnelView: View {
         return "\(preset.scheme)://\(a)"
     }
 
+    /// Which row has to be filled in before this VPN can connect, and why — straight
+    /// off `ProxyTunnelConfig.connectFault`, which is the same gate
+    /// `VPNController+ProxyTunnel.connect` throws on. Asked of a draft carrying the
+    /// editor's OWN text fields (they are only folded into `draft` on save), so a
+    /// field the user has just typed into counts as filled in.
+    private var needs: SettingNeeds {
+        var probe = draft
+        probe.upstream = composedUpstream
+        probe.includedRoutes = ProxyTunnelConfig.splitRoutes(includedText)
+        probe.excludedRoutes = ProxyTunnelConfig.splitRoutes(excludedText)
+        probe.dnsServers = ProxyTunnelConfig.splitRoutes(dnsText)
+        probe.searchDomains = ProxyTunnelConfig.splitRoutes(searchDomainsText)
+        guard let fault = probe.connectFault, let id = fault.settingID else { return SettingNeeds() }
+        return SettingNeeds(byID: [id: fault.sentence])
+    }
+
     private var saveDisabledReason: String? {
         if saving { return "Saving…" }
         if name.trimmingCharacters(in: .whitespaces).isEmpty { return "Give this VPN a name first." }
@@ -401,7 +411,13 @@ struct ProxyTunnelView: View {
         }
     }
 
+    /// Store what the editor holds. Called on field blur, on submit, and on close
+    /// (`savesSettingsLive`) — never from a button, because there isn't one.
+    /// Idempotent and validity-gated: an invalid draft is HELD here, not rewritten
+    /// and not stored.
     private func save() async {
+        guard !ManagedPolicy.lockConfiguration else { return }
+        guard saveDisabledReason == nil else { return }
         saving = true
         defer { saving = false }
         draft.upstream = composedUpstream
@@ -424,9 +440,10 @@ struct ProxyTunnelView: View {
             customRouting = await commitCustomRouting(vpn, profileID: profileID, profile: customRouting,
                                                       proxyAuthUsername: crProxyAuthUsername,
                                                       proxyAuthPassword: crProxyAuthPassword)
-            savedTick = true
-            try? await Task.sleep(for: .seconds(2))
-            savedTick = false
+            // No "Saved" transient: it reused the SAME `checkmark` glyph as "Save"
+            // in an icon-only toolbar, so a successful save was invisible to a
+            // sighted user while VoiceOver heard "Saved". Deleting the button
+            // deleted the bug.
         } catch {
             vpn.report(error, profile: profileID)
         }
@@ -448,22 +465,12 @@ struct ProxyTunnelView: View {
     /// reading `Self.specs["px.…"]`.
     static var specs: EngineSettingCatalog { ProxyTunnelSettings.catalog }
 
-    /// The house text-field idiom (`LabeledContent` + trailing plain field), so a
-    /// text row looks the same here as in the OpenVPN, WireGuard, SSH and
-    /// OpenConnect editors — this form used full-width `.roundedBorder` fields.
+    /// The house text-field idiom — one of the five copies of it that now forward to
+    /// the shared `SettingValueField` (UI/Components/SettingValueRow.swift).
     private func labeledField(_ spec: EngineSettingSpec, _ binding: Binding<String>,
                               prompt: String, problem: String? = nil,
                               accessibilityLabel: String? = nil) -> some View {
-        LabeledContent {
-            TextField(prompt, text: binding)
-                .multilineTextAlignment(.trailing)
-                .autocorrectionDisabled()
-                // The title is an EXAMPLE value — the spec name is the name.
-                .accessibilityLabel(accessibilityLabel ?? spec.name)
-                .accessibilityValue(problem.map { "\(binding.wrappedValue). Problem: \($0)" }
-                                    ?? binding.wrappedValue)
-        } label: {
-            EngineSettingLabel(spec: spec, value: binding.wrappedValue)
-        }
+        SettingValueField(spec: spec, text: binding, prompt: prompt, problem: problem,
+                          spokenName: accessibilityLabel)
     }
 }
