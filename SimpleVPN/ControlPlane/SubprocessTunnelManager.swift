@@ -222,14 +222,15 @@ final class SubprocessTunnelManager {
         // Configs using settings the in-process bridge doesn't carry route to the
         // subprocess path (see inProcessOpenConnectSupports).
         //
-        // ONE rule, `willRunInProcess`, and this is the only place that decides.
-        // It used to be two: the editor promised in-process for every SSL-VPN kind
-        // while this dispatch named `[.fortinet, .f5apm, .ciscoAnyConnect]` — so a
-        // GlobalProtect / Juniper / Pulse / Array tunnel was told it would run
-        // in-process and silently ran as an `openconnect` subprocess (needing
-        // ocproxy, and Homebrew, for no reason). The extension has never had that
-        // limit: `PacketTunnelProvider.startTunnel` dispatches on
-        // `VPNKind.openconnectProtocol`, which covers all seven.
+        // ONE PREDICATE, `willRunInProcess`, and this is the only place that decides.
+        // It used to be three spellings and two were wrong: the editor promised
+        // in-process for every SSL-VPN kind, this dispatch named
+        // `[.fortinet, .f5apm, .ciscoAnyConnect]`, and the cookie path checked nothing
+        // — so a GlobalProtect / Juniper / Pulse / Array tunnel was told it would run
+        // in-process and silently ran as an `openconnect` subprocess, needing ocproxy
+        // and therefore Homebrew for no reason. The extension has never had that limit:
+        // `PacketTunnelProvider.startTunnel` dispatches on `VPNKind.openconnectProtocol`,
+        // which is non-nil for all seven.
         if config.authMode != "sso", Self.willRunInProcess(config) {
             connectInProcessOpenConnect(config, password: password)
             return
@@ -251,11 +252,36 @@ final class SubprocessTunnelManager {
     /// silently dropping a CA file, client cert, proxy, posture wrapper or token
     /// would connect with weaker (or simply broken) settings than configured.
     /// Mirrors `inProcessSSHSupports`.
+
     /// Whether "Run In-Process" will ACTUALLY be honoured for this config — the
     /// single honesty gate behind the editor's caveats, in the shape
     /// `sshPinBlockReason` established. The toggle asking for it is not the same
     /// as getting it: any option the bridge can't express sends the connection
     /// back to the subprocess (with its SOCKS proxy), and the editor says which.
+    ///
+    /// IT WAS LYING FOR FOUR KINDS, and this is the fix. It answered
+    /// `kind.isSSLVPN && preferInProcess && supports`, while `connect` additionally
+    /// required the kind to be one of the three the bridge is wired for — so a
+    /// GlobalProtect, Juniper, Pulse or Array config with the toggle on was told, by the
+    /// editor's own caveat, that it "is carried as a full system tunnel — no SOCKS proxy
+    /// is opened", and then ran as an `openconnect` subprocess with a SOCKS proxy. Found
+    /// by grouping the connect list on what a connection does to the Mac: the grouping
+    /// asks this predicate, and the answer disagreed with the connect path.
+    ///
+    /// THERE IS NO PER-KIND ALLOW-LIST, and adding one back would re-introduce the bug.
+    /// The narrowing that used to live in `connect` was never a statement about what the
+    /// engine can carry — `PacketTunnelProvider.startTunnel` dispatches on
+    /// `VPNKind.openconnectProtocol`, which is non-nil for all seven SSL-VPN kinds, so the
+    /// extension has always handled every one of them. The three-kind list was simply a
+    /// stale hand-maintained copy of "which kinds we got round to", and it is what made
+    /// GlobalProtect, Juniper, Pulse and Array demand Homebrew for nothing. What the
+    /// bridge genuinely cannot carry is a matter of SETTINGS, not kinds, and that is
+    /// `inProcessOpenConnectSupports`'s job alone.
+    ///
+    /// No SSO clause is needed either. Browser sign-in ends in a cookie, and
+    /// `connectWithCookie` has no per-protocol sign-in code left to run, so it carries any
+    /// protocol whose settings the bridge covers — and it is only reached for a kind whose
+    /// `supportsExternalBrowserSSO` is already true.
     static func willRunInProcess(_ c: SubprocessTunnelConfig) -> Bool {
         c.kind.isSSLVPN && c.preferInProcess && inProcessOpenConnectSupports(c)
     }
@@ -426,6 +452,9 @@ final class SubprocessTunnelManager {
     /// `--cookie-on-stdin` (no sign-in left to do — and no sysext required,
     /// preserving the no-root SOCKS path SSO configs had before).
     private func connectWithCookie(_ config: SubprocessTunnelConfig, auth: OCAuthDone) {
+        // The same one predicate as the password path — see `willRunInProcess`. Reached
+        // only with `authMode == "sso"` on a kind that really does browser sign-in, which
+        // is why no SSO clause is needed inside the predicate itself.
         if Self.willRunInProcess(config) {
             inProcessNE.insert(config.id)
             var l = live[config.id] ?? Live()

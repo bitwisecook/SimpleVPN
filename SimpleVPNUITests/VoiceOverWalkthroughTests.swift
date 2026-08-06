@@ -271,11 +271,15 @@ final class VoiceOverWalkthroughTests: XCTestCase {
                 \(describe(control)) has no value, so focusing it says what it is but never \
                 what the connection is doing
                 """)
-            // BOTH sanctioned vocabularies, not just the NEVPNStatus one: the
-            // "Other Connections" rows stop a subprocess or native tunnel, which has
-            // no NEVPNStatus behind it at all, so their controls speak `DotState`
-            // ("working", "connection problem") — which is rule 3's own vocabulary,
-            // not a second language. Anything outside both lists still fails.
+            // BOTH sanctioned vocabularies, not just the NEVPNStatus one. The connect
+            // list is no longer split by which of our transports carries a connection —
+            // it is grouped under "Whole-Mac VPNs" and "Local Ports" (ConnectionScope) —
+            // so a subprocess or native connection can be any row in either section, and
+            // those have no NEVPNStatus behind them at all. Their controls speak
+            // `DotState` ("working", "connection problem"), which is rule 3's own
+            // vocabulary rather than a second language. Anything outside both lists
+            // still fails, which is what makes the merged sections safe: two halves of
+            // one list must not speak two languages about one state.
             XCTAssertNotNil(Self.phrase(in: value, from: Self.allStatusPhrases), """
                 \(describe(control)) reports \u{201C}\(value)\u{201D}, which is in neither status \
                 vocabulary (\(Self.allStatusPhrases.joined(separator: ", "))) — \
