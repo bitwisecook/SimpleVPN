@@ -106,7 +106,7 @@ nonisolated struct WireGuardConfig: Codable, Sendable, Equatable, Identifiable {
 
 extension WireGuardConfig {
     /// Parse a wg-quick .conf. Lenient: unknown keys are ignored, extra peers kept.
-    static func parse(_ text: String, name: String) -> WireGuardConfig {
+    nonisolated static func parse(_ text: String, name: String) -> WireGuardConfig {
         var c = WireGuardConfig(name: name)
         enum Section { case none, interface, peer }
         var section: Section = .none

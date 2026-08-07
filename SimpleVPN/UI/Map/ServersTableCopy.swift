@@ -323,4 +323,25 @@ nonisolated enum ServersTableCopy {
     /// never advice about something that already happened.
     static let dragHint = "Drag a row, or use the up and down buttons, to put these servers"
         + " in your own order. Doing that turns off the automatic ordering."
+
+    // MARK: - Adding servers from more configuration files
+
+    /// The button beside `+` and `−` that opens the file panel. It is the keyboard
+    /// half of drag-to-merge: a second `.ovpn` from the same provider can be dropped
+    /// on this table, and a drag must never be the only way to do anything
+    /// (Docs/Accessibility.md rule 7).
+    static let addFromFilesHelp = "Add the servers from other configuration files for this "
+        + "same VPN \u{2014} the ones a provider publishes one file per server. You are shown "
+        + "what each file would do before anything changes. Files can also be dropped on the "
+        + "table."
+
+    /// Why the button is dead when the editor has no VPN behind it. Rare, and still
+    /// a reason rather than a grey glyph.
+    static let addFromFilesNoVPN = "There is no VPN here to add servers to."
+
+    /// The footnote that makes the drop discoverable — the affordance is otherwise
+    /// invisible until somebody happens to try it.
+    static let addFromFilesHint = "Downloaded several configuration files from the same "
+        + "provider? Drop them on this table, or use the button beside \u{2212}, and SimpleVPN "
+        + "will add the servers rather than making a second VPN for each file."
 }

@@ -49,6 +49,13 @@ struct AddServersFromProviderSheet: View {
     @State private var chosenCountries: Set<String> = []
     @State private var task: Task<Void, Never>?
     @State private var consenting = false
+    /// A fetch whose diff the rules HELD, waiting to be looked at.
+    ///
+    /// This is what turns "the update cannot proceed" into "the update needs your
+    /// say-so": the fetch's own refusal is unchanged — nothing is written while this
+    /// holds a value — and `ProviderListUpdateSheet` is the only thing in the app
+    /// that can pass `confirmed: true`.
+    @State private var pendingUpdate: PendingProviderListUpdate?
 
     private var store: ProviderServerListStore { .shared }
 
@@ -107,6 +114,18 @@ struct AddServersFromProviderSheet: View {
         } message: {
             Text(ProviderPickerCopy.consentMessage(
                 provider, throughTunnel: connectedProviders.contains(provider.id)))
+        }
+        // THE APPROVAL FLOW. Held here rather than in the fetch: producing a diff
+        // changes nothing, and the only thing that can apply a held one is the
+        // button on that sheet.
+        .sheet(item: $pendingUpdate) { held in
+            ProviderListUpdateSheet(pending: held) { applied in
+                store.save(applied)
+                list = applied
+                // The "needs your say-so" note is answered now, so it goes; leaving
+                // it up after an approval would say the opposite of what happened.
+                failure = nil
+            }
         }
         .task { list = store.list(provider.id) }
     }
@@ -281,13 +300,18 @@ struct AddServersFromProviderSheet: View {
                 }
                 // RULE 3 AND 4: an update that moves an address or a key on a server
                 // the user holds, or that loses a third of the list, is HELD. Nothing
-                // is written until it is confirmed — and this sheet does not confirm
-                // it, so the stored list stays exactly as it was and the outcome says
-                // what is waiting.
+                // is written here — the stored list stays exactly as it was, the
+                // outcome says what is waiting, and the diff is handed to
+                // `ProviderListUpdateSheet`, which is the only place in the app that
+                // can pass `confirmed: true`. Declining that sheet leaves this state
+                // exactly as this line found it.
                 let diff = ProviderServerListDiff.between(stored: stored, incoming: fresh)
                 guard !diff.needsConfirmation else {
                     announce(ProviderFetchOutcome
                         .needsConfirmation(moved: diff.moved.count, retired: diff.retired.count))
+                    pendingUpdate = PendingProviderListUpdate(
+                        provider: provider, diff: diff, stored: stored, incoming: fresh,
+                        heldHostnames: Set(vpn.endpoints(for: profile.id).map(\.host)))
                     return
                 }
                 let applied = ProviderServerListUpdate.apply(diff, stored: stored,
