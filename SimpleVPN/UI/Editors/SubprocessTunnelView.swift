@@ -47,8 +47,6 @@ struct SubprocessTunnelView: View {
     @State private var hostPicker: HostPickerPayload?
     // Debounce for live forward edits while connected.
     @State private var applyForwardsTask: Task<Void, Never>?
-    /// The saved-confirmation affordance every editor's primary action now has.
-    @State private var savedTick = false
     /// What the SSH agent said last time we asked (nil until the first answer).
     @State private var agentStatus: SSHAgentState?
     /// Vendor agents whose socket is on this Mac right now, offered as one-click
@@ -169,19 +167,39 @@ struct SubprocessTunnelView: View {
         .padding(.top, 10)
         .navigationTitle(draft.name)
         .task { loadOnce() }
-        .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button { save() } label: {
-                    savedTick ? Label("Saved", systemImage: "checkmark")
-                              : Label("Save", systemImage: "checkmark")
-                }
-                    .buttonStyle(.glassProminent)   // primary action — one idiom in every editor
-                    .disabled(saveDisabledReason != nil)
-                    // A dead button must say why (the rule ConnectionView follows).
-                    .help(saveDisabledReason ?? "Save changes to this tunnel")
-                    .accessibilityValue(saveDisabledReason.map { "unavailable — \($0)" } ?? "")
-            }
-        }
+        // LIVE SAVE — no confirming button in any editor now. See `SettingCommit`.
+        //
+        // THIS EDITOR WAS THE LAST ONE STILL CARRYING THE TICK, and it was skipped by
+        // accident rather than on purpose: the batch that converted the other six
+        // (`fb0a00d`) could not take this file because another change held it. The
+        // cost was not cosmetic. Its Save button was DISABLED for any tunnel
+        // `saveDisabledReason` refused, so a profile with no server address yet could
+        // not store ANY change at all — turn "Run In-Process" on and nothing was
+        // written, with the reason hidden in the tooltip of a button in an icon-only
+        // toolbar. Reported exactly that way: the toggle "did not persist".
+        .savesSettingsLive { save() }
+        // RED ON THE FIELD THAT IS HOLDING THIS UP — the other half of the same fix,
+        // and the reason live save is honest here rather than silent. `save()` HOLDS a
+        // draft that `saveDisabledReason` refuses, so the editor must say which row it
+        // is waiting on; every other editor already does. Same source as the connect
+        // list's disabled Connect and its "Fix This…" banner (`SettingNeeds`).
+        .settingNeeds(needs)
+    }
+
+    /// Which row has to be filled in before this tunnel can be stored and connected,
+    /// and why.
+    ///
+    /// `SubprocessTunnelReadiness.need` already answers exactly this — one
+    /// `ConnectNeed` carrying the sentence AND the `settingID` at fault — so the
+    /// editor reads it rather than restating it. The facts come from THIS EDITOR'S
+    /// fields rather than the keychain, for the same reason `connectBlockedReason`
+    /// does: a password typed and not yet committed counts as present.
+    private var needs: SettingNeeds {
+        var facts = SubprocessTunnelReadiness.Facts(installedTools: TunnelCLI.installed())
+        facts.hasPassword = !password.isEmpty
+        guard let need = SubprocessTunnelReadiness.need(for: draft, facts: facts),
+              let id = need.settingID else { return SettingNeeds() }
+        return SettingNeeds(byID: [id: need.sentence])
     }
 
     // MARK: Sections
@@ -1384,12 +1402,16 @@ struct SubprocessTunnelView: View {
         }
     }
 
-    /// Why Save is unavailable, in the user's language, or nil when it can go.
+    /// Why this draft is not stored yet, in the user's language, or nil when it is.
+    ///
+    /// There is no Save button to disable any more — this is the gate `save()` holds
+    /// the draft behind (`savesSettingsLive`), and `needs` is what puts the reason on
+    /// the row at fault rather than in a tooltip nobody opens.
     ///
     /// The SOCKS port is here because `normalized()` no longer rewrites it: a
     /// stored port is something other software points at, so the choice is
-    /// "block the save with the reason" or "silently move it to 1080 and break
-    /// them". This is the block.
+    /// "hold the value with the reason" or "silently move it to 1080 and break
+    /// them". This is the hold.
     private var saveDisabledReason: String? {
         if draft.name.trimmingCharacters(in: .whitespaces).isEmpty { return "Give this tunnel a name first." }
         if draft.server.isEmpty { return "Enter the server address first." }
@@ -1590,7 +1612,17 @@ struct SubprocessTunnelView: View {
         // there is nothing to seed here (and no chain to keep in sync).
     }
 
+    /// Store what the editor holds. Called on field blur, on submit, and on close
+    /// (`savesSettingsLive`) — never from a button, because there isn't one.
+    ///
+    /// IDEMPOTENT and VALIDITY-GATED, the two properties live save needs: all three
+    /// paths can fire for one edit, and a draft `saveDisabledReason` refuses is HELD
+    /// here rather than stored or silently rewritten. What is being held is said on
+    /// the row at fault by `needs` above — holding without saying so is what made the
+    /// old disabled Save button read as "the toggle did nothing".
     private func save() {
+        guard !ManagedPolicy.lockConfiguration else { return }
+        guard saveDisabledReason == nil else { return }
         store.save(draft)
         if remember, !password.isEmpty {
             try? KeychainCredentialStore.saveCredentials(profile: "tunnel." + draft.id,
@@ -1635,12 +1667,9 @@ struct SubprocessTunnelView: View {
             customRouting = await commitCustomRouting(vpn, profileID: id, profile: toCommit,
                                                       proxyAuthUsername: user, proxyAuthPassword: pass)
         }
-        // Acknowledge the save on the button, like every other editor.
-        savedTick = true
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(2))
-            savedTick = false
-        }
+        // No "Saved" transient: it reused the SAME `checkmark` glyph as "Save" in an
+        // icon-only toolbar, so a successful save was invisible to a sighted user
+        // while VoiceOver heard "Saved". Deleting the button deleted the bug.
     }
 
     private func connect() {

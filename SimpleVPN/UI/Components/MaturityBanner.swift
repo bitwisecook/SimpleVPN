@@ -41,6 +41,49 @@
 
 import SwiftUI
 
+// MARK: - The paragraph, and the floor under it
+
+/// THE EXPLANATORY PARAGRAPH IN A BANNER — and the one place the floor under its
+/// width is stated, because the floor is what stops a banner emptying a window.
+///
+/// THE BUG THIS EXISTS TO KILL (`EditorPaneHeightTests`). `fixedSize(horizontal:
+/// false, vertical: true)` means "be as tall as this paragraph needs at whatever
+/// width you are given" — right on screen, and a trap off it. SwiftUI measures the
+/// two axes independently, so the MINIMUM-height query arrives with a width proposal
+/// of nearly nothing, and a paragraph that is never drawn narrower than 500 points
+/// answers with its height at ONE WORD PER LINE. For the F5 BIG-IP APM notice that
+/// was 4,527 points.
+///
+/// That number reached the window because these banners are mounted OUTSIDE the
+/// editor's scroll container — `MaturityBannerScaffold` puts one above the whole
+/// `TabView`, which is the point of it — so the paragraph's minimum height is the
+/// minimum height of the entire detail pane. `NavigationSplitView` gives both of its
+/// columns the same height, a 4,627pt column in a 612pt window is laid out CENTRED,
+/// and every row of the Manage VPNs sidebar ended up about 1,800 points above the top
+/// of the window: blank, unscrollable, and persisted by AppKit into the split view's
+/// saved subview frames so that reopening the window brought it straight back.
+///
+/// A FLOOR ON THE WIDTH IS THE HONEST FIX, because it states something that is true:
+/// this paragraph is never drawn in a column narrower than this. The narrowest window
+/// that shows one is 760 points wide less a 200pt sidebar, so the floor is never
+/// reached in a real layout and nothing on screen moves — it only answers the
+/// measuring question sensibly.
+struct NoticeParagraph: View {
+    let text: String
+
+    /// The narrowest column this paragraph is ever measured for. Not a design
+    /// decision about line length — a statement about the smallest editor pane the
+    /// app can produce, kept well below it so this can never clip anything.
+    static let minimumWidth: CGFloat = 320
+
+    var body: some View {
+        Text(text)
+            .font(.callout).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(minWidth: Self.minimumWidth, alignment: .leading)
+    }
+}
+
 // MARK: - The banner
 
 /// "This hasn't been tested" with room to explain, and the one action that
@@ -78,9 +121,7 @@ struct MaturityBanner: View {
                     }
                 } else {
                     Text(notice.title).font(.callout.weight(.semibold))
-                    Text(notice.detail)
-                        .font(.callout).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    NoticeParagraph(text: notice.detail)
                 }
             }
             Spacer(minLength: 8)
@@ -208,9 +249,7 @@ struct FeatureRequestBanner: View {
                     Text(notice.title).font(.callout)
                 } else {
                     Text(notice.title).font(.callout.weight(.semibold))
-                    Text(notice.detail)
-                        .font(.callout).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    NoticeParagraph(text: notice.detail)
                 }
             }
             Spacer(minLength: 8)
