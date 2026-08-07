@@ -120,6 +120,10 @@ struct ServersTable: View {
     @State private var draft: Draft?
     @FocusState private var focus: Field?
     @AppStorage(endpointProbeDefaultsKey) private var probingOn = true
+    /// Configuration files dropped ON this table, or chosen from the button beside
+    /// `+` and `−`. Dropping a second `.ovpn` from the same provider onto a server
+    /// list reads as "these are more servers", which is exactly what it means.
+    @State private var serverFilesRequest: ServerConfigurationRequest?
 
     /// One line in the table: a saved server, or the not-yet-saved row `+` added.
     ///
@@ -181,6 +185,16 @@ struct ServersTable: View {
         .onChange(of: focus) { _, now in
             if now != .draftHost, now != .draftPort { commitDraft() }
         }
+        // The file panel and the sheet for whatever the drop (or the button) named.
+        // One host for both paths, so the drag and the menu item cannot behave
+        // differently.
+        .serverConfigurationImport(vpn: vpn, request: $serverFilesRequest)
+    }
+
+    /// This VPN, when there is one to name. Nil only while a profile is being
+    /// removed out from under an open editor.
+    private var profile: VPNController.Profile? {
+        vpn.profiles.first { $0.id == profileID }
     }
 
     private var table: some View {
@@ -232,6 +246,11 @@ struct ServersTable: View {
         .onDeleteCommand(perform: removeSelected)
         .frame(minHeight: 150)
         .overlay { if rows.isEmpty { emptyState } }
+        // DROPPING A CONFIGURATION ON A SERVER LIST MEANS "MORE SERVERS". The
+        // comparison is `ConfigurationKinship`'s and the decision is the sheet's —
+        // nothing merges without being shown first, and a file that differs in who
+        // this VPN trusts is never merged at all.
+        .modifier(ServersTableConfigurationDrop(profile: profile, request: $serverFilesRequest))
     }
 
     /// The row context menu. Right-clicking a row is what a Mac user tries first,
@@ -423,6 +442,19 @@ struct ServersTable: View {
             // a drag-only order is unusable without a pointer. This is the one pair
             // in the window that may claim ⌘⌥↑/⌘⌥↓.
             ReorderButtons(commands: reorderCommands(for: selectedRow), shortcuts: true)
+            Divider().frame(height: 16)
+            // THE KEYBOARD PATH FOR DRAG-TO-MERGE, and the reason the drop target
+            // above is allowed to exist at all: a drag-only affordance is unusable
+            // without a pointer (Docs/Accessibility.md rule 7), which is the same
+            // rule that put Move Up / Move Down beside `+` and `−`.
+            Button { chooseConfigurationFiles() } label: {
+                Image(systemName: "arrow.down.doc")
+                    .frame(width: 22, height: 22).contentShape(Rectangle())
+            }
+            .disabled(profile == nil || !ServerConfigurationRequest.canTake(kind))
+            .help(addFromFilesReason ?? ServersTableCopy.addFromFilesHelp)
+            .accessibilityLabel(ConfigurationDropCopy.menuTitle)
+            .accessibilityValue(addFromFilesReason ?? ServersTableCopy.addFromFilesHelp)
             if manuallyOrdered {
                 Button(ServersTableCopy.automaticOrderLabel, action: useAutomaticOrder)
                     .help(ServersTableCopy.automaticOrderHelp)
@@ -461,6 +493,15 @@ struct ServersTable: View {
             // offer would be advice about something already done.
             if !manuallyOrdered, items.count > 1 {
                 Text(ServersTableCopy.dragHint)
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            // Says the drop exists. An affordance nobody can find is not an
+            // affordance, and this one is invisible until somebody happens to try it
+            // — the button beside the reorder pair is named in the same sentence so
+            // the pointer-free path is discovered at the same moment.
+            if ServerConfigurationRequest.canTake(kind) {
+                Text(ServersTableCopy.addFromFilesHint)
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -597,6 +638,19 @@ struct ServersTable: View {
         commands.drop(from: from, insertingBefore: min(index, items.count))
     }
 
+    /// Why the "add servers from files" button is dead, or nil when it can run. A
+    /// disabled button says why, in `.help` and in its spoken value both.
+    private var addFromFilesReason: String? {
+        guard let profile else { return ServersTableCopy.addFromFilesNoVPN }
+        return ServerConfigurationRequest.canTake(profile.kind)
+            ? nil : ConfigurationDropCopy.wrongKindOfVPN(profile.name)
+    }
+
+    private func chooseConfigurationFiles() {
+        guard let profile, ServerConfigurationRequest.canTake(profile.kind) else { return }
+        serverFilesRequest = ServerConfigurationRequest(profile: profile)
+    }
+
     private func useAutomaticOrder() {
         Task {
             await vpn.clearEndpointOrder(for: profileID)
@@ -675,6 +729,22 @@ struct ServersTable: View {
 
     private func save(_ endpoint: VPNEndpoint) {
         Task { await vpn.updateEndpoint(endpoint, for: profileID) }
+    }
+}
+
+/// The table's own drop target, in a modifier because the profile can be nil for a
+/// render or two while one is being removed — and a drop destination that appeared
+/// and disappeared under the pointer would be worse than none.
+private struct ServersTableConfigurationDrop: ViewModifier {
+    let profile: VPNController.Profile?
+    @Binding var request: ServerConfigurationRequest?
+
+    func body(content: Content) -> some View {
+        if let profile {
+            content.serverConfigurationDropTarget(profile: profile, request: $request)
+        } else {
+            content
+        }
     }
 }
 

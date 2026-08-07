@@ -69,6 +69,10 @@ struct ConnectionView: View {
     /// The failure currently explained by the error sheet (mirror of
     /// VPNController.presentedFailure — see the .onChange below).
     @State private var shownFailure: UserFacingError?
+    /// Configuration files offered to ONE VPN as more servers, from a drop on its
+    /// sidebar row or from that row's menu. Window-level because a drop lands on
+    /// whatever row is under the pointer rather than on the selection.
+    @State private var serverFilesRequest: ServerConfigurationRequest?
 
     /// Sidebar dot — from the ONE shared derivation, so it can never disagree with
     /// the header pill, the menu bar or the route graph (they all used to compute
@@ -235,6 +239,7 @@ struct ConnectionView: View {
         if let p = vpn.profiles.first(where: { $0.id == tag }) {
             VPNSidebarRow(vpn: vpn, profile: p, labelDefs: labels.labels(for: p.id), dotState: rowDot(p))
                 .tag(p.id)
+                .serverConfigurationDropTarget(profile: p, request: $serverFilesRequest)
                 .contextMenu { sidebarMenu(p) }
         } else if let row = otherConnections.first(where: { $0.id == tag }) {
             otherConnectionRow(row).tag(row.id)
@@ -427,6 +432,12 @@ struct ConnectionView: View {
                           allowedContentTypes: [UI.ovpnType, .data, .plainText],
                           onCompletion: importConfig)
             .ovpnDropTarget(vpn: vpn)
+            // Attached once for the window; the sidebar rows and their menus write
+            // into the binding. A configuration dropped ON a VPN adds servers to it,
+            // and one dropped anywhere else still imports — the row's own target is
+            // inside the window-wide one, so the narrower meaning wins where it
+            // applies and nowhere else.
+            .serverConfigurationImport(vpn: vpn, request: $serverFilesRequest)
             .importOutcomeAlert(vpn: vpn)
             .onChange(of: vpn.importRequested, initial: true) {
                 // initial: the ⌘O menu item may set the flag before this window's
@@ -667,6 +678,14 @@ struct ConnectionView: View {
             }
         }
         Divider()
+        // The named equivalent of dropping a configuration on this row. Never the
+        // only way, in either direction: the drag is discoverable, this is reachable
+        // (Docs/Accessibility.md rule 7).
+        if ServerConfigurationRequest.canTake(p.kind) {
+            Button(ConfigurationDropCopy.menuTitle) {
+                serverFilesRequest = ServerConfigurationRequest(profile: p)
+            }
+        }
         ProbeVPNMenuItem(vpn: vpn, profile: p)
         Button("Settings…") {
             vpn.selectedID = p.id

@@ -580,9 +580,11 @@ Two settings, both needing stable ids and `manual.html` anchors or `ManualAnchor
 
 ## 9. What is built ✅ and what is not 📐
 
-**The fetch, the peer-key model and both entry points are now built.** Drag-to-merge has its
-comparison core built and tested and is *not* wired to a drop target. Details at the end of this
-section; the list below marks each piece.
+**The fetch, the peer-key model, both entry points, drag-to-merge and the approval sheet are now
+built.** The two pieces this section previously recorded as deferred — the drop targets that call
+`ConfigurationKinship`, and the sheet that lets a held list update be accepted — are the same idea
+(*show what will change, and let the user accept it*) and were built together. Details at the end of
+this section; the list below marks each piece.
 
 ### The second batch ✅ (the fetch, the endpoints, the picker)
 
@@ -657,7 +659,24 @@ they are the kind that would otherwise have shipped:
   silently un-claimed NordVPN and IPVanish the moment somebody removed a pin — which is exactly the
   unclaimed-by-omission failure the registry exists to prevent.
 
-### 10. Drag-to-merge 📐/✅ — core built, not wired
+### The third batch ✅ (the two things that were deferred)
+
+- **`ProviderListUpdateReview` + `ProviderListUpdateSheet`** — the confirmation gate finally has
+  a second half. The rules were always honoured and an update that moved an address or a key could
+  always be *declined by doing nothing*; there was no way to say yes. Now there is, and the shape of
+  it is the asymmetry of §3 turned into an ordering: **a moved peer key on a server the user holds
+  ranks above a moved key on one they do not, above a moved address, above a removal, above an
+  arrival** — never alphabetical, because the one row that can hand somebody the whole tunnel must
+  not land wherever the alphabet leaves it. Removals get rows of their own and say they will be
+  *kept and marked retired*; `lostTooMany` gets its own line saying that is why the whole update is
+  held. **There is not one tick box on the sheet**: accepting the good rows beside a poisoned one is
+  exactly what `needsConfirmation` exists to prevent. The safe button is the prominent one and owns
+  Escape; **nothing carries `.defaultAction`**, so Return cannot accept a moved key — the same
+  treatment the WireGuard with-keys export consent already uses. `ProviderListUpdateSheet.approve()`
+  is the only place in the app that passes `confirmed: true`.
+- **The drop targets and `AddServersFromFilesSheet`** — §10 below, now wired.
+
+### 10. Drag-to-merge ✅ — core built AND wired
 
 Dropping a second `.ovpn`/`.conf` from the same provider onto a VPN you already have should offer
 to add it as **another endpoint** rather than making a duplicate VPN.
@@ -684,20 +703,50 @@ Two findings came out of writing those tests and both would otherwise have shipp
   normalise — but a file that dials one host and name-checks *another* has not merely moved server,
   and the per-file placeholder leaves that difference standing. Both are pinned by test.
 
-📐 **Not wired.** There is no drop target on a VPN row, no sheet showing the diff, and no
-"import as a separate VPN" button. The verdicts exist and are correct; nothing calls them yet.
+✅ **Wired**, in `ConfigurationDropMerge` (pure) and `AddServersFromFilesSheet` (the drop targets,
+the menu equivalent and the sheet).
+
+**Three drop targets, all meaning the same thing**: a VPN's row in the main window's sidebar, its
+row in Manage VPNs, and the Servers table itself — dropping a config onto a server list reads
+naturally, and that table is where somebody is already looking at servers. A drop target is
+**absent** on a kind with no configuration file to compare against (SSH, the SSL-VPN kinds,
+Tailscale, Proxy Tunnel): there is no "same VPN, elsewhere" question to ask of one, so the file falls
+through to the ordinary import, which is the honest answer.
+
+**Drag is never the only way** (`Docs/Accessibility.md` rule 7, the rule that also gave every
+reorderable list its Move Up / Move Down). Every target has a named equivalent —
+*"Add Servers from Configuration Files…"* — on that VPN's context menu in both sidebars, in Manage
+VPNs' `+` menu (disabled with a reason when nothing suitable is selected), and as a Tab-reachable
+button beside `+` / `−` / the reorder pair in the Servers table. The Servers table footer says the
+drop exists, because an affordance nobody can find is not one.
+
+**Multi-file is the case the request named**, and it is four rules rather than one:
+
+1. **Several files, one answer each.** Six files produce six lines. Averaging is how the odd one out
+   gets waved through.
+2. **All-or-nothing per file.** A file contributes every server it names or none of them. Never a
+   half-merge.
+3. **The files see each other.** Each is compared against the VPN *and* against what the earlier
+   files in the same drop already contributed, so two downloads of one relay are one row and the
+   second file says so.
+4. **The wrong kind is a difference, not a crash.** A WireGuard `.conf` dropped on an OpenVPN VPN
+   says there is nothing to compare — `ConfigDetector` decides, so there is no second answer to
+   "what kind of file is this?".
+
+**The ordering is part of the answer**: the files that need a decision come first — a trust
+difference, then "this is not that VPN" — and the quiet successes last. Five good IPVanish configs
+and one carrying somebody else's `<ca>` in the same drop is pinned by test: the five merge, the sixth
+contributes *nothing*, not even its address, and neither decision leaks into the other.
+
+**"Import as its own VPN" goes through `handleImport`**, the shared pipeline every other entry point
+uses — so a file an import would refuse is refused here too, in the same words, and there is no
+private path that skips it.
 
 ### 📐 Still not built, in the order to do it in
 
-1. **Wiring the confirmation gate to a real diff view.** The rules exist and are tested, and the
-   fetch *honours* them — an update that moves an address or a key, or loses a third of the list, is
-   held and the user is told what is waiting. What does not exist is the sheet that shows the diff
-   **so it can be accepted**; today such an update can only be declined by doing nothing. That is
-   fail-safe but it is a dead end, and it is the next thing to build.
-2. **Drag-to-merge's wiring** (above).
-3. **Readiness reasons** via `ConnectListing`/`SubprocessTunnelReadiness`, so a profile with servers
+1. **Readiness reasons** via `ConnectListing`/`SubprocessTunnelReadiness`, so a profile with servers
    and no sign-in is listed with Connect disabled and the reason named per provider.
-4. **The CA fingerprints** for NordVPN and IPVanish, which are what turns `canFetch` on for them.
+2. **The CA fingerprints** for NordVPN and IPVanish, which are what turns `canFetch` on for them.
    Until then both fail closed and their rows say so.
 
 ### What still needs a real account to confirm ❓

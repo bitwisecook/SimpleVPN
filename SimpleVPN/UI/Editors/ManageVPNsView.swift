@@ -45,6 +45,11 @@ struct ManageVPNsView: View {
     /// holds a value, which is also the privacy rule (consenting to Mullvad is not
     /// consenting to Nord).
     @State private var addingServersFrom: VPNServiceProvider?
+    /// Configuration files being offered to ONE VPN as more servers — dropped on its
+    /// row, or chosen from the menu item that must exist beside the drag
+    /// (Docs/Accessibility.md rule 7). Window-level because a drop lands on whatever
+    /// row is under the pointer, which is not necessarily the selected one.
+    @State private var serverFilesRequest: ServerConfigurationRequest?
     @State private var ciscoNote: String?
     @State private var exportDoc: OVPNDocument?
     @State private var exportName = "config"
@@ -178,6 +183,11 @@ struct ManageVPNsView: View {
             Button("OK", role: .cancel) { ciscoNote = nil }
         } message: { Text(ciscoNote ?? "") }
         .fileDropTarget { urls in importFiles(urls) }
+        // Attached ONCE for the window: the rows and the menu item write into
+        // `serverFilesRequest`, this presents the file panel and the sheet. A drop on
+        // a row is caught by that row's own target first, so a configuration dropped
+        // on a VPN adds servers while one dropped anywhere else still imports.
+        .serverConfigurationImport(vpn: vpn, request: $serverFilesRequest)
         .importOutcomeAlert(vpn: vpn)
         .sheet(isPresented: $showDiscover) {
             DiscoverEndpointView { candidate in createFromDiscovery(candidate) }
@@ -318,11 +328,24 @@ struct ManageVPNsView: View {
             InlineKeyStillStoredBadge(reason: vpn.inlineSecretMigrationFailures[p.id])
         }
             .tag(p.id)
+            // DROP A SECOND CONFIGURATION ON A VPN YOU ALREADY HAVE. Nothing merges
+            // without the sheet showing what it would do first, and a file that
+            // differs in who this VPN trusts is never merged at all — it is offered
+            // as its own VPN through the ordinary import.
+            .serverConfigurationDropTarget(profile: p, request: $serverFilesRequest)
             .contextMenu {
                 // Right-clicking a row is what a Mac user tries first, and VO-⇧-M
                 // reaches it — but it is never the only path (the toolbar pair above is).
                 ReorderMenuItems(commands: order.commands(for: p.id))
                 Divider()
+                // The named equivalent of the drop above, on the row it acts on, so
+                // the subject is unambiguous. Absent for a kind with no configuration
+                // to compare against, because there absence is the honest answer.
+                if ServerConfigurationRequest.canTake(p.kind) {
+                    Button(ConfigurationDropCopy.menuTitle) {
+                        serverFilesRequest = ServerConfigurationRequest(profile: p)
+                    }
+                }
                 exportItems(for: p)
                 Button("Remove", role: .destructive) { Task { try? await vpn.remove(id: p.id) } }
             }
@@ -793,9 +816,38 @@ struct ManageVPNsView: View {
         // Every row is enabled or disabled for a stated reason, never hidden: with
         // no VPN selected it says so, and Proton's row says its own.
         Menu(ProviderPickerCopy.sectionTitle) { providerMenu }
+        // The OTHER source of servers for a VPN that already exists, and the one the
+        // drag makes discoverable but must not own. It sits here rather than under
+        // Import… because it adds to a VPN instead of making one — the same
+        // distinction the provider submenu above draws.
+        Button(ConfigurationDropCopy.menuTitle) {
+            if let p = selectedProfileForServerFiles {
+                serverFilesRequest = ServerConfigurationRequest(profile: p)
+            }
+        }
+        .disabled(selectedProfileForServerFiles == nil)
+        .help(serverFilesMenuReason ?? ConfigurationDropCopy.dropLabel(
+            selectedProfileForServerFiles?.name ?? ""))
         Divider()
         Button("Import…") { showImporter = true }
         Button("Discover from Address…") { showDiscover = true }
+    }
+
+    /// The selected VPN, when it is one servers can be added to from a file.
+    private var selectedProfileForServerFiles: VPNController.Profile? {
+        guard let id = selection, let p = vpn.profiles.first(where: { $0.id == id }),
+              ServerConfigurationRequest.canTake(p.kind) else { return nil }
+        return p
+    }
+
+    /// Why the `+` menu's file item cannot run, in the two ways it cannot: nothing is
+    /// selected, or what is selected has no configuration file to compare against.
+    private var serverFilesMenuReason: String? {
+        guard let id = selection, let p = vpn.profiles.first(where: { $0.id == id }) else {
+            return ConfigurationDropCopy.needsAVPN
+        }
+        return ServerConfigurationRequest.canTake(p.kind)
+            ? nil : ConfigurationDropCopy.wrongKindOfVPN(p.name)
     }
 
     /// The four companies, as menu items. The keyboard path for the same thing the

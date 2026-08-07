@@ -11,13 +11,18 @@
 
 import Foundation
 
-enum DetectedConfigKind: Sendable, Equatable {
+nonisolated enum DetectedConfigKind: Sendable, Equatable {
     case openVPN
     case wireGuard
     case cisco        // AnyConnect XML or legacy .pcf — CiscoImport tells them apart
 }
 
-enum ConfigDetector {
+/// `nonisolated` because the answer is a pure function of the bytes and the name,
+/// and the pure comparison layer (`ConfigurationDropMerge`) has to ask it off the
+/// main actor. There is exactly one answer to "what kind of file is this?" in this
+/// app, and a second one written to dodge an isolation annotation would be the
+/// beginning of two.
+nonisolated enum ConfigDetector {
 
     static func detect(text: String, filename: String) -> DetectedConfigKind {
         let lower = text.lowercased()
