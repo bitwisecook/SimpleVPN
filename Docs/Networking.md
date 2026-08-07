@@ -953,6 +953,212 @@ not on the `vmenet0` tap** (which carries no IPv4 address at all), and **`bridge
 from detection entirely, because it is the ordinary user-configurable Thunderbolt/Ethernet bridge and
 treating it as a guest network would invite routing a real LAN around the VPN.
 
+### 6.1 ❓ The NordVPN report — what the first measurement did not cover
+
+The report was re-put more precisely: *with NordVPN connected, a guest under Apple `container` cannot
+reach the internet, while the host is fine.* That is a sharper claim than the one §6 answered, and
+re-reading the measurement above against it exposes a gap that the original write-up did not name.
+
+**The measurement above never tested a full tunnel.** It was taken with Tailscale live and *no exit
+node*, and the third bullet says as much — "Tailscale sets neither `includeAllNetworks` nor a route
+that outranks the interface-scoped route to the guest subnet". Re-measured on 2026-08-07, that is
+visible directly in the host table:
+
+```
+default            10.0.7.254         UGScg                 en0        ← the GLOBAL default
+default            link#27            UCSIg               utun4        ← Tailscale, IFSCOPE'd
+default            link#36            UCSIg           bridge100 !      ← vmnet, IFSCOPE'd
+```
+
+`UCSIg` is an **interface-scoped** default (`I` = `IFSCOPE`); `UGScg` on `en0` is the real one. So the
+guest's NAT'd traffic left via `en0` and never met the tunnel at all. "The reported failure did not
+reproduce" is therefore true and remains true — but it is evidence about *a split tunnel*, and the
+symptom being reported is about a full one. **The full-tunnel case is still unmeasured**, and no claim
+in this section should be read as covering it.
+
+The 2026-08-07 baseline re-confirmed the rest, on Apple `container` 1.0.0 with an Alpine guest at
+`192.168.64.4/24`, `eth0` MTU 1280, host `bridge100` = `192.168.64.1/24` MTU 1500 with `vmenet0` as
+its only member and no IPv4 of its own:
+
+| Probe | Result |
+|---|---|
+| `ping 1.1.1.1` | 3/3, avg 7.4 ms |
+| `ping 9.9.9.9` | 2/2 |
+| `nslookup cloudflare.com` | answers |
+| `ping cloudflare.com` | 2/2 |
+| `/etc/resolv.conf` | `nameserver 192.168.64.1` **and nothing else** |
+
+That last row is the already-recorded search-domain loss, unchanged and independent of any VPN.
+
+**`pfctl` is not observable without root.** `pfctl -sr`, `-sn` and `-s info` all return
+`/dev/pf: Permission denied`, and this investigation did not elevate. A commercial client's
+kill-switch rules are therefore **invisible to us by construction** — which matters, because a pf rule
+that drops non-tunnel traffic is one of the two leading hypotheses and the one we cannot rule in or
+out from here. Any future attempt at this needs `sudo pfctl -sr -a '*'` from the reporter, not from us.
+
+**The four hypotheses, and what each predicts.** Stated so a single run can discriminate between them,
+because they fail in visibly different ways:
+
+| Hypothesis | Guest → `1.1.1.1` | Guest → hostname | Distinguishing host-side sign |
+|---|---|---|---|
+| `includeAllNetworks` (native full-tunnel / kill switch) | fails | fails | tunnel is a native `NEVPNProtocol`, not a packet-tunnel provider |
+| pf kill-switch rule | fails | fails | `sudo pfctl -sr` shows a `block` on non-tunnel egress; route table looks *fine* |
+| Routing — guest subnet captured with no return path | fails | fails | global default moved to `utun`; `192.168.64/24` route intact but NAT source is wrong |
+| DNS — host resolver taken over | **works** | fails | `scutil --dns` resolver #1 is the tunnel's; guest still points at `192.168.64.1` |
+
+**One probe separates the top three from the bottom one, and it is the whole point of the script
+below**: a guest that reaches `1.1.1.1` but not `cloudflare.com` is a DNS problem; one that reaches
+neither is routing or filtering. Nothing else needs to be decided first.
+
+### 6.2 ❓ The Tailscale-exit-node proxy — why it stands in for our own full tunnel
+
+We cannot connect a real SimpleVPN tunnel on the development Mac: there is no gateway and no account.
+But a **Tailscale exit node** is a legitimate structural proxy for our full-tunnel mode, and the
+reasoning is worth recording because it is not obvious:
+
+* it installs `0.0.0.0/0` through a **`NEPacketTunnelProvider`** — the same OS mechanism, and the same
+  `includedRoutes`-carries-a-default shape our packet-tunnel kinds use (§4.1);
+* it does **not** set `includeAllNetworks` — that property is native-kinds-only for us too (§4.2), so
+  the proxy holds the same variable fixed;
+* it installs **no pf kill switch**, so it isolates the *routing* hypothesis from the *filtering* one;
+* it is reversible in one command, and needs no account we do not already have.
+
+So the exit node tests exactly the question our own code raises — *does a plain full-tunnel default
+route break a container?* — with the two NordVPN-specific suspects held out. **What each outcome
+would prove:**
+
+* **Reaches neither an IP nor a hostname** → a plain full-tunnel default route breaks containers by
+  itself. NordVPN is not special, and **SimpleVPN shares the bug structurally**, because §4.1 says our
+  full tunnel is that same default route. This is the outcome that turns the report into our bug.
+* **Fine** → a full tunnel alone is not the cause. NordVPN adds something — a pf kill switch being the
+  likeliest, `includeAllNetworks` next — and **we are probably clean**, since we set neither.
+* **Reaches `1.1.1.1` but not a hostname** → DNS, consistent with the search-domain loss already
+  recorded above, and fixable in the guest rather than in any routing toggle.
+
+**The proxy demonstrably does move the global default — that much *was* measured.** During the
+attempt below, the route table before and after the exit node came up differed in exactly the way a
+full tunnel is supposed to make it differ, and the flags are the whole story:
+
+```
+before:  default  10.0.7.254  UGScg    en0      ← global      |  default  link#27  UCSIg   utun4  ← IFSCOPE'd
+after:   default  10.0.7.254  UGScIg   en0      ← IFSCOPE'd   |  default  link#27  UCSg    utun4  ← global
+```
+
+`en0` **gained** `I` and `utun4` **lost** it: the two defaults swapped roles, which is precisely what
+one of our packet-tunnel kinds does when it puts `NEIPv4Route.default()` in `includedRoutes`. So the
+proxy is sound — the precondition the experiment depends on holds, and the only thing missing is the
+guest-side probe.
+
+**The attempt itself was inconclusive, and it must be recorded that it was.** The exit node was
+enabled on 2026-08-07 to take exactly this measurement. Within six seconds the **host itself** lost
+connectivity
+(`ping 1.1.1.1` 0/2, `curl` to an address-echo service returned nothing) and the run was reverted with
+`tailscale set --exit-node=` before any container probe was taken. The host recovered immediately and
+completely. That is **inconclusive** — the exit node may simply have been unhealthy, or still
+converging — and it was **not repeated**, because rerouting every packet on someone's working machine
+is their decision and not an investigating agent's. It is written down because "we tried it and it
+took the machine off the air" is the reason the script below is a script for the user to run
+deliberately rather than a result we can report.
+
+### 6.3 ❓ Does the `bridge100`+ carve-out exclusion cause this?
+
+`LocalNetworkCarveOut.isLocalNetworkInterface` rejects `bridge100`+ and every `vmenet*` / `vmnet*` /
+`vnic*` / `vboxnet*` name (§4.2.1). The consequence is precise and worth stating in the terms of this
+symptom: **"Allow local network access" does not carve out a guest subnet, so under a full tunnel the
+guest's traffic goes into the tunnel.**
+
+**That is the right default, and it should stay.** The alternative — folding guest bridges into the
+LAN carve-out — means a user who enabled a toggle *for their printer* silently gets every container
+they run sending traffic outside a tunnel they believe is carrying everything. That is a leak, it is
+invisible, and it is not what the toggle says. The carve-out's own safety argument is that it is never
+wider than the evidence, and "there is a bridge here" is not evidence that the user wants that bridge
+outside the VPN.
+
+**But it is not the whole answer either, and the distinction is the important part.** Traffic entering
+the tunnel is only a failure if it cannot get *back*. A container whose NAT'd packets go through the
+VPN and return is working correctly and is arguably what the user wanted; a container whose packets
+enter the tunnel with a source address the gateway will not route home is broken. Which of those
+happens depends on where vmnet's NAT rewrites the source relative to the routing decision — and that
+is precisely what §6.2's measurement would settle and what we could not measure. **Until it is
+measured, the carve-out exclusion is not implicated**; it only determines *which* of the two outcomes
+we would get, not that either is wrong.
+
+**If the measurement shows containers break, the fix is a setting and not a behaviour change.** The
+guest-network offer already exists (§6) and already produces a `RoutingRule(.outside)` through
+`DivertPlan` under the `ManagedPolicy` gate — so the mechanism to put a guest subnet outside a tunnel
+is built, consented to per guest, and MDM-gated. The change would be to *surface* it for this symptom,
+not to invent a parallel path, and it must remain a user choice: **"should my containers go through
+the VPN?" has two legitimate answers with real security weight either way.** A container reaching the
+internet outside a tunnel the user believes protects everything is a leak; one that cannot reach the
+internet at all is broken. Neither should happen by accident, which is the argument against fixing
+this silently in the routing code.
+
+### 6.4 The experiment, for someone who can run it
+
+Ten steps. Steps 1–4 are the baseline, 5–8 the tunnel, 9–10 the restore. The host-side captures repeat
+at each stage on purpose: the *change* between them is the evidence, not any single reading.
+
+```sh
+# ---- 1. baseline host state -------------------------------------------------
+netstat -rn -f inet | grep -E '^default|192\.168\.64'   # which default is global (UGScg) vs IFSCOPE'd (UCSIg)
+ifconfig bridge100                                       # guest bridge addr + MTU + member tap
+scutil --dns | head -40                                  # resolver order, whose servers are #1
+sudo pfctl -sr                                           # OPTIONAL but the one thing we could not see
+
+# ---- 2. start a guest -------------------------------------------------------
+container run --rm --name probe -d docker.io/library/alpine:latest sleep 900
+
+# ---- 3. baseline from INSIDE the guest — the decisive pair ------------------
+container exec probe ping -c 3 -W 2 1.1.1.1              # literal IP
+container exec probe ping -c 3 -W 2 cloudflare.com       # name
+container exec probe cat /etc/resolv.conf
+container exec probe ip route
+
+# ---- 4. baseline egress identity -------------------------------------------
+curl -s https://api.ipify.org; echo                      # host's public IP
+
+# ---- 5. bring up the full tunnel -------------------------------------------
+#   EITHER the Tailscale proxy:      tailscale set --exit-node=<exit-node-name>
+#   OR the real thing:               connect NordVPN normally
+sleep 10
+
+# ---- 6. host state again — diff this against step 1 ------------------------
+netstat -rn -f inet | grep -E '^default|192\.168\.64'    # did the GLOBAL default move to a utun?
+                                                          # did the 192.168.64/24 route survive?
+ifconfig bridge100
+scutil --dns | head -40
+sudo pfctl -sr                                           # a new block rule here = kill switch, hypothesis 2
+
+# ---- 7. confirm the HOST is actually working -------------------------------
+ping -c 2 1.1.1.1; curl -s https://api.ipify.org; echo   # public IP must have CHANGED
+#   if the host itself is broken, stop: the tunnel is unhealthy and the guest proves nothing
+
+# ---- 8. THE MEASUREMENT — same pair as step 3 ------------------------------
+container exec probe ping -c 3 -W 2 1.1.1.1              # <-- reaches an IP?
+container exec probe ping -c 3 -W 2 cloudflare.com       # <-- reaches a name?
+container exec probe cat /etc/resolv.conf
+
+# ---- 9. restore -------------------------------------------------------------
+#   tailscale set --exit-node=          (or disconnect NordVPN)
+container stop probe
+
+# ---- 10. confirm restored ---------------------------------------------------
+netstat -rn -f inet | grep -E '^default'; ping -c 2 1.1.1.1
+```
+
+Read step 8 against the table in §6.1. **Step 7 is not optional**: it is what distinguishes "the VPN
+breaks containers" from "the VPN was not working", and skipping it is how the 2026-08-07 attempt
+became inconclusive.
+
+**The question to put to the original reporter**, which their answer and this run together bracket:
+
+> With NordVPN connected, can your container reach `1.1.1.1` by IP, while it cannot reach a hostname
+> like `cloudflare.com` — or does it fail to reach both?
+
+Both-fail means routing or filtering and points at their kill switch; IP-works-name-fails means DNS,
+which is the search-domain and resolver-inheritance story already recorded above and which no routing
+toggle of ours would fix.
+
 ---
 
 ## 7. What a future reader would otherwise have to rediscover
