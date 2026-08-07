@@ -79,7 +79,7 @@ nonisolated enum RouteTableSource {
 
     /// One ARP cache entry. `NetworkMemory` wants exactly this and nothing more:
     /// the gateway's MAC is the strong half of the network fingerprint.
-    typealias ARPEntry = (ip: String, mac: String, interface: String)
+    typealias ARPEntry = (ip: String, mac: MACAddress, interface: String)
 
     // MARK: Snapshots
 
@@ -250,7 +250,7 @@ nonisolated enum RouteTableSource {
                 let dl = LinkAddress(link)
                 // No link-layer address yet = an unresolved entry (`arp` says
                 // "(incomplete)"); a MAC-less "MAC" helps nobody.
-                guard let mac = dl.macText else { continue }
+                guard let mac = dl.mac else { continue }
                 let interface = dl.name
                     ?? interfaceName(index: header.rtm_index)
                     ?? interfaceName(index: dl.index)
@@ -402,7 +402,11 @@ nonisolated enum RouteTableSource {
         case AF_INET6: return addressText(sockaddr, family: .v6) ?? ""
         case AF_LINK:
             let dl = LinkAddress(sockaddr)
-            if let mac = dl.macText { return mac }
+            // `bsdText`, because this column's contract is to be what `netstat`
+            // prints — unpadded lower-case hex — and `RouteRecord` reads meaning out
+            // of the spelling. The canonical form would be a nicer string and a wrong
+            // answer.
+            if let mac = dl.mac { return mac.bsdText }
             if dl.index != 0 { return "link#\(dl.index)" }
             return dl.name ?? ""
         default: return ""
@@ -444,7 +448,13 @@ nonisolated enum RouteTableSource {
     struct LinkAddress {
         let index: UInt16
         let name: String?
-        let macText: String?
+        /// The link-layer address, when there is one and it is six bytes long.
+        ///
+        /// `MACAddress` rather than text, so nothing downstream re-derives a spelling.
+        /// The six-byte requirement lives in the type, and it is a real filter and not
+        /// a formality: `sdl_alen` can be 8 (FireWire) or 0 (an unresolved ARP entry,
+        /// which `arp` prints as "(incomplete)"), and neither is an Ethernet address.
+        let mac: MACAddress?
 
         init(_ sockaddr: RawSockaddr) {
             index = UInt16(sockaddr.byte(2)) | UInt16(sockaddr.byte(3)) << 8
@@ -453,15 +463,7 @@ nonisolated enum RouteTableSource {
             let nameBytes = sockaddr.slice(8, nameLength)
             name = nameLength > 0 && !nameBytes.contains(0)
                 ? String(decoding: nameBytes, as: UTF8.self) : nil
-            if addressLength > 0 {
-                // netstat/ether_ntoa spell a MAC as unpadded lowercase hex —
-                // "a0:99:9b:18:dc:93", "a:e6:33:6c:f0:52" — and `NetworkMemory`
-                // compares against exactly that.
-                macText = sockaddr.slice(8 + nameLength, addressLength)
-                    .map { String($0, radix: 16) }.joined(separator: ":")
-            } else {
-                macText = nil
-            }
+            mac = MACAddress(octets: sockaddr.slice(8 + nameLength, addressLength))
         }
     }
 

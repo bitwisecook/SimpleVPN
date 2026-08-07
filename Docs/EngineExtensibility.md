@@ -13,6 +13,32 @@ there are the premises for everything below, and this document does not repeat t
 
 ---
 
+## Prerequisite — a threat model, and it does not exist yet ⏸
+
+**A threat model analysis is a gate on building any of this, not a companion to building it.** The
+user has deliberately deferred both, in that order:
+
+> "anyway, largely academic for now, we need to spend time writing a TMA and I don't want to do
+> that before the next release"
+
+This is written down rather than left as an aside because the document below now carries two
+worked options, a trust model and a mechanism sketch — which is exactly the shape of thing a later
+reader mistakes for a plan ready to implement. **It is not one. Everything here is 📐 or ❓.**
+
+The record already names three of the questions such an analysis would have to resolve, and all
+three are acceptability judgements about risk rather than engineering problems waiting to be
+solved — which is precisely why the gate sits where it does:
+
+- **Exfiltration can be neither prevented nor detected**, because an engine holds plaintext and a
+  socket by definition (§4.5, §6.5).
+- **macOS lets us enforce identity, never behaviour** (§6.3).
+- **Under Option B, credentials cross into another developer's process**, and nothing constrains
+  what happens to them afterwards (§6.7).
+
+Until those have been answered deliberately, nothing below should be started.
+
+---
+
 ## The question
 
 > "I'd rather build an extension mechanism so it's separate from the main app … the
@@ -308,7 +334,8 @@ flowchart TB
 | Default-route arbitration (§1.6) | ours, works | **breaks** — we have no gateway IPC into them (§5.3) |
 | System-extension approvals the user faces | one (ours) | **two** — ours and theirs, different developers |
 | IPC contract | per-packet + control | **larger**, but not per-packet: auth, config, status, errors, live stats |
-| Who holds the user's credentials | secrets stay ours — the helper gets packets, not credentials | **we hand credentials to their process** (§6.6) |
+| Who holds the user's credentials | secrets stay ours — the helper gets packets, not credentials | **we hand credentials to their process** (§6.7) |
+| "Only the one VPN the user approved, and nothing else" (§6.2) | **enforceable by construction** — we build the channel and omit the verb | **a contract term and a consent statement**, not a guarantee — and isolating engines from each other is much weaker too |
 | Blocked on | ❓O1 (§4.3) | ❓O11 (§5.4) |
 
 ### 3.2 The product question this turns on — pose it, do not decide it
@@ -449,7 +476,7 @@ loses its main advantage over Option B and the choice in §3.2 changes.**
   session and speaks to the server, so it must reach the network. **An engine helper cannot be
   denied the network.**
 
-The architecture can make an engine helper **unprivileged** but not **non-exfiltrating** (§6.4).
+The architecture can make an engine helper **unprivileged** but not **non-exfiltrating** (§6.5).
 A *pure transformer* — obfuscation with no server of its own — could be denied the network and
 sandboxed hard, a genuinely strong position; the motivating example is not that (§2.2).
 ❓**O5** — a two-tier contract was not worked through.
@@ -492,7 +519,7 @@ flowchart TB
         TSX["their NetworkExtension provider<br/><b>their utun · their routes · their DNS</b>"]
     end
     UI <-->|"IPC: auth, config,<br/>status, stats, errors"| TAPP
-    CRED -.->|"credentials leave<br/>our process (§6.6)"| TAPP
+    CRED -.->|"credentials leave<br/>our process (§6.7)"| TAPP
     TAPP --> TSX
     TSX <--> NET["their server"]
     TSX -.->|"❌ no gateway IPC — default-route<br/>invariant breaks (§1.6)"| OURSX
@@ -511,7 +538,7 @@ flowchart TB
 - **The channel question ❓O1.** Our sandboxed extension is not involved at all; the IPC is
   app↔app, in user context.
 - **Our exfiltration exposure via the packet path.** We never hold their plaintext packets,
-  because we never see them. (It reappears differently in §6.6.)
+  because we never see them. (It reappears differently in §6.7.)
 
 ### 5.2 It fits the codebase's existing IPC posture
 
@@ -607,7 +634,79 @@ In **Option B** they see the same thing, but as *their own VPN*, which the user 
 approved as a separate product. A meaningfully different consent story, and an easier one to
 explain honestly.
 
-### 6.2 What macOS lets us **enforce** ✅ / ❓
+### 6.2 Scope — one VPN's configuration and sign-in material, and nothing else 📐
+
+**The rule, and it is core rather than a refinement:** an engine gets **exactly the configuration
+and sign-in material for the one VPN the user approved it for, and nothing else.** Never another
+VPN's configuration, never another VPN's password or key passphrase, and never the means to find
+out that another VPN exists. §6.1 bounds what an engine sees of the traffic it carries; this
+bounds what it sees of everything else the user has set up.
+
+**It bounds the blast radius; it does not close the hole.** §4.5 and §6.5 record that an engine
+holds plaintext and a socket *by construction* and can therefore send what it holds elsewhere,
+undetectably. That stays true. This rule changes only *how much there is to send* — one VPN the
+user explicitly chose, rather than every VPN they have configured. That is the difference between
+a bad day and a catastrophe, and worth designing in, but it must never be written up, or shown to
+a user, as though it were a solution to the problem it only contains.
+
+**Under Option A it is enforceable by construction, which is the strong form.** We build the
+channel, so we can decline to give it any verb that could return another VPN's data:
+
+- **Capability by construction, not a permission check.** The central point. Not a
+  `getConfig(id:)` whose implementation validates the id, but a channel that only ever carries the
+  one configuration it was created for. A check can be bypassed, mis-scoped, or quietly forgotten
+  by whoever adds the next message; **an absent verb cannot be any of those things.**
+- **Push, never pull.** Material is handed over at start (§7.3); there is no request path for more.
+  The helper gets **no keychain access of its own**, so it could not read another VPN's password
+  even knowing the account name. This is the app↔extension boundary's own shape extended one hop —
+  `startTunnel(options:)` pushes, and the extension has no lookup either (§1.5).
+- **One channel per tunnel, never a shared bus.** A shared control channel invites precisely the
+  "list the profiles" verb this forbids, and makes the boundary a matter of discipline rather than
+  of structure.
+- **Scope ends when the tunnel does.** No cached configuration, no reusable channel, no warm helper
+  kept for the next start.
+
+**Under Option B it is largely a promise we cannot enforce, and that counts against B.** §6.7
+records why: our keychain group is scoped to our team prefix, so nothing can be shared as an
+item — material crosses **over IPC, in memory**, into a process we do not control, and what
+happens to it afterwards is entirely theirs. Under B, "they only ever get what the user approved"
+is a **contract term and a consent statement, not a guarantee**. That belongs in the trade (§3.1)
+beside credential custody, not presented as a property of the design.
+
+**Approval is per VPN, not per engine**, in both options. Installing an engine is not consent for
+it to carry everything the user has configured; §6.4 carries what that means for the sheet.
+
+#### 6.2.1 The mechanism, as sketched 📐
+
+> "it'd be something like a uuid for each extension, along with allow-listing and verification of
+> the internal engines vs a 3rd party one so we can definitely protect them from others"
+
+Three parts, and the caveat on the first is the one that matters:
+
+1. **A stable per-extension UUID** — binds a configuration to the engine allowed to carry it, keys
+   the allow-list, and makes "which engine touched what" auditable. **A UUID is an identifier, not
+   a credential.** It is guessable, loggable and observable, so it must never be the fact that
+   *authorises* access, or anything that learns it can impersonate the engine. The split is
+   three-way: **the UUID names the party, the code signature proves it** (§6.3 — Team ID,
+   Developer ID, hardened runtime, tamper-freedom, which is all macOS will actually enforce),
+   **and the channel bounds it.** "Each extension has a UUID" reads like a security control and is
+   not one on its own.
+2. **Allow-listing as a tier, not a boolean.** Our own engines are signed by us and ship inside the
+   app, so their identity is fixed at **build time** and can be pinned exactly. A third party's is
+   established at **install time**, by Team ID and consent, and can change under us between
+   launches. Different evidence, different confidence — and the UI must not present the two as
+   equivalent. This is the concrete shape of §6.8's "we decide what loads".
+3. **Engine-to-engine isolation** — the part the rule did not previously cover. Several VPNs can
+   run at once, so two engines can be live simultaneously, and an engine must be isolated **from
+   its siblings** as well as from data we hold: no shared channel, no shared scratch state, no way
+   to enumerate or address another engine. A third-party engine must not reach an internal one's
+   material, and an internal one must not become a path to a third party's. **Separate processes
+   make this mostly structural rather than policy, which is a point in Option A's favour** — under
+   Option B the siblings are the OS's peers rather than our children, so "protect them from others"
+   is much weaker there, in the same way and for the same reason that default-route arbitration is
+   (§1.6, §5.3, ❓O12).
+
+### 6.3 What macOS lets us **enforce** ✅ / ❓
 
 Both options reduce to code-signing checks on a binary we did not build:
 
@@ -630,7 +729,7 @@ does.** Identity is accountability, not containment. Any design leaning on "it's
 unverified and entangled with ❓O1. **Option B does not have this problem**: the checks happen
 app-side, unsandboxed.
 
-### 6.3 Consent — what the user must see
+### 6.4 Consent — what the user must see
 
 Applies to both options; the tree's rule (opt-in, off by default, requested only on toggle) has
 more force here, not less.
@@ -653,7 +752,7 @@ more force here, not less.
    writes"; "extension", "plugin", "engine" and "backend" are all taken here — "extension"
    especially. ❓**O9**.
 
-### 6.4 Blast radius — Option A
+### 6.5 Blast radius — Option A
 
 | Failure | Prevented? | Detected? | Notes |
 |---|---|---|---|
@@ -667,7 +766,7 @@ more force here, not less.
 | Loads a malicious dylib | ✅ **yes** | — | nobody carries `disable-library-validation` |
 | Local process impersonates it | depends on ❓O1 | — | socketpair impossible; **loopback not** (§4.3) |
 
-### 6.5 Blast radius — Option B
+### 6.6 Blast radius — Option B
 
 | Failure | Prevented? | Detected? | Notes |
 |---|---|---|---|
@@ -675,14 +774,14 @@ more force here, not less.
 | **Exfiltrates traffic** | ❌ no | ❌ no | same as A — but it is *their* VPN, installed knowingly |
 | **Tampers with routes/DNS** | ❌ **no** | ⚠️ partially | **the row that flips.** They own the interface; `PFRouteMonitor` would *see* route changes but cannot prevent or arbitrate them |
 | Fights us for the default route | ❌ **no** | ⚠️ | §1.6 / ❓O12 — macOS will not arbitrate and we have no IPC to demote them |
-| **Misuses credentials we hand over** | ❌ **no** | ❌ **no** | §6.6 — the central Option B risk |
+| **Misuses credentials we hand over** | ❌ **no** | ❌ **no** | §6.7 — the central Option B risk |
 | Loads a malicious dylib in *our* process | ✅ **yes** | — | nothing of theirs is in our process at all |
 | Compromises our extension | ✅ **yes** | — | no shared process boundary |
 
 **The two tables differ exactly as the trade predicts.** A protects routes and DNS and exposes
 our process; B protects our process and exposes routes, DNS and credentials.
 
-### 6.6 The Option B pivot — who holds the secret
+### 6.7 The Option B pivot — who holds the secret
 
 In Option A secrets never leave us: the helper gets packets, not credentials. In Option B **our
 UI signs the user in and must then hand the result to another developer's process.**
@@ -704,14 +803,14 @@ merely launching it), is a **policy** question, not a technical one. The narrowe
 relay a manager-sourced secret — costs Option B much of its appeal, since "IPC to our UI for
 auth" was the point.
 
-### 6.7 Recommendation
+### 6.8 Recommendation
 
 **Refuse, in both options:** an open plugin ecosystem. Anything a user can drop in a folder; any
 "install this engine" flow reachable from a config import or URL; any design whose answer to
 "can this see my traffic?" is a shrug.
 
 **If Option A:** a **Team-ID allow-list we control**, checked at **every launch**; Developer ID +
-hardened runtime + notarization (subject to ❓O6); off by default per-engine behind the §6.3
+hardened runtime + notarization (subject to ❓O6); off by default per-engine behind the §6.4
 sheet; marked third-party everywhere; a published contract (§7).
 
 **If Option B:** the same allow-list and consent discipline, **plus** an explicit statement in
@@ -774,7 +873,7 @@ contract already proven across a language boundary:
 - **Teardown**: idempotent stop; **EOF authoritative** both directions.
 - **Logging**: relayed to `os_log`, tagged third-party, never trusted as UI copy.
 - **Option B only**: gateway demotion (§5.3 / ❓O12), and a declaration of which routing features
-  the provider does or does not honour, so the UI can say so (§6.3).
+  the provider does or does not honour, so the UI can say so (§6.4).
 
 ### 7.4 Absence is the ordinary state 📐
 
@@ -797,14 +896,14 @@ banner.
 | **O4** | **Throughput cost — named by the user, and the measurement that settles Option A.** §4.4's numbers are budgeted, **not measured** | socketpair (and loopback) ping-pong benchmark at 64 / 512 / 1500 B; report packets/s and CPU. If materially worse than estimated, Option A loses its edge and §3.2 changes |
 | **O11** | **Option B blocker.** Can our app drive another team's `NETunnelProviderManager` configuration at all, or must the IPC be app↔app? (§5.4) | confirm cross-team scoping of `loadAllFromPreferences()`; look for any supported cross-app NE management path |
 | **O12** | **Option B's hardest design question.** Can gateway demotion (§1.6) be a contract obligation with enforcement, or only advisory? Two unarbitrated default routes is a real failure mode | design; depends on O11 |
-| **O13** | **Option B policy question.** Should SimpleVPN ever hand a password-manager-sourced credential to another developer's process — or must third parties do their own sign-in? (§6.6) | product/policy decision. The safe answer removes much of Option B's appeal |
+| **O13** | **Option B policy question.** Should SimpleVPN ever hand a password-manager-sourced credential to another developer's process — or must third parties do their own sign-in? (§6.7) | product/policy decision. The safe answer removes much of Option B's appeal |
 | **O2** | Is the outer-UDP-relay shortcut really dead, or only for newer revisions? (§2.2) | read `noise-protocol.go` / `send.go` / `receive.go`; check an original-parameters-only config |
 | **O3** | Licences of the fork's *own* dependencies (§2.3) | read each `LICENSE`; a static link makes them ours to acknowledge |
 | **O5** | Two-tier contract — network-less transformers sandboxed hard, full engines not? (§4.5) | design; depends on whether any plausible consumer is a pure transformer |
-| **O6** | Can notarization be verified **offline** for something we launch ourselves? (§6.2) | `SecAssessment` with the network down; if not, it cannot be a hard gate |
-| **O7** | Can the sandboxed extension perform `SecCode` checks? (§6.2) — Option A only | same build as O1 |
-| **O8** | How does a third-party kind register in `FeatureMaturityRegistry`, keyed by the closed `VPNKind` enum with a totality test? (§6.3) | design; touches `VPNKind`, editors, `SettingSurface`, `ManualAnchorParityTests` |
-| **O9** | **What is this thing called?** `ONTOLOGY.md` needs a row; the obvious words are taken (§6.3) | settle **before** publishing a contract — the contract fixes the vocabulary |
+| **O6** | Can notarization be verified **offline** for something we launch ourselves? (§6.3) | `SecAssessment` with the network down; if not, it cannot be a hard gate |
+| **O7** | Can the sandboxed extension perform `SecCode` checks? (§6.3) — Option A only | same build as O1 |
+| **O8** | How does a third-party kind register in `FeatureMaturityRegistry`, keyed by the closed `VPNKind` enum with a totality test? (§6.4) | design; touches `VPNKind`, editors, `SettingSurface`, `ManualAnchorParityTests` |
+| **O9** | **What is this thing called?** `ONTOLOGY.md` needs a row; the obvious words are taken (§6.4) | settle **before** publishing a contract — the contract fixes the vocabulary |
 | **O10** | Downstream of a third-party kind: global `SettingSurface` namespaces, two-way manual-anchor parity, MDM policy, CLI addressing. **Both options**, and in B we must render settings we do not define | not started; plausibly comparable in size to the mechanism itself |
 
 ---
@@ -821,8 +920,10 @@ banner.
 | **Option A** — signed helper on our packet path, we keep utun/routes/DNS | 📐 **live.** Not blocked by AMFI or by cost — **blocked on ❓O1**, settled by ❓O4 (§4) |
 | **Option B** — their own NetworkExtension, our UI over IPC | 📐 **live, and a genuine peer.** Removes per-packet cost, AMFI and supervision outright; costs the routing model, the default-route invariant and credential custody — **blocked on ❓O11** (§5) |
 | Choosing between A and B | ⏸ **not an engineering decision** — turns on whether third-party VPNs should participate in our routing model at all (§3.2). **Posed, not decided** |
-| An **open** third-party plugin ecosystem | ❌ **would refuse** — exfiltration can be neither prevented nor detected in either option (§6.4–6.5, §6.7) |
-| A **Team-ID allow-list we control**, consent-gated, marked third-party | 📐 the narrow version, and the only recommendable one, in either option (§6.7) |
+| An **open** third-party plugin ecosystem | ❌ **would refuse** — exfiltration can be neither prevented nor detected in either option (§6.5–6.6, §6.8) |
+| A **Team-ID allow-list we control**, consent-gated, marked third-party | 📐 the narrow version, and the only recommendable one, in either option (§6.8) |
+| **An engine gets one VPN's configuration and sign-in material, and nothing else** — including isolation from sibling engines | 📐 **core design rule** (§6.2). Enforceable by construction under A; a contract term only under B, which counts against B |
+| A **threat model analysis** before any of this is built | ⏸ **prerequisite, not a companion** — deferred by the user until after the next release (front matter) |
 | Licence compatibility for linking an MIT `wireguard-go` fork into this GPL-3.0-only work | ✅ **compatible** (§2.3) |
 | Server provisioning | ❌ **out of scope**, permanently (§2.4) |
 

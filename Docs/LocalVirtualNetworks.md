@@ -153,11 +153,17 @@ UTM (`BIGIP-21.1.0.1.utm`): `Information.Name` = `BIGIP-21.1.0.1`, `Network[0]` 
 `{Mode: Bridged, BridgeInterface: en0, MacAddress: EA:85:74:8B:18:97}`.
 
 **THE SPELLING TRAP, and it would have failed silently.** `netstat` prints a hardware address with no
-leading zeros in lower case (`42:0:5c:85:fa:1a` — measured); UTM records `EA:85:74:8B:18:97`.
-Compared raw they never match, and the symptom is "names are never attached" rather than a crash.
-`NetworkTopology.normalisedMAC` is the one place both are reduced to the same string; VirtualBox and
-Parallels write it with no separators at all, which gets its own converter rather than loosening that
-comparison.
+leading zeros in lower case (`42:0:5c:85:fa:1a` — measured); UTM records `EA:85:74:8B:18:97`;
+VirtualBox and Parallels write it with no separators at all (`0800271A2B3C`). Compared raw they never
+match, and the symptom is "names are never attached" rather than a crash.
+
+**A hardware address is therefore not a `String` anywhere in this app.** `MACAddress`
+(`Shared/MACAddress.swift`) stores the six octets, so every spelling is one value and equality is
+structural — there is no normaliser anybody can forget to call, and a source scan
+(`HardwareAddressTypeDisciplineTests`) fails the build if one is declared as text again. It is also
+where the rule that an address **never reaches the diagnostic report, a log line or an error string**
+is enforced. See `Docs/NetworkTypes.md` for the conventions it sets and the rest of the family still
+to be built.
 
 **The two surfaces do not support the same set of vendors, and the reason is the interface shape.**
 A *per-guest* line on the traffic graph needs one tap per guest, and only Apple's vmnet stack creates

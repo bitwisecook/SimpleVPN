@@ -236,10 +236,10 @@ struct NetworkKeyedCachesTests {
         // after the sign-in page. Portals are resolved by the captive rechecks,
         // never by watching this key.
         let before = NetworkFingerprint(interface: "en0", gatewayIP: "192.168.87.1",
-                                        gatewayMAC: "0:8:a2:e:dc:c7",
+                                        gatewayMAC: MACAddress("0:8:a2:e:dc:c7"),
                                         localNetwork: "192.168.87.0/24", ssid: nil)
         let after = NetworkFingerprint(interface: "en0", gatewayIP: "192.168.87.1",
-                                       gatewayMAC: "0:8:a2:e:dc:c7",
+                                       gatewayMAC: MACAddress("0:8:a2:e:dc:c7"),
                                        localNetwork: "192.168.87.0/24", ssid: "Hotel Wi-Fi")
         #expect(before.key == after.key)
     }

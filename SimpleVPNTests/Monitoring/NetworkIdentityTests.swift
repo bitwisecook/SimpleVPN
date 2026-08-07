@@ -16,6 +16,16 @@ import NetworkExtension
 import Testing
 @testable import SimpleVPN
 
+/// Parse-or-die, for fixtures. These are `ether_ntoa`'s unpadded spelling because
+/// that is what `arp` reports and therefore what `RouteTableSource` decodes into —
+/// `MACAddressTests` is where the spellings themselves are tried.
+private func fixtureMAC(_ text: String) -> MACAddress {
+    guard let parsed = MACAddress(text) else {
+        preconditionFailure("fixture \u{201C}\(text)\u{201D} is not a hardware address")
+    }
+    return parsed
+}
+
 @MainActor
 struct NetworkIdentityTests {
 
@@ -74,10 +84,10 @@ struct NetworkIdentityTests {
     """
 
     private let homeARP: [RouteTableSource.ARPEntry] = [
-        (ip: "192.168.87.1", mac: "0:8:a2:e:dc:c7", interface: "en0"),
+        (ip: "192.168.87.1", mac: fixtureMAC("0:8:a2:e:dc:c7"), interface: "en0"),
     ]
     private let cafeARP: [RouteTableSource.ARPEntry] = [
-        (ip: "10.0.7.254", mac: "a0:99:9b:18:dc:93", interface: "en0"),
+        (ip: "10.0.7.254", mac: fixtureMAC("a0:99:9b:18:dc:93"), interface: "en0"),
     ]
 
     private func fingerprint(_ text: String, arp: [RouteTableSource.ARPEntry],
@@ -130,17 +140,17 @@ struct NetworkIdentityTests {
         let cafe = try #require(fingerprint(otherNetwork, arp: cafeARP,
                                             localNetwork: "10.0.0.0/21"))
         #expect(home.key != cafe.key)
-        #expect(cafe.gatewayMAC == "a0:99:9b:18:dc:93")
+        #expect(cafe.gatewayMAC == MACAddress("a0:99:9b:18:dc:93"))
     }
 
     @Test func theGatewayMACComesFromTheMatchingARPEntry() throws {
         // Two interfaces can hold the same gateway address (a scoped route per
         // link); the one on OUR interface is the right MAC.
         let arp: [RouteTableSource.ARPEntry] = [
-            (ip: "192.168.87.1", mac: "de:ad:be:ef:00:01", interface: "en7"),
-            (ip: "192.168.87.1", mac: "0:8:a2:e:dc:c7", interface: "en0"),
+            (ip: "192.168.87.1", mac: fixtureMAC("de:ad:be:ef:00:01"), interface: "en7"),
+            (ip: "192.168.87.1", mac: fixtureMAC("0:8:a2:e:dc:c7"), interface: "en0"),
         ]
-        #expect(fingerprint(physicalOnly, arp: arp)?.gatewayMAC == "0:8:a2:e:dc:c7")
+        #expect(fingerprint(physicalOnly, arp: arp)?.gatewayMAC == MACAddress("0:8:a2:e:dc:c7"))
     }
 
     // MARK: Route picking

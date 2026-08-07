@@ -69,9 +69,11 @@ nonisolated struct NamedGuest: Sendable, Equatable, Identifiable {
     var detail: String?
     /// The product's own name for the network it is on, where it records one.
     var recordedNetwork: String?
-    /// Hardware addresses it is recorded as using, normalised
-    /// (`NetworkTopology.normalisedMAC`). The strongest evidence there is.
-    var recordedMACs: [String] = []
+    /// Hardware addresses it is recorded as using. The strongest evidence there is.
+    ///
+    /// `MACAddress`, so that the four products' four spellings are the same VALUE by
+    /// the time they get here and the match against the neighbour cache is structural.
+    var recordedMACs: [MACAddress] = []
     /// The arrangement its own settings record, where they do.
     var recordedMode: GuestNetworkMode = .unknown
     /// Stable within a product: the product's own identifier for it.
@@ -222,7 +224,7 @@ nonisolated enum GuestInventory {
                     productID: "utm",
                     detail: nil,
                     recordedNetwork: nil,
-                    recordedMACs: network.macAddresses.compactMap(NetworkTopology.normalisedMAC),
+                    recordedMACs: network.macAddresses,
                     recordedMode: GuestNetworkMode(vendorWord: network.mode),
                     identifier: network.machineUUID ?? fallback)
             }
@@ -230,9 +232,10 @@ nonisolated enum GuestInventory {
 
     /// Parallels Desktop. **NOT RUN HERE** — Parallels is not installed on this Mac,
     /// so this is written from its documented `config.pvs`, which is XML with
-    /// `<VmName>` and a `<MAC>` per network adapter. Untested code that finds nothing
-    /// is harmless; untested code that finds the WRONG thing cannot attach a name
-    /// anyway, because attachment needs the address to match a live neighbour.
+    /// `<VmName>` and a `<MAC>` per network adapter — written, like VirtualBox's,
+    /// with no separators at all. Untested code that finds nothing is harmless;
+    /// untested code that finds the WRONG thing cannot attach a name anyway, because
+    /// attachment needs the address to match a live neighbour.
     static func parallelsGuests(env: VirtualizationEnvironment) -> [NamedGuest] {
         let root = env.home.appendingPathComponent("Parallels").path
         return env.listDirectory(root)
@@ -246,7 +249,7 @@ nonisolated enum GuestInventory {
                     name: XMLScrape.firstElement("VmName", in: xml) ?? fallback,
                     productID: "parallels", detail: nil, recordedNetwork: nil,
                     recordedMACs: XMLScrape.elements("MAC", in: xml)
-                        .compactMap(Self.normalisedUnseparatedMAC),
+                        .compactMap(MACAddress.init),
                     recordedMode: .unknown, identifier: fallback)
             }
     }
@@ -267,7 +270,7 @@ nonisolated enum GuestInventory {
                 let macs = settings
                     .filter { $0.key.hasSuffix(".address") || $0.key.hasSuffix(".generatedAddress") }
                     .values
-                    .compactMap(NetworkTopology.normalisedMAC)
+                    .compactMap(MACAddress.init)
                 return NamedGuest(
                     name: settings["displayName"] ?? fallback,
                     productID: "vmware-fusion", detail: settings["guestOS"],
@@ -290,23 +293,9 @@ nonisolated enum GuestInventory {
                 name: XMLScrape.firstAttribute("name", ofElement: "Machine", in: xml) ?? folder,
                 productID: "virtualbox", detail: nil, recordedNetwork: nil,
                 recordedMACs: XMLScrape.attributes("MACAddress", ofElement: "Adapter", in: xml)
-                    .compactMap(Self.normalisedUnseparatedMAC),
+                    .compactMap(MACAddress.init),
                 recordedMode: .unknown, identifier: folder)
         }
-    }
-
-    /// `0800271A2B3C` → `08:00:27:1a:2b:3c`. Parallels and VirtualBox both write the
-    /// address without separators; `NetworkTopology.normalisedMAC` deliberately
-    /// refuses anything that is not six colon-separated groups, so the spelling is
-    /// converted here rather than by loosening the one comparison everything depends
-    /// on.
-    static func normalisedUnseparatedMAC(_ text: String) -> String? {
-        let clean = text.filter(\.isHexDigit)
-        guard clean.count == 12 else { return NetworkTopology.normalisedMAC(text) }
-        return stride(from: 0, to: 12, by: 2)
-            .map { clean[clean.index(clean.startIndex, offsetBy: $0)...]
-                    .prefix(2).lowercased() }
-            .joined(separator: ":")
     }
 
     // MARK: - Placing them
@@ -323,7 +312,7 @@ nonisolated enum GuestInventory {
     ///   - recordedNetworkNames: every network name the products have on disk, so the
     ///     elimination rule can tell "one network" from "one of several".
     static func place(_ guests: [NamedGuest],
-                      neighbours: [String: Set<String>],
+                      neighbours: [String: Set<MACAddress>],
                       guestNetworks: [GuestNetwork],
                       recordedNetworkNames: Set<String>) -> [PlacedGuest] {
 
@@ -341,10 +330,18 @@ nonisolated enum GuestInventory {
             // instead of on a guest network.
             for (iface, seen) in neighbours.sorted(by: { $0.key < $1.key }) {
                 if let match = guest.recordedMACs.first(where: seen.contains) {
+                    // `canonicalText` and not interpolation: `MACAddress` has no
+                    // `description` precisely so that showing one is deliberate. This
+                    // sentence is ON SCREEN and nowhere else — it is not in the
+                    // diagnostic report, not in a log line, and not in an error. It
+                    // names the address the USER'S OWN virtual machine records, to a
+                    // reader who is looking at that machine's card, because "we
+                    // matched something" without saying what is not evidence.
                     return PlacedGuest(guest: guest, attachment: .interface(
                         iface,
                         evidence: "\(guest.productTitle) records this machine using the hardware "
-                            + "address \(match), and that address is on \(iface) right now."))
+                            + "address \(match.canonicalText), and that address is on \(iface) "
+                            + "right now."))
                 }
             }
             // EVIDENCE 2 — a recorded network name, when there is only one network it

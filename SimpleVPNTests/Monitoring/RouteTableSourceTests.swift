@@ -199,8 +199,10 @@ struct RouteTableSourceTests {
         let text = Self.run("/usr/sbin/arp", ["-an"]) ?? ""
 
         for entry in entries {
-            #expect(!entry.mac.isEmpty)
-            #expect(entry.mac.split(separator: ":").count == 6, "\(entry.ip) → \(entry.mac)")
+            // Six octets is now guaranteed by the type rather than checked here —
+            // `MACAddress` refuses a link address of any other length, which is what
+            // keeps a FireWire sdl_alen of 8 out of the ARP table.
+            #expect(entry.mac.octets.count == 6)
             #expect(!entry.interface.isEmpty, "\(entry.ip) has no interface")
             #expect(IPPrefix.parseAddress(entry.ip) != nil, "\(entry.ip) is not an address")
         }
@@ -209,7 +211,9 @@ struct RouteTableSourceTests {
         // unpadded hex NetworkMemory expects, so an entry we found must be in there
         // verbatim (modulo the cache moving under us).
         guard !text.isEmpty, !entries.isEmpty else { return }
-        let missing = entries.filter { !text.contains("(\($0.ip)) at \($0.mac) on \($0.interface)") }
+        let missing = entries.filter {
+            !text.contains("(\($0.ip)) at \($0.mac.bsdText) on \($0.interface)")
+        }
         #expect(missing.count <= max(2, entries.count / 20),
                 "entries arp(8) does not corroborate: \(missing.prefix(5).map(\.ip))")
         // Incomplete entries are deliberately dropped, so we should never have MORE
@@ -515,7 +519,7 @@ struct RouteTableSourceTests {
 
         try #require(entries.count == 1)
         #expect(entries[0].ip == "10.0.0.13")
-        #expect(entries[0].mac == "a:e6:33:6c:f0:52")
+        #expect(entries[0].mac == MACAddress("a:e6:33:6c:f0:52"))
         #expect(entries[0].interface == "lo0")
     }
 

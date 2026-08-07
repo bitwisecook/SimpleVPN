@@ -148,6 +148,17 @@ itself. Never use "store" generically for a vault.
 | Networks a peer shares with the tailnet | **advertised routes** | subnet routes, subnet router |
 | Sending all traffic via another machine | **exit node** | Tailscale's own term; keep it |
 | The largest packet that fits | **MTU** | MTU (universal — keep it) |
+| The 48-bit address burned into a network adapter | **hardware address** | MAC address, MAC, physical address, ethernet address, BIA, `lladdr`, `MacAddress`, `HWaddr` |
+
+**"Hardware address", not "MAC address"**, wherever a person will read it — the manual and the
+guest cards already say it that way, and "MAC address" on a Mac reads as though it were something
+Apple's. In code the type is `MACAddress` (`Shared/MACAddress.swift`), because that is what an
+engineer greps for; the two do not have to agree and it is the user-facing word that is fixed here.
+
+**It is an identifier for a device and it does not leave this Mac.** It names one physical machine
+for that machine's life. So: never in the diagnostic report, never in a log line, never in an error
+string — the same reasoning that keeps guest *names* out of the report, one step stronger, because a
+name is a label somebody chose and an address is a fingerprint they did not.
 
 ### Virtual machines and containers, and how their networks are wired
 

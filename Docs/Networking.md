@@ -17,7 +17,8 @@ Naming follows `ONTOLOGY.md` — **full tunnel** / "Send All Traffic", **split t
 `Docs/SecretsAndSync.md` for where secrets live, `Docs/AuthArchitecture.md` for how a sign-in is
 resolved before any of this starts, `Docs/PolicyRouting.md` for the policy-routing design,
 `Docs/StateMediators.md` for the route/DNS/proxy mediators this document keeps referring to, and
-`Docs/LocalVirtualNetworks.md` for the virtual-machine findings summarised at the end.
+`Docs/LocalVirtualNetworks.md` for the virtual-machine findings summarised at the end, and
+`Docs/NetworkTypes.md` for the value types these concepts are (or should be) held in.
 
 ---
 

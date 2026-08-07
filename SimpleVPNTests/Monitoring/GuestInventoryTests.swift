@@ -44,6 +44,18 @@ private let containersRoot =
     "/Users/fixture/Library/Application Support/com.apple.container/containers"
 private let utmRoot = "/Users/fixture/Library/Containers/com.utmapp.UTM/Data/Documents"
 
+/// Parse-or-die, for fixtures. A fixture that will not parse is a broken fixture, not
+/// a test result — `MACAddressTests` is where parsing itself is tried.
+private func macs(_ text: String) -> MACAddress {
+    guard let parsed = MACAddress(text) else {
+        preconditionFailure("fixture \u{201C}\(text)\u{201D} is not a hardware address")
+    }
+    return parsed
+}
+
+/// The one UTM machine on this Mac, in UTM's own zero-padded upper-case spelling.
+private let utmMAC = macs("EA:85:74:8B:18:97")
+
 // MARK: - Reading the names
 
 struct GuestNameReadingTests {
@@ -99,13 +111,14 @@ struct GuestNameReadingTests {
             mode: "Bridged", bridgeInterface: "en0",
             machineName: "BIGIP-21.1.0.1",
             machineUUID: "5EF697AB-1A55-41A2-89C6-B15609691753",
-            macAddresses: ["EA:85:74:8B:18:97"])
+            macAddresses: [utmMAC])
         let guest = try #require(GuestInventory.utmNamedGuests(env: mac.environment).first)
         #expect(guest.name == "BIGIP-21.1.0.1")
         #expect(guest.identifier == "5EF697AB-1A55-41A2-89C6-B15609691753")
         #expect(guest.recordedMode == .bridged)
-        // Normalised on the way in, so the one comparison point never has to guess.
-        #expect(guest.recordedMACs == ["ea:85:74:8b:18:97"])
+        // Parsed on the way in, so what reaches the comparison is a value and not a
+        // spelling — see `MACAddressTests`.
+        #expect(guest.recordedMACs == [utmMAC])
     }
 
     /// A product nobody has installed is never searched for — the same gate every
@@ -122,37 +135,24 @@ struct GuestNameReadingTests {
     }
 }
 
-// MARK: - The two spellings of a hardware address
+// MARK: - The spellings of a hardware address
 
-/// THE BUG THAT WOULD HAVE MADE EVERY ATTACHMENT FAIL SILENTLY, and it is a string
-/// comparison. `netstat` prints octets without leading zeros in lower case
-/// (`42:0:5c:85:fa:1a` — measured on this Mac); UTM records `EA:85:74:8B:18:97`,
-/// zero-padded and upper case. Compared raw they never match, and the symptom is
+/// THE BUG THAT WOULD HAVE MADE EVERY ATTACHMENT FAIL SILENTLY was a string
+/// comparison: `netstat` prints octets without leading zeros in lower case
+/// (`42:0:5c:85:fa:1a` — measured on this Mac) and UTM records `EA:85:74:8B:18:97`,
+/// zero-padded and upper case, so compared raw they never match and the symptom is
 /// "names are never attached" rather than a crash.
+///
+/// **That lives in `MACAddressTests` now**, together with the source scans that fail
+/// if a hardware address is declared as a `String` again. What is left here is the
+/// half that belongs to this file: that each product's own spelling is parsed at the
+/// boundary where its file is read.
 struct HardwareAddressSpellingTests {
 
-    @Test func bothSpellingsNormaliseToTheSameThing() {
-        #expect(NetworkTopology.normalisedMAC("EA:85:74:8B:18:97") == "ea:85:74:8b:18:97")
-        #expect(NetworkTopology.normalisedMAC("42:0:5c:85:fa:1a") == "42:00:5c:85:fa:1a")
-        #expect(NetworkTopology.normalisedMAC("42:00:5C:85:FA:1A") == "42:00:5c:85:fa:1a")
-    }
-
-    /// An IPv6 next hop must not read as a hardware address — the same trap the route
-    /// graph's gateway test guards from the other side.
-    @Test func anIPv6NextHopIsNotAHardwareAddress() {
-        #expect(NetworkTopology.normalisedMAC("fe80::1%en0") == nil)
-        #expect(NetworkTopology.normalisedMAC("2001:db8::1") == nil)
-        #expect(NetworkTopology.normalisedMAC("10.0.7.254") == nil)
-        #expect(NetworkTopology.normalisedMAC("link#27") == nil)
-    }
-
-    /// VirtualBox and Parallels write it with no separators at all, which is their own
-    /// spelling and gets its own converter rather than loosening the comparison.
-    @Test func theUnseparatedSpellingIsConvertedNotAccepted() {
-        #expect(NetworkTopology.normalisedMAC("0800271A2B3C") == nil)
-        #expect(GuestInventory.normalisedUnseparatedMAC("0800271A2B3C") == "08:00:27:1a:2b:3c")
-        // …and the separated one still works through the same door.
-        #expect(GuestInventory.normalisedUnseparatedMAC("08:00:27:1a:2b:3c") == "08:00:27:1a:2b:3c")
+    /// VirtualBox and Parallels write it with no separators at all. That used to need
+    /// a second normaliser, which is how the two disagreed about what was legal.
+    @Test func theUnseparatedSpellingIsTheSameAddress() {
+        #expect(MACAddress("0800271A2B3C") == MACAddress("08:00:27:1a:2b:3c"))
     }
 }
 
@@ -166,8 +166,9 @@ struct GuestPlacementTests {
                      attachedGuestInterfaces: taps, mode: .shared)
     }
 
-    private func utmGuest(_ name: String, mac: String) -> NamedGuest {
-        NamedGuest(name: name, productID: "utm", recordedMACs: [mac], identifier: name)
+    private func utmGuest(_ name: String, mac text: String) -> NamedGuest {
+        NamedGuest(name: name, productID: "utm", recordedMACs: [macs(text)],
+                   identifier: name)
     }
 
     private func containerGuest(_ name: String, network: String?) -> NamedGuest {
@@ -181,7 +182,7 @@ struct GuestPlacementTests {
     @Test func aRecordedAddressSeenOnAnInterfaceAttachesTheGuestToIt() throws {
         let placed = GuestInventory.place(
             [utmGuest("lab", mac: "ea:85:74:8b:18:97")],
-            neighbours: ["bridge100": ["ea:85:74:8b:18:97"], "en0": ["aa:bb:cc:dd:ee:ff"]],
+            neighbours: ["bridge100": [macs("ea:85:74:8b:18:97")], "en0": [macs("aa:bb:cc:dd:ee:ff")]],
             guestNetworks: [network("bridge100", subnet: "192.168.64.0/24")],
             recordedNetworkNames: [])
         let one = try #require(placed.first)
@@ -197,7 +198,7 @@ struct GuestPlacementTests {
     @Test func aBridgedGuestIsAttachedToThePhysicalInterfaceItIsReallyOn() throws {
         let placed = GuestInventory.place(
             [utmGuest("lab", mac: "ea:85:74:8b:18:97")],
-            neighbours: ["en0": ["ea:85:74:8b:18:97"]],
+            neighbours: ["en0": [macs("ea:85:74:8b:18:97")]],
             guestNetworks: [network("bridge100", subnet: "192.168.64.0/24")],
             recordedNetworkNames: [])
         #expect(placed.first?.attachment.interfaceName == "en0")
@@ -253,7 +254,7 @@ struct GuestPlacementTests {
     @Test func aGuestWhoseAddressIsNowhereReadsAsNotRunning() throws {
         let placed = GuestInventory.place(
             [utmGuest("lab", mac: "ea:85:74:8b:18:97")],
-            neighbours: ["en0": ["aa:bb:cc:dd:ee:ff"]],
+            neighbours: ["en0": [macs("aa:bb:cc:dd:ee:ff")]],
             guestNetworks: [], recordedNetworkNames: [])
         let one = try #require(placed.first)
         #expect(one.attachment.interfaceName == nil)
@@ -266,7 +267,7 @@ struct GuestPlacementTests {
     @Test func aGuestWithNothingRecordedSaysThatRatherThanNotRunning() throws {
         let placed = GuestInventory.place(
             [NamedGuest(name: "mystery", productID: "parallels", identifier: "mystery")],
-            neighbours: ["en0": ["aa:bb:cc:dd:ee:ff"]],
+            neighbours: ["en0": [macs("aa:bb:cc:dd:ee:ff")]],
             guestNetworks: [network("bridge100", subnet: "192.168.64.0/24")],
             recordedNetworkNames: [])
         let one = try #require(placed.first)
@@ -278,9 +279,9 @@ struct GuestPlacementTests {
     /// the other is deduction.
     @Test func aRecordedAddressBeatsARecordedNetworkName() {
         var guest = containerGuest("postgres", network: "default")
-        guest.recordedMACs = ["ea:85:74:8b:18:97"]
+        guest.recordedMACs = [macs("ea:85:74:8b:18:97")]
         let placed = GuestInventory.place(
-            [guest], neighbours: ["en0": ["ea:85:74:8b:18:97"]],
+            [guest], neighbours: ["en0": [macs("ea:85:74:8b:18:97")]],
             guestNetworks: [network("bridge100", subnet: "192.168.64.0/24")],
             recordedNetworkNames: ["default"])
         #expect(placed.first?.attachment.interfaceName == "en0")

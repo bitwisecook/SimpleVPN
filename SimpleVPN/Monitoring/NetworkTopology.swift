@@ -106,9 +106,14 @@ nonisolated struct RouteEntry: Sendable, Equatable {
 nonisolated struct NetworkTopology: Sendable, Equatable {
     var interfaces: [NetInterface] = []
     var routes: [RouteEntry] = []
-    /// Hardware addresses seen on each interface right now, BSD name → normalised
-    /// MACs. The kernel's neighbour cache, which `netstat -rn` prints as host rows
-    /// with a link-layer gateway.
+    /// Hardware addresses seen on each interface right now, BSD name → addresses.
+    /// The kernel's neighbour cache, which `netstat -rn` prints as host rows with a
+    /// link-layer gateway.
+    ///
+    /// `MACAddress`, not `String`, and that is load-bearing rather than tidy: the
+    /// products on the other side of this comparison spell an address differently
+    /// from `netstat`, and while these were strings the membership test below was
+    /// answering "no" to every question anyone asked it.
     ///
     /// WHY IT IS KEPT AT ALL, given the route parser has always thrown these rows
     /// away: it is the one unprivileged way to prove *which guest network a named
@@ -122,7 +127,7 @@ nonisolated struct NetworkTopology: Sendable, Equatable {
     /// showing; it is only ever asked "is this particular address here?" — a
     /// membership test whose answer is a yes or a no about a machine the user already
     /// configured themselves.
-    var neighbours: [String: Set<String>] = [:]
+    var neighbours: [String: Set<MACAddress>] = [:]
     /// The FULL routing table — both families, unfiltered, with flags — for
     /// `RouteResolver`. Kept separate from `routes` on purpose: `routes` stays
     /// IPv4-only and noise-filtered so every existing consumer of the railroad
@@ -166,32 +171,6 @@ nonisolated struct NetworkTopology: Sendable, Equatable {
         guard let name = RouteResolver(topology: self).resolve(ip)?.interfaceName
         else { return nil }
         return interfaces.first { $0.name == name }
-    }
-
-    /// A hardware address in ONE spelling, or nil if this is not one.
-    ///
-    /// THE TWO SPELLINGS ARE BOTH REAL AND THEY DO NOT MATCH AS STRINGS. `netstat`
-    /// prints octets without leading zeros and in lower case
-    /// (`42:0:5c:85:fa:1a` — measured on this Mac); UTM's `config.plist` records
-    /// `EA:85:74:8B:18:97`, zero-padded and upper case. Comparing those raw finds
-    /// nothing, silently, which would present as "we can never attach a name" rather
-    /// than as a bug. Normalising to lower-case zero-padded octets is the fix, and it
-    /// is done in ONE place so the two sides cannot drift.
-    ///
-    /// Six groups of 1–2 hex digits and nothing else: an IPv6 next hop
-    /// (`fe80::1%en0`) must not be mistaken for a hardware address, which is the same
-    /// trap `RouteGraphLayout.isGatewayAddress` guards from the other side.
-    nonisolated static func normalisedMAC(_ text: String) -> String? {
-        let groups = text.split(separator: ":", omittingEmptySubsequences: false)
-        guard groups.count == 6 else { return nil }
-        var out: [String] = []
-        out.reserveCapacity(6)
-        for group in groups {
-            guard (1...2).contains(group.count), group.allSatisfy(\.isHexDigit),
-                  let value = UInt8(group, radix: 16) else { return nil }
-            out.append(String(format: "%02x", value))
-        }
-        return out.joined(separator: ":")
     }
 
     static func ipv4ToUInt32(_ s: String) -> UInt32? {
@@ -297,7 +276,7 @@ final class TopologyMonitor {
     /// `open` and never return. One scan in flight at a time: a guest that flaps must
     /// not queue a scan per tick, and an abandoned scan still costs a thread.
     private func refreshGuestsIfNeeded(interfaces: [NetInterface],
-                                       neighbours: [String: Set<String>]) {
+                                       neighbours: [String: Set<MACAddress>]) {
         let signature = interfaces
             .filter { $0.kind == .virtualMachine || $0.kind == .bridge }
             .map { "\($0.name):\($0.ipv4Subnets.joined(separator: ","))" }
@@ -330,7 +309,7 @@ final class TopologyMonitor {
             var tick = 0
             var routes: [RouteEntry] = []
             var snapshot = RouteTableSnapshot.empty
-            var neighbours: [String: Set<String>] = [:]
+            var neighbours: [String: Set<MACAddress>] = [:]
             while !Task.isCancelled {
                 if tick % 5 == 0 {
                     (routes, snapshot, neighbours) = await Self.readRoutes()
@@ -353,7 +332,7 @@ final class TopologyMonitor {
     }
 
     private func update(routes: [RouteEntry], snapshot: RouteTableSnapshot = .empty,
-                        neighbours: [String: Set<String>] = [:]) {
+                        neighbours: [String: Set<MACAddress>] = [:]) {
         var (interfaces, counters) = Self.readInterfaces()
         let now = Date()
         for i in interfaces.indices {
@@ -574,13 +553,13 @@ final class TopologyMonitor {
     /// AND the full unfiltered both-family snapshot that `RouteResolver` needs.
     private nonisolated static func readRoutes()
         async -> (routes: [RouteEntry], snapshot: RouteTableSnapshot,
-                  neighbours: [String: Set<String>]) {
+                  neighbours: [String: Set<MACAddress>]) {
         await Task.detached(priority: .utility) {
             let v4 = netstat(family: "inet")
             let v6 = netstat(family: "inet6")
 
             var routes: [RouteEntry] = []
-            var neighbours: [String: Set<String>] = [:]
+            var neighbours: [String: Set<MACAddress>] = [:]
             for line in v4.split(separator: "\n") {
                 let cols = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
                 // Destination Gateway Flags Netif [Expire]
@@ -594,7 +573,12 @@ final class TopologyMonitor {
                 // as ROUTES — they are not networks and the railroad never wanted
                 // them — but the address is KEPT now, because it is the evidence that
                 // attaches a named virtual machine to the network it is really on.
-                if let mac = NetworkTopology.normalisedMAC(gateway), !dest.contains("/") {
+                //
+                // `MACAddress` is also what keeps an IPv6 next hop (`fe80::1%en0`) out
+                // of the neighbour set: it refuses anything that is not six groups,
+                // the same trap `RouteGraphLayout.isGatewayAddress` guards from the
+                // other side.
+                if let mac = MACAddress(gateway), !dest.contains("/") {
                     neighbours[netif, default: []].insert(mac)
                     continue
                 }

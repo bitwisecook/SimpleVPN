@@ -189,6 +189,28 @@ nonisolated private let corpus: [Seeded] = [
            "00112233445566778899aabbccddeeff"),
     Seeded("static password from slot 2",
            "field received static password: Tr0ub4dor&3xample", "Tr0ub4dor&3xample"),
+
+    // --- Hardware addresses, in all three spellings this Mac produces ------
+    //
+    // A hardware address identifies a physical machine for that machine's life.
+    // The PRIMARY control is that none is ever put into the report — see
+    // `HardwareAddressTypeDisciplineTests`, which scans the source for it. These
+    // are the defence in depth, for the free-text bundle and for anything an
+    // admitted log line quotes, and all three spellings are here because a
+    // scrubber that only knows the padded one is a scrubber that misses every
+    // address `netstat` and `arp` print.
+    Seeded("netstat gateway column, leading zeros suppressed",
+           "10.0.7.13          42:0:5c:85:fa:1a   UHLWIi         en0",
+           "42:0:5c:85:fa:1a"),
+    Seeded("arp -an, the same spelling in prose",
+           "? (10.0.0.4) at a0:99:9b:18:dc:93 on en0 ifscope [ethernet]",
+           "a0:99:9b:18:dc:93"),
+    Seeded("a vendor config's padded upper case",
+           "UTM Network[0].MacAddress = EA:85:74:8B:18:97",
+           "EA:85:74:8B:18:97"),
+    Seeded("the network-identity key, which IS an address",
+           "netmemory: network fingerprint key=mac:a:e6:33:6c:f0:52",
+           "a:e6:33:6c:f0:52"),
 ]
 
 // MARK: - The corpus, asserted

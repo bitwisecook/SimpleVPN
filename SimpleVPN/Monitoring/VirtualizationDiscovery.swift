@@ -496,10 +496,12 @@ nonisolated struct UTMNetworkConfig: Sendable, Equatable {
     var machineName: String?
     /// `Information.UUID`, so a renamed machine is still the same machine.
     var machineUUID: String?
-    /// `Network[].MacAddress`, verbatim in UTM's spelling — normalised at the one
-    /// comparison point (`NetworkTopology.normalisedMAC`), never here.
-    /// **MEASURED**: `EA:85:74:8B:18:97` on this Mac's one UTM machine.
-    var macAddresses: [String] = []
+    /// `Network[].MacAddress`, parsed at the boundary where it is read rather than
+    /// carried on as UTM's text — a hardware address stops being a string the moment
+    /// it enters the app, which is what makes the later comparison structural.
+    /// **MEASURED**: `EA:85:74:8B:18:97` on this Mac's one UTM machine, which is
+    /// zero-padded upper case where `netstat` prints the same address unpadded lower.
+    var macAddresses: [MACAddress] = []
 }
 
 /// A UTM virtual machine's network mode, read from its own config. UTM is the
@@ -661,7 +663,7 @@ nonisolated struct VirtualizationEnvironment: Sendable {
             bridgeInterface: first["BridgeInterface"] as? String,
             machineName: information?["Name"] as? String,
             machineUUID: information?["UUID"] as? String,
-            macAddresses: networks.compactMap { $0["MacAddress"] as? String })
+            macAddresses: networks.compactMap { MACAddress($0["MacAddress"] as? String ?? "") })
     }
 
     /// One container as Apple's `container` records it.
@@ -984,7 +986,7 @@ nonisolated enum VirtualizationDiscovery {
         interfaces: [NetInterface],
         detectionEnabled: Bool,
         env: VirtualizationEnvironment,
-        neighbours: [String: Set<String>] = [:]) async -> VirtualizationSnapshot {
+        neighbours: [String: Set<MACAddress>] = [:]) async -> VirtualizationSnapshot {
 
         guard detectionEnabled else { return VirtualizationSnapshot(detectionEnabled: false) }
 
@@ -1049,7 +1051,7 @@ nonisolated enum VirtualizationDiscovery {
     /// the same facts.
     static func assemble(interfaces: [NetInterface],
                          scan: FilesystemScan,
-                         neighbours: [String: Set<String>]) -> VirtualizationSnapshot {
+                         neighbours: [String: Set<MACAddress>]) -> VirtualizationSnapshot {
         let networks = guestNetworks(interfaces: interfaces, installed: scan.installed,
                                      appleContainerModes: scan.appleContainerModes,
                                      utmGuests: scan.utmGuests)
@@ -1110,7 +1112,7 @@ nonisolated enum VirtualizationDiscovery {
     static func snapshot(interfaces: [NetInterface],
                          detectionEnabled: Bool,
                          env: VirtualizationEnvironment,
-                         neighbours: [String: Set<String>] = [:]) -> VirtualizationSnapshot {
+                         neighbours: [String: Set<MACAddress>] = [:]) -> VirtualizationSnapshot {
         guard detectionEnabled else { return VirtualizationSnapshot(detectionEnabled: false) }
         return assemble(interfaces: interfaces, scan: readEverything(env: env),
                         neighbours: neighbours)

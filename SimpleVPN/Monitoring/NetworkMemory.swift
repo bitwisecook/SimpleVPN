@@ -33,7 +33,10 @@ nonisolated struct NetworkFingerprint: Codable, Hashable, Sendable {
     /// still thinking). Requiring one is what used to make fingerprinting fail
     /// outright and silently drop the whole memory.
     var gatewayIP: String
-    var gatewayMAC: String?        // the strong part of the identity
+    /// The strong part of the identity. `MACAddress` and not text, so that the
+    /// fingerprint of one network cannot differ from itself because the address was
+    /// spelled two ways — see `Shared/MACAddress.swift`.
+    var gatewayMAC: MACAddress?
     /// The interface's own IPv4 network, e.g. "192.168.87.0/24" — read in-process from
     /// getifaddrs, so it works with no gateway, no subprocess and no permission.
     var localNetwork: String?
@@ -60,11 +63,31 @@ nonisolated struct NetworkFingerprint: Codable, Hashable, Sendable {
     /// one), and it means nothing keyed off `key` may be relied on to notice a portal
     /// being cleared. Captive-portal resolution is handled separately, by the
     /// ConnectionView captive rechecks (see VPNController.recheckCaptivePortal).
+    ///
+    /// IT CARRIES A HARDWARE ADDRESS, so it is not a loggable value: the two
+    /// `netmemory` lines that mention it mark it `privacy: .private`, and nothing may
+    /// put it in the diagnostic report.
+    ///
+    /// THE SPELLING HERE IS PINNED, and `bsdText` rather than `canonicalText` is not
+    /// an oversight. This key is written into `UserDefaults` (the
+    /// `network.unreachableMemory.v1` map) the moment a VPN fails somewhere, and it is
+    /// looked up again on the next launch. Every key already on every user's disk was
+    /// produced from `ether_ntoa`'s unpadded spelling, so canonicalising it would
+    /// silently orphan the remembered failures for every gateway with a low octet —
+    /// about a third of them — and the symptom would be a warning that quietly stopped
+    /// appearing. Changing it needs a migration, not an edit.
     var key: String {
-        if let mac = gatewayMAC, !mac.isEmpty { return "mac:\(mac.lowercased())" }
+        if let mac = gatewayMAC { return "mac:\(mac.bsdText)" }
         if let net = localNetwork, !net.isEmpty { return "net:\(interface)|\(net)" }
         if !gatewayIP.isEmpty { return "gw:\(interface)|\(gatewayIP)" }
         return "if:\(interface)"
+    }
+
+    /// Which of the four identities `key` fell back to — `mac`, `net`, `gw` or `if`,
+    /// strongest first. The loggable half of the key: it says how well this network
+    /// can be told from another one without saying which network it is.
+    var keyStrength: String {
+        String(key.prefix { $0 != ":" })
     }
 
     /// Human wording for a warning. Names the Wi-Fi network when we're allowed to know
@@ -162,7 +185,16 @@ nonisolated enum NetworkIdentity {
             log.error("no network fingerprint: no physical default route and no candidate from getifaddrs")
             return nil
         }
-        log.debug("network fingerprint key=\(fp.key, privacy: .public)")
+        // `.private`, and the KIND is logged separately so the line still says
+        // something. The key's strongest form is "mac:" plus the gateway's hardware
+        // address — an identifier for a specific piece of somebody's furniture, in a
+        // log that `DiagnosticReportLog` reads and a user then SENDS. Which of the
+        // four identity strengths we got is the whole diagnostic content of this line;
+        // the address itself never was.
+        log.debug("""
+            network fingerprint strength=\(fp.keyStrength, privacy: .public) \
+            key=\(fp.key, privacy: .private)
+            """)
         return fp
     }
 
@@ -189,7 +221,7 @@ nonisolated enum NetworkIdentity {
         }
         guard !iface.isEmpty else { return nil }
 
-        var mac: String?
+        var mac: MACAddress?
         if !gateway.isEmpty {
             let matches = arp.filter { $0.ip == gateway }
             mac = (matches.first { $0.interface == iface } ?? matches.first)?.mac
@@ -264,8 +296,15 @@ nonisolated enum NetworkIdentity {
 
     /// A remember that couldn't happen is worth a line: the whole feature silently does
     /// nothing when there's no fingerprint, and that's precisely how it failed before.
+    ///
+    /// THE KEYS ARE `.private` for the reason `NetworkFingerprint.key` states: the
+    /// strongest form of one is the gateway's hardware address. "The network changed"
+    /// is the fact a maintainer needs, and it survives the redaction.
     static func logNetworkChange(from old: String?, to new: String?) {
-        log.log("network changed: \(old ?? "none", privacy: .public) -> \(new ?? "none", privacy: .public)")
+        log.log("""
+            network changed: \(old ?? "none", privacy: .private) \
+            -> \(new ?? "none", privacy: .private)
+            """)
     }
 
     static func logMissedRemember(profile id: String) {

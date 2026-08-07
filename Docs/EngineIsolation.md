@@ -433,6 +433,55 @@ the framing must be one contract compiled into both sides** — the pattern the 
 sources so "app and helper can never disagree about the format". Anything less reproduces today's
 asymmetry with a silent-zero-traffic failure and no linker to catch it.
 
+### 3.6 Scope of what an engine is handed 📐 — the same rule, and it binds our own engines
+
+**An engine gets exactly the configuration and sign-in material for the one VPN the user approved
+it for, and nothing else** — not another VPN's configuration, not another VPN's password or key
+passphrase, and no means of learning that another VPN exists. It must also be isolated from its
+**sibling engines**, since several VPNs can run at once: no shared channel, no shared scratch
+state, no way to enumerate or address another engine.
+
+`Docs/EngineExtensibility.md` §6.2 states the rule, argues it, and sketches the mechanism (a
+per-extension UUID that **names** but never **authorises**; allow-listing as a tier, with our own
+engines pinned at build time and a third party's established at install time; and why the absent
+verb beats the validated one). It also records the limit — the rule bounds the blast radius and
+does not close the exfiltration hole. **None of that is repeated here.**
+
+**It applies to our own engines too, and is easier there without being automatic.** Both sides
+would be ours: no allow-list to consult, no consent sheet, just a contract we write. But a
+contract written to be convenient for us is exactly how a `listProfiles` verb arrives six months
+later because a diagnostic wanted it. §3.4 already argues that proving the contract on our own
+engines is the right sequencing; this is a property that must be proven **with** the framing
+(§3.5), not retrofitted once an outside consumer is attached.
+
+**It would be a genuine tightening, not a restatement of the status quo.** ✅ Today every engine is
+statically linked into one system extension (§1) and therefore sits in a process holding whatever
+that process was handed. The push-shaped half of the rule is already how material arrives —
+`startTunnel(options:)` hands the extension one session's material and the extension has no lookup
+of its own — but the *structural* half does not exist: today an engine merely **does not** reach
+its siblings' material, where after a split it **could not**. Separate processes make engine-to-
+engine isolation structural rather than a matter of discipline, which is a real entry on the "for"
+side of §0's ledger, and the only one this document adds.
+
+Three consequences land on decisions already taken above:
+
+- **§2.4's unit is the tunnel, not the engine kind.** The diagram there shows one extension and N
+  helpers, which is right; what it does not say is that two concurrent VPNs of the same kind are
+  **two helpers with two channels**, not one helper multiplexing both. A multiplexed helper is the
+  shared bus the rule forbids, and it is the natural thing to build to save spawn cost.
+- **§2.4 option 2's Mach service is the awkward case.** A registered Mach service is a *named,
+  discoverable* rendezvous by design. If the spawn spike fails and Mach lookup becomes the path,
+  the per-tunnel channel has to be a port handed over an initial connection rather than the
+  well-known name itself — more machinery on the option that was already least attractive.
+- **§3.1's helper restart must re-push, and the helper must not cache.** A recovered helper is a
+  fresh start with a fresh handing-over; nothing may be kept warm across the gap "so the reconnect
+  is quicker". That is "scope ends when the tunnel does" meeting the supervision requirement, and
+  the two agree — a restarted engine needs a fresh handshake anyway (§3.1).
+
+❓ **Unmeasured:** one helper per *tunnel* rather than per engine kind means a process spawn on
+every connect, and §2.1 measured the steady-state hop but not start-up. Worth having before the
+temptation to pool or keep helpers warm arrives, since that temptation is the shared bus again.
+
 ---
 
 ## 4. What would flip the answer ❓
@@ -486,6 +535,7 @@ Recorded so the next reader does not mistake absence for a negative finding:
 | Whether a second system extension genuinely prompts a second approval | §2.4 rests on the per-bundle-id `enabled`/`active` columns, not a live trial | Activate a trivial second extension and watch System Settings |
 | Whether a Mach service could bridge app-spawned helper to root sysext | The only untested escape if the spawn spike fails | Register a service from the non-sandboxed app and attempt lookup from the sysext |
 | Field crash rates per engine | §4 item 2 — would turn "crash isolation" from a hypothesis into a number | Read `TunnelIncidentStore` across installs |
+| Process spawn cost per connect, given one helper per **tunnel** rather than per engine kind | §3.6 — if spawning is expensive the tempting fix is a pooled or warm helper, which is the shared bus the scope rule forbids | Time `posix_spawn` + handshake for a stub helper; compare against connect latency, which is seconds |
 | Whether inbound packet batching helps *today*, independent of isolation | Every bridge writes one packet at a time (`writePackets:@[ip]`); §2.1 suggests coalescing is ~12× cheaper per packet | An in-process A/B on `writePackets:` array size — a small change with no isolation attached |
 
 `WebSearch` was unavailable for this work, so nothing here rests on documentation retrieved from the
