@@ -366,6 +366,43 @@ will otherwise assume away:
    (Two further clauses refuse an *invalid* value rather than a capability: a compression mode or a
    reported OS OpenConnect hasn't got. Both would be refused by the tool at startup too.)
 
+### Why 2 and 3 need a library patch, and the three cheaper options that failed ❓
+
+Recorded because "we already have an MTU setter" is the obvious objection to carrying a local patch
+forever, and because the question has now been asked twice and re-derived twice. Three cheaper
+routes were considered before concluding a patch is the only one, and each failed for its own
+reason:
+
+1. **Is `--base-mtu` covered by the setter we already call?** No: they are different numbers.
+   `openconnect_set_reqmtu` (public header, and it *is* wired — one of the gates already closed with
+   it) is `--mtu`: the MTU we **ask the gateway for**. `--base-mtu` describes the MTU of the
+   **underlying link**, which OpenConnect uses as an input when deriving a tunnel MTU and when
+   sizing DTLS. Setting the request does not tell the library what the path beneath it can carry, so
+   one cannot stand in for the other. ✅ Verified from the header: `openconnect_set_reqmtu` is
+   present and there is **no** base-MTU entry point. The semantic distinction between the two is
+   reasoned from OpenConnect's documented CLI behaviour, **not** read from source — the vendored
+   archive ships no CLI, so it could not be checked here. ❓
+2. **Is there a callback where the library asks us for it?** No. This was worth asking because the
+   pattern works elsewhere: OpenVPN's local-network carve-out exists precisely because openvpn3
+   *calls back* into our tun builder (`tun_builder_get_local_networks`), so we override rather than
+   patch. OpenConnect's tun surface is `openconnect_setup_tun_device` / `_tun_script` / `_tun_fd` —
+   we hand it an interface, it does not ask us what the base MTU is. There is nothing to intercept.
+3. **Does `--no-http-keepalive` even belong on this list?** It looked like it might not, under the
+   rule that sign-in may leave the process while carrying traffic must not: keepalive on the *HTTP*
+   requests sounds like a sign-in concern. It is not — it also governs the connection that carries
+   CSTP, so it is a data-path setting and the gate is justified. ❓ Reasoned, not measured. The
+   public header contains **no keepalive symbol at all**, which is verified. ✅
+
+So the remaining option is to **patch the vendored library** to add the two setters, applied by
+`Tools/build-openconnect-xcframework.sh` from a patch file in the repo. That work is **not done
+yet**. Note the constraint it must respect: the script pins `OPENSSL_PIN` and fails hard if
+Homebrew disagrees, because three engine archives statically carry OpenSSL and must agree — a patch
+must not become an excuse to move that pin.
+
+Two setters that OpenConnect's own CLI plainly wants are also a plausible **upstream**
+contribution, which would end the cost of carrying the patch across library bumps. Worth proposing
+rather than maintaining locally forever.
+
    **Smartcard sign-in used to head that list, and it was the load-bearing entry** — the one capability
    the Homebrew tool had that the bundled engine structurally could not, whatever the xcframework was
    configured with. It is *gone*: SimpleVPN no longer signs in with a certificate on a card at all
