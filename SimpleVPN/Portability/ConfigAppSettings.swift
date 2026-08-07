@@ -85,6 +85,23 @@ enum ConfigAppSettings {
                   name: "IPv6 lookup URL", kind: .text("")),
             .init(id: "app.location", key: LocationAuthority.enabledKey,
                   name: "Use this Mac\u{2019}s location", kind: .boolean(false), importable: false),
+            // Asking Mullvad, NordVPN or IPVanish for its published server list is a
+            // LOOKUP: it tells that company somebody at your address runs this app
+            // and roughly when. So it is opt-in, off by default, and — like
+            // `app.location` — NOT importable, because a file that could flip an
+            // opt-in would turn "opt in" into "opt in on somebody else's behalf".
+            // The per-provider consent is a separate record and is never in a file at
+            // all: agreeing to Mullvad is not agreeing to Nord.
+            .init(id: "app.provider-lists", key: ProviderListSettings.enabledKey,
+                  name: "Get server lists from VPN providers",
+                  kind: .boolean(false), importable: false),
+            // Importable, and safely so: it can only make the feature ask for LESS.
+            // The default is on, so the ordinary path routes the request through the
+            // provider's own exit, where they learn essentially nothing new.
+            .init(id: "app.provider-lists-only-connected",
+                  key: ProviderListSettings.onlyWhenConnectedKey,
+                  name: "Only refresh a provider\u{2019}s server list while connected to it",
+                  kind: .boolean(true)),
             .init(id: VirtualizationSettings.detect.id, key: VirtualizationSettings.detectDefaultsKey,
                   name: VirtualizationSettings.detect.name, kind: .boolean(true)),
             .init(id: VirtualizationSettings.warnOnConnect.id,

@@ -238,10 +238,34 @@ nonisolated enum ServersTableCopy {
         + " You can name it and move it, but only the configuration can add or remove it."
     static let lockedLabel = "Provided by this VPN\u{2019}s configuration"
 
+    /// What a row that came from a provider's PUBLISHED LIST says about itself.
+    ///
+    /// A third provenance beside "the configuration advertises this" and "you typed
+    /// it in", and it earns its own sentence because the answer to "where did this
+    /// server come from?" is the question a person asks when one of them behaves
+    /// oddly — and because these rows CAN be removed, so the locked sentence would
+    /// be wrong about the one thing it is for.
+    static func fromProviderHelp(_ providerName: String) -> String {
+        "This server came from \(providerName)\u{2019}s own published list rather than from this"
+            + " VPN\u{2019}s configuration. You can name it, move it and remove it; refreshing the"
+            + " list brings it back."
+    }
+
+    /// The extra clause on a WireGuard row whose server carries its own key —
+    /// which is every Mullvad relay. Said on the row because it is the reason
+    /// choosing a server there changes two things rather than one.
+    static let carriesPeerKeyHelp = "It carries its own public key, so choosing it changes"
+        + " the key this VPN expects as well as the address."
+
     /// Why `\u{2212}` can't remove, or nil when it can.
-    static func removeBlockedReason(hasSelection: Bool, userAdded: Bool) -> String? {
+    ///
+    /// `removable` rather than `userAdded`: a server from a provider's list is one
+    /// the user asked for and can take back, exactly like one they typed, and the
+    /// button used to refuse it with a sentence about a configuration that never
+    /// mentioned it.
+    static func removeBlockedReason(hasSelection: Bool, removable: Bool) -> String? {
         guard hasSelection else { return "Select a server in the table first." }
-        guard userAdded else { return lockedHelp }
+        guard removable else { return lockedHelp }
         return nil
     }
 

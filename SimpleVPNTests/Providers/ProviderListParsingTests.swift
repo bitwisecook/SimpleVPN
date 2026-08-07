@@ -182,24 +182,33 @@ struct ProviderListParsingTests {
         #expect(ProviderPeerKey(key.base64) == key)
     }
 
-    // MARK: - NordVPN, against the real payload
+    // MARK: - NordVPN, against the real /v2 payload
 
-    /// Shaped from `https://api.nordvpn.com/v1/servers?limit=1` on 2026-08-07,
-    /// including the real nesting the WireGuard key lives at. The entry was
-    /// `technologies[6]` in that payload, which is exactly why the parser searches by
-    /// `identifier` instead of by index.
+    /// Copied from `https://api.nordvpn.com/v2/servers?limit=2` on 2026-08-07, with
+    /// the fields the parser does not read trimmed away and NOTHING it does read
+    /// altered.
+    ///
+    /// THE SHAPE IS THE TEST. v2 is NORMALISED: a server carries `location_ids` and
+    /// numeric `technologies[].id`, and the names behind those numbers live in
+    /// top-level tables. That normalisation is why v2 is 9 MB where v1 is 30 MB for
+    /// the same seven thousand servers — and it is why a parser written against v1's
+    /// inline `locations` finds no country at all here.
     private static let nordRealRow = """
-        [{"id":930488,"name":"United States #5063","station":"185.245.87.59",
-        "ipv6_station":"","hostname":"us5063.nordvpn.com","load":64,"status":"online",
-        "locations":[{"country":{"code":"US","name":"United States",
-        "city":{"name":"Los Angeles"}}}],
-        "technologies":[{"id":21,"name":"HTTP Proxy (SSL)","identifier":"proxy_ssl",
-        "metadata":[{"name":"port","value":"89"}]},
-        {"id":35,"name":"Wireguard","identifier":"wireguard_udp",
-        "metadata":[{"name":"public_key","value":"V1WC7wt34kcSDyqPuUhN56NJ0v+GlqY9TwZR5WlzzB4="}]}]}]
+        {"servers":[{"id":930488,"name":"United States #5063","station":"185.245.87.59",
+        "ipv6_station":"","hostname":"us5063.nordvpn.com","load":57,"status":"online",
+        "technologies":[{"id":1,"status":"online"},
+        {"id":21,"metadata":[{"name":"proxy_hostname","value":"us5063.proxy.nordvpn.com"}],"status":"online"},
+        {"id":35,"metadata":[{"name":"public_key","value":"V1WC7wt34kcSDyqPuUhN56NJ0v+GlqY9TwZR5WlzzB4="}],"status":"online"}],
+        "location_ids":[51]}],
+        "locations":[{"id":51,"latitude":34.0522222,"longitude":-118.2427778,
+        "country":{"id":228,"name":"United States","code":"US",
+        "city":{"id":8761958,"name":"Los Angeles","dns_name":"los-angeles"}}}],
+        "technologies":[{"id":1,"name":"IKEv2/IPSec","identifier":"ikev2"},
+        {"id":21,"name":"HTTP Proxy (SSL)","identifier":"proxy_ssl"},
+        {"id":35,"name":"Wireguard","identifier":"wireguard_udp"}]}
         """
 
-    @Test("Nord's real server shape parses, including the nested WireGuard key")
+    @Test("Nord's real v2 server parses, resolving its location and WireGuard key")
     func nordRealServer() throws {
         let list = try ProviderListParser.nordVPN(Data(Self.nordRealRow.utf8))
         let s = try #require(list.servers.first)
@@ -207,6 +216,9 @@ struct ProviderListParsingTests {
         // BOTH values matter for Nord: its `.ovpn` dials the IP and name-checks the
         // hostname, so a substitution that fills in one and not the other is broken.
         #expect(s.ipv4 == "185.245.87.59")
+        // Resolved THROUGH `location_ids` → the top-level `locations` table. A parser
+        // that looked for an inline `locations` on the server would silently place
+        // every Nord server nowhere, which is a whole feature quietly not working.
         #expect(s.countryCode == "us")
         #expect(s.cityName == "Los Angeles")
         #expect(s.active)
@@ -222,25 +234,72 @@ struct ProviderListParsingTests {
         #expect(list.servers.first?.ipv6 == nil)
     }
 
-    /// The key is found by searching for the identifier, so it survives Nord
-    /// reordering its technologies — which is not hypothetical, since the array's
-    /// contents differ per server.
-    @Test("the WireGuard key is found by identifier, not by position")
+    /// THE ONE THAT MATTERS MOST IN THIS FILE. In v2 a server's technologies are bare
+    /// numbers, and `35` meaning WireGuard is a fact about today's table rather than
+    /// something Nord promises. So the identifier is resolved through the payload's
+    /// own table — and if Nord renumbered it, a parser with `35` hard-coded would read
+    /// whatever technology now holds that id and hand back its metadata AS A PEER
+    /// PUBLIC KEY. Here the numbers are swapped round and the right key still comes
+    /// out.
+    @Test("the WireGuard key is resolved through the technology table, not a hard-coded id")
     func nordKeyFoundByIdentifier() throws {
         let json = """
-            [{"hostname":"us5063.nordvpn.com","station":"185.245.87.59","status":"online",
-            "technologies":[{"id":35,"name":"Wireguard","identifier":"wireguard_udp",
-            "metadata":[{"name":"public_key","value":"V1WC7wt34kcSDyqPuUhN56NJ0v+GlqY9TwZR5WlzzB4="}]},
-            {"id":21,"identifier":"proxy_ssl","metadata":[{"name":"port","value":"89"}]}]}]
+            {"servers":[{"hostname":"us5063.nordvpn.com","station":"185.245.87.59","status":"online",
+            "technologies":[
+            {"id":35,"metadata":[{"name":"public_key","value":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}]},
+            {"id":21,"metadata":[{"name":"public_key","value":"V1WC7wt34kcSDyqPuUhN56NJ0v+GlqY9TwZR5WlzzB4="}]}]}],
+            "technologies":[{"id":21,"identifier":"wireguard_udp"},{"id":35,"identifier":"proxy_ssl"}]}
             """
         let list = try ProviderListParser.nordVPN(Data(json.utf8))
         #expect(list.servers.first?.peerKey?.base64 == "V1WC7wt34kcSDyqPuUhN56NJ0v+GlqY9TwZR5WlzzB4=")
     }
 
+    /// …and a payload whose table never names `wireguard_udp` yields NO key, rather
+    /// than guessing one off a plausible-looking id. Fail closed: for a peer key,
+    /// "none" is recoverable and "the wrong one" is a tunnel to nowhere.
+    @Test("no key at all when the technology table does not name WireGuard")
+    func nordNoKeyWithoutTheIdentifier() throws {
+        let json = """
+            {"servers":[{"hostname":"us5063.nordvpn.com","station":"185.245.87.59","status":"online",
+            "technologies":[{"id":35,"metadata":[{"name":"public_key","value":"V1WC7wt34kcSDyqPuUhN56NJ0v+GlqY9TwZR5WlzzB4="}]}]}],
+            "technologies":[{"id":35,"identifier":"something_else"}]}
+            """
+        let list = try ProviderListParser.nordVPN(Data(json.utf8))
+        #expect(list.servers.first?.peerKey == nil)
+    }
+
+    /// A server naming a location the table does not contain keeps its hostname and
+    /// loses only its place. Dropping the row would throw away a usable server over a
+    /// display label.
+    @Test("an unresolvable location leaves the server placeless, not dropped")
+    func nordUnknownLocation() throws {
+        let json = """
+            {"servers":[{"hostname":"us5063.nordvpn.com","status":"online","location_ids":[999]}],
+            "locations":[{"id":51,"country":{"code":"US"}}]}
+            """
+        let list = try ProviderListParser.nordVPN(Data(json.utf8))
+        let s = try #require(list.servers.first)
+        #expect(s.hostname.value == "us5063.nordvpn.com")
+        #expect(s.countryCode == nil)
+    }
+
+    /// v1's top-level shape is an ARRAY and v2's is an OBJECT, so the old payload is
+    /// now `malformed` rather than silently yielding nothing. Pinned because the
+    /// difference between "we changed endpoint" and "they changed shape" is the
+    /// sentence the user is shown.
+    @Test("the v1 array shape is refused as malformed rather than read as empty")
+    func nordV1ShapeIsRefused() {
+        #expect(throws: ProviderListParser.Failure.malformed) {
+            try ProviderListParser.nordVPN(Data("""
+                [{"hostname":"us5063.nordvpn.com","station":"185.245.87.59","status":"online"}]
+                """.utf8))
+        }
+    }
+
     @Test("a Nord server outside nordvpn.com is dropped and counted")
     func nordSuffixEnforced() {
         let json = """
-            [{"hostname":"us5063.nordvpn.com.evil.example","station":"10.0.0.1","status":"online"}]
+            {"servers":[{"hostname":"us5063.nordvpn.com.evil.example","station":"10.0.0.1","status":"online"}]}
             """
         #expect(throws: ProviderListParser.Failure.empty) {
             try ProviderListParser.nordVPN(Data(json.utf8))

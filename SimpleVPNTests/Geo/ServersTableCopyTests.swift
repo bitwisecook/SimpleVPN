@@ -205,17 +205,17 @@ struct ServersTableCopyTests {
     // MARK: Add and remove
 
     @Test func aServerFromTheConfigurationCannotBeRemovedAndTheButtonSaysWhy() {
-        let reason = ServersTableCopy.removeBlockedReason(hasSelection: true, userAdded: false)
+        let reason = ServersTableCopy.removeBlockedReason(hasSelection: true, removable: false)
         #expect(reason == ServersTableCopy.lockedHelp)
         #expect(reason?.contains("configuration") == true)
     }
 
     @Test func aServerTheUserAddedCanBeRemoved() {
-        #expect(ServersTableCopy.removeBlockedReason(hasSelection: true, userAdded: true) == nil)
+        #expect(ServersTableCopy.removeBlockedReason(hasSelection: true, removable: true) == nil)
     }
 
     @Test func removingNothingExplainsWhatToDoFirst() {
-        let reason = ServersTableCopy.removeBlockedReason(hasSelection: false, userAdded: false)
+        let reason = ServersTableCopy.removeBlockedReason(hasSelection: false, removable: false)
         #expect(reason?.contains("Select") == true)
     }
 

@@ -158,6 +158,47 @@ the paperwork.
 `id`, `created_at`, `updated_at`, `name`, `station`, `ipv6_station`, `hostname`, `load`, `status`,
 `locations`, `services`, `technologies`, `groups`, `specifications`, `ips`.
 
+#### ⚠️ Two measurements taken when the fetch was built, and the first is a bug this document shipped
+
+Re-measured on **2026-08-07**, against the live API:
+
+| Request | Bytes | Servers |
+|---|---|---|
+| `api.nordvpn.com/v1/servers` (as this document originally specified) | 383,566 | **100** |
+| `api.nordvpn.com/v1/servers?limit=8000` | **30,068,724** | ~7,000 |
+| `api.nordvpn.com/v2/servers?limit=8000` | **8,977,890** | ~7,000 |
+
+1. **`/v1/servers` with no `limit` returns one hundred servers.** Not the list — page one of
+   about seventy, with nothing in the payload saying so. The original catalogue entry used exactly
+   that URL, so a user who "fetched NordVPN's servers" would have received an arbitrary hundredth
+   of them and been told nothing. An explicit `limit` is part of the URL now and is not optional.
+2. **v2 is 3.3× smaller than v1 for the same servers**, because it is *normalised*: `locations`,
+   `technologies`, `groups` and `services` are hoisted into top-level tables and each server
+   references them by id, instead of every server carrying an inline copy of all four. 30 MB to
+   learn seven thousand hostnames is indefensible on a tethered connection; 9 MB is merely large,
+   and the fetch sheet states it before asking.
+
+Neither `fields[]` filtering (`400 {"errors":{"message":"Invalid request","code":200138}}`, tried
+on both versions) nor narrowing to `openvpn_udp` (9,064,980 bytes — nearly every Nord server does
+OpenVPN) makes it smaller. **So the shipped URL is `https://api.nordvpn.com/v2/servers?limit=8000`.**
+
+v2's shape, verbatim from the live payload:
+
+```json
+{ "servers": [ { "hostname": "us5063.nordvpn.com", "station": "185.245.87.59",
+                 "ipv6_station": "", "status": "online", "location_ids": [51],
+                 "technologies": [ { "id": 35, "status": "online",
+                     "metadata": [ { "name": "public_key", "value": "V1WC7w…" } ] } ] } ],
+  "locations": [ { "id": 51, "country": { "code": "US", "city": { "name": "Los Angeles" } } } ],
+  "technologies": [ { "id": 35, "identifier": "wireguard_udp" } ] }
+```
+
+**The technology id is resolved, never assumed.** A server's `technologies[]` carries bare numbers,
+and `35` meaning WireGuard is a fact about today's table rather than something Nord promises. The
+parser looks the identifier up in the payload's own `technologies` table; a payload that never names
+`wireguard_udp` yields *no* keys rather than keys read off whatever now holds id 35. For a peer
+public key, "none" is recoverable and "the wrong one" is a tunnel to nowhere.
+
 The WireGuard peer key is real and reachable:
 
 ```json
@@ -539,10 +580,51 @@ Two settings, both needing stable ids and `manual.html` anchors or `ManualAnchor
 
 ## 9. What is built ✅ and what is not 📐
 
-**Nothing user-visible is built, and nothing fetches.** What landed is the pure core — the part that
-is testable without a network and is where the security lives.
+**The fetch, the peer-key model and both entry points are now built.** Drag-to-merge has its
+comparison core built and tested and is *not* wired to a drop target. Details at the end of this
+section; the list below marks each piece.
 
-✅ **Built**, in `SimpleVPN/Providers/`:
+### The second batch ✅ (the fetch, the endpoints, the picker)
+
+- **`VPNEndpoint.peerPublicKey` and `VPNEndpoint.fromProvider`**
+  (`SimpleVPN/Geo/VPNEndpoints.swift`). The blocker §5 predicted. A WireGuard server list is a
+  list of *(address, key)* pairs, so an endpoint can now carry the second half. Validated on
+  decode (44 base64 characters to exactly 32 bytes, canonically re-encoded), part of
+  `hasAnnotations` so a relay carrying nothing else survives being stored, and carried by
+  export/import free — the endpoints section goes through `structuralMapRedacting`, i.e. the
+  type's own `Encodable` keys, exactly as the manual server order does. The *un*-free half was the
+  classification: `peerPublicKey` is a **reviewed non-secret** in `ConfigSecrets`, because
+  withholding it would export an address with nothing to check it against.
+- **`WireGuardEndpointSelection`** (`SimpleVPN/Geo/`). The address and the key move together or
+  neither moves, and a keyless row in a keyed list is **refused** rather than half-applied. Getting
+  this wrong does not crash, leak or error — the handshake fails closed and *silently*, so the whole
+  symptom is a tunnel that connects to nothing for ever after somebody changed a menu.
+  `VPNController.selectEndpoint` is the one entry point, and `EndpointSection` no longer writes
+  OpenVPN overrides for a WireGuard profile (which it never read, so every WireGuard VPN showed
+  "Automatic" whatever relay it was on).
+- **`ProviderListFetch`** — one GET, HTTPS with the system trust store, the host a constant from the
+  catalogue, **a redirect off that host refused rather than followed**, a 32 MB cap enforced against
+  what arrived rather than only against what was declared, and no authentication-challenge callback
+  anywhere in the file (its absence is what guarantees verification cannot be switched off). Off by
+  default, per-provider consent, MDM can forbid it (`DisableProviderLists`), and it prefers to go out
+  through that provider's own tunnel.
+- **`ProviderFetchProgress`** — four named stages, determinate **only** where the server sent a
+  `Content-Length`, nothing drawn under about a second, cancellable leaving the stored list exactly
+  as it was. `ProgressView` lives only in the sheet, which never animates its own geometry, and its
+  row reserves its height so appearing changes no layout — the layout-loop crash shape.
+- **`ProviderServerListStore`** — Application Support, not `providerConfiguration` (§5) and not the
+  export (§6). Re-validated on the way back in through the same validators the fetch uses, because
+  anything that can write a file in Application Support can write that one.
+- **`ProviderEndpointImport`** — the payoff. A provider's servers become **ordinary `VPNEndpoint`s
+  on an ordinary profile**, so the ranking, probing, region grouping and drag-to-reorder that
+  already exist do all the sorting the request asked for, without a second list or a parallel
+  picker. Facts win and opinions survive: a refresh replaces a stale peer key and never a name or a
+  position, and a hand-typed server is never restamped as the provider's.
+- **The two entry points** — `ProviderPickerSection` on the no-VPNs page (below the import actions,
+  because for three of the four providers importing is the prerequisite) and a submenu in the Manage
+  VPNs `+`. `ProviderPickerCopy` holds every string and is test-enforced against ONTOLOGY §7.
+
+### The first batch ✅, in `SimpleVPN/Providers/`:
 
 - `VPNServiceProviders.swift` — the catalogue of four, with the ship/fetch split of §1 as its
   structure. `stillNeeded` is the honesty rule made into a field, and it is **test-enforced**: a
@@ -559,8 +641,8 @@ is testable without a network and is where the security lives.
 - A fourth table in `FeatureMaturityRegistry` (§5), with Mullvad `.partlyVerified`, NordVPN and
   IPVanish `.untested`, and Proton absent because its row states an absence rather than a claim.
 
-✅ **45 tests in 4 suites**, on real fixtures: a Mullvad relay and a Nord server copied verbatim out
-of the 2026-08-07 payloads, and IPVanish's real directory index. Half of them are hostile — a
+✅ **124 test functions in 10 suites** across both batches, on real fixtures: a Mullvad relay and a
+Nord `/v2` server copied verbatim out of the 2026-08-07 payloads, and IPVanish's real directory index. Half of them are hostile — a
 newline in a hostname, another domain in an `href`, a 31-byte peer key — and assert that the parsers
 produce *nothing* rather than something slightly wrong.
 
@@ -575,21 +657,56 @@ they are the kind that would otherwise have shipped:
   silently un-claimed NordVPN and IPVanish the moment somebody removed a pin — which is exactly the
   unclaimed-by-omission failure the registry exists to prevent.
 
-📐 **Not built**, in the order to do it in:
+### 10. Drag-to-merge 📐/✅ — core built, not wired
 
-1. **The fetch**, with rules 1–2 of §3 (transport, never-silently-accept) and the privacy sheet of
-   §8. Small and provable, and useless without step 2.
-2. **Wiring the confirmation gate to a real diff view.** The rules exist and are tested; the sheet
-   that shows them does not. **Mullvad must not ship before this** — for WireGuard the gate is the
-   only thing standing between a substituted peer key and a silent traffic redirection.
-3. **Endpoint provenance and the peer-key field** in `SimpleVPN/Geo/` (§5). The one change with a
-   migration story, which is why it is not first.
-4. **The picker, the location filter, and the readiness reasons** via `ConnectListing`; the two
-   settings of §8 with their `manual.html` anchors.
-5. **The CA fingerprints** for NordVPN and IPVanish, which are what turns `canFetch` on for them.
+Dropping a second `.ovpn`/`.conf` from the same provider onto a VPN you already have should offer
+to add it as **another endpoint** rather than making a duplicate VPN.
 
-Steps 1–2 are worth having whether or not the picker is ever built, which is the argument for that
-order.
+✅ **`ConfigurationKinship` is built and tested.** It is the comparison, and it is shared rather than
+reinvented because the normalisation it needs is *the measurement in §2*: replacing the hostname made
+all 3,576 IPVanish files hash identically. The rule that matters is that **"everything else" is three
+categories, not one**:
+
+| | Treatment | Why |
+|---|---|---|
+| **Where it connects** — `remote`, and for WireGuard the peer key travelling with it | **Merges.** This is the feature. | The relay's key rides onto the endpoint row, never over the profile's own. |
+| **Who you are** — `auth-user-pass`, a private key | Endpoint merges; the difference is **reported and never applied**. | Something that works must not be replaced by a file. |
+| **Who you trust** — `<ca>`, `verify-x509-name`, a pin, the cipher, the port | **Refuses**, shows what differs, offers "import as a separate VPN". | A different CA is not the same VPN elsewhere; it is **a different trust anchor wearing a familiar name**. Merging it would repoint a VPN the user trusts at somebody else's authority with their own name still on the row. |
+
+Two findings came out of writing those tests and both would otherwise have shipped:
+
+- **The placeholder substitution has to be token-wise.** A plain text replacement of the host
+  `a.ipvanish.com` also rewrites the CA filename `ca.ipvanish.com.crt` into `c{{server}}.crt` — so
+  two files differing only in server stopped comparing equal *and* the certificate path silently
+  became part of what varied.
+- **It has to be per-file, not a blanket "ignore the name check".** IPVanish's
+  `verify-x509-name <server> name` legitimately differs between two of their files, so it must
+  normalise — but a file that dials one host and name-checks *another* has not merely moved server,
+  and the per-file placeholder leaves that difference standing. Both are pinned by test.
+
+📐 **Not wired.** There is no drop target on a VPN row, no sheet showing the diff, and no
+"import as a separate VPN" button. The verdicts exist and are correct; nothing calls them yet.
+
+### 📐 Still not built, in the order to do it in
+
+1. **Wiring the confirmation gate to a real diff view.** The rules exist and are tested, and the
+   fetch *honours* them — an update that moves an address or a key, or loses a third of the list, is
+   held and the user is told what is waiting. What does not exist is the sheet that shows the diff
+   **so it can be accepted**; today such an update can only be declined by doing nothing. That is
+   fail-safe but it is a dead end, and it is the next thing to build.
+2. **Drag-to-merge's wiring** (above).
+3. **Readiness reasons** via `ConnectListing`/`SubprocessTunnelReadiness`, so a profile with servers
+   and no sign-in is listed with Connect disabled and the reason named per provider.
+4. **The CA fingerprints** for NordVPN and IPVanish, which are what turns `canFetch` on for them.
+   Until then both fail closed and their rows say so.
+
+### What still needs a real account to confirm ❓
+
+Nobody has connected a tunnel through any of this. Mullvad's list is fetched and parsed against the
+real payload and Nord's and IPVanish's shapes are read from theirs, but **no relay chosen this way
+has ever carried traffic**, because that needs an account and a registered key and SimpleVPN
+registers nothing. `FeatureMaturityRegistry` says so: Mullvad `.partlyVerified`, Nord and IPVanish
+`.untested`, all three carrying the feedback link.
 
 ### The open questions, in the order they matter ❓
 

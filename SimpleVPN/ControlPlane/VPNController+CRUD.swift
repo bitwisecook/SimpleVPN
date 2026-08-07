@@ -302,6 +302,49 @@ extension VPNController {
         await setEndpointList(list, for: id)
     }
 
+    // MARK: Choosing one (the ONE place a server choice is written)
+
+    /// Point a VPN at one of its servers — or at nothing (Automatic).
+    ///
+    /// ONE ENTRY POINT FOR TWO MECHANISMS, and that is the whole reason it exists.
+    /// For every kind whose server identity is checked by a certificate, choosing a
+    /// server writes `OpenVPNOverrides.server/port/proto` and the engine's own name
+    /// verification does the rest. WIREGUARD HAS NO CERTIFICATE: the peer's public
+    /// key IS the identity, Mullvad gives every relay its own, and so a choice there
+    /// has to move the address and the key TOGETHER
+    /// (`WireGuardEndpointSelection` — read its header for what getting it wrong
+    /// looks like, which is a tunnel that connects to nothing, silently, forever).
+    ///
+    /// Returns the refusal to show, or nil when the choice was made. A refusal is
+    /// never silent: a picker that appears to accept a choice and quietly keeps the
+    /// old one is the failure this whole path is defending against.
+    @discardableResult
+    func selectEndpoint(_ endpoint: VPNEndpoint?, for id: String) async -> String? {
+        guard isWireGuard(id) else {
+            var o = overrides(for: id)
+            o.server = endpoint?.host
+            o.port = endpoint?.port
+            o.proto = endpoint?.proto.flatMap { OpenVPNOverrides.TransportProto(rawValue: $0) }
+            try? await setOverrides(o, for: id)
+            return nil
+        }
+        // "Automatic" has no meaning for WireGuard: a peer is one address and one
+        // key, and there is no failover list to fall back to. The picker does not
+        // offer it, and a programmatic nil is a no-op rather than a config wiped
+        // down to no endpoint at all.
+        guard let endpoint else { return nil }
+        let config = wireGuardConfig(for: id)
+        switch WireGuardEndpointSelection.selecting(endpoint, from: endpoints(for: id), in: config) {
+        case .refused(let why):
+            return why
+        case .applied(let next):
+            do { try await setWireGuardConfig(next, for: id) } catch {
+                return error.localizedDescription
+            }
+            return nil
+        }
+    }
+
     /// Go back to the automatic order (measured, else nearest). The counterpart to
     /// `setEndpointOrder` and the reason a manual order is never a one-way door —
     /// an annotation left with nothing but a cleared position stops being stored at

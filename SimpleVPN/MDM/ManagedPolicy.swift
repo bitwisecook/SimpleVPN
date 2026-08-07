@@ -13,6 +13,12 @@
 //    DisableDivertRules   — no divert rules of any kind (outside or over-another-VPN).
 //    LockProxySettings    — proxy configuration is read-only.
 //    LockConfiguration    — a connection's configuration/overrides can't be edited.
+//    DisableProviderLists — SimpleVPN may not ask a VPN company (Mullvad, NordVPN,
+//                           IPVanish) for its published server list. A managed Mac
+//                           may not be permitted to make that request at all, and
+//                           the request is one this app initiates rather than one
+//                           the user's own traffic makes, so it is the app's to
+//                           forbid.
 //
 //  See Docs/MDM.md for a sample .mobileconfig payload.
 //
@@ -27,9 +33,11 @@ enum ManagedPolicy {
     private static let disableDivertRulesKey = "DisableDivertRules"
     private static let lockProxySettingsKey  = "LockProxySettings"
     private static let lockConfigurationKey  = "LockConfiguration"
+    private static let disableProviderListsKey = "DisableProviderLists"
 
     private static let allKeys = [
         forceKeepInsideVPNKey, disableDivertRulesKey, lockProxySettingsKey, lockConfigurationKey,
+        disableProviderListsKey,
     ]
 
     // MARK: Policy
@@ -42,6 +50,10 @@ enum ManagedPolicy {
     static var lockProxySettings: Bool { UserDefaults.standard.bool(forKey: lockProxySettingsKey) }
     /// Connection configuration/overrides are read-only.
     static var lockConfiguration: Bool { UserDefaults.standard.bool(forKey: lockConfigurationKey) }
+    /// SimpleVPN may not ask a VPN company for its published server list.
+    static var disableProviderLists: Bool {
+        UserDefaults.standard.bool(forKey: disableProviderListsKey)
+    }
 
     /// May the user send a destination *outside* the VPN?
     static var allowDivertOutside: Bool { !forceKeepInsideVPN && !disableDivertRules }
@@ -60,6 +72,9 @@ enum ManagedPolicy {
         if disableDivertRules { out.append("Diverting traffic around the VPN is turned off.") }
         if lockProxySettings  { out.append("Proxy settings are locked.") }
         if lockConfiguration  { out.append("Connection settings can't be changed.") }
+        if disableProviderLists {
+            out.append("Getting server lists from VPN providers is turned off.")
+        }
         return out
     }
 }

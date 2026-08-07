@@ -446,6 +446,13 @@ nonisolated enum ConfigSecrets {
         "trustedCertSHA256": "a fingerprint of a public certificate, integrity-critical",
         "pinnedHostKeySHA256": "a fingerprint of a public host key, integrity-critical",
         "sshPinnedHostKey": "a fingerprint of a public host key, integrity-critical",
+        // A WireGuard server's own PUBLIC key, carried per-endpoint because every
+        // Mullvad relay has a different one. Public by construction — a `.conf`
+        // writes it in the clear — and it is the ONLY thing that identifies the
+        // server, so it is integrity-critical in exactly the way a certificate
+        // fingerprint is: withholding it would export an address with nothing to
+        // check it against, which is the mismatch this field exists to prevent.
+        "peerPublicKey": "a WireGuard server\u{2019}s own public key, integrity-critical",
     ]
 
     /// Is this field's value withheld from the file?

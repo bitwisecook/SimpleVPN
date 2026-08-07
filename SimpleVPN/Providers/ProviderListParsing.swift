@@ -92,18 +92,41 @@ nonisolated enum ProviderListParser {
 
     // MARK: NordVPN
 
-    /// Nord's `/v1/servers` — a flat JSON array of server objects.
+    /// Nord's **`/v2/servers`** — an object with a `servers` array and three lookup
+    /// tables beside it.
     ///
-    /// VERIFIED SHAPE (2026-08-07): `hostname`, `station` (the IPv4 the `.ovpn`
-    /// actually dials), `ipv6_station`, `status`, `locations[].country.code`, and
-    /// `technologies[]` where the WireGuard key lives as
-    /// `{"identifier": "wireguard_udp", "metadata": [{"name": "public_key", "value": …}]}`.
+    /// WHY v2 AND NOT v1, which the first version of this file read. Measured on
+    /// 2026-08-07, for the same ~7,000 servers: **v1 is 30,068,724 bytes and v2 is
+    /// 8,977,890.** v2 is normalised — the locations and technologies are hoisted
+    /// into top-level tables and every server references them by id, instead of each
+    /// server carrying its own inline copy of both. Reading the smaller one is not an
+    /// optimisation, it is the difference between a request that is fair to make on a
+    /// tethered connection and one that is not. (And `/v1/servers` with no `limit`
+    /// silently answers with ONE HUNDRED servers, which is the more embarrassing
+    /// half of the same finding — see `VPNServiceProviderCatalog.nordVPN`.)
     ///
-    /// **The peer key is read but this provider is OpenVPN-only** (see
+    /// VERIFIED SHAPE (2026-08-07, from the live payload rather than documentation):
+    /// ```json
+    /// { "servers": [ { "hostname": "us5063.nordvpn.com", "station": "185.245.87.59",
+    ///                  "ipv6_station": "", "status": "online", "location_ids": [51],
+    ///                  "technologies": [ { "id": 35, "status": "online",
+    ///                      "metadata": [ { "name": "public_key", "value": "V1WC7w…" } ] } ] } ],
+    ///   "locations": [ { "id": 51,
+    ///                    "country": { "code": "US", "city": { "name": "Los Angeles" } } } ],
+    ///   "technologies": [ { "id": 35, "identifier": "wireguard_udp" } ] }
+    /// ```
+    ///
+    /// **The technology id is RESOLVED, never assumed.** A server's `technologies[]`
+    /// carries bare numeric ids, and `35` meaning WireGuard is a fact about today's
+    /// table rather than a constant Nord promises. So the identifier is looked up in
+    /// the payload's own `technologies` table first, and a payload that does not name
+    /// `wireguard_udp` simply yields no keys — never keys read off the wrong
+    /// technology, which for a peer key would be the worst possible failure.
+    ///
+    /// **The peer key is read even though this provider is OpenVPN-only** (see
     /// `VPNServiceProviderCatalog.nordVPN`): NordLynx needs a private key Nord's
     /// authenticated API issues, and SimpleVPN holds no provider account. Reading it
-    /// anyway costs nothing and means the day that changes is a one-line change
-    /// rather than a parser change.
+    /// costs nothing and means the day that changes is a one-line change.
     ///
     /// **Two values per server matter for Nord and only one for the others.** Nord's
     /// `.ovpn` puts an IP literal in `remote` and the hostname in
@@ -111,33 +134,34 @@ nonisolated enum ProviderListParser {
     /// produces a configuration that either dials nowhere or fails the name check.
     /// Both come from here.
     static func nordVPN(_ data: Data, now: Date = .now) throws(Failure) -> ProviderServerList {
-        guard let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
-            throw .malformed
-        }
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let rows = root["servers"] as? [[String: Any]]
+        else { throw .malformed }
         let suffix = VPNServiceProviderCatalog.nordVPN.hostnameSuffix
+        let places = nordLocations(root)
+        let wireGuardTechID = nordTechnologyID(root, identifier: "wireguard_udp")
         var servers: [ProviderServer] = []
         var dropped = 0
         for row in rows {
             guard let name = row["hostname"] as? String,
                   let host = ProviderHostname(name, allowedSuffix: suffix)
             else { dropped += 1; continue }
-            let country = (row["locations"] as? [[String: Any]])?
+            // A server may list several locations; the first that resolves is the one
+            // shown, exactly as the v1 reader did. Nord's own client shows one place
+            // per server too.
+            let place = (row["location_ids"] as? [Any])?
                 .lazy
-                .compactMap { ($0["country"] as? [String: Any])?["code"] as? String }
-                .first
-            let city = (row["locations"] as? [[String: Any]])?
-                .lazy
-                .compactMap { ($0["country"] as? [String: Any])?["city"] as? [String: Any] }
-                .compactMap { $0["name"] as? String }
+                .compactMap { nordLocationKey($0) }
+                .compactMap { places[$0] }
                 .first
             servers.append(ProviderServer(
                 hostname: host,
                 ipv4: ProviderServer.normalisedIPv4(row["station"] as? String),
                 ipv6: ProviderServer.normalisedIPv6(row["ipv6_station"] as? String),
-                countryCode: ProviderServer.normalisedCountry(country),
+                countryCode: ProviderServer.normalisedCountry(place?.country),
                 cityCode: nil,
-                cityName: city,
-                peerKey: nordPeerKey(row),
+                cityName: place?.city,
+                peerKey: nordPeerKey(row, technologyID: wireGuardTechID),
                 active: (row["status"] as? String) == "online"))
         }
         guard !servers.isEmpty else { throw .empty }
@@ -145,13 +169,54 @@ nonisolated enum ProviderListParser {
                                   dropped: dropped, fetchedAt: now)
     }
 
-    /// `technologies[] → identifier == "wireguard_udp" → metadata[] → name == "public_key"`.
-    /// Written out rather than reached by index because the index is not stable: the
-    /// entry was `technologies[6]` in the payload read on 2026-08-07 and nothing
-    /// promises it stays there.
-    private static func nordPeerKey(_ row: [String: Any]) -> ProviderPeerKey? {
-        guard let techs = row["technologies"] as? [[String: Any]] else { return nil }
-        for tech in techs where (tech["identifier"] as? String) == "wireguard_udp" {
+    /// The payload's `locations` table as id → (country code, city name).
+    ///
+    /// The city name is display text and keeps its case (the per-field folding rule);
+    /// the country code is normalised where it is used, not here.
+    private static func nordLocations(_ root: [String: Any])
+        -> [Int: (country: String?, city: String?)] {
+        var out: [Int: (country: String?, city: String?)] = [:]
+        for entry in (root["locations"] as? [[String: Any]]) ?? [] {
+            guard let id = nordLocationKey(entry["id"]) else { continue }
+            let country = entry["country"] as? [String: Any]
+            out[id] = (country: country?["code"] as? String,
+                       city: (country?["city"] as? [String: Any])?["name"] as? String)
+        }
+        return out
+    }
+
+    /// An id from the payload as an `Int`. `JSONSerialization` hands numbers back as
+    /// `NSNumber`, and a payload is free to write one as a string — neither is worth
+    /// dropping a row over, and a mistyped id would silently unplace every server.
+    private static func nordLocationKey(_ any: Any?) -> Int? {
+        if let n = any as? Int { return n }
+        if let n = any as? NSNumber { return n.intValue }
+        if let s = any as? String { return Int(s) }
+        return nil
+    }
+
+    /// The numeric id v2 uses for a named technology, resolved from the payload's own
+    /// table. Nil when this payload does not mention it at all.
+    private static func nordTechnologyID(_ root: [String: Any], identifier: String) -> Int? {
+        for entry in (root["technologies"] as? [[String: Any]]) ?? []
+        where (entry["identifier"] as? String) == identifier {
+            if let id = nordLocationKey(entry["id"]) { return id }
+        }
+        return nil
+    }
+
+    /// `server.technologies[] → id == <wireguard_udp's id> → metadata[] → name == "public_key"`.
+    ///
+    /// Written out rather than reached by index because the index is not stable, and
+    /// gated on a RESOLVED id rather than a literal `35` because a hard-coded id that
+    /// Nord later reassigns would read some other technology's metadata as a peer
+    /// public key. No id resolved ⇒ no keys, which is the fail-closed answer.
+    private static func nordPeerKey(_ row: [String: Any], technologyID: Int?)
+        -> ProviderPeerKey? {
+        guard let technologyID, let techs = row["technologies"] as? [[String: Any]] else {
+            return nil
+        }
+        for tech in techs where nordLocationKey(tech["id"]) == technologyID {
             guard let meta = tech["metadata"] as? [[String: Any]] else { continue }
             for entry in meta where (entry["name"] as? String) == "public_key" {
                 if let key = (entry["value"] as? String).flatMap(ProviderPeerKey.init) { return key }

@@ -78,7 +78,13 @@ struct EndpointSection: View {
             get: { selection },
             set: { newID in select(items.first { $0.id == newID }?.endpoint) }
         )) {
-            Text("Automatic — try in order").tag(String?.none)
+            // "Automatic" means "try the configuration's remotes in order", which is
+            // an OpenVPN behaviour. A WireGuard peer is one address and one key with
+            // nothing to fall back to, so offering it there would be a row that
+            // cannot do what it says.
+            if !vpn.isWireGuard(profile.id) {
+                Text("Automatic — try in order").tag(String?.none)
+            }
             ForEach(groups) { group in
                 // The heading looks the same but SAYS more: how many servers
                 // the region holds and the quickest measured one, so a
@@ -117,6 +123,14 @@ struct EndpointSection: View {
     /// The endpoint the current overrides point at (nil = Automatic; an id not
     /// in the list = hand-set overrides in the Options tab).
     private func selectedEndpointID(_ endpoints: [VPNEndpoint]) -> String? {
+        // WireGuard keeps its choice in its OWN configuration — one peer, one
+        // address, one key — rather than in the OpenVPN overrides, which its engine
+        // never reads. Asking the wrong store showed every WireGuard VPN as
+        // "Automatic" no matter which relay it was actually pointed at.
+        if vpn.isWireGuard(profile.id) {
+            return WireGuardEndpointSelection
+                .selected(in: endpoints, config: vpn.wireGuardConfig(for: profile.id))?.id
+        }
         let o = vpn.overrides(for: profile.id)
         guard let server = o.server else { return nil }
         // Match all three components — profiles commonly list the same host:port
@@ -130,12 +144,17 @@ struct EndpointSection: View {
         return "custom:\(server)"
     }
 
+    /// One call, whatever the kind: `selectEndpoint` decides whether this is an
+    /// override to write or a WireGuard peer to swap address AND key on. A refusal
+    /// is SPOKEN rather than swallowed — the whole hazard here is a choice that
+    /// looks accepted and was not.
     private func select(_ endpoint: VPNEndpoint?) {
-        var o = vpn.overrides(for: profile.id)
-        o.server = endpoint?.host
-        o.port = endpoint?.port
-        o.proto = endpoint?.proto.flatMap { OpenVPNOverrides.TransportProto(rawValue: $0) }
-        Task { try? await vpn.setOverrides(o, for: profile.id) }
+        Task {
+            if let refusal = await vpn.selectEndpoint(endpoint, for: profile.id) {
+                AccessibilityAnnouncer.sayNow(refusal)
+                vpn.lastError = refusal
+            }
+        }
     }
 
     // MARK: Pins

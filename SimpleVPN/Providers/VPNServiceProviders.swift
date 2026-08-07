@@ -70,6 +70,19 @@ nonisolated struct VPNServiceProvider: Sendable, Identifiable, Equatable {
     /// Where the list lives. `nil` ⇒ unreachable without an account; see `blocked`.
     let listURL: URL?
 
+    /// About how many bytes that URL returns, measured rather than estimated.
+    ///
+    /// It is a FACT ABOUT THE DOWNLOAD and it belongs in the catalogue because the
+    /// user is told it before they agree to the fetch: "about 9 MB" is the
+    /// difference between a reasonable request and an indefensible one on a phone
+    /// tether. It is also the fallback for the progress bar when a provider sends no
+    /// `Content-Length` — see `ProviderFetchProgress`, which uses it to show a real
+    /// proportion and never a computed-looking number it cannot compute.
+    ///
+    /// Nothing depends on it being right: it is presentation, and the size cap that
+    /// actually protects anything is `ProviderListFetchPolicy.maximumPayloadBytes`.
+    let approximateBytes: Int
+
     /// Every hostname in a fetched list must end with this, or it is dropped.
     ///
     /// The cheapest control in the whole feature and one of the strongest: a fully
@@ -147,6 +160,10 @@ nonisolated enum VPNServiceProviderCatalog {
         displayName: "Mullvad",
         kind: .wireGuard,
         listURL: URL(string: "https://api.mullvad.net/www/relays/all/"),
+        // MEASURED 2026-08-07: 300,032 bytes for all 580 relays. The lightest list of
+        // the three by a wide margin, and small enough that the progress indicator
+        // will usually never appear at all — which is the correct outcome.
+        approximateBytes: 300_000,
         hostnameSuffix: ".relays.mullvad.net",
         caFingerprintSHA256: nil,   // WireGuard: no certificate anywhere in the path
         stillNeeded: "You will still need a Mullvad account and a WireGuard configuration "
@@ -172,6 +189,15 @@ nonisolated enum VPNServiceProviderCatalog {
         displayName: "IPVanish",
         kind: .openVPN,
         listURL: URL(string: "https://configs.ipvanish.com/configs/"),
+        // MEASURED 2026-08-07: 2,084,884 bytes of HTML for all 3,576 filenames.
+        //
+        // THE INDEX RATHER THAN `configs.zip` (1,283,217 bytes), even though the zip
+        // is SMALLER. The zip's payload is 3,576 configuration files we do not want
+        // and must not use — the template ships in the binary — so downloading it
+        // would mean fetching a megabyte of `.ovpn` bodies to read their names off
+        // the directory entries, plus a zip decoder in the trust path. 800 KB is a
+        // cheap price for reading nothing but filenames.
+        approximateBytes: 2_085_000,
         hostnameSuffix: ".ipvanish.com",
         caFingerprintSHA256: nil,   // ❓ to be pinned when the fetch lands; fails closed until then
         stillNeeded: "You will still need an IPVanish account \u{2014} its username and password go "
@@ -195,11 +221,33 @@ nonisolated enum VPNServiceProviderCatalog {
     ///
     /// ❓ Nord's terms could not be read — `nordvpn.com/terms-of-service/` returns 403
     /// to us. Treated as IPVanish is, by precaution: fetch, never embed.
+    ///
+    /// TWO MEASUREMENTS ON 2026-08-07 CHANGED THIS ROW, and the first one is a bug
+    /// the original catalogue shipped with:
+    ///
+    ///  • `api.nordvpn.com/v1/servers` WITH NO `limit` RETURNS 100 SERVERS, not the
+    ///    list — 383,566 bytes, and page one of about seventy. A user who "fetched
+    ///    NordVPN's servers" would have got an arbitrary hundredth of them with
+    ///    nothing saying so, which is the quiet kind of wrong this feature must not
+    ///    do. An explicit `limit` is therefore part of the URL and not optional.
+    ///  • With `limit=8000`, **v1 is 30,068,724 bytes and v2 is 8,977,890** for the
+    ///    same ~7,000 servers. v2 is 3.3× smaller because it is NORMALISED: the
+    ///    locations, technologies, groups and services are hoisted into top-level
+    ///    tables and each server references them by id, instead of every server
+    ///    carrying an inline copy. 30 MB to learn seven thousand hostnames would be
+    ///    indefensible on a tethered connection; 9 MB is merely large, and it is
+    ///    what the fetch sheet says before it asks.
+    ///
+    /// Neither `fields[]` filtering (400 `Invalid request`) nor narrowing to
+    /// `openvpn_udp` (9,064,980 bytes — nearly every Nord server does OpenVPN)
+    /// makes it smaller, both tried. v2 is the lightest source that carries the
+    /// names, so v2 is the one shipped.
     static let nordVPN = VPNServiceProvider(
         id: .nordVPN,
         displayName: "NordVPN",
         kind: .openVPN,
-        listURL: URL(string: "https://api.nordvpn.com/v1/servers"),
+        listURL: URL(string: "https://api.nordvpn.com/v2/servers?limit=8000"),
+        approximateBytes: 9_000_000,
         hostnameSuffix: ".nordvpn.com",
         caFingerprintSHA256: nil,   // ❓ to be pinned when the fetch lands; fails closed until then
         stillNeeded: "You will still need a NordVPN account, and OpenVPN uses the separate "
@@ -226,6 +274,7 @@ nonisolated enum VPNServiceProviderCatalog {
         displayName: "Proton VPN",
         kind: nil,
         listURL: nil,
+        approximateBytes: 0,        // nothing is fetched, so nothing is downloaded
         hostnameSuffix: ".protonvpn.net",
         caFingerprintSHA256: nil,
         stillNeeded: "",

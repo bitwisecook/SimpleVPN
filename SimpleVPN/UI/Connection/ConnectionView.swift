@@ -501,7 +501,15 @@ struct ConnectionView: View {
             } else if hasNothingConfigured {
                 EmptyVPNsPrompt(importAction: { showImporter = true },
                                 manageAction: { openWindow(id: "manage") },
-                                dropAction: { vpn.handleImport(of: $0) })
+                                dropAction: { vpn.handleImport(of: $0) },
+                                // The four providers, on the starting journey. They
+                                // cannot open the fetch sheet from here — that needs
+                                // a VPN to add servers TO, and there are none — so a
+                                // choice opens the import flow, which is genuinely
+                                // the next step for all three that work. Naming the
+                                // provider first is still worth it: it tells somebody
+                                // who has a Mullvad account what to go and download.
+                                providerAction: { _ in showImporter = true })
                     .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
             } else {
                 splitView
@@ -701,6 +709,9 @@ private struct EmptyVPNsPrompt: View {
     /// The shared import pipeline (same one the open panel and Dock drops use), so a
     /// drop here can't take a different code path from every other way in.
     let dropAction: ([URL]) -> Void
+    /// The four provider rows. A choice here cannot fetch anything — there is no VPN
+    /// to add servers to yet — so it points at the step that comes first.
+    let providerAction: (VPNServiceProvider) -> Void
     /// Highlighted while a config is over the window, so the drop reads as live rather
     /// than as decoration.
     @State private var targeted = false
@@ -750,6 +761,15 @@ private struct EmptyVPNsPrompt: View {
             .accessibilityLabel("Drop zone for VPN configuration files")
             // Dragging isn't keyboard-operable — point at the path that is.
             .accessibilityHint("Use the Import Configuration button to choose a file instead.")
+
+            // The four providers, BELOW the import actions rather than above them.
+            // For three of the four, importing a configuration is literally the
+            // prerequisite — Mullvad's list turns one relay into 567 and can do
+            // nothing at all before that one exists — so putting them first would
+            // offer the second step as though it were the first.
+            ProviderPickerSection(detail: ProviderPickerCopy.firstRunDetail,
+                                  action: providerAction)
+                .frame(maxWidth: 460)
         }
         // Mirrors the window-wide handler's types, so the visible target and the
         // invisible one can't disagree about what's droppable.

@@ -295,20 +295,23 @@ struct ServersTable: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
-                if item.endpoint.userAdded != true {
-                    Image(systemName: "lock.fill")
+                // THREE PROVENANCES, THREE GLYPHS — or none. A lock means only the
+                // configuration can add or remove this row; a globe means it came
+                // from a provider's published list (removable, and refreshable); a
+                // bare row is one the user typed. The provider row used to wear the
+                // lock, which was wrong about the only thing a lock is for.
+                if let note = provenanceNote(item) {
+                    Image(systemName: note.symbol)
                         .font(.caption)
                         .foregroundStyle(.tertiary)
-                        .help(ServersTableCopy.lockedHelp)
+                        .help(note.help)
                         .accessibilityHidden(true)      // its words ride the cell's value
                 }
             }
             .help(summary)
             .accessibilityElement(children: .combine)
             .accessibilityLabel(ServersTableCopy.addressHeading)
-            .accessibilityValue(item.endpoint.userAdded == true
-                                ? summary
-                                : summary + " " + ServersTableCopy.lockedHelp)
+            .accessibilityValue(provenanceNote(item).map { summary + " " + $0.help } ?? summary)
         } else if let binding = draftHostBinding {
             // `prompt:`, never the title — a title is rendered as content by
             // LabeledContent and announced by VoiceOver as the field's NAME.
@@ -463,7 +466,7 @@ struct ServersTable: View {
             }
             // Only where there is a lock to explain — a footnote about rows that
             // aren't on screen is how this pane got its reputation.
-            if items.contains(where: { $0.endpoint.userAdded != true }) {
+            if items.contains(where: { $0.endpoint.userAdded != true && !$0.endpoint.isRemovable }) {
                 Text(ServersTableCopy.lockFootnote)
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -491,6 +494,23 @@ struct ServersTable: View {
         }
         .padding(24)
         .accessibilityElement(children: .combine)
+    }
+
+    /// Where this row came from, as a glyph plus the sentence that rides the cell's
+    /// spoken value. Nil for a server the user typed in — that needs no explaining,
+    /// and a glyph on every row explains nothing.
+    private func provenanceNote(_ item: RankedEndpoint) -> (symbol: String, help: String)? {
+        if let raw = item.endpoint.fromProvider,
+           let id = VPNServiceProviderID(rawValue: raw) {
+            let name = VPNServiceProviderCatalog.provider(id).displayName
+            var help = ServersTableCopy.fromProviderHelp(name)
+            if item.endpoint.peerPublicKey != nil {
+                help += " " + ServersTableCopy.carriesPeerKeyHelp
+            }
+            return ("globe", help)
+        }
+        if item.endpoint.userAdded != true { return ("lock.fill", ServersTableCopy.lockedHelp) }
+        return nil
     }
 
     // MARK: Facts about this profile
@@ -587,7 +607,7 @@ struct ServersTable: View {
     private var removeBlockedReason: String? {
         if selection == ServerRow.draftID, draft != nil { return nil }
         return ServersTableCopy.removeBlockedReason(hasSelection: selectedItem != nil,
-                                                    userAdded: selectedItem?.endpoint.userAdded == true)
+                                                    removable: selectedItem?.endpoint.isRemovable == true)
     }
 
     private var removeHelp: String {
@@ -624,7 +644,7 @@ struct ServersTable: View {
             selection = nil
             return
         }
-        guard let item = selectedItem, item.endpoint.userAdded == true else { return }
+        guard let item = selectedItem, item.endpoint.isRemovable else { return }
         selection = nil
         Task { await vpn.removeEndpoint(id: item.endpoint.id, for: profileID) }
     }

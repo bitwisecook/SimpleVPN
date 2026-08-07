@@ -16,6 +16,7 @@ All keys are optional. An absent key means the user is free.
 | `DisableDivertRules` | **No divert rules at all** — neither "send outside" nor "route over another VPN". |
 | `LockProxySettings` | Proxy configuration is read-only. |
 | `LockConfiguration` | A connection's configuration and options (the .ovpn, engine overrides, certificates, proxy) can't be edited in the app. Also makes **Settings ▸ Sign-In Sources** read-only. |
+| `DisableProviderLists` | SimpleVPN may not ask a VPN company (Mullvad, NordVPN, IPVanish) for its published server list. That request is one the *app* initiates rather than one the user's own traffic makes, so it is the app's to forbid — see `Docs/ServiceBundles.md` §8. The feature is off by default anyway; this stops it being turned on. |
 
 ### Sign-in sources — which password apps may be used
 
@@ -86,6 +87,7 @@ targeting `com.bragi0.SimpleVPN`:
           <key>DisableDivertRules</key><true/>
           <key>LockProxySettings</key><true/>
           <key>LockConfiguration</key><true/>
+          <key>DisableProviderLists</key><true/>
           <!-- Sign-in sources: 1Password only, Keeper explicitly denied, and
                its tool path pinned for the machines that do use it. -->
           <key>SignInSourcesAllowed</key>

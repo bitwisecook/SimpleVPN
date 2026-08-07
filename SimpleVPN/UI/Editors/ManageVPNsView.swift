@@ -40,6 +40,11 @@ struct ManageVPNsView: View {
     private static let nativeTag = ConnectListing.nativeTag
     @State private var showImporter = false
     @State private var showDiscover = false
+    /// The provider whose server list is being added to the selected VPN, or nil.
+    /// One at a time by construction — a second sheet cannot be opened while this
+    /// holds a value, which is also the privacy rule (consenting to Mullvad is not
+    /// consenting to Nord).
+    @State private var addingServersFrom: VPNServiceProvider?
     @State private var ciscoNote: String?
     @State private var exportDoc: OVPNDocument?
     @State private var exportName = "config"
@@ -181,6 +186,11 @@ struct ManageVPNsView: View {
             CompositionEditor(vpn: vpn, store: compositions, draft: comp) {}
         }
         .sheet(isPresented: $showFindSetting) { GlobalSettingsSearchView() }
+        .sheet(item: $addingServersFrom) { provider in
+            if let id = selection, let profile = vpn.profiles.first(where: { $0.id == id }) {
+                AddServersFromProviderSheet(vpn: vpn, profile: profile, provider: provider)
+            }
+        }
         .onChange(of: settingsRouter?.findGeneration ?? 0) { showFindSetting = true }
         // A route arriving from a related-settings link in another editor, or from
         // the global search: this window owns profile SELECTION, so it resolves
@@ -774,8 +784,39 @@ struct ManageVPNsView: View {
         Button("Composition (multiple VPNs)…") { editingComposition = VPNComposition() }
             .disabled(vpn.profiles.count < 2)
         Divider()
+        // THE SECOND ENTRY POINT (the first is the no-VPNs page). A submenu rather
+        // than four more top-level items: the `+` menu already lists sixteen kinds,
+        // and four company names among them would read as four more kinds of VPN,
+        // which is exactly the wrong idea — these add SERVERS to a VPN that already
+        // exists (ONTOLOGY.md §7).
+        //
+        // Every row is enabled or disabled for a stated reason, never hidden: with
+        // no VPN selected it says so, and Proton's row says its own.
+        Menu(ProviderPickerCopy.sectionTitle) { providerMenu }
+        Divider()
         Button("Import…") { showImporter = true }
         Button("Discover from Address…") { showDiscover = true }
+    }
+
+    /// The four companies, as menu items. The keyboard path for the same thing the
+    /// no-VPNs page offers as rows — `Docs/Accessibility.md`: nothing may be
+    /// reachable only one way.
+    @ViewBuilder private var providerMenu: some View {
+        let target = selection.flatMap { id in vpn.profiles.first { $0.id == id } }
+        ForEach(VPNServiceProviderCatalog.all) { provider in
+            Button(ProviderPickerCopy.actionTitle(provider)) {
+                if provider.blocked == nil { addingServersFrom = provider } else { showImporter = true }
+            }
+            // Disabled with a REASON in the help, both for Proton (which cannot be
+            // read at all) and for "you have not chosen which VPN these go on" —
+            // which is the commoner case and the one a bare grey row would leave
+            // somebody guessing about.
+            .disabled(provider.blocked != nil || target == nil)
+            .help(provider.blocked
+                  ?? (target == nil
+                      ? "Choose a VPN in the list first \u{2014} these add servers to one you already have."
+                      : ProviderPickerCopy.detail(provider)))
+        }
     }
 
     /// Which editor the selected row gets. Tag prefixes route the non-NE
