@@ -65,6 +65,34 @@ a concept that already has one.
 **Never**: endpoint, gateway, host, target, concentrator, headend, portal — as *our* label. Any of
 them may appear in a sentence explaining a vendor's own terminology.
 
+### Companies that sell VPN service, and the servers they publish
+
+Mullvad, NordVPN, IPVanish and Proton VPN each publish a list of their servers and a set of
+connection settings that is the same for every one of them. SimpleVPN can fill a VPN's server list
+from that (`Docs/ServiceBundles.md`), and the naming decision came first because it is the thing
+this feature gets wrong before it gets anything else wrong.
+
+| Concept | House term | Vendor / other words |
+|---|---|---|
+| A company that sells VPN service and publishes its servers | **provider** | Mullvad, NordVPN, IPVanish, Proton VPN by name |
+| The servers a provider publishes | **the provider's server list**, short form **server list** | relay list (Mullvad), logicals (Proton), node list, POPs, edges |
+| The connection settings a provider uses for every one of its servers | **the provider's settings** | `template` — code only, never UI |
+| Adding servers from a provider | **"Add servers from a provider"** | install, subscribe, provision, sync |
+| A server that arrived in a fetched list, rather than from your configuration or your typing | **from *Mullvad*'s list** | imported, synced, discovered |
+
+**There is deliberately no noun for "the thing you install", and that absence is the decision.** The
+request that started this called it a *service bundle*, and bundle, pack, preset and profile
+template all promise completeness. **None of these providers can be made complete by us**: every one
+ties the last mile to an account, and SimpleVPN does not sign anyone in to a provider — so a person
+who reads "Mullvad bundle" has been misled by the noun before they reach the error message. What the
+feature does is fill in a server list. It is named after that.
+
+**Never** as our label: **bundle**, **service bundle**, **pack**, **preset**. Allowed only in
+quotation marks or a `code` span where a provider uses the word for its own thing (rule 2).
+
+**`vendor` is taken** — it means a password app or the author of a tool we shell out to
+(`LocalVaultVendor`). A VPN company is a **provider**, and the two must not drift together.
+
 ### Signing in
 
 **House term: `sign in` (verb), `sign-in` (noun/adjective).** Never log in, login, logon, or
@@ -225,6 +253,8 @@ mappings that feed it.
 | Keeping LAN reachable | **"Allow local network access"** | local LAN, exclude local networks |
 | A connection every app follows without being told to | **whole-Mac VPN** (section "Whole-Mac VPNs") | packet tunnel, utun, "Tunnels" as a category, "Other Connections", full tunnel (that is the Send-All-Traffic axis) |
 | A connection that only opens a port you aim apps at | **local port** (section "Local Ports") | proxy on its own — a *connection proxy* is the thing you go THROUGH to reach a server, which is a different concept one row down |
+| A company that sells VPN service | **provider** | vendor (that is a password app or a tool author), service, brand |
+| A provider's published servers, and the settings that go with them | **the provider's server list** / **the provider's settings** | bundle, service bundle, pack, preset, profile template — every one of them promises a completeness we cannot deliver |
 | Credentials | **username / password** | user, login, account name |
 | Other products' own labels | keep their vocabulary (1Password "one-time password" field, GlobalProtect "portal/gateway", System Settings pane names) | translating another product's proper terms |
 

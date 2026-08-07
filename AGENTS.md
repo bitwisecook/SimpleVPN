@@ -202,6 +202,11 @@ as `{password}{otp}` (no `static-challenge`). No client cert → `ENABLE_EXTERNA
   - `SimpleVPN/Diagnostics/` — logging/highlighting, doctor, diagnostic bundles + capture UI, crash
     handling, `UserFacingError`.
   - `SimpleVPN/Geo/` — GeoIP, regions, endpoints/discovery/ranking, world-map model.
+  - `SimpleVPN/Providers/` — the four VPN companies whose PUBLISHED SERVER LISTS SimpleVPN can
+    read (`Docs/ServiceBundles.md`). Pure so far: the catalogue, the parsers and the
+    trusted-template / untrusted-list validation seam. **No account integration of any kind** —
+    a list saves typing, it never signs anyone in, and `VPNServiceProvider.stillNeeded` is the
+    test-enforced sentence that keeps that honest. Nothing here fetches yet.
   - `SimpleVPN/Import/` — config importers (ovpn/cisco/ssh/cert) + detector, i.e. ONE VPN's
     file at a time.
   - `SimpleVPN/Portability/` — the WHOLE configuration as one file: every VPN and every app

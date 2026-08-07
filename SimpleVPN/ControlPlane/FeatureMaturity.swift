@@ -244,6 +244,38 @@ nonisolated enum FeatureMaturityRegistry {
                 + "host-key checking is refused"),
     ]
 
+    // MARK: VPN providers
+
+    /// Reading a VPN company's published server list (`Docs/ServiceBundles.md`).
+    ///
+    /// A FOURTH table rather than four `AppFeature` cases, for the reason the
+    /// sign-in table exists separately: these are per-vendor claims about somebody
+    /// else's service, they will be cleared one at a time by different people, and a
+    /// Mullvad result says nothing whatever about IPVanish.
+    ///
+    /// Mullvad is `.partlyVerified` and the other two are `.untested`, and the
+    /// asymmetry is exactly the honest one. WHAT WAS PROVEN FOR MULLVAD: the live
+    /// list was fetched from `api.mullvad.net/www/relays/all/` while this was
+    /// written, all 580 relays parsed, and every field the parser reads is pinned by
+    /// a test against a row copied verbatim out of that payload. WHAT WAS NOT: no
+    /// tunnel has ever been raised to a relay chosen this way, because that needs a
+    /// Mullvad account and a registered key, and SimpleVPN registers nothing.
+    ///
+    /// NordVPN and IPVanish had their payloads read here too — Nord's `/v1/servers`
+    /// and two of its CDN configs, and all 3,576 of IPVanish's `.ovpn` files — but
+    /// neither account exists on the machine this was built on, so nobody has
+    /// connected anything with either list. Proton VPN is absent on purpose: its row
+    /// states an absence rather than making a claim (`maturity(ofProvider:)` returns
+    /// `.tested`, meaning "no notice", for a provider that offers nothing).
+    static let providers: [VPNServiceProviderID: FeatureMaturity] = [
+        .mullvad: .partlyVerified(
+            checked: "its published list has been fetched and read for real \u{2014} every relay in it "
+                + "parsed, and every field SimpleVPN uses is pinned by a test against Mullvad\u{2019}s "
+                + "own payload"),
+        .nordVPN: .untested,
+        .ipVanish: .untested,
+    ]
+
     // MARK: Lookups
 
     /// A kind's maturity. An unregistered kind is `.untested` — the safe default:
@@ -288,6 +320,24 @@ nonisolated enum FeatureMaturityRegistry {
         (table ?? features)[feature] ?? .untested
     }
 
+    /// A provider's maturity.
+    ///
+    /// The default is `.tested` — meaning NO NOTICE, not "proven" — and that is the
+    /// same asymmetry the sign-in table draws for a pointer row. A provider absent
+    /// from the table is one SimpleVPN cannot read at all (Proton VPN), so its row
+    /// makes no reliability claim and has nothing to qualify; sprouting an "untested"
+    /// banner on a row whose whole content is "this does not work here" would be
+    /// noise on top of a refusal. `FeatureMaturityProviderTests` asserts every
+    /// provider we INTEND to read (`blocked == nil`) is listed regardless, so this
+    /// default cannot be used to leave a real adapter unclaimed — and the predicate
+    /// is deliberately intent rather than `canFetch`, which is additionally false
+    /// while a CA fingerprint is still to be pinned.
+    static func maturity(ofProvider id: VPNServiceProviderID,
+                         in table: [VPNServiceProviderID: FeatureMaturity]? = nil)
+        -> FeatureMaturity {
+        (table ?? providers)[id] ?? .tested
+    }
+
     /// Every kind that still carries a notice, in `VPNKind.allCases` order. Used by
     /// the tests, and available to anything that wants to state how much of this app
     /// is unproven in one place (a diagnostic report, an About-window line) without
@@ -308,6 +358,14 @@ nonisolated extension VPNKind {
 
     /// The notice to show for this kind, or nil when it is tested.
     var maturityNotice: MaturityNotice? { MaturityNotice.forKind(self) }
+}
+
+nonisolated extension VPNServiceProvider {
+    /// This provider's maturity. One hop to the registry, like every other subject.
+    var maturity: FeatureMaturity { FeatureMaturityRegistry.maturity(ofProvider: id) }
+
+    /// The notice for this provider, or nil when there is nothing to qualify.
+    var maturityNotice: MaturityNotice? { MaturityNotice.forProvider(self) }
 }
 
 nonisolated extension SignInSourceOption {
@@ -436,6 +494,44 @@ nonisolated struct MaturityNotice: Sendable, Equatable {
                 title: "\(name) has never been tested",
                 detail: "The code is written and reviewed, but nobody has used it for real yet. It may "
                     + "well work. If it doesn\u{2019}t it should say why and change nothing. Telling us what "
+                    + "happened is what gets this notice removed.")
+        }
+    }
+
+    /// A VPN provider whose published server list SimpleVPN reads.
+    ///
+    /// The copy differs from the sign-in factory in one deliberate way: it names
+    /// **what was read** rather than what was installed, because that is the honest
+    /// distinction here. Reading a provider's list is not connecting to that
+    /// provider, and a notice that blurred the two would let "we fetched Mullvad's
+    /// list" quietly become "Mullvad works".
+    static func forProvider(_ provider: VPNServiceProvider,
+                            in table: [VPNServiceProviderID: FeatureMaturity]? = nil)
+        -> MaturityNotice? {
+        let maturity = FeatureMaturityRegistry.maturity(ofProvider: provider.id, in: table)
+        guard maturity.needsNotice else { return nil }
+        let name = provider.displayName
+        switch maturity {
+        case .tested:
+            return nil
+        case .partlyVerified(let checked):
+            return MaturityNotice(
+                subject: name, maturity: maturity, key: "provider.\(provider.id.rawValue)",
+                title: "\(name)\u{2019}s server list is only partly tested",
+                detail: "Part of it is proven: \(checked). What has never happened here is a "
+                    + "connection to a \(name) server chosen from that list \u{2014} that needs a "
+                    + "\(name) account, and SimpleVPN never signs in to a provider. The list may "
+                    + "well be exactly right. Telling us what happened is what gets this notice "
+                    + "removed.")
+        case .untested:
+            return MaturityNotice(
+                subject: name, maturity: maturity, key: "provider.\(provider.id.rawValue)",
+                title: "\(name)\u{2019}s server list has never been tested",
+                detail: "The code that reads \(name)\u{2019}s published server list is written and "
+                    + "reviewed, but nobody has connected to a \(name) server with it \u{2014} "
+                    + "there is no \(name) account on the machine this was built on. It may well "
+                    + "work. If the list comes back wrong, nothing else changes: your existing "
+                    + "servers are untouched and you can still type one in. Telling us what "
                     + "happened is what gets this notice removed.")
         }
     }
