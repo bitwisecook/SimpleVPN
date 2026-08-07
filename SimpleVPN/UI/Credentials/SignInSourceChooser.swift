@@ -348,6 +348,37 @@ struct SignInSourceChooser: View {
     }
 }
 
+// MARK: - "Change…", once
+
+/// THE ONE "Change…" — the button that reopens the sign-in chooser.
+///
+/// There were TWO, and they were on screen TOGETHER: the recovery banner for a source
+/// that has gone missing carries one, and the summary line directly beneath it carries
+/// the other. Same words, same action, two declarations — so they had drifted into two
+/// button styles (one `.bordered`, one whatever `.automatic` gave it) and two
+/// accessibility shapes (one had a hint, one did not). The second one's own comment says
+/// what the rule is: *two identical actions on one screen must not have two appearances.*
+/// A comment cannot enforce that; one view can.
+///
+/// `.bordered`, not `.borderless`: a borderless text Button on macOS draws no chrome and
+/// no accent, so it renders as label-coloured text indistinguishable from the secondary
+/// caption beside it, and the only hint that it is a control is the cursor. Reported as
+/// "doesn't look like something a user could click", which was accurate. And a button
+/// rather than a `.link` because the HIG separates links (navigation, opening content)
+/// from buttons (performing an action), and this performs one.
+struct ChangeSignInSourceButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button("Change\u{2026}", action: action)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Choose a different way to sign in to this VPN")
+            .accessibilityLabel("Change how you sign in")
+            .accessibilityHint("Choose a different way to sign in to this VPN.")
+    }
+}
+
 // MARK: - Returning: how you sign in now, and the quiet way to change it
 
 /// One line for a VPN that is already set up, plus a Change button. This is the
@@ -372,25 +403,7 @@ struct SignInSourceSummary: View {
                 }
             }
             Spacer(minLength: 8)
-            // NOT .borderless: a borderless text Button on macOS draws no chrome and
-            // no accent, so it renders as label-coloured text indistinguishable from
-            // the secondary caption beside it, and the only hint that it is a control
-            // is the cursor. Reported as "doesn't look like something a user could
-            // click", which was accurate.
-            //
-            // .bordered rather than .link, for two reasons that do not depend on
-            // reading the HIG a particular way. First, the HIG separates links
-            // (navigation, opening content) from buttons (performing an action), and
-            // this performs an action — it opens the chooser. Second and more
-            // concretely, the unavailable-source banner immediately above this row
-            // already offers a BORDERED "Change…" that does the same thing; two
-            // identical actions on one screen must not have two appearances.
-            Button("Change\u{2026}", action: onChange)
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("Choose a different way to sign in to this VPN")
-                .accessibilityLabel("Change how you sign in")
-                .accessibilityHint("Choose a different way to sign in to this VPN.")
+            ChangeSignInSourceButton(action: onChange)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
@@ -632,9 +645,7 @@ struct SignInSourceRecoveryNotice: View {
                     .buttonStyle(.glass)
                     .help("Show the username and password fields for this connect only \u{2014} your setup is left alone")
                     .accessibilityHint("Shows the username and password fields for this connect only. Your saved choice is left alone.")
-                Button("Change\u{2026}", action: onChange)
-                    .help("Choose a different way to sign in to this VPN")
-                    .accessibilityLabel("Change how you sign in")
+                ChangeSignInSourceButton(action: onChange)
                 Spacer(minLength: 0)
             }
             .controlSize(.small)

@@ -248,53 +248,29 @@ struct StatusDot: View {
     }
 }
 
-/// Sidebar row: logo · name · label pills. `dotState` lets a caller pass a
-/// reachability-aware state (stalled/paused/captive); default is status-only.
-struct VPNRow: View {
-    let profile: VPNController.Profile
-    let labelDefs: [LabelDef]
-    var dotState: DotState? = nil
-    var body: some View {
-        HStack(spacing: 8) {
-            LogoBadge(id: profile.id, status: profile.status, dotState: dotState)
-            Text(profile.name).lineLimit(1).truncationMode(.tail)
-            Spacer(minLength: 6)
-            ForEach(labelDefs) { LabelPill(label: $0) }
-            // A kind nobody has been able to test says so here too — Manage VPNs
-            // is where somebody picks which VPN to set up next, so it is exactly
-            // where the state belongs. Hidden from VoiceOver; the row's sentence
-            // below carries it in words.
-            if let maturityNotice { MaturityBadge(notice: maturityNotice) }
-        }
-        // One element, one sentence — not a logo, a name and n pill fragments.
-        // The dot is hidden, so its state rides here in words.
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilitySummary)
-    }
-
-    /// From the maturity registry, never a list of kinds written out here.
-    private var maturityNotice: MaturityNotice? { profile.kind.maturityNotice }
-
-    private var accessibilitySummary: String {
-        let state = dotState ?? .from(status: profile.status)
-        var bits = [profile.name, profile.kind.displayName, state.accessibilityDescription]
-        bits.append(contentsOf: labelDefs.map(\.name))
-        if let maturityNotice { bits.append(maturityNotice.spokenValue) }
-        return bits.joined(separator: ", ")
-    }
-}
+// `VPNRow` USED TO BE HERE — a fourth sidebar row shape: logo · name · pills, at its own
+// height, with its own accessibility sentence, drawn only by Manage VPNs' profile rows
+// while the two rows beside them in the same section were built by hand in that file. It
+// is `ConnectionRowLayout` now (UI/Components/ConnectionRow.swift), which every
+// non-interactive list row in both windows goes through. Deleted rather than deprecated:
+// a spare row builder with no call sites is the next copy somebody reaches for.
 
 struct LogoBadge: View {
     let id: String
     let status: NEVPNStatus
     /// Pass a richer state (stall/captive-portal aware) where the caller has one.
     var dotState: DotState? = nil
-    /// What to draw when this connection has no logo of its own. A globe for an NE
-    /// profile (a logo is expected and simply absent); the KIND's symbol for the
-    /// connections that never get one, so an SSH tunnel and an F5 APM sitting in the same
-    /// sidebar section as an OpenVPN read as the same kind of row rather than as three
-    /// identical globes.
-    var fallbackSymbol = "globe"
+    /// What to draw when this connection has no logo of its own: **the KIND's symbol**.
+    ///
+    /// NO DEFAULT VALUE, and the compiler is the guard. It used to default to `"globe"`
+    /// on the reasoning that a logo "is expected and simply absent" for an NE profile —
+    /// which had stopped being true. Only the OpenVPN editor has a logo well, so a
+    /// WireGuard, Tailscale, Proxy Tunnel or SSH Network Tunnel profile can never get a
+    /// logo either, and still drew a globe that said nothing about it while the subprocess
+    /// and native rows beside it in the SAME sidebar section said what they were. One
+    /// badge, two fallback policies: `Docs/Drift.md` §12. A caller with genuinely no kind
+    /// may still pass `"globe"` — having to type it is the point.
+    let fallbackSymbol: String
     var body: some View {
         let state = dotState ?? .from(status: status)
         ZStack(alignment: .bottomTrailing) {

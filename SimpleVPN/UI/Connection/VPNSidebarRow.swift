@@ -28,11 +28,21 @@ struct VPNSidebarRow: View {
     private var isPaused: Bool { vpn.pausedProfiles.contains(profile.id) }
     private var reconfiguring: Bool { vpn.isReconfiguring(profile.id) }
 
+    /// WHY THIS ROW IS NOT A `ConnectionRowLayout` (a decision recorded in
+    /// `Docs/Drift.md`, not an oversight). Its middle column is INTERACTIVE — for a VPN
+    /// advertising several endpoints the caption is replaced by a destination picker,
+    /// which cannot live inside the `.combine` element a one-sentence row is made of —
+    /// and its trailing column is the live transport control. What actually drifted
+    /// between the row shapes was the SIZE, the caption rule and the spoken sentence, and
+    /// all three are shared: `ConnectionRowMetrics`, `ConnectionRowCaption` and
+    /// `ConnectionRowSentence`. `SidebarRowDisciplineTests` holds this row to them.
     var body: some View {
-        HStack(spacing: 10) {
-            LogoBadge(id: profile.id, status: profile.status, dotState: dotState)
-                .scaleEffect(1.15)
-                .frame(width: 26, height: 26)
+        HStack(spacing: ConnectionRowMetrics.spacing) {
+            LogoBadge(id: profile.id, status: profile.status, dotState: dotState,
+                      fallbackSymbol: profile.kind.systemImage)
+                .scaleEffect(ConnectionRowMetrics.badgeScale)
+                .frame(width: ConnectionRowMetrics.badgeSide,
+                       height: ConnectionRowMetrics.badgeSide)
 
             VStack(alignment: .leading, spacing: 2) {
                 // The name element carries the WHOLE row for assistive tech —
@@ -55,24 +65,31 @@ struct VPNSidebarRow: View {
                     Text(statusText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         .accessibilityHidden(true)
                 }
-                // The user's labels, and — for a VPN kind nobody has been able to
-                // test — the compact maturity chip. Both hidden from VoiceOver:
-                // the row's one sentence above already carries them in words, the
-                // same way the status dot does.
-                if !labelDefs.isEmpty || maturityNotice != nil {
+                // The user's labels. Hidden from VoiceOver: the row's one sentence
+                // above already carries them in words, the same way the status dot
+                // does. (The maturity chip USED TO BE IN HERE, which gave it a third
+                // position in a sidebar that also drew it beside the name and on the
+                // trailing edge. It is trailing now, like every other row's.)
+                if !labelDefs.isEmpty {
                     HStack(spacing: 4) {
                         ForEach(labelDefs) { LabelPill(label: $0) }
-                        if let maturityNotice { MaturityBadge(notice: maturityNotice) }
                     }
                     .accessibilityHidden(true)
                 }
             }
 
-            Spacer(minLength: 6)
+            Spacer(minLength: ConnectionRowMetrics.gutter)
+            // ONE POSITION FOR THE CHIP, and `.fixedSize()` for the same reason
+            // `ConnectionRowLayout` sets it: a flexible `Text` in a 200pt sidebar gets
+            // compressed to "Untest…", and a badge that exists to invite a report on an
+            // untried kind cannot do its job unreadable.
+            if let maturityNotice {
+                MaturityBadge(notice: maturityNotice).fixedSize()
+            }
             controls
         }
-        .padding(.vertical, 6)
-        .frame(minHeight: 52)
+        .padding(.vertical, ConnectionRowMetrics.verticalPadding)
+        .frame(minHeight: ConnectionRowMetrics.minHeight)
     }
 
     /// Whether this VPN's kind still carries a maturity notice. One lookup, from
@@ -85,11 +102,14 @@ struct VPNSidebarRow: View {
     /// urgent of them — whether the kind is proven. The chip beside the labels is
     /// hidden, so this is how it reaches VoiceOver.
     private var rowAccessibilitySummary: String {
-        var bits = [profile.name, profile.kind.displayName, rowStateDescription]
-        if vpn.routes.effectiveGatewayOwner == profile.id { bits.append("owns the default route") }
-        bits.append(contentsOf: labelDefs.map(\.name))
-        if let maturityNotice { bits.append(maturityNotice.spokenValue) }
-        return bits.joined(separator: ", ")
+        // Assembled by `ConnectionRowSentence`, not here: the ORDER a person hears while
+        // arrowing down a list has to be the same for every row in it, and this row and
+        // the three in Manage VPNs each used to join their own bits in their own order.
+        ConnectionRowSentence.make(
+            name: profile.name, kind: profile.kind, dot: dotState,
+            stateInWords: rowStateDescription,
+            notes: [vpn.routes.effectiveGatewayOwner == profile.id ? "owns the default route" : ""],
+            labels: labelDefs.map(\.name), maturity: maturityNotice)
     }
 
     private var rowStateDescription: String {

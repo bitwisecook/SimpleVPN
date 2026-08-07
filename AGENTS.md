@@ -36,6 +36,50 @@ AES-128-GCM).
 Team `QVUFB5676H`, bundles `com.bragi0.SimpleVPN[.PacketTunnel]`, App Group `group.com.bragi0.SimpleVPN`,
 keychain group `$(AppIdentifierPrefix)com.bragi0.SimpleVPN.shared`.
 
+## A change that cannot cover part of its own scope must leave a marker that SURFACES
+
+**Binding.** Two of one day's worst defects came from the same cause, and neither was
+dishonesty — both exclusions were recorded plainly, in a place nobody reads again:
+
+- `fb0a00d` collapsed five duplicate editor-row helpers into one and **excluded
+  `SubprocessTunnelView.swift`** because another agent held the file. That file is now the
+  source of three separate defects (settings silently not persisting, an unbounded pane
+  that blew a sidebar to 4627pt, an unexplained banner).
+- `7df48eb` merged the sidebar's sections and **scoped itself to regrouping** — "lifted
+  into `profileRow`/`tunnelRow`/`nativeRow` verbatim, no layout restructure". The headings
+  stopped dividing rows by transport; the rows carried on doing it. One heading ended up
+  showing two icon styles, two row heights, a differently-placed status dot, an
+  inconsistent subtitle and a truncated "Untest…" badge.
+
+Both were stated in their own commit messages and reports. **Nobody re-read either.** So:
+
+> **If your change deliberately leaves part of its own scope untouched — an excluded file,
+> a "regrouping only" boundary, a call site you could not reach — the exclusion must be
+> recorded somewhere the NEXT PERSON TRIPS OVER IT. A sentence in a commit message is not
+> that place. Neither is a `TODO`.**
+
+What counts, in order of preference:
+
+1. **A test that fails when the exclusion ends.** The strongest form, because it cannot be
+   missed and it self-retires. `SidebarRowDisciplineTests
+   .subprocessTunnelViewIsStillOutsideTheSharedRows` is the model: it passes while that
+   editor is still outside the shared rows and fails the moment it is brought in, telling
+   whoever did it to close the register entry and delete the test.
+2. **A test that fails when a second implementation appears.** For an exclusion that leaves
+   two copies standing: `DriftRegisterTests` names every file allowed to hold a guarded
+   concept and fails on a new one. Prefer this over collapsing the code — a guard prevents
+   the recurrence, a collapse only fixes today.
+3. **An entry in `Docs/Drift.md`**, the register of everything this repo implements more
+   than once: the concept, where the copies are, whether they agree, and the verdict —
+   **collapse**, **keep separate with a stated reason**, or **not yet decided**. Every
+   guarded concept must have a section there; `DriftRegisterTests` asserts it, so a guard
+   can never send its author to a table with no reason attached.
+
+**Read `Docs/Drift.md` before adding a second implementation of anything**, and add to it
+when you find one. "Keep separate" is a real verdict and is sometimes the right one —
+§6 (four prefix policies, four defensible subsets) is the model — but it has to be written
+down as a decision rather than left as an accident.
+
 ## Zero warnings is ENFORCED, not aspirational
 
 `SWIFT_TREAT_WARNINGS_AS_ERRORS: YES` + `GCC_TREAT_WARNINGS_AS_ERRORS: YES` are set on **all seven of

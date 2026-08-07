@@ -33,7 +33,8 @@ extension ConnectionDetailView {
     // Connect/disconnect lives here, in the header, local to this VPN — not a global button.
     var header: some View {   // was private — internal for the file split
         HStack(spacing: 14) {
-            LogoBadge(id: profile.id, status: profile.status, dotState: headerDotState)
+            LogoBadge(id: profile.id, status: profile.status, dotState: headerDotState,
+                      fallbackSymbol: profile.kind.systemImage)
                 .scaleEffect(1.6).frame(width: 40, height: 40)
             VStack(alignment: .leading, spacing: 3) {
                 Text(profile.name).font(.title2).bold()

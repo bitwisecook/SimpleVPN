@@ -237,12 +237,21 @@ everything below.
 
 - **Stores** a host (an `FQDN` or an `IPAddress`) and a `Port`.
 - **THE reason to build it**: `[::1]:443`. An IPv6 literal in a `host:port` string **must** be
-  bracketed, and today three places do that by hand —
-  `SimpleVPN/Geo/WireGuardEndpointSelection.swift:110` (`h.contains(":") && !h.hasPrefix("[")`),
-  `SimpleVPN/Geo/EndpointDiscovery.swift:85`, and `SimpleVPN/Import/SSHConfigImport.swift:259` —
-  each with its own idea of when to bracket and how to unbracket. Make it **one rendering the type
-  owns** (`wireText`, or whatever it is called) and delete the string interpolation at every call
-  site.
+  bracketed, and today **five** places do that by hand, each with its own idea of when to bracket
+  and how to unbracket:
+  - `SimpleVPN/Geo/WireGuardEndpointSelection.swift:110` — `h.contains(":") && !h.hasPrefix("[")`
+  - `SimpleVPN/Geo/EndpointDiscovery.swift:85`, `:94` — the parse side, guarded by *counting* colons
+  - `SimpleVPN/Import/SSHConfigImport.swift:259` — the parse side, `hasPrefix("[")` then find `]`
+  - `Shared/SSHNetworkTunnelConfig.swift:182` — the first one's rule, written out again
+  - `SimpleVPN/Credentials/BitwardenProvider.swift:145` — `host.contains(":")` → bracket, **with no
+    already-bracketed guard**, so an already-bracketed host would become `[[::1]]`. Latent only
+    because `isLoopback` gates it and rejects the bracketed spellings — i.e. prevented by an
+    unrelated function, which is the accident this whole document is about.
+
+  This entry said "three places" until the fourth and fifth were found while writing
+  `Docs/Drift.md` §5; **the count is now guarded** by `DriftRegisterTests`, which fails on a sixth.
+  Make it **one rendering the type owns** (`wireText`, or whatever it is called) and delete the
+  string interpolation at every call site.
 - **Parsing is the same trap in reverse**: splitting on the last `:` is right for `host:443` and
   wrong for `::1`, and `EndpointDiscovery` already guards it by counting colons.
 - **Traps.** A port is optional and its absence means "the scheme's default" or "the config's own",

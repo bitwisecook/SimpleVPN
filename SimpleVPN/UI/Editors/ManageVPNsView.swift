@@ -307,10 +307,17 @@ struct ManageVPNsView: View {
         }
     }
 
-    /// The row for one arrangement tag, from whichever store owns it. The three row
-    /// builders are unchanged, including the `.tag(…)` each one applies: a reorder
-    /// moves rows and must change no tag, or a settings route from the other window
-    /// would select nothing.
+    /// The row for one arrangement tag, from whichever store owns it. The `.tag(…)` each
+    /// one applies is load-bearing: a reorder moves rows and must change no tag, or a
+    /// settings route from the other window would select nothing.
+    ///
+    /// THERE ARE THREE OF THESE AND ONE ROW. What differs between a profile, a subprocess
+    /// tunnel and a native VPN is which store answers, what the caption's extra fact is,
+    /// and what the context menu offers — so that is what these three pass in. The badge,
+    /// the metrics, the caption rule, the dot's position, the maturity chip and the spoken
+    /// sentence all come from `ConnectionRowLayout`, because when they were written out
+    /// three times they drifted into three of everything under one heading. See
+    /// `Docs/Drift.md`.
     @ViewBuilder private func row(for tag: String) -> some View {
         if let t = tunnelBinding(for: tag) {
             tunnelRow(t)
@@ -322,8 +329,14 @@ struct ManageVPNsView: View {
     }
 
     @ViewBuilder private func profileRow(_ p: VPNController.Profile) -> some View {
-        HStack(spacing: 8) {
-            VPNRow(profile: p, labelDefs: labels.labels(for: p.id))
+        ConnectionRowLayout(
+            id: p.id, name: p.name, kind: p.kind, status: p.status,
+            dot: .from(status: p.status),
+            caption: ConnectionRowCaption.of(name: p.name, kind: p.kind),
+            labels: labels.labels(for: p.id)
+        ) {
+            // The two warnings only an NE profile can carry. Outside the combined
+            // element on purpose — each is its own labelled, help-carrying badge.
             CertExpiryBadge(ovpn: vpn.ovpnText(id: p.id))
             InlineKeyStillStoredBadge(reason: vpn.inlineSecretMigrationFailures[p.id])
         }
@@ -386,29 +399,16 @@ struct ManageVPNsView: View {
         // What this one gives you, when what it gives you is a port. The same string the
         // connect list's caption carries, from the same one place.
         let port = ConnectListing.portSummary(t)
-        HStack(spacing: 8) {
-            StatusDot(state: .from(subprocess: st))
-            Image(systemName: t.kind.systemImage)
-                .foregroundStyle(tunnelManager.isActive(t.id) ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(t.name)
-                Text(st.isFailed ? (st.failureText ?? "Failed")
-                     : [t.kind.displayName, port].compactMap { $0 }.joined(separator: " \u{00B7} "))
-                    .font(.caption)
-                    .foregroundStyle(st.isFailed ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
-                    .lineLimit(1)
-            }
-            // The SSL-VPN kinds are exactly the ones nobody has been able to try.
-            if let notice = t.kind.maturityNotice {
-                MaturityBadge(notice: notice)
-            }
-        }
-        // One sentence, dot state in words (the dot is hidden), then the maturity the
-        // chip shows.
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(t.name), \(t.kind.displayName)\(port.map { ", \($0)" } ?? ""), \(DotState.from(subprocess: st).accessibilityDescription)\(st.isFailed ? ", \(st.failureText ?? "failed")" : "")\(t.kind.maturityNotice.map { ", \($0.spokenValue)" } ?? "")")
-        .tag(Self.tunnelTag + t.id)
+        ConnectionRowLayout(
+            id: t.id, name: t.name, kind: t.kind,
+            dot: .from(subprocess: st),
+            caption: st.isFailed
+                ? ConnectionRowCaption.problem(kind: t.kind, st.failureText ?? "Failed")
+                : ConnectionRowCaption.of(name: t.name, kind: t.kind, fact: port),
+            // No `spokenNotes` for the failure: the caption already carries it, and the
+            // sentence says the caption's fact.
+            captionIsProblem: st.isFailed)
+            .tag(Self.tunnelTag + t.id)
         .contextMenu {
             ReorderMenuItems(commands: order.commands(for: Self.tunnelTag + t.id))
             Divider()
@@ -422,26 +422,14 @@ struct ManageVPNsView: View {
         // Reflect real status, not just activeConfigID — an OS-side drop clears
         // activeConfigID, and connecting/failed now read distinctly.
         let isThis = nativeVPN.activeConfigID == c.id
-        HStack(spacing: 8) {
-            StatusDot(status: isThis ? nativeVPN.status : .disconnected)
-            Image(systemName: c.kind.systemImage)
-                .foregroundStyle(isThis && nativeVPN.status == .connected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(c.name)
-                Text(c.kind.displayName).font(.caption).foregroundStyle(.secondary)
-            }
-            // All three native kinds are unproven — this Mac has no IKEv2, IPsec or
-            // L2TP server to try.
-            if let notice = c.kind.maturityNotice {
-                MaturityBadge(notice: notice)
-            }
-        }
-        // One sentence incl. the dot's state in words — the hidden dot and icon tint
-        // said "connected" to nobody — then the maturity the chip shows.
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(c.name), \(c.kind.displayName), \(DotState.from(status: isThis ? nativeVPN.status : .disconnected).accessibilityDescription)\(c.kind.maturityNotice.map { ", \($0.spokenValue)" } ?? "")")
-        .tag(Self.nativeTag + c.id)
+        let status = isThis ? nativeVPN.status : .disconnected
+        ConnectionRowLayout(
+            id: c.id, name: c.name, kind: c.kind, status: status,
+            dot: .from(status: status),
+            // Nothing but the kind to say, so a VPN the + menu named after its kind gets
+            // NO caption rather than "IKEv2" written twice — see `ConnectionRowCaption`.
+            caption: ConnectionRowCaption.of(name: c.name, kind: c.kind))
+            .tag(Self.nativeTag + c.id)
         .contextMenu {
             ReorderMenuItems(commands: order.commands(for: Self.nativeTag + c.id))
             Divider()
@@ -450,10 +438,16 @@ struct ManageVPNsView: View {
     }
 
     /// A composition row: single Connect/Disconnect for the whole group, plus edit/remove.
+    ///
+    /// NOT a `ConnectionRowLayout`, and that is a decision rather than an omission
+    /// (`Docs/Drift.md`): a composition is a GROUP of VPNs, so it has no `VPNKind`, no
+    /// maturity, no logo and no status dot of its own — everything the shared row is made
+    /// of. It sits under its own heading for the same reason. What it DOES share is the
+    /// height, because a sidebar whose rows are two sizes reads as two lists.
     @ViewBuilder private func compositionRow(_ comp: VPNComposition) -> some View {
         let active = vpn.isCompositionActive(comp)
-        HStack(spacing: 8) {
-            HStack(spacing: 8) {
+        HStack(spacing: ConnectionRowMetrics.spacing) {
+            HStack(spacing: ConnectionRowMetrics.spacing) {
                 Image(systemName: "square.stack.3d.up")
                     .foregroundStyle(active ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
                     .accessibilityHidden(true)
@@ -463,20 +457,33 @@ struct ManageVPNsView: View {
                 }
             }
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("\(comp.name), composition of \(comp.members.count) VPNs, \(active ? "connected" : "disconnected")")
-            Spacer(minLength: 6)
+            // The same sentence shape, in the same order, from the same assembler — a
+            // composition has no kind, so it passes none.
+            .accessibilityLabel(ConnectionRowSentence.make(
+                name: comp.name, kind: nil,
+                fact: "composition of \(comp.members.count) VPNs",
+                dot: active ? .connected : .off))
+            Spacer(minLength: ConnectionRowMetrics.gutter)
+            // THE SAME CONTROL AS EVERY OTHER CONNECT/DISCONNECT IN THE APP. It used to
+            // be a borderless `play.circle.fill` glyph with no accessibility VALUE — a
+            // second dialect of the one action, in a window whose other rows all speak
+            // the first, and a control that named itself without ever saying whether the
+            // thing it acts on is running (rule 1, Docs/Accessibility.md).
+            // The value's words come from `DotState`, the one status vocabulary — never
+            // a phrase typed here.
+            let groupDot: DotState = active ? .connected : .off
             if active {
-                Button { vpn.disconnectComposition(comp) } label: {
-                    Image(systemName: "stop.circle.fill").frame(width: 22, height: 22).contentShape(Rectangle())
+                SidebarActionCircle(symbol: "stop.fill", tint: .red, help: "Disconnect all",
+                                    label: "Disconnect all of \(comp.name)",
+                                    value: groupDot.accessibilityDescription) {
+                    vpn.disconnectComposition(comp)
                 }
-                    .buttonStyle(.borderless).help("Disconnect all")
-                    .accessibilityLabel("Disconnect all of \(comp.name)")
             } else {
-                Button { Task { await vpn.connectComposition(comp) } } label: {
-                    Image(systemName: "play.circle.fill").frame(width: 22, height: 22).contentShape(Rectangle())
+                SidebarActionCircle(symbol: "play.fill", tint: .green, help: "Connect all",
+                                    label: "Connect all of \(comp.name)",
+                                    value: groupDot.accessibilityDescription) {
+                    Task { await vpn.connectComposition(comp) }
                 }
-                    .buttonStyle(.borderless).help("Connect all")
-                    .accessibilityLabel("Connect all of \(comp.name)")
             }
             // Edit/Remove used to live only in the context menu, which plain
             // keyboard can't open — this menu is the Tab-reachable path.
@@ -489,6 +496,8 @@ struct ManageVPNsView: View {
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                 .accessibilityLabel("Actions for \(comp.name)")
         }
+        .padding(.vertical, ConnectionRowMetrics.verticalPadding)
+        .frame(minHeight: ConnectionRowMetrics.minHeight)
         .contextMenu {
             Button(active ? "Disconnect All" : "Connect All") {
                 if active { vpn.disconnectComposition(comp) } else { Task { await vpn.connectComposition(comp) } }

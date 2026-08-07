@@ -518,7 +518,8 @@ struct MenuBarView: View {
         let busy = p.status == .connecting || p.status == .disconnecting
         MenuItemRow(action: { rowAction(p) }, enabled: !busy) {
             HStack(spacing: 8) {
-                if anyLogo { LogoBadge(id: p.id, status: p.status, dotState: dotState) }
+                if anyLogo { LogoBadge(id: p.id, status: p.status, dotState: dotState,
+                                    fallbackSymbol: p.kind.systemImage) }
                 else { StatusDot(state: dotState, size: 8) }
                 Text(p.name).lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 6)
@@ -750,7 +751,11 @@ struct MenuBarView: View {
         }
         .help(active ? "Disconnect \(comp.name)" : "Connect \(comp.name)")
         // The bare member count would read as a mystery number.
-        .accessibilityLabel("\(comp.name), \(active ? "connected" : "disconnected"), \(comp.members.count) VPNs")
+        // The state's words come from `DotState`, the one status vocabulary — this row
+        // and Manage VPNs' composition row each used to spell it out for themselves, so
+        // "connected"/"disconnected" existed here as literals that nothing kept in step
+        // with the rest of the app (`Docs/Drift.md`).
+        .accessibilityLabel("\(comp.name), \((active ? DotState.connected : .off).accessibilityDescription), \(comp.members.count) VPNs")
         .accessibilityHint(active ? "Disconnects the whole group." : "Connects the whole group.")
     }
 }

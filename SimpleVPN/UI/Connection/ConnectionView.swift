@@ -247,48 +247,25 @@ struct ConnectionView: View {
     }
 
     private func otherConnectionRow(_ row: OtherConnection) -> some View {
-        let notice = row.kind.maturityNotice
         let need = otherNeeds[row.id]
-        // THE CAPTION, in priority order. Something missing outranks everything (that is
-        // what the user has to act on), and the status word comes from the ONE
-        // vocabulary — never a phrase invented here. Otherwise a local-port row says
-        // WHICH PORT, which is the fact its section exists to make actionable, and a
-        // whole-Mac row says only its kind: "it takes your traffic" is the heading's job.
-        let caption = need.map { "\(row.kind.displayName) \u{00B7} \($0.statusWord)" }
-            ?? [row.kind.displayName, row.portSummary].compactMap { $0 }.joined(separator: " \u{00B7} ")
-        return HStack(spacing: 10) {
-            // THE SAME BADGE, METRICS AND CONTROL AS `VPNSidebarRow`. These rows share a
-            // section with the NE profiles now, so a shorter row with a bare dot and a
-            // borderless glyph would redraw the transport split this change removed — the
-            // user would still see which ones are "the other kind", just without a label
-            // for it. The badge falls back to the KIND's symbol because these connections
-            // never have a logo of their own.
-            LogoBadge(id: row.configID, status: .disconnected, dotState: row.dot,
-                      fallbackSymbol: row.kind.systemImage)
-                .scaleEffect(1.15)
-                .frame(width: 26, height: 26)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 5) {
-                    Text(row.name).lineLimit(1)
-                    // A kind nobody has proven: the chip is still true, and a row
-                    // that is only configured is exactly where somebody decides
-                    // whether to try it.
-                    if let notice { MaturityBadge(notice: notice) }
-                }
-                // The sidebar is 220pt wide, so the SENTENCE lives in the detail pane's
-                // banner and on this row's `.help`; what fits here is the fact that
-                // there is something to do, or the port to aim at.
-                Text(caption)
-                    .font(.caption).lineLimit(1)
-                    .foregroundStyle(need == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.orange))
-            }
-            // One sentence per row; the (hidden) dot's state rides in words. The port
-            // rides here too — a caption a screen reader never hears would make the
-            // one actionable fact about a local port sighted-only.
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("\(row.name), \(row.kind.displayName)\(row.portSummary.map { ", \($0)" } ?? ""), \(row.dot.accessibilityDescription)\(notice.map { ", \($0.spokenValue)" } ?? "")")
-            .accessibilityValue(need?.sentence ?? "")
-            Spacer(minLength: 6)
+        // THE CAPTION, in priority order, from the ONE caption rule
+        // (`ConnectionRowCaption`) that both windows read. Something missing outranks
+        // everything (that is what the user has to act on), and the status word comes
+        // from the ONE vocabulary — never a phrase invented here. Otherwise a local-port
+        // row says WHICH PORT, which is the fact its section exists to make actionable,
+        // and a whole-Mac row says only its kind: "it takes your traffic" is the
+        // heading's job. A row whose name IS its kind says nothing twice.
+        let caption = need.map { ConnectionRowCaption.problem(kind: row.kind, $0.statusWord) }
+            ?? ConnectionRowCaption.of(name: row.name, kind: row.kind, fact: row.portSummary)
+        // THE SAME BADGE, METRICS, CAPTION RULE AND SPOKEN SENTENCE AS MANAGE VPNS' ROWS
+        // — one `ConnectionRowLayout`, because these rows share a section with the NE
+        // profiles now and a shorter row with a bare dot would redraw the transport split
+        // this change removed. The trailing control stays here: it is the one thing that
+        // differs between a connect list and a configuration list.
+        return ConnectionRowLayout(
+            id: row.configID, name: row.name, kind: row.kind, dot: row.dot,
+            caption: caption, captionIsProblem: need != nil,
+            spokenValue: need?.sentence ?? "") {
             if row.isActive {
                 // Every other Connect/Disconnect control in the app reports the live
                 // state in its value (rule 1). The words come from DotState, which is the
@@ -317,9 +294,6 @@ struct ConnectionView: View {
                     disabled: need != nil, action: row.connect)
             }
         }
-        // The same vertical metrics as `VPNSidebarRow`, so one section is one list.
-        .padding(.vertical, 6)
-        .frame(minHeight: 52)
     }
 
     /// This native VPN's Custom Routing proxy, as `NEVPNManager` wants it. Mirrors
