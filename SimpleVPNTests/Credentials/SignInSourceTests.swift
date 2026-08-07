@@ -960,6 +960,42 @@ struct SignInFlowTests {
         #expect(SignInFlow.recoveryLine.lowercased().contains("another way"))
     }
 
+    /// …AND WHEN THE LEVEL MODEL NAMED THE PROBLEM, the notice says WHICH problem.
+    ///
+    /// "1Password isn't available" is the wrong sentence for most of the states that
+    /// reach the recovery notice: an app that is not running, an app that is too old
+    /// and a switch that is off are three different problems with three different
+    /// fixes, and the vendor's copy book already spells each of them out. The notice
+    /// used to walk past all of it and show the one vague sentence.
+    @Test func aNamedBlockGetsTheVendorsOwnSentence() {
+        let vague = SignInFlow.unavailableHeadline(.onePassword)
+        for block in [LocalVaultBlock.appNotRunning, .needsUpdate, .integrationOff] {
+            let precise = SignInFlow.unavailableHeadline(.onePassword, block: block)
+            #expect(precise != vague)
+            #expect(precise == LocalVaultCopyBook.onePassword.blocks[block]?.headline)
+        }
+        // A block the vendor has written nothing for falls back rather than inventing
+        // a sentence — 1Password has no `.toolMissing` copy, because its channel is the
+        // app's own IPC and there is no tool to install.
+        #expect(SignInFlow.unavailableHeadline(.onePassword, block: .toolMissing) == vague)
+        // …and so does "no block at all", which is what every non-vault kind gives.
+        #expect(SignInFlow.unavailableHeadline(.onePassword, block: nil) == vague)
+        #expect(SignInFlow.unavailableHeadline(.applePasswords, block: .toolMissing)
+                == SignInFlow.unavailableHeadline(.applePasswords))
+    }
+
+    /// The kind→vendor lookup the routing rests on is total for every vault kind and
+    /// nil for the two that are not vaults. A kind that silently failed to resolve
+    /// would send every one of its blocks back to the vague sentence.
+    @Test func everyVaultKindResolvesToItsVendor() {
+        for vendor in LocalVaultVendor.allCases {
+            let kind = LocalVaultCopyBook.copy(for: vendor).storedKind
+            #expect(LocalVaultCopyBook.vendor(forStored: kind) == vendor)
+        }
+        #expect(LocalVaultCopyBook.vendor(forStored: .manual) == nil)
+        #expect(LocalVaultCopyBook.vendor(forStored: .applePasswords) == nil)
+    }
+
     /// The whole decision, over every reachable combination: it always answers,
     /// and it never asks a VPN that is already set up.
     @Test func theDecisionIsTotalAndNeverReAsks() {

@@ -445,6 +445,9 @@ struct SignInSourcesSettings: View {
             switch availability {
             case .ready: return "Ready to use."
             case .notInstalled: return "Nothing found for it on this Mac."
+            // The pane refreshes on appear, so this is the first frame only \u{2014} and it
+            // must not spend that frame telling somebody their vault is gone.
+            case .unscanned: return "SimpleVPN hasn\u{2019}t checked this Mac yet."
             // The vendor's wording when it has some, else the CEILING's — never a
             // fourth copy of "SimpleVPN checks this when you pick it", which was
             // wrong for a server nothing will ever probe.
@@ -465,10 +468,14 @@ struct SignInSourcesSettings: View {
                         .font(.callout.weight(isChosen ? .semibold : .regular))
                     // Colour is never the only carrier: the sentence says it, and a
                     // symbol differs as well.
-                    Label(sentence, systemImage: availability.isReady
-                          ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    // Three outcomes, not two: ready, a real problem, and "nobody has
+                    // looked", which earns neither the tick nor the orange.
+                    Label(sentence, systemImage: !availability.isAnswered ? "hourglass"
+                          : (availability.isReady ? "checkmark.circle.fill"
+                                                  : "exclamationmark.triangle.fill"))
                         .font(.caption)
-                        .foregroundStyle(availability.isReady ? Color.secondary : Color.orange)
+                        .foregroundStyle(availability.isReady || !availability.isAnswered
+                                         ? Color.secondary : Color.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
@@ -499,6 +506,7 @@ struct SignInSourcesSettings: View {
             }
             switch availability {
             case .notInstalled: return "Not found on this Mac."
+            case .unscanned: return "SimpleVPN hasn\u{2019}t checked this Mac yet."
             case .ready: return "Ready to use."
             // The vendor's wording when it has some, else the CEILING's — never a
             // fourth copy of "SimpleVPN checks this when you pick it", which was
@@ -512,6 +520,9 @@ struct SignInSourcesSettings: View {
             switch availability {
             case .ready: return "checkmark.circle.fill"
             case .notInstalled: return "questionmark.circle"
+            // Distinct from `.unchecked`'s clock: that one means "installed, one check
+            // owed"; this one means SimpleVPN has not swept this Mac at all yet.
+            case .unscanned: return "hourglass"
             case .unchecked: return "clock"
             case .blocked: return "exclamationmark.triangle.fill"
             }

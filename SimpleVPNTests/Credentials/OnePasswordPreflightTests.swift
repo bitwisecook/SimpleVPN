@@ -99,6 +99,50 @@ struct OnePasswordPreflightTests {
                 == .notInstalled)
     }
 
+    // MARK: - A refused spawn is not an answer about 1Password
+
+    /// THE HELPER NEVER RAN, so nothing here is 1Password's fault and nothing may be
+    /// concluded about it.
+    ///
+    /// The first execution of `opnative-helper` after any install or update is denied
+    /// by a one-shot Gatekeeper assessment ("Security policy would not allow process")
+    /// and the very next spawn works. That throw used to arrive as `.other(…)`,
+    /// indistinguishable from a real SDK failure, and `probe()` swallowed it into a
+    /// bare `false` — which the deep scan turned into `.blocked(.needsUpdate)` and
+    /// `deepWins` then let override a perfectly good `.ready` for the whole session.
+    ///
+    /// So: never `.notInstalled`, and the sentence must not send anyone to 1Password.
+    @Test func aRefusedSpawnIsNeverMistakenForAMissingApp() throws {
+        let refused = OnePasswordNativeError.helperRefusedToStart("Security policy would not allow process")
+        #expect(refused != OnePasswordNativeError.other("Security policy would not allow process"))
+
+        let state = OnePasswordPreflight.outcome(for: refused)
+        #expect(state != .notInstalled)
+        #expect(state != .integrationOff)
+        guard case .failed(let error) = state else {
+            Issue.record("expected a classified failure, got \(state)")
+            return
+        }
+        #expect(!error.title.isEmpty)
+
+        // The sentence says what happened and that trying again is the fix. It must not
+        // tell somebody to install, update or unlock a 1Password that is working.
+        let sentence = try #require(refused.errorDescription)
+        #expect(sentence.contains("Try again"))
+        for wrongAdvice in ["install", "update", "unlock", "1password.com"] {
+            #expect(!sentence.lowercased().contains(wrongAdvice))
+        }
+    }
+
+    /// The three outcomes are three, and only ONE of them is a finding. A caller
+    /// switching on this type cannot accidentally fold "no answer" into "no".
+    @Test func onlyOneProbeOutcomeIsAVerdict() {
+        // How every caller reads it: "is it a definite no?" — which a non-answer isn't.
+        #expect(OnePasswordNative.ProbeAnswer.noAnswer != .unavailable)
+        #expect(OnePasswordNative.ProbeAnswer.noAnswer != .available)
+        #expect(OnePasswordNative.ProbeAnswer.available != .unavailable)
+    }
+
     /// Anything else still lands somewhere actionable: the classified failure,
     /// so the card can show real advice for a problem this file never met.
     @Test func unfamiliarFailuresKeepTheirAdvice() throws {

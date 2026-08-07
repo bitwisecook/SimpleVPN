@@ -185,6 +185,10 @@ nonisolated extension UserFacingError {
         case .rateLimited:       return opBusy(detail: detail, occurred: occurred)
         case .badRequest:        return opItemNotFound(detail: detail, occurred: occurred)
         case .badResponse:       return opGeneric(detail: detail, occurred: occurred)
+        // MACOS REFUSED THE SPAWN — nothing about it is 1Password's doing, so it must
+        // not be routed to a 1Password-blaming sentence. Its own `errorDescription`
+        // already says what happened and that trying again usually clears it.
+        case .helperRefusedToStart: return opGeneric(detail: detail, occurred: occurred)
         case .other(let message):
             // It came out of the 1Password helper, so it IS a 1Password failure
             // however unfamiliar its wording — this is the path the SDK's raw

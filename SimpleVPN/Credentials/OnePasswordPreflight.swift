@@ -151,7 +151,13 @@ nonisolated enum OnePasswordPreflight {
     /// better thing to say after six seconds than a spinner is.
     static func run(account: String, timeout: Duration = .seconds(6),
                     store: UserDefaults = .standard) async -> State {
-        guard await OnePasswordNative.probe() else { return .notInstalled }
+        // `.notInstalled` only on a REAL finding. A probe that never got an answer
+        // (a refused spawn — one-shot Gatekeeper after an update — a killed helper, an
+        // unparseable reply) says nothing about 1Password, so the walkthrough carries
+        // on to the real call below, whose own failure is classified honestly. Claiming
+        // "1Password isn't installed" from a non-answer is how a healthy setup got told
+        // to go and install what it already had.
+        if await OnePasswordNative.probeAnswer() == .unavailable { return .notInstalled }
         // Read the remembered name up front: the racing closure has to be
         // Sendable, and UserDefaults isn't.
         let remembered = OnePasswordAccountMemory.remembered(in: store)

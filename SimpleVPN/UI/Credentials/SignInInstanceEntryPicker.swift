@@ -131,14 +131,25 @@ struct SignInInstanceEntryPicker: View {
             switch availability {
             case .ready: return "Ready to use."
             case .notInstalled: return "Not found on this Mac."
+            // The first frame, before this view's own `onAppear` refresh lands. It must
+            // NOT borrow "Not found on this Mac" — that is a verdict, and this is the
+            // absence of one.
+            case .unscanned: return "SimpleVPN hasn\u{2019}t checked this Mac yet."
             case .unchecked(let ceiling): return copy.uncheckedNote ?? ceiling.fallbackNote
             case .blocked(let block): return copy.headline(for: block)
             }
         }()
         let ok = availability.isReady && resolution.isUsable
-        Label(sentence, systemImage: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+        // NOT AN ALARM AND NOT A TICK. An unscanned source has told us nothing, so it
+        // claims neither — a warning triangle here would be the same false verdict the
+        // sentence above refuses to give, wearing an icon. Differentiate Without Colour
+        // is satisfied by the third symbol, not by the grey alone.
+        let pending = !availability.isAnswered
+        Label(sentence, systemImage: pending ? "hourglass"
+                                             : (ok ? "checkmark.circle.fill"
+                                                   : "exclamationmark.triangle.fill"))
             .font(.callout)
-            .foregroundStyle(ok ? Color.secondary : Color.orange)
+            .foregroundStyle(ok || pending ? Color.secondary : Color.orange)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityElement(children: .combine)
             .accessibilityLabel("This \(vendor.instanceNoun) on this Mac")

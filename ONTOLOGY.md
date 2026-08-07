@@ -310,12 +310,25 @@ These are constantly conflated and must not be:
 
 - **Availability** — can this work *on this Mac, right now*: installed, running, signed in,
   reachable. It changes when the user installs something. It is a live probe.
-  Terms: **ready**, **needs setup**, **not installed**.
+  Terms: **ready**, **needs setup**, **not installed**, **not checked yet**.
 - **Maturity** — has anyone ever seen this work *at all*. It changes when a human reports a
   result. Terms: **tested**, **partly tested**, **untested**.
 
 A source can be **ready** and **untested** simultaneously, and that is the normal state of a new
 adapter. Never let one word carry both ideas.
+
+**"Not checked yet" is a fourth availability state and never a synonym for "not installed."**
+It means *SimpleVPN has not looked at this Mac yet* — an absence of facts, not a finding about the
+source. The sentence is **"SimpleVPN hasn't checked this Mac yet."** and it carries the hourglass,
+never the warning triangle: a state that has told us nothing must not be drawn as a problem or
+spoken as one. It exists because the two were once the same value (`LocalVaultAvailability`
+answered `.notInstalled` for a vendor nobody had looked for), and the app consequently told a user
+their perfectly healthy 1Password was unavailable. The binding rule, and the one the tests pin: an
+unscanned source is never `needsAttention`, and a source that HAS been looked for and is absent
+still says so.
+
+Distinguish it in copy from **"the check is owed"** (`AuthProbeCeiling.checkOwedOnUse`), which is a
+finding: the source IS here, and one further check is paid the first time you use it.
 
 ---
 

@@ -516,6 +516,10 @@ nonisolated enum DiagnosticReportInventory {
                            vendor: LocalVaultVendor? = nil) -> String {
         let noun = vendor?.instanceNoun ?? "vault"
         return switch availability {
+        // A report that says "not installed" about a vendor nobody looked for sends the
+        // next reader after the wrong thing — which is precisely how one of these
+        // reports was misread. Say what actually happened.
+        case .unscanned: "not checked \u{2014} SimpleVPN hadn\u{2019}t scanned this Mac yet"
         case .notInstalled: "not installed"
         // "installed and reachable, never proven end to end" was the old sentence, and
         // for a SERVER-shaped source it claimed something nothing had established:

@@ -75,6 +75,14 @@ enum DiagnosticReportAssembler {
                          answers: DiagnosticReportAnswers) async -> DiagnosticReportPayload {
         let scrubber = SecretScrubber(policy: .report,
                                      literalSecrets: literalSecrets(context: context))
+        // LOOK BEFORE REPORTING. This was the other caller reading facts nobody had
+        // gathered: a report raised before any sign-in surface had appeared listed every
+        // vendor as absent, in the one artefact a person sends when they want help.
+        // The cheap pass is synchronous, spawns nothing and prompts for nothing — the
+        // same guard `VPNController.authSatisfaction` pays for the same reason. What it
+        // does NOT do is force the deep pass: that spawns vendor tools, and a report
+        // must never put somebody's Touch ID sheet on screen.
+        if !context.availability.scanned { context.availability.refresh() }
         let facts = context.availability.facts
 
         // Awaited BEFORE the array literal: the scan runs off the main actor (see

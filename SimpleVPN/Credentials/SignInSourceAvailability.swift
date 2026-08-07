@@ -40,7 +40,12 @@ final class SignInSourceAvailability {
     /// with `facts(allowsPasswordSave:)` rather than it being stored here.
     private(set) var facts = SignInSourceFacts()
     /// True once the cheap pass has run at least once.
-    private(set) var scanned = false
+    ///
+    /// It is `facts.scanned` — one flag, read from whichever of the two a caller
+    /// happens to hold. It used to live only here, which meant a snapshot of the facts
+    /// travelled to a view WITHOUT it and every vendor in that snapshot read as
+    /// `.notInstalled`; see `SignInSourceFacts.scanned`.
+    var scanned: Bool { facts.scanned }
     private var deepScanned = false
     private var deepScanning = false
 
@@ -81,6 +86,10 @@ final class SignInSourceAvailability {
     /// poll; no subprocesses, no prompts, no network.
     func refresh() {
         var next = SignInSourceFacts()
+        // Set FIRST and unconditionally: every return path below publishes `next`, and
+        // a fact set that has been gathered but forgot to say so is the bug this flag
+        // exists to make impossible.
+        next.scanned = true
         next.biometricsAvailable = Self.cachedBiometrics()
         // Which vendors the user (or their organization) has switched off.
         next.disabledVendors = settings.disabledVendors
@@ -91,7 +100,6 @@ final class SignInSourceAvailability {
         // Anything less than that would be a scan wearing a different name.
         guard settings.discoveryEnabled else {
             if next != facts { facts = next }
-            scanned = true
             return
         }
         // LEVEL 2 first: the configured vaults, then a cheap scan of each. The
@@ -123,14 +131,16 @@ final class SignInSourceAvailability {
         // second for ever — and a list that redraws under the pointer is how a
         // radio row gets clicked by accident.
         if next != facts { facts = next }
-        scanned = true
     }
 
     /// A deep answer outranks a cheap one only while the cheap one still agrees
     /// the vendor is here at all: a quit 1Password must be able to overrule a
     /// remembered "ready".
     private static func deepWins(quick: LocalVaultAvailability?, deep: LocalVaultAvailability) -> Bool {
-        guard let quick, quick != .notInstalled, deep != .notInstalled else { return false }
+        // `.unscanned` on either side is not an answer, so it can neither be
+        // overruled nor do the overruling — the cheap pass has not run.
+        guard let quick, quick.isAnswered, deep.isAnswered,
+              quick != .notInstalled, deep != .notInstalled else { return false }
         // The cheap pass owns "the app isn't running" / "the socket is gone";
         // the deep pass owns "too old", "not signed in" and "signed in but locked"
         // — the three a file check cannot see. Without `vaultLocked` here, a
@@ -161,7 +171,11 @@ final class SignInSourceAvailability {
         guard facts.vaults.values.contains(where: { availability in
             switch availability {
             case .blocked, .unchecked: true
-            case .ready, .notInstalled: false
+            // `.unscanned` cannot appear in this dictionary (it is the ABSENCE of an
+            // entry, not an entry), and a subprocess is the wrong answer to it anyway:
+            // what an unscanned Mac needs is the cheap pass, which the caller's poll
+            // already runs.
+            case .ready, .notInstalled, .unscanned: false
             }
         }) else { return }
         let now = Date()
@@ -237,6 +251,11 @@ final class SignInSourceAvailability {
         LocalVaultVendor.allCases.map { vendor in
             let state: String
             switch vaults[vendor] ?? .notInstalled {
+            // Logged distinctly on purpose. The bug this case was added for was
+            // diagnosed from a log line that said "absent" about a vendor that was
+            // running perfectly — "unscanned" would have ended that hunt at the
+            // first line.
+            case .unscanned: state = "unscanned"
             case .notInstalled: state = "absent"
             case .blocked(let block): state = "blocked:\(block.rawValue)"
             // The ceiling rides the log line: "unchecked" alone cannot tell a
@@ -296,10 +315,27 @@ final class SignInSourceAvailability {
         }
         let vendor = adapter.vendor
 
+        // LEVEL 0 — HAS ANYBODY LOOKED? Answered before level 1, and it RETURNS rather
+        // than falling through, because levels 2 and 3 read the same unscanned facts:
+        // an empty instance list would come back as "you haven't chosen a database",
+        // which is the same false verdict one level down.
+        //
+        // `.unproven(.checkOwedOnUse)` is the honest answer and it is deliberately not
+        // `needsAttention`: the check is owed, it is cheap, it is local, and it is paid
+        // by the next `refresh()` — that is exactly what the ceiling means. It also
+        // still `connectsUnattended`, so a reconnect that fires before any view has
+        // appeared goes through with a source that works.
+        //
+        // WHAT THIS PREVENTS, concretely: the connect surface read these facts without
+        // gathering them and told a user that their perfectly healthy 1Password was
+        // unavailable — while the connect it was warning about succeeded.
+        //
         // LEVEL 1 — can we reach the vendor at all? The order matters: asking "is the
         // entry named?" before "is the tool installed?" produces the wrong sentence for
         // a Mac with neither.
         switch live.availability(vendor) {
+        case .unscanned:
+            return .unproven(.checkOwedOnUse)
         case .notInstalled:
             return .broken(locus: .transport, block: .toolMissing)
         case .blocked(let block):

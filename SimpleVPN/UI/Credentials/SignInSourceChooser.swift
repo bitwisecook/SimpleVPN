@@ -601,14 +601,23 @@ struct SignInChooserPopover: View {
 /// AUTH_FAILED five seconds into a connect is the worst version of this.
 struct SignInSourceRecoveryNotice: View {
     let kind: CredentialSourceKind
+    /// WHAT THE LEVEL MODEL FOUND, when it named something. It is what turns "1Password
+    /// isn't available" into the vendor's own sentence for the actual problem — a
+    /// missing tool, an old app, a switch that is off, a database that has moved.
+    /// nil only where the satisfaction carried no block.
+    var block: LocalVaultBlock?
     let onTypeItOnce: () -> Void
     let onChange: () -> Void
+
+    /// One derivation, read by the visible text and by the AX label — they must be the
+    /// same sentence, and computing it twice is how they stop being.
+    private var headline: String { SignInFlow.unavailableHeadline(kind, block: block) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(SignInFlow.unavailableHeadline(kind))
+                    Text(headline)
                         .font(.callout.weight(.semibold))
                         .fixedSize(horizontal: false, vertical: true)
                     Text(SignInFlow.recoveryLine)
@@ -634,6 +643,6 @@ struct SignInSourceRecoveryNotice: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(SignInFlow.unavailableHeadline(kind)) \(SignInFlow.recoveryLine)")
+        .accessibilityLabel("\(headline) \(SignInFlow.recoveryLine)")
     }
 }

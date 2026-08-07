@@ -145,8 +145,18 @@ struct OnePasswordVaultAdapter: LocalVaultAdapter {
         // The prompt-free probe only proves the SDK library is on disk. An app
         // that is here without it is an old 1Password, which no amount of
         // approving will fix — say "update" rather than "allow".
-        guard await OnePasswordNative.probe() else { return .blocked(.needsUpdate) }
-        return quick
+        //
+        // THREE OUTCOMES, and the third is the fix. `.noAnswer` means the helper never
+        // ran (a refused spawn, a killed process, an unparseable reply): it is not a
+        // finding about 1Password, so the cheap pass's answer stands unchanged. It used
+        // to arrive here as `false` and become `.blocked(.needsUpdate)` — which
+        // `deepWins` then let override a perfectly good `.ready` for the rest of the
+        // session, telling somebody with a healthy 1Password to update it.
+        switch await OnePasswordNative.probeAnswer() {
+        case .available: return quick
+        case .unavailable: return .blocked(.needsUpdate)
+        case .noAnswer: return quick
+        }
     }
 
     func provider(for source: CredentialSource) -> (any CredentialProvider)? {

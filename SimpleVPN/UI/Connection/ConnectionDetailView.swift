@@ -169,6 +169,20 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     var credentialKind: CredentialSourceKind { vpn.effectiveCredentialKind(for: profile.id) }   // was private — internal for the file split
     var usesManager: Bool { credentialKind != .manual }   // was private — internal for the file split
 
+    /// The whole answer, computed once: `signInStep` and `signInBlock` are two readings
+    /// of the SAME satisfaction, and deriving them separately is how a notice ends up
+    /// describing a problem the step was not decided from.
+    private var authSatisfaction: AuthSatisfaction {
+        vpn.authSatisfaction(for: profile.id, facts: sources.facts)
+    }
+
+    /// WHICH problem, when the level model named one — what lets the recovery notice
+    /// show the vendor's exact sentence instead of "your password app isn't available".
+    var signInBlock: LocalVaultBlock? {   // internal: read by the body
+        if case .broken(_, let block) = authSatisfaction { return block }
+        return nil
+    }
+
     /// First time versus every other time, in one place. Everything it turns on
     /// is a plain fact about this VPN; the decision itself is pure and tested
     /// (SignInFlow.step).
@@ -183,8 +197,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
         // question its own way. `.typedInstead` counts as available: typing IS a way to
         // sign in, and an in-force "type it this time" is one of its reasons, so the
         // recovery question stops being re-asked without a second check for it.
-        inputs.chosenSourceAvailable = !vpn.authSatisfaction(
-            for: profile.id, facts: sources.facts).needsAttention
+        inputs.chosenSourceAvailable = !authSatisfaction.needsAttention
         inputs.hasConnectedBefore = !neverConnected
         inputs.hasStoredSignIn = hasStoredSignIn
         inputs.dismissedForNow = setupDismissed
@@ -352,6 +365,9 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                         case .recoverUnavailableSource(let kind):
                             SignInSourceRecoveryNotice(
                                 kind: kind,
+                                // The block, so the notice can say WHICH problem this
+                                // is. Same satisfaction the step was decided from.
+                                block: signInBlock,
                                 onTypeItOnce: {
                                     vpn.setTypedSignInOnce(true, for: profile.id)
                                     focusedField = firstMissingField
@@ -442,6 +458,17 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
         .navigationTitle(profile.name)
         .disabled(busy)
         .task { loadOnce() }
+        // GATHER THE FACTS THIS VIEW JUDGES BY. `signInStep` asks
+        // `authSatisfaction(for:facts:)` with THIS view's snapshot, which takes the
+        // overlaid-facts branch — the one that deliberately does not refresh, because a
+        // getter that writes mid-render is how a SwiftUI update loop starts. Nobody else
+        // was gathering them for it: `FirstConnectSetupCard` refreshes on appear, and it
+        // only renders for the step an empty-facts verdict displaces. So an unscanned Mac
+        // read as "your password app has gone away" and the recovery notice took the
+        // card's place — the view that would populate the facts was the view the empty
+        // facts prevented from appearing. Same call, same place in the lifecycle, as
+        // every other consumer (the setup card, the chooser, the entry picker, Settings).
+        .onAppear { sources.refresh() }
         // Detect a conflicting official Tailscale client with a light 2s poll (cheap:
         // it reads an in-process array). NSWorkspace's launch/quit notifications are
         // unreliable for menu-bar/agent apps like Tailscale, so polling is the honest

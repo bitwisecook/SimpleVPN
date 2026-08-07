@@ -593,11 +593,92 @@ struct AuthSatisfactionTests {
         var source = CredentialSource()
         source.kind = .keeper
         source.reference = "Work/VPN"
-        let satisfaction = availability().satisfaction(for: source)
+        let sources = availability()
+        // LOOK BEFORE CONCLUDING. "Nothing Keeper is installed" is a finding, and a
+        // finding needs a scan; an unscanned Mac answers `.unproven` instead, which is
+        // the fix for the bug where an ungathered fact set read as a missing vendor.
+        // The ORDER this test is about is unchanged — it is asserted below, on facts
+        // that exist.
+        sources.refresh()
+        let satisfaction = sources.satisfaction(for: source)
         // Nothing Keeper is installed in a fresh defaults suite on this machine.
         #expect(satisfaction == .broken(locus: .transport, block: .toolMissing))
         #expect(satisfaction.needsAttention)
         #expect(!satisfaction.connectsUnattended)
+    }
+
+    // MARK: - The pair that IS the fix: unscanned ≠ unavailable
+
+    /// AN UNSCANNED SOURCE MUST NEVER RENDER AS UNAVAILABLE — for EVERY vendor, not
+    /// for the one that happened to be reported.
+    ///
+    /// This is the invariant behind a bug a user hit: the connect surface read a fact
+    /// set nobody had gathered, `availability(_:)` answered `.notInstalled` because the
+    /// dictionary was empty, and SimpleVPN said "1Password isn't available, so SimpleVPN
+    /// can't get your sign-in from it" while 1Password was healthy and the connect it
+    /// was warning about succeeded. The verdict came out of an ABSENCE OF FACTS, and
+    /// nothing in the type system could tell the two apart.
+    ///
+    /// `.unproven` rather than merely "not broken" is deliberate and load-bearing: it
+    /// still `connectsUnattended`, so a reconnect that fires before any view has
+    /// appeared goes through with a source that works.
+    @Test func anUnscannedSourceIsNeverUnavailable() {
+        let unscanned = SignInSourceFacts()
+        #expect(!unscanned.scanned)
+        for vendor in LocalVaultVendor.allCases {
+            #expect(unscanned.availability(vendor) == .unscanned)
+            #expect(unscanned.rawAvailability(vendor) == .unscanned)
+            // Not offered as a row either: a chooser that grows rows as a scan lands is
+            // a list that moves under the pointer.
+            #expect(!unscanned.availability(vendor).isOffered)
+            #expect(!unscanned.availability(vendor).isAnswered)
+
+            guard let adapter = LocalVaultRegistry.adapter(for: vendor) else { continue }
+            var source = CredentialSource()
+            source.kind = adapter.storedKind
+            source.reference = "VPN/Work"
+            let satisfaction = SignInSourceAvailability.shared
+                .satisfaction(for: source, facts: unscanned)
+            #expect(!satisfaction.needsAttention)
+            #expect(satisfaction.connectsUnattended)
+            #expect(satisfaction == .unproven(.checkOwedOnUse))
+        }
+    }
+
+    /// …AND THE OTHER HALF, which is what stops the fix from becoming "never say a
+    /// source is missing": a vendor that HAS been looked for and is absent still says
+    /// so, at level 1, with the sentence that sends someone to install it.
+    ///
+    /// The pair is the whole fix. Either assertion alone can be satisfied by a
+    /// one-line change that breaks the other.
+    @Test func aScannedAndAbsentSourceStillSaysSo() {
+        var scanned = SignInSourceFacts()
+        scanned.scanned = true          // swept, and nothing was found
+        for vendor in LocalVaultVendor.allCases {
+            #expect(scanned.availability(vendor) == .notInstalled)
+            #expect(scanned.availability(vendor).isAnswered)
+
+            guard let adapter = LocalVaultRegistry.adapter(for: vendor) else { continue }
+            var source = CredentialSource()
+            source.kind = adapter.storedKind
+            source.reference = "VPN/Work"
+            let satisfaction = SignInSourceAvailability.shared
+                .satisfaction(for: source, facts: scanned)
+            #expect(satisfaction == .broken(locus: .transport, block: .toolMissing))
+            #expect(satisfaction.needsAttention)
+        }
+    }
+
+    /// A NON-ANSWER MUST NEVER WIN A `max`. The vendor row of a multi-vault vendor is
+    /// the best of its vaults, chosen by `rank` — so "nobody has looked" ranking above
+    /// "absent" would let an unscanned vault hide a real answer from its neighbour.
+    @Test func unscannedRanksBelowEveryRealAnswer() {
+        #expect(LocalVaultAvailability.unscanned.rank < LocalVaultAvailability.notInstalled.rank)
+        #expect(LocalVaultAvailability.notInstalled.rank < LocalVaultAvailability.blocked(.toolMissing).rank)
+        #expect(LocalVaultAvailability.blocked(.toolMissing).rank
+            < LocalVaultAvailability.unchecked(.checkOwedOnUse).rank)
+        #expect(LocalVaultAvailability.unchecked(.checkOwedOnUse).rank
+            < LocalVaultAvailability.ready.rank)
     }
 
     /// UNPROVEN CONNECTS. Refusing to try would make every unproven source permanently

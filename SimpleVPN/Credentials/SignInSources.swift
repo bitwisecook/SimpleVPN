@@ -265,7 +265,24 @@ nonisolated enum LocalVaultBlock: String, Sendable, Equatable {
 
 /// What a vendor can do right now. Ordered from useless to usable.
 nonisolated enum LocalVaultAvailability: Sendable, Equatable {
-    /// Not on this Mac at all — the row isn't offered.
+    /// NOBODY HAS LOOKED YET. Not an answer about the vendor at all — an answer
+    /// about US — and it exists because the absence of one used to be spelled
+    /// `.notInstalled`.
+    ///
+    /// The facts start empty, so before the first `SignInSourceAvailability.refresh()`
+    /// every vendor read as absent, and a caller could not tell "we swept this Mac and
+    /// 1Password is not on it" from "we have not swept this Mac". That produced a
+    /// DEFINITE VERDICT from an ABSENCE: the connect surface told somebody their
+    /// perfectly healthy 1Password had gone away, and the view that would have gathered
+    /// the facts was the view that false verdict displaced.
+    ///
+    /// The rule that follows, and the one the tests pin: an unscanned source is never
+    /// `needsAttention`. It is unproven — the cheap pass is owed and costs nothing —
+    /// and it is not offered as a row either, because a chooser that grows rows under
+    /// the pointer as a scan lands is its own bug.
+    case unscanned
+    /// Not on this Mac at all — the row isn't offered. LOOKED FOR AND ABSENT, which
+    /// `.unscanned` above is deliberately not.
     case notInstalled
     /// Here, but something must happen first. Offered WITH the fix.
     case blocked(LocalVaultBlock)
@@ -287,8 +304,16 @@ nonisolated enum LocalVaultAvailability: Sendable, Equatable {
     /// Proven working.
     case ready
 
-    var isOffered: Bool { self != .notInstalled }
+    /// Whether this vendor gets a row. `.unscanned` is NOT offered, for the same
+    /// reason `.notInstalled` isn't — but for the opposite reason about the vendor:
+    /// there is nothing to say yet, and a row that appears a moment later is a row
+    /// that moves under the pointer.
+    var isOffered: Bool { self != .notInstalled && self != .unscanned }
     var isReady: Bool { self == .ready }
+
+    /// Whether this is an ANSWER about the vendor at all. The one thing every caller
+    /// that is about to draw a conclusion should ask first.
+    var isAnswered: Bool { self != .unscanned }
 
     /// Useless to usable, as a number — so "the best of this vendor's vaults" is one
     /// `max` rather than a chain of `if`s in the gatherer. It exists because a
@@ -296,10 +321,12 @@ nonisolated enum LocalVaultAvailability: Sendable, Equatable {
     /// answer: one database being missing must not hide the one that is ready.
     var rank: Int {
         switch self {
-        case .notInstalled: 0
-        case .blocked: 1
-        case .unchecked: 2
-        case .ready: 3
+        // Below "absent": a non-answer must never win a `max` against a real one.
+        case .unscanned: 0
+        case .notInstalled: 1
+        case .blocked: 2
+        case .unchecked: 3
+        case .ready: 4
         }
     }
 
@@ -313,6 +340,9 @@ nonisolated enum LocalVaultAvailability: Sendable, Equatable {
     /// of a row that is about to say the long one.
     var spokenChange: String {
         switch self {
+        // Reachable only if a re-check somehow produced no sweep at all. It says the
+        // honest thing rather than borrowing one of the four real answers.
+        case .unscanned: "SimpleVPN hasn\u{2019}t looked yet."
         case .notInstalled: "it isn\u{2019}t on this Mac."
         case .blocked: "there is still something to do first \u{2014} the steps are on its row."
         case .unchecked: "it looks ready; SimpleVPN will know for certain the first time you use it."
@@ -582,6 +612,17 @@ nonisolated enum LocalVaultCopyBook {
             settingLocation: "In SimpleVPN: **Settings \u{25B8} Sign-In Sources**, then set "
                 + "**\(title)**\u{2019}s tool path.",
             doc: doc)
+    }
+
+    /// Which vendor row a STORED KIND belongs to, without going through
+    /// `LocalVaultRegistry` — which holds live adapters and is main-actor isolated,
+    /// while copy is pure data and has to be reachable from `SignInFlow`.
+    ///
+    /// Derived from the copy book itself rather than declared a second time: a vendor
+    /// already names its `storedKind`, and a second table would be a second thing to
+    /// keep in step.
+    static func vendor(forStored kind: CredentialSourceKind) -> LocalVaultVendor? {
+        LocalVaultVendor.allCases.first { copy(for: $0).storedKind == kind }
     }
 
     static func copy(for vendor: LocalVaultVendor) -> LocalVaultCopy {
@@ -907,9 +948,28 @@ nonisolated struct SignInSourceOption: Identifiable, Sendable, Equatable {
 /// Everything the list depends on, gathered by `SignInSourceAvailability` and
 /// injectable wholesale by tests.
 nonisolated struct SignInSourceFacts: Sendable, Equatable {
-    /// Per-vendor live answer. A vendor missing from the dictionary is treated
-    /// as `.notInstalled` — an unscanned Mac offers no vendor rows rather than
-    /// offering broken ones.
+
+    /// HAS ANYBODY LOOKED? False until `SignInSourceAvailability.refresh()` has run
+    /// once and filled this in.
+    ///
+    /// This flag is what makes "not looked yet" EXPRESSIBLE, and it is the root fix for
+    /// a bug that reached a user: `availability(_:)` used to answer `.notInstalled` for
+    /// a vendor that simply was not in the dictionary yet, which is a definite verdict
+    /// produced by an absence. Every caller then had a choice between believing it and
+    /// remembering to check `SignInSourceAvailability.scanned` first — and remembering
+    /// is not a mechanism.
+    ///
+    /// Now the facts say so themselves: an unscanned fact set answers `.unscanned` for
+    /// every vendor, which is not offered, is not ready, and — the invariant the tests
+    /// pin — never reads as `needsAttention`.
+    ///
+    /// Deliberately part of `Equatable`: the transition from "no facts" to "the same
+    /// facts, now gathered" is a real change that observers must see.
+    var scanned = false
+
+    /// Per-vendor live answer. Before the first scan every vendor answers
+    /// `.unscanned`; after it, a vendor missing from the dictionary is `.notInstalled`
+    /// — it was looked for and it is not here.
     ///
     /// For a vendor that can have several vaults (`SourceCardinality.multiple`) this
     /// is the BEST of them: the row is offered when any one of them can answer.
@@ -955,15 +1015,23 @@ nonisolated struct SignInSourceFacts: Sendable, Equatable {
     var toolsFoundOutsideAllowList: [LocalVaultVendor: String] = [:]
 
     func availability(_ vendor: LocalVaultVendor) -> LocalVaultAvailability {
+        // A switched-off vendor is off whether or not anyone has looked: that is the
+        // user's own decision, not a measurement, so it outranks the scan.
         guard !disabledVendors.contains(vendor) else { return .notInstalled }
-        return vaults[vendor] ?? .notInstalled
+        return rawAvailability(vendor)
     }
 
     /// What was PROBED, ignoring the user's own switch. Only the Settings pane may
     /// use this — everywhere else, a switched-off vendor must be indistinguishable
     /// from an absent one.
     func rawAvailability(_ vendor: LocalVaultVendor) -> LocalVaultAvailability {
-        vaults[vendor] ?? .notInstalled
+        // AN ENTRY IS AN ANSWER, whoever wrote it — a scan, or a test's fixture.
+        if let answer = vaults[vendor] { return answer }
+        // NO ENTRY IS TWO DIFFERENT THINGS, and this line is the whole point of
+        // `scanned`: after a sweep, a vendor that is not in the dictionary was looked
+        // for and is not here; before one, nobody has looked. They used to be the same
+        // value, and the second one shipped as a definite verdict.
+        return scanned ? .notInstalled : .unscanned
     }
 
     /// ONE INSTANCE's live answer — the level-2 form of `availability(_:)`, and
@@ -1284,7 +1352,10 @@ nonisolated enum SignInSourceCatalog {
             // of its tool, should not have to go looking for where that lives.
             configurableVendor: vendor)
         switch availability {
-        case .notInstalled:
+        // Both already refused by `isOffered` above; restated so the compiler keeps
+        // asking. No row for "absent", and no row for "we haven't looked" — a row that
+        // materialises when a scan lands is a row that moves under the pointer.
+        case .notInstalled, .unscanned:
             return nil
         case .blocked(let block):
             option.state = .needsSetup(headline: copy.headline(for: block),
@@ -1574,8 +1645,32 @@ nonisolated enum SignInFlow {
 
     // MARK: Recovery copy
 
+    /// THE SENTENCE THE RECOVERY NOTICE SHOWS, given what the level model actually
+    /// found — which is nearly always more than "it isn't there".
+    ///
+    /// The per-kind sentence below is a fallback that has to cover every way a source
+    /// can fail at once, so for most sources it is vague by construction: "1Password
+    /// isn't available" is the wrong sentence for `.toolMissing` (install something),
+    /// for `.needsUpdate` (update something), for `.integrationOff` (flip one switch)
+    /// and for `.vaultFileMissing` (re-point a database) — four different problems with
+    /// four different fixes. The vendor's copy book already has the exact sentence for
+    /// each of them, and the notice was walking straight past it.
+    ///
+    /// So: the BLOCK's own headline when the block is known and the vendor has written
+    /// one, and the per-kind sentence otherwise. Never a status code, either way.
+    static func unavailableHeadline(_ kind: CredentialSourceKind,
+                                    block: LocalVaultBlock?) -> String {
+        guard let block, let vendor = LocalVaultCopyBook.vendor(forStored: kind),
+              let precise = LocalVaultCopyBook.copy(for: vendor).blocks[block]?.headline
+        else { return unavailableHeadline(kind) }
+        return precise
+    }
+
     /// "Your password app isn't there" — one sentence per source, naming the app
     /// and what it means, never a status code.
+    ///
+    /// THE FALLBACK. Prefer `unavailableHeadline(_:block:)`, which says which of the
+    /// vendor's several problems this actually is where the vendor has written it down.
     static func unavailableHeadline(_ kind: CredentialSourceKind) -> String {
         switch kind {
         case .onePassword:

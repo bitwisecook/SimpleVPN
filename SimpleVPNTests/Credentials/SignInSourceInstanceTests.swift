@@ -509,6 +509,12 @@ struct SourceInstanceAvailabilityTests {
         let sources = SignInSourceAvailability(
             settings: SignInSourceSettingsStore(
                 store: UserDefaults(suiteName: "SourceInstanceAvailabilityTests.\(UUID().uuidString)")!))
+        // LOOK FIRST. This assertion is about a database that has VANISHED, which is a
+        // conclusion only a scan can support — and an unscanned Mac now (correctly)
+        // refuses to draw it. Without this line the test was asserting the very bug
+        // `LocalVaultAvailability.unscanned` exists to prevent: "we haven't looked"
+        // reading as "it isn't there".
+        sources.refresh()
         var source = CredentialSource()
         source.kind = .keePassFile
         source.reference = "VPN/Work"

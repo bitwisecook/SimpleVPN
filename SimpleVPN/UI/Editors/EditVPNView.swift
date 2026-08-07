@@ -304,7 +304,12 @@ struct EditVPNView: View {
             .task {
                 load()
                 kpAvailable = KeePassXCProvider.probe()
-                opAvailable = await OnePasswordNative.probe()
+                // Only a REAL "no SDK here" disables the 1Password controls. A probe
+                // that got no answer at all (the spawn refused, the helper killed) says
+                // nothing, and greying out the pickers on a non-answer is how a working
+                // 1Password ends up unusable for a session.
+                let opProbe = await OnePasswordNative.probeAnswer()
+                opAvailable = opProbe != .unavailable
                 // A live Keeper session is the only thing worth warning about:
                 // Commander missing entirely is covered by the row's own copy.
                 if KeeperCommanderChannel.isInstalled() {
@@ -343,8 +348,10 @@ struct EditVPNView: View {
                     protonPassState = await ProtonPassCLIChannel().sessionState()
                 }
                 // Prompt-free, so this much can be said without anyone asking:
-                // no 1Password on this Mac is a setup state, not a failure.
-                if !opAvailable { opPreflight.note(.notInstalled) }
+                // no 1Password on this Mac is a setup state, not a failure. Noted ONLY
+                // on a real finding — a non-answer must not arm the "install 1Password"
+                // walkthrough for somebody who already has it.
+                if opProbe == .unavailable { opPreflight.note(.notInstalled) }
             }
             // Reload from the persisted config when it changes underneath us
             // (Doctor fix, undo, another editor) — but only for a field group the

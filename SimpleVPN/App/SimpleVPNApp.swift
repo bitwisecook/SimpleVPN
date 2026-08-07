@@ -126,6 +126,16 @@ struct SimpleVPNApp: App {
                 .environment(linkState)
                 .environment(ext)
                 .environment(extDoctor)
+                // THE STORES THE CONNECT LIST IS A LIST OF. Their absence here is the
+                // reason an F5 BIG-IP APM was reported missing from the main window
+                // three times and "fixed" twice: ConnectionView reads them as
+                // OPTIONAL, so a scene that never injected them silently produced an
+                // empty list rather than a crash, and every fix landed on the
+                // filtering downstream of data that was never arriving. Manage VPNs
+                // declares the same two non-optionally, which is why it always worked
+                // and why the two windows disagreed.
+                .environment(tunnels)
+                .environment(nativeVPN)
                 .onChange(of: appDelegate.openBuffer.generation) {
                     // Finder double-click / Dock drop → the shared import pipeline.
                     vpn.handleImport(of: appDelegate.openBuffer.take())

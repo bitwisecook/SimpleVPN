@@ -48,7 +48,12 @@ struct OnePasswordProvider: CredentialProvider {
 
     func isAvailable(for profile: String) async -> Bool {
         guard !itemReference.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
-        return await OnePasswordNative.probe()
+        // A NON-ANSWER IS NOT A NO. `.noAnswer` means the helper never ran (a refused
+        // spawn, a killed process, an unparseable reply) — reporting that as "1Password
+        // is unavailable" is exactly the false negative `ProbeAnswer` was split out to
+        // stop. The real call that follows will say what is actually wrong, if
+        // anything.
+        return await OnePasswordNative.probeAnswer() != .unavailable
     }
 
     func resolve(profile: String, fields: Set<AuthKind>) async throws -> RawCredentials {
