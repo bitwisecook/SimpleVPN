@@ -345,7 +345,14 @@ nonisolated enum DiagnosticReportInventory {
                 var detail: [ReportValue] = [
                     .path("host end: \(network.hostAddress) on \(network.interfaceName)"),
                     .words("attributed to: \(network.attribution)"),
+                    // HOW IT IS WIRED, AND WHERE THAT ANSWER CAME FROM. The three
+                    // arrangements route differently (ONTOLOGY.md), so a report that
+                    // said only "there is a guest network here" sent a maintainer off
+                    // to reason about a packet path nobody had established.
+                    .state("arrangement: \(network.mode.title)"),
+                    .words(network.mode.summary),
                 ]
+                if !network.modeEvidence.isEmpty { detail.append(.words(network.modeEvidence)) }
                 if !network.attachedGuestInterfaces.isEmpty {
                     detail.append(.count(network.attachedGuestInterfaces.count))
                 }
@@ -354,6 +361,21 @@ nonisolated enum DiagnosticReportInventory {
                     value: .path(network.subnet),
                     detail: detail))
             }
+        }
+
+        // Guests running with no network of this Mac's behind them. Reported
+        // separately because the fix is different and the honest description is
+        // narrow: we can see a guest, and we cannot see a network of ours.
+        for guest in snapshot.bridgedGuests {
+            out.append(DiagnosticReportField(
+                label: "Running guest on \(guest.interfaceName)",
+                value: .state(guest.mode.title),
+                detail: [
+                    .words("attributed to: \(guest.attribution)"),
+                    .words(guest.mode.summary),
+                    .words("no guest network of this Mac\u{2019}s was found behind it, so no routing "
+                           + "setting here affects it"),
+                ]))
         }
 
         // UTM's per-VM modes. UTM is the product whose class cannot be read off

@@ -67,6 +67,92 @@
 
 import Foundation
 
+// MARK: - How a guest network is wired
+
+/// The three arrangements `ONTOLOGY.md` names, plus the honest fourth answer.
+///
+/// THIS IS NOT A REFINEMENT OF `GuestNetworkClass` — the two answer different
+/// questions and both are needed. `GuestNetworkClass` says whether there is a host
+/// interface at all (and therefore whether a route could ever help). This says, for
+/// a network that *has* one, **who decides where its guests' traffic goes** — which
+/// is what makes the difference between a VPN that can affect them and one that
+/// cannot.
+///
+///  • `.shared` — the guests are behind this Mac and their traffic is translated
+///    out of it. This Mac's routing table is on their path.
+///  • `.bridged` — the guests are on the same network as this Mac, with addresses
+///    of their own from it. **This Mac's routing table is not consulted at all**, so
+///    no VPN of ours can capture them and no divert rule of ours can move them.
+///  • `.hostOnly` — this Mac and its guests, and nothing else. There is no way out
+///    to lose; the only thing a tunnel can take away is this Mac's own path TO them.
+///  • `.unknown` — see the note in `ONTOLOGY.md`. Telling `.shared` from `.hostOnly`
+///    means reading `pf`, and `pfctl` is `Permission denied` for every unprivileged
+///    process (`Docs/Networking.md` §6.1). Where the product does not write the
+///    answer down somewhere we may read, this is the truthful answer and the UI says
+///    it in those words rather than assuming the common case.
+nonisolated enum GuestNetworkMode: String, Sendable, CaseIterable, Equatable {
+    case shared
+    case bridged
+    case hostOnly
+    case unknown
+
+    /// The house term, as a label.
+    var title: String {
+        switch self {
+        case .shared: "Shared network"
+        case .bridged: "Bridged network"
+        case .hostOnly: "Host-only network"
+        case .unknown: "Arrangement not visible"
+        }
+    }
+
+    /// What it means to the person reading it — consequences, not mechanism.
+    var summary: String {
+        switch self {
+        case .shared:
+            "Guests sit behind this Mac and share its connection, so their traffic goes wherever "
+            + "this Mac\u{2019}s does."
+        case .bridged:
+            "Guests are on the same network as this Mac, with addresses of their own. This Mac "
+            + "does not decide where their traffic goes, so a VPN here cannot change it."
+        case .hostOnly:
+            "Guests can reach this Mac and each other and nothing else. There is no way out for a "
+            + "VPN to take away \u{2014} only this Mac\u{2019}s own path to them."
+        case .unknown:
+            "SimpleVPN cannot tell whether these guests share this Mac\u{2019}s connection or can "
+            + "only reach this Mac. Seeing that needs administrator access this app does not take."
+        }
+    }
+
+    /// Is this Mac's routing table on the guests' path at all? `.unknown` answers
+    /// yes, which is the cautious direction: it keeps the network visible and keeps
+    /// the choice offered, rather than quietly deciding a VPN is irrelevant to it.
+    var thisMacIsOnThePath: Bool {
+        switch self {
+        case .shared, .hostOnly, .unknown: true
+        case .bridged: false
+        }
+    }
+
+    /// Whether keeping this network out of a tunnel is a choice worth offering. False
+    /// for `.bridged` for the reason above — a rule there would apply cleanly, change
+    /// nothing whatever, and look like a fix.
+    var routingChoiceApplies: Bool { thisMacIsOnThePath }
+
+    /// ONE place where every vendor's spelling is translated into ours, so the same
+    /// word cannot mean two things in two files. The vendor words are exactly the
+    /// ones in `ONTOLOGY.md`'s table; anything unrecognised is `.unknown` rather
+    /// than a guess at the nearest match.
+    init(vendorWord: String) {
+        switch vendorWord.lowercased() {
+        case "nat", "shared":                 self = .shared
+        case "bridged", "bridge":             self = .bridged
+        case "host", "host-only", "hostonly": self = .hostOnly
+        default:                              self = .unknown
+        }
+    }
+}
+
 // MARK: - How a product puts its guests on the network
 
 /// The mechanism a product uses, and therefore whether a routing exclusion can
@@ -320,6 +406,16 @@ nonisolated struct GuestNetwork: Sendable, Equatable, Identifiable {
     var candidateProductIDs: [String] = []
     /// Guest taps attached to this network — how many guests are actually on it.
     var attachedGuestInterfaces: [String] = []
+    /// Shared, bridged, host-only — or, honestly, not visible. See
+    /// `GuestNetworkMode`; the default is the honest one, so a construction that
+    /// never asked cannot accidentally claim to know.
+    var mode: GuestNetworkMode = .unknown
+    /// WHERE the mode answer came from, verbatim enough to argue with — a vendor's
+    /// own record, a vendor's own fixed convention, or the reason we cannot see it.
+    /// Surfaced in the inspector and the diagnostic report, because "shared" and
+    /// "shared, because Apple's own network record on this Mac says `nat`" are
+    /// different claims.
+    var modeEvidence: String = ""
 
     var id: String { "\(interfaceName)|\(subnet)" }
 
@@ -329,6 +425,43 @@ nonisolated struct GuestNetwork: Sendable, Equatable, Identifiable {
         if let productID, let product = VirtualizationCatalog.product(id: productID) {
             return product.title
         }
+        let titles = candidateProductIDs.compactMap { VirtualizationCatalog.product(id: $0)?.title }
+        switch titles.count {
+        case 0: return "a virtual machine or container"
+        case 1: return titles[0]
+        default: return "one of " + titles.joined(separator: ", ")
+        }
+    }
+}
+
+/// A guest that is running but is NOT on a network of this Mac's — a guest tap with
+/// no host-side guest network carrying an address behind it.
+///
+/// WHY THIS IS A SEPARATE TYPE AND NOT A `GuestNetwork` WITH NO SUBNET. Every field
+/// of `GuestNetwork` that matters — the subnet, this Mac's address on it, the rule
+/// that could be built from it — is meaningless here, and an optional subnet
+/// threaded through the offer path would be an invitation to build a rule for
+/// nothing. What we know is exactly this: something is running, on this tap, and
+/// this Mac is not on its path. That is worth SAYING (it is the one arrangement the
+/// user can see nothing about today) and worth refusing to offer a routing change
+/// for.
+///
+/// MEASURED-ADJACENT, NOT MEASURED: this Mac has Apple Containers but no bridged
+/// guest was run to confirm the interface shape, so the inference is stated as an
+/// inference in the UI and here. The observation is only ever "there is a tap and
+/// no guest network", which is true whatever produced it.
+nonisolated struct BridgedGuest: Sendable, Equatable, Identifiable {
+    /// The guest tap (`vmenet0`).
+    var interfaceName: String
+    /// Products on this Mac that use this stack, when the tap alone cannot single
+    /// one out — same honesty as `GuestNetwork.candidateProductIDs`.
+    var candidateProductIDs: [String] = []
+
+    var id: String { interfaceName }
+
+    var mode: GuestNetworkMode { .bridged }
+
+    var attribution: String {
         let titles = candidateProductIDs.compactMap { VirtualizationCatalog.product(id: $0)?.title }
         switch titles.count {
         case 0: return "a virtual machine or container"
@@ -373,12 +506,30 @@ nonisolated struct UTMGuest: Sendable, Equatable, Identifiable {
 nonisolated struct VirtualizationSnapshot: Sendable, Equatable {
     var installed: [InstalledVirtualization] = []
     var guestNetworks: [GuestNetwork] = []
+    /// Guests that are running but are not on a network of this Mac's. Kept apart
+    /// from `guestNetworks` for the reason `BridgedGuest` gives: they are worth
+    /// showing and must never be offered a routing change.
+    var bridgedGuests: [BridgedGuest] = []
     var utmGuests: [UTMGuest] = []
     /// False when the user turned detection off (`vm.detect`). Reported rather
     /// than implied, so an empty result is never mistaken for "you have none".
     var detectionEnabled = true
 
-    var isEmpty: Bool { installed.isEmpty && guestNetworks.isEmpty }
+    var isEmpty: Bool { installed.isEmpty && guestNetworks.isEmpty && bridgedGuests.isEmpty }
+
+    /// ONE ROW PER HOST INTERFACE — the list every surface that DRAWS a guest network
+    /// must use.
+    ///
+    /// `guestNetworks` is per address, because a bridge may hold more than one and
+    /// each is a genuinely different subnet. But a bridge reporting two addresses on
+    /// the SAME subnet (a secondary address, an alias) is still one guest network,
+    /// and drawing it twice would put the same containers on the diagram twice with
+    /// two controls that fight. First row per interface wins: it is the one the
+    /// kernel reports first, which is the interface's primary.
+    var distinctGuestNetworks: [GuestNetwork] {
+        var seen = Set<String>()
+        return guestNetworks.filter { seen.insert($0.interfaceName).inserted }
+    }
 
     /// Live networks a VPN could capture. The list an exclusion offer is built
     /// from — and it is empty for a machine that only runs class-B products, which
@@ -427,6 +578,44 @@ nonisolated struct VirtualizationEnvironment: Sendable {
               let mode = first["Mode"] as? String
         else { return nil }
         return UTMNetworkConfig(mode: mode, bridgeInterface: first["BridgeInterface"] as? String)
+    }
+
+    /// The `mode` Apple's `container` records for each network it has created, in
+    /// its own words (`"nat"`), from
+    /// `~/Library/Application Support/com.apple.container/networks/<name>/entity.json`.
+    ///
+    /// MEASURED ON THIS MAC, 2026-08-07, with nothing running:
+    /// ```
+    /// {"creationDate":803319258.7,"plugin":"container-network-vmnet","mode":"nat",
+    ///  "name":"default","labels":{…},"options":{}}
+    /// ```
+    /// That file is the ONLY unprivileged source on this Mac for shared-versus-
+    /// host-only, and it is why `apple-container` gets a real answer where the other
+    /// vmnet products get `.unknown` (`Docs/Networking.md` §6.1: `pf` is the other
+    /// source and it is `Permission denied`).
+    ///
+    /// TWO DELIBERATE LIMITS, both of which keep this from over-claiming:
+    ///  • it is a record of the network by NAME, and nothing on disk maps `default`
+    ///    to `bridge100` — so the answer is only used when there is exactly one, and
+    ///    `mode(...)` says so;
+    ///  • it records what the network was CREATED as, not what the kernel is doing
+    ///    now. That is still a vendor's own record rather than our guess, which is
+    ///    the bar the evidence string states.
+    ///
+    /// The mode strings are returned verbatim (rule 2 — a vendor's own spelling) and
+    /// mapped in one place, `GuestNetworkMode.init(vendorWord:)`.
+    var appleContainerNetworkModes: @Sendable (URL) -> [String] = { home in
+        let root = home
+            .appendingPathComponent("Library/Application Support/com.apple.container/networks")
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
+        return names.sorted().compactMap { name in
+            let path = root.appendingPathComponent(name).appendingPathComponent("entity.json").path
+            guard let data = FileManager.default.contents(atPath: path),
+                  let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let mode = json["mode"] as? String
+            else { return nil }
+            return mode
+        }
     }
 
     static func live(home: URL = FileManager.default.homeDirectoryForCurrentUser)
@@ -481,8 +670,16 @@ nonisolated enum VirtualizationDiscovery {
     ///     macOS. macOS allocates vmnet bridges from `bridge100` upwards, so the
     ///     number is the discriminator — and treating `bridge0` as a VM network
     ///     would invite someone to route their real LAN around their VPN.
+    ///
+    /// `appleContainerModes` and `utmGuests` are the vendors' OWN records of how each
+    /// network was set up, and they are the only unprivileged source for shared vs
+    /// host-only. Both default to empty so the interface-list-only call (the one that
+    /// must never touch the filesystem — see `snapshotOffMain`) still works and
+    /// simply answers `.unknown`, which is true.
     static func guestNetworks(interfaces: [NetInterface],
-                              installed: [InstalledVirtualization]) -> [GuestNetwork] {
+                              installed: [InstalledVirtualization],
+                              appleContainerModes: [String] = [],
+                              utmGuests: [UTMGuest] = []) -> [GuestNetwork] {
         // Guest taps present right now. Their names are what tells us a guest is
         // actually attached, even though they carry no address.
         let taps = interfaces.filter { $0.name.hasPrefix("vmenet") }.map(\.name)
@@ -499,17 +696,107 @@ nonisolated enum VirtualizationDiscovery {
                 guard index < interface.ipv4.count else { continue }
                 let address = interface.ipv4[index]
                 guard let attribution = attribute(interfaceName: interface.name) else { continue }
+                let wiring = mode(interfaceName: interface.name,
+                                  appleContainerModes: appleContainerModes,
+                                  utmGuests: utmGuests)
                 out.append(GuestNetwork(
                     interfaceName: interface.name,
                     hostAddress: address,
                     subnet: subnet,
                     productID: attribution.productID,
                     candidateProductIDs: attribution.isAppleVMNet ? vmnetCandidates : [],
-                    attachedGuestInterfaces: attribution.isAppleVMNet ? taps : []))
+                    attachedGuestInterfaces: attribution.isAppleVMNet ? taps : [],
+                    mode: wiring.mode,
+                    modeEvidence: wiring.evidence))
             }
         }
         return out
     }
+
+    /// Guests that are running with no guest network of this Mac's behind them.
+    ///
+    /// THE OBSERVATION IS NARROW ON PURPOSE: a `vmenet*` tap exists, and no vmnet
+    /// bridge carries a subnet. What that means is that this Mac is not on those
+    /// guests' path — which is the *bridged* arrangement, and is also what a guest
+    /// mid-boot briefly looks like. Both are honestly described by "we can see a
+    /// guest and we cannot see a network of ours behind it", which is what the UI
+    /// says; neither is offered a routing change.
+    ///
+    /// If ANY vmnet bridge is carrying a subnet the taps are attributed to it
+    /// instead (`attachedGuestInterfaces`) and nothing is reported here — a tap can
+    /// only be counted once, which is what keeps a guest network off the graph twice.
+    static func bridgedGuests(interfaces: [NetInterface],
+                              guestNetworks: [GuestNetwork]) -> [BridgedGuest] {
+        let claimed = Set(guestNetworks.flatMap(\.attachedGuestInterfaces))
+        return interfaces
+            .filter { $0.name.hasPrefix("vmenet") && !claimed.contains($0.name) }
+            .map { BridgedGuest(interfaceName: $0.name) }
+    }
+
+    /// Shared, bridged, host-only or "we cannot see" — with the evidence, which is
+    /// half the answer.
+    ///
+    /// The vendors' FIXED CONVENTIONS are used where a vendor genuinely has one and
+    /// documents it, and nowhere else:
+    ///  • VMware Fusion ships `vmnet1` as host-only and `vmnet8` as NAT, and has for
+    ///    twenty years. Any other `vmnet*` is one the user made, so it is unknown.
+    ///  • VirtualBox's `vboxnet*` adapters ARE the host-only ones — its NAT mode has
+    ///    no host interface at all, so a `vboxnet` that exists is host-only by
+    ///    construction rather than by convention.
+    ///  • Parallels ships `vnic0` as shared and `vnic1` as host-only.
+    ///
+    /// Apple's shared vmnet stack (`bridge1xx`) has no convention to read, so it
+    /// falls back to the records: Apple `container`'s `entity.json` and UTM's
+    /// per-VM `config.plist`. **Only a UNANIMOUS answer is used** — two products (or
+    /// two networks) on one stack disagreeing means we cannot say which bridge is
+    /// which, and `.unknown` is then the truthful answer rather than the first match.
+    static func mode(interfaceName name: String,
+                     appleContainerModes: [String] = [],
+                     utmGuests: [UTMGuest] = []) -> (mode: GuestNetworkMode, evidence: String) {
+
+        if name.hasPrefix("vmnet") {
+            switch name {
+            case "vmnet1": return (.hostOnly, "VMware Fusion ships \u{201C}vmnet1\u{201D} as its host-only adapter.")
+            case "vmnet8": return (.shared, "VMware Fusion ships \u{201C}vmnet8\u{201D} as its NAT adapter.")
+            default: return (.unknown, unseeable)
+            }
+        }
+        if name.hasPrefix("vboxnet") {
+            return (.hostOnly, "A VirtualBox \u{201C}vboxnet\u{201D} adapter is host-only \u{2014} its NAT mode creates no interface at all.")
+        }
+        if name.hasPrefix("vnic") {
+            switch name {
+            case "vnic0": return (.shared, "Parallels Desktop ships \u{201C}vnic0\u{201D} as its shared adapter.")
+            case "vnic1": return (.hostOnly, "Parallels Desktop ships \u{201C}vnic1\u{201D} as its host-only adapter.")
+            default: return (.unknown, unseeable)
+            }
+        }
+
+        // Apple's shared vmnet stack. Every record we may read, translated once.
+        var words: [String] = appleContainerModes
+        var sources: [String] = appleContainerModes.isEmpty ? [] :
+            ["Apple\u{2019}s own network record on this Mac says \u{201C}\(appleContainerModes.joined(separator: "\u{201D}, \u{201C}"))\u{201D}"]
+        // An Emulated UTM machine is not on this stack at all (it is QEMU slirp with
+        // no interface), so it must not get a vote on what a bridge is.
+        let utmWords = utmGuests.filter { $0.networking != .userspace }.map(\.mode)
+        if !utmWords.isEmpty {
+            words += utmWords
+            sources.append("UTM\u{2019}s own settings say \u{201C}\(Set(utmWords).sorted().joined(separator: "\u{201D}, \u{201C}"))\u{201D}")
+        }
+        let modes = Set(words.map { GuestNetworkMode(vendorWord: $0) })
+        guard modes.count == 1, let only = modes.first, only != .unknown else {
+            return (.unknown, words.isEmpty ? unseeable
+                    : "More than one arrangement is set up on this Mac (\(sources.joined(separator: "; "))), "
+                    + "and nothing on disk says which of them this network is.")
+        }
+        return (only, sources.joined(separator: "; ") + ".")
+    }
+
+    /// The one sentence for "no unprivileged process can see this", said the same way
+    /// everywhere it is true. `Docs/Networking.md` §6.1 is the measurement behind it.
+    static let unseeable =
+        "Telling a shared network from a host-only one means reading this Mac\u{2019}s packet "
+        + "filter, which needs administrator access SimpleVPN does not take."
 
     /// Which product, if any, an interface name belongs to — and whether it is
     /// Apple's shared vmnet stack, where the name cannot single a product out.
@@ -586,6 +873,12 @@ nonisolated enum VirtualizationDiscovery {
         // even when everything below times out. Attribution by interface name
         // (`bridge1xx`, `vmnet1`, `vnic0`, `vboxnet0`) needs no installed list; only the
         // vmnet CANDIDATES do, and those are filled in below when they arrive.
+        //
+        // The MODE half of that answer is `.unknown` here for Apple's shared vmnet
+        // stack and correct for the products with a fixed convention, because the
+        // records that would settle it are files — and reading a file is exactly
+        // what this half must not do. `.unknown` is a true answer, and the UI says
+        // it in those words.
         let networksWithoutAttribution = guestNetworks(interfaces: interfaces, installed: [])
 
         // AND THE FILESYSTEM HALF ON A DEADLINE, because one of its reads can block for
@@ -595,18 +888,40 @@ nonisolated enum VirtualizationDiscovery {
         // it BLOCKS, and it blocked for as long as it was left to. Waiting on that from
         // a connect or from the report is not acceptable at any duration, so the answer
         // is bounded and the missing half is simply absent.
-        let filesystem = await answer(within: scanBudget) { () -> ([InstalledVirtualization], [UTMGuest]) in
-            (installed(env: env), utmGuests(env: env))
+        let filesystem = await answer(within: scanBudget) {
+            () -> ([InstalledVirtualization], [UTMGuest], [String]) in
+            (installed(env: env), utmGuests(env: env), env.appleContainerNetworkModes(env.home))
         }
-        guard let (found, guests) = filesystem else {
-            return VirtualizationSnapshot(guestNetworks: networksWithoutAttribution,
-                                          detectionEnabled: true)
+        guard let (found, guests, containerModes) = filesystem else {
+            return VirtualizationSnapshot(
+                guestNetworks: networksWithoutAttribution,
+                bridgedGuests: bridgedGuests(interfaces: interfaces,
+                                             guestNetworks: networksWithoutAttribution),
+                detectionEnabled: true)
         }
+        let networks = guestNetworks(interfaces: interfaces, installed: found,
+                                     appleContainerModes: containerModes, utmGuests: guests)
         return VirtualizationSnapshot(
             installed: found,
-            guestNetworks: guestNetworks(interfaces: interfaces, installed: found),
+            guestNetworks: networks,
+            bridgedGuests: bridgedGuests(interfaces: interfaces, guestNetworks: networks)
+                .map { withCandidates($0, installed: found) },
             utmGuests: guests,
             detectionEnabled: true)
+    }
+
+    /// A bridged guest's candidate products, once the installed list has arrived.
+    /// Same honesty as `GuestNetwork.candidateProductIDs`: a `vmenet` tap belongs to
+    /// Apple's shared stack, which several products use, so naming one would be a
+    /// guess.
+    private static func withCandidates(_ guest: BridgedGuest,
+                                       installed: [InstalledVirtualization]) -> BridgedGuest {
+        var out = guest
+        out.candidateProductIDs = installed
+            .filter { VirtualizationCatalog.product(id: $0.productID)?
+                        .interfacePrefixes.contains("vmenet") == true }
+            .map(\.productID)
+        return out
     }
 
     /// `work`'s answer, or nil if it has not produced one inside `budget`.
@@ -639,10 +954,16 @@ nonisolated enum VirtualizationDiscovery {
                          env: VirtualizationEnvironment) -> VirtualizationSnapshot {
         guard detectionEnabled else { return VirtualizationSnapshot(detectionEnabled: false) }
         let found = installed(env: env)
+        let guests = utmGuests(env: env)
+        let networks = guestNetworks(interfaces: interfaces, installed: found,
+                                     appleContainerModes: env.appleContainerNetworkModes(env.home),
+                                     utmGuests: guests)
         return VirtualizationSnapshot(
             installed: found,
-            guestNetworks: guestNetworks(interfaces: interfaces, installed: found),
-            utmGuests: utmGuests(env: env),
+            guestNetworks: networks,
+            bridgedGuests: bridgedGuests(interfaces: interfaces, guestNetworks: networks)
+                .map { withCandidates($0, installed: found) },
+            utmGuests: guests,
             detectionEnabled: true)
     }
 }

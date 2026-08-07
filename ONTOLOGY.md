@@ -149,6 +149,44 @@ itself. Never use "store" generically for a vault.
 | Sending all traffic via another machine | **exit node** | Tailscale's own term; keep it |
 | The largest packet that fits | **MTU** | MTU (universal — keep it) |
 
+### Virtual machines and containers, and how their networks are wired
+
+Named here **before** the code uses them, because the mapping is the design decision. Every one of
+these products spells the same three arrangements differently, and the three route differently —
+so a UI that lumps them together tells the user the wrong thing about where their traffic goes.
+
+| Concept | House term | Vendor / other words |
+|---|---|---|
+| A virtual machine or container running on this Mac | **guest** | container, VM, virtual machine, instance, box, droplet |
+| The network a guest sits on | **guest network** | VM network, container network, `docker` network, vmnet, virtual switch |
+| The interface on **this Mac** that a guest network hangs off | **host interface** | bridge, `bridge100`, `vmnet8`, `vboxnet0`, host adapter, virtual switch uplink |
+| The per-guest virtual cable into that network | **guest tap** | tap, `vmenet0`, vNIC, virtual adapter, veth |
+
+**The three arrangements.** These are the terms the app uses everywhere a guest network is
+described — the graph card, the inspector, the diagnostic report and the manual:
+
+| Arrangement | House term | What it means to the user | Vendor / other words |
+|---|---|---|---|
+| Guests sit behind this Mac and share its connection | **shared network** | Their traffic comes out of this Mac, so whatever this Mac's traffic does, theirs does too | NAT, `nat`, `--mode nat`, Shared (UTM, Parallels), `vmnet8` / "NAT" (VMware Fusion), "Shared Networking", masquerade, slirp-with-an-interface |
+| Guests sit on the same network as this Mac, as machines of their own | **bridged network** | The network gives them their own address; this Mac isn't in the way and doesn't decide where their traffic goes | bridged, Bridged, Bridge, "Bridged Adapter", `vmnet0`, macvtap, `--network bridge` |
+| Guests can reach this Mac and each other and nothing else | **host-only network** | There is no way out to begin with, so a VPN can only affect whether this Mac can still reach them | host-only, Host (UTM), "Host-Only Adapter", "Host-Only Networking", **private network** (VirtualBox "internal", libvirt `isolated`), `vmnet1`, `vboxnet0` |
+
+**"private network" is a vendor word, not ours.** Several products use it, and they do not agree
+with each other about what it means — VirtualBox's *internal* network excludes even the host,
+libvirt's `isolated` includes it. We say **host-only**, and where a person arrived with the other
+word the copy says both once.
+
+**"We cannot see which" is a fourth answer and it must be sayable.** Telling shared from host-only
+means knowing whether this Mac is translating the guests' traffic, and that lives in `pf`, which
+no unprivileged process on macOS may read (`Docs/Networking.md` §6.1: `pfctl -sr` is
+`Permission denied`). Where the product does not record the answer on disk, the app says it does
+not know rather than guessing. **Never** write copy that assumes shared.
+
+**Never** as our label: *guest OS*, *hypervisor*, *NAT* (as our word for the arrangement — it is
+the mechanism, and it is also what a home router does, which is not the thing being named),
+*virtual switch*, *veth*, *slirp*, *vmnet* (Apple's own, and VMware's near-identical `vmnet` means
+something else entirely — quote either only in a `code` span).
+
 ### What connecting actually does to your Mac
 
 The one question about a connection a person can answer by watching their own machine, and

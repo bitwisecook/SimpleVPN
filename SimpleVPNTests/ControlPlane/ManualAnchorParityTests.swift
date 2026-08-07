@@ -124,6 +124,14 @@ struct ManualAnchorParityTests {
         // "creds." settings' help links into.
         "creds-what-is-it",
         "vm-what-is-it",
+        // Guests on the Routes map, and the one control there. PROSE, not settings:
+        // there is no value anybody sets — the map is a window, and the choice is a
+        // per-VPN kept-direct ROUTE stored on that VPN (the same list the routing
+        // rules editor shows), not an app-level switch. Deliberately so: "should my
+        // containers go through the VPN" has two legitimate answers with real
+        // security weight either way, and a global switch would make it once for
+        // every VPN at once.
+        "vm-on-the-route-graph", "vm-through-or-around",
         // Prose about a WAY of signing in rather than a setting: what an SSH
         // agent is, which agents work, what its three failures mean, and why
         // agent forwarding isn't offered. The setting itself is

@@ -191,6 +191,8 @@ extension RouteGraphView {
             internetCard(owner, standbys: standbys, outcome)
         case .proxy(let proxies):
             proxyCard(proxies)
+        case .guestNetwork(let guest):
+            guestNetworkCard(guest)
         }
     }
 

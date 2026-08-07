@@ -36,6 +36,11 @@ struct GraphNode: Identifiable {   // was private — internal for the file spli
         /// A real hop: the proxy the live connection says its traffic goes through,
         /// sitting between the tunnel and the Internet because that is where it is.
         case proxy([String])
+        /// A virtual machine or container network, drawn to the LEFT of This Mac
+        /// because that is where it is in the packet's journey — a guest sends into
+        /// this Mac, which then decides by which interface it leaves.
+        /// `RouteGraphGuests.swift` has the argument in full.
+        case guestNetwork(GuestGraphCard)
     }
     /// A bucket of routes carried by one interface. `id` is stable across refreshes
     /// (interface BSD name + bucket), so expansion state and selection survive polls.
@@ -247,6 +252,10 @@ extension RouteGraphView {
     func buildLayout(_ outcome: SearchOutcome?) -> Layout {   // was private — internal for the file split
         guard let topo else { return Layout(nodes: [], edges: [], canvas: CGSize(width: 400, height: 200)) }
         let t = topo.topology
+        // The guests, computed once. They add a COLUMN IN FRONT of This Mac when
+        // there are any, and cost nothing at all when there are none — which is the
+        // common case, and the diagram must be unchanged for it.
+        let guests = guestCards
         let ifaces = t.interfaces.filter(\.inUse).sorted { a, b in
             func rank(_ i: NetInterface) -> Int {
                 if i.kind == .tunnel && !i.isTailscale { return 0 }
@@ -260,7 +269,10 @@ extension RouteGraphView {
 
         var nodes: [GraphNode] = []
         var edges: [GraphEdge] = []
-        let x0: CGFloat = 0
+        // Guests sit at x = 0 and push everything else one column right; with no
+        // guests `x0` is 0 and every coordinate below is exactly what it always was.
+        let xGuests: CGFloat = 0
+        let x0: CGFloat = guests.isEmpty ? 0 : colWidth + colGap
         let x1 = x0 + colWidth + colGap
         let x2 = x1 + colWidth + colGap      // destinations — and the Internet, and any proxy
 
@@ -354,11 +366,50 @@ extension RouteGraphView {
             y += internetHeight + rowGap * 2
         }
 
-        let canvasHeight = max(240, y - rowGap * 2)
+        // The guest column can be taller than the interface stack (a Mac running
+        // several guest networks and one VPN), so the canvas takes whichever is
+        // bigger rather than clipping the new column.
+        let guestStack = guests.isEmpty ? 0
+            : CGFloat(guests.count) * guestHeight + CGFloat(guests.count - 1) * rowGap
+        let canvasHeight = max(240, y - rowGap * 2, guestStack)
         // Source node, centred against the whole stack.
         let srcHeight: CGFloat = 72
         let srcFrame = CGRect(x: x0, y: (canvasHeight - srcHeight) / 2, width: colWidth, height: srcHeight)
         nodes.insert(GraphNode(id: "source", kind: .source, frame: srcFrame), at: 0)
+
+        // The guest cards, centred against the same stack, each wired to This Mac.
+        //
+        // THE EDGE IS THE ANSWER TO PART TWO: its badge says, in the user's words,
+        // whether the traffic that reaches these guests goes through a VPN or around
+        // it, and its tint matches the card's (purple = a VPN carries it, gray = it
+        // does not, orange = the VPNs disagree). `.passive` status keeps it solid —
+        // this is a real attachment, not a connection that can be down — and the
+        // dashes march when the host interface is actually moving bytes, so a busy
+        // container looks busy.
+        //
+        // A BRIDGED GUEST'S EDGE IS DRAWN `standby`, which is the diagram's existing
+        // word for "this link exists but is not the route in force" — dashed and dim.
+        // A solid line to This Mac would claim the packets come through here, which
+        // is precisely what bridged means they do not; no line at all would leave a
+        // card floating as though it were a drawing bug. The badge says it in words.
+        var guestY = (canvasHeight - guestStack) / 2
+        for guest in guests {
+            let frame = CGRect(x: xGuests, y: guestY, width: colWidth, height: guestHeight)
+            let offPath = guest.routing.path == .notThisMacsDecision
+            nodes.append(GraphNode(id: guest.id, kind: .guestNetwork(guest), frame: frame))
+            edges.append(GraphEdge(id: "e0-\(guest.id)",
+                                   from: CGPoint(x: frame.maxX, y: frame.midY),
+                                   to: CGPoint(x: srcFrame.minX, y: srcFrame.midY),
+                                   active: guest.isActive && !offPath,
+                                   rate: offPath ? 0 : max(guest.inRate, guest.outRate),
+                                   tint: guestTint(guest),
+                                   status: .passive,
+                                   controllable: false,
+                                   badge: guest.routing.edgeLabel,
+                                   standby: offPath,
+                                   fromNode: guest.id, toNode: "source"))
+            guestY += guestHeight + rowGap
+        }
         for (iface, f) in ifaceFrames {
             let active = iface.inRate > 512 || iface.outRate > 512
             let rate = max(iface.inRate, iface.outRate)
@@ -538,13 +589,35 @@ extension RouteGraphView {
             .sorted()
         if !specific.isEmpty {
             let isMesh = iface.isTailscale
+            // A GUEST BRIDGE IS NOT A LOCAL NETWORK, and calling it one was the
+            // diagram telling the user the opposite of what `Docs/Networking.md`
+            // §4.2.1 decided: `LocalNetworkCarveOut` deliberately REJECTS
+            // `bridge100`+ precisely because a guest network is not the LAN the
+            // printer is on. The routes are still listed here — this card is the
+            // routing table, verbatim — but under the name the guest card in the
+            // first column uses, so the two surfaces agree about what it is.
+            let isGuestBridge = guestHostInterfaces.contains(iface.name)
+            let title = if isMesh { "Tailscale mesh" }
+                else if iface.kind == .tunnel { "Networks behind the VPN" }
+                else if isGuestBridge { "Guest network" }
+                else { "Local network" }
+            let symbol = if isMesh { "point.3.connected.trianglepath.dotted" }
+                else if iface.kind == .tunnel { "building.2" }
+                else if isGuestBridge { "shippingbox" }
+                else { "house" }
             out.append(.init(id: "dest-\(iface.name)-specific", interfaceName: iface.name,
-                             title: isMesh ? "Tailscale mesh" : (iface.kind == .tunnel ? "Networks behind the VPN" : "Local network"),
-                             symbol: isMesh ? "point.3.connected.trianglepath.dotted"
-                                 : (iface.kind == .tunnel ? "building.2" : "house"),
+                             title: title, symbol: symbol,
                              routes: specific.map { RouteRow(cidr: $0) },
                              tint: isMesh ? .teal : (iface.kind == .tunnel ? .purple : .gray)))
         }
         return out
+    }
+
+    /// The host interfaces that carry a live guest network, so a destination card
+    /// built from one is named for what it is. Read from the same snapshot the guest
+    /// cards are built from — one source, so the first column and the third cannot
+    /// disagree.
+    var guestHostInterfaces: Set<String> {
+        Set(virtualization.guestNetworks.map(\.interfaceName))
     }
 }

@@ -29,6 +29,10 @@ private struct FakeMac {
     var present: Set<String> = []
     var directories: [String: [String]] = [:]
     var networks: [String: UTMNetworkConfig] = [:]
+    /// What Apple's `container` has written in its own network records, in ITS
+    /// spelling (`"nat"`). Explicit for the same reason as every other field: the
+    /// author's own Mac really does have one of these, and a test must not read it.
+    var containerModes: [String] = []
 
     var environment: VirtualizationEnvironment {
         VirtualizationEnvironment(
@@ -36,7 +40,8 @@ private struct FakeMac {
             fileExists: { [present] in present.contains($0) },
             applicationDirectories: ["/Applications"],
             listDirectory: { [directories] in directories[$0] ?? [] },
-            readUTMNetwork: { [networks] in networks[$0] })
+            readUTMNetwork: { [networks] in networks[$0] },
+            appleContainerNetworkModes: { [containerModes] _ in containerModes })
     }
 }
 
@@ -362,6 +367,221 @@ struct VirtualizationSnapshotTests {
                                    candidateProductIDs: ["apple-container", "utm"])
         #expect(network.attribution.contains("Apple Containers"))
         #expect(network.attribution.contains("UTM"))
+    }
+}
+
+// MARK: - How a guest network is WIRED (shared / bridged / host-only / can't see)
+
+/// The three arrangements route differently (`ONTOLOGY.md`), so getting one wrong
+/// means telling somebody a control will help when it cannot — or hiding a network
+/// a VPN really is swallowing. The fourth answer is the important one: where the
+/// truth lives in `pf`, we say we cannot see it.
+struct GuestNetworkModeTests {
+
+    /// The vendors with a genuine, documented, twenty-year-old convention get a real
+    /// answer off the interface name alone — no filesystem, so the never-blocking
+    /// half of the scan is not `.unknown` for them.
+    @Test func vendorConventionsAreReadFromTheInterfaceName() {
+        #expect(VirtualizationDiscovery.mode(interfaceName: "vmnet1").mode == .hostOnly)
+        #expect(VirtualizationDiscovery.mode(interfaceName: "vmnet8").mode == .shared)
+        #expect(VirtualizationDiscovery.mode(interfaceName: "vboxnet0").mode == .hostOnly)
+        #expect(VirtualizationDiscovery.mode(interfaceName: "vnic0").mode == .shared)
+        #expect(VirtualizationDiscovery.mode(interfaceName: "vnic1").mode == .hostOnly)
+    }
+
+    /// An adapter the user made themselves has no convention to read, so it is
+    /// `.unknown` rather than rounded to the vendor's default.
+    @Test func anAdapterOutsideTheConventionIsNotGuessedAt() {
+        let answer = VirtualizationDiscovery.mode(interfaceName: "vmnet3")
+        #expect(answer.mode == .unknown)
+        #expect(answer.evidence == VirtualizationDiscovery.unseeable)
+    }
+
+    /// Apple's shared vmnet stack has no convention, so with nothing on disk to read
+    /// the honest answer is that we cannot see it — and the evidence says WHY, in the
+    /// user's terms, rather than leaving a blank.
+    @Test func appleVMNetWithNoRecordSaysItCannotSee() {
+        let answer = VirtualizationDiscovery.mode(interfaceName: "bridge100")
+        #expect(answer.mode == .unknown)
+        #expect(answer.evidence.contains("administrator access"))
+    }
+
+    /// MEASURED ON A REAL MAC (2026-08-07): Apple's `container` writes
+    /// `{"mode":"nat", …}` into its own network record, and that file is the only
+    /// unprivileged source for shared-versus-host-only there is.
+    @Test func applesOwnRecordAnswersItAndIsCitedAsTheEvidence() {
+        let answer = VirtualizationDiscovery.mode(interfaceName: "bridge100",
+                                                  appleContainerModes: ["nat"])
+        #expect(answer.mode == .shared)
+        #expect(answer.evidence.contains("Apple"))
+        #expect(answer.evidence.contains("nat"))
+    }
+
+    /// UTM records it per virtual machine, in UTM's own spelling.
+    @Test func utmsOwnSettingsAnswerItPerVirtualMachine() {
+        let host = VirtualizationDiscovery.mode(
+            interfaceName: "bridge101",
+            utmGuests: [UTMGuest(name: "alpine", mode: "Host", bridgeInterface: nil)])
+        #expect(host.mode == .hostOnly)
+        #expect(host.evidence.contains("UTM"))
+    }
+
+    /// An Emulated UTM machine is QEMU slirp with no interface at all, so it must not
+    /// get a vote on what a bridge is — it is not on that bridge.
+    @Test func anEmulatedMachineDoesNotVoteOnABridgesArrangement() {
+        let answer = VirtualizationDiscovery.mode(
+            interfaceName: "bridge100", appleContainerModes: ["nat"],
+            utmGuests: [UTMGuest(name: "win", mode: "Emulated", bridgeInterface: nil)])
+        #expect(answer.mode == .shared)
+    }
+
+    /// TWO PRODUCTS DISAGREEING IS `.unknown`, not first-match-wins. Nothing on disk
+    /// maps a network record to a particular bridge, so with two answers in play we
+    /// genuinely do not know which one this bridge is — and saying "shared" there
+    /// would be a security claim made by a coin toss.
+    @Test func disagreeingRecordsAreUnknownRatherThanTheFirstMatch() {
+        let answer = VirtualizationDiscovery.mode(
+            interfaceName: "bridge100", appleContainerModes: ["nat"],
+            utmGuests: [UTMGuest(name: "lab", mode: "Bridged", bridgeInterface: "en0")])
+        #expect(answer.mode == .unknown)
+        #expect(answer.evidence.contains("More than one arrangement"))
+    }
+
+    /// The vendor-word table is the one place any of this is translated.
+    @Test func everyVendorWordIsTranslatedInOnePlace() {
+        #expect(GuestNetworkMode(vendorWord: "nat") == .shared)
+        #expect(GuestNetworkMode(vendorWord: "Shared") == .shared)
+        #expect(GuestNetworkMode(vendorWord: "Bridged") == .bridged)
+        #expect(GuestNetworkMode(vendorWord: "Host") == .hostOnly)
+        #expect(GuestNetworkMode(vendorWord: "host-only") == .hostOnly)
+        #expect(GuestNetworkMode(vendorWord: "something new") == .unknown)
+    }
+
+    /// Only `.bridged` takes this Mac off the path — and it is the only one that
+    /// must never be offered a routing control.
+    @Test func onlyABridgedNetworkTakesThisMacOffThePath() {
+        #expect(GuestNetworkMode.shared.thisMacIsOnThePath)
+        #expect(GuestNetworkMode.hostOnly.thisMacIsOnThePath)
+        #expect(GuestNetworkMode.unknown.thisMacIsOnThePath)
+        #expect(!GuestNetworkMode.bridged.thisMacIsOnThePath)
+        #expect(!GuestNetworkMode.bridged.routingChoiceApplies)
+    }
+
+    /// Every arrangement has its own sentence in both voices, so no surface can
+    /// silently show a blank for one of them.
+    @Test func everyArrangementHasItsOwnWords() {
+        var titles = Set<String>(), summaries = Set<String>()
+        for mode in GuestNetworkMode.allCases {
+            #expect(!mode.title.isEmpty)
+            #expect(!mode.summary.isEmpty)
+            titles.insert(mode.title)
+            summaries.insert(mode.summary)
+        }
+        #expect(titles.count == GuestNetworkMode.allCases.count)
+        #expect(summaries.count == GuestNetworkMode.allCases.count)
+    }
+
+    /// The mode reaches a real `GuestNetwork` through the ordinary scan, with its
+    /// evidence, rather than being computed again somewhere downstream.
+    @Test func theModeAndItsEvidenceRideOnTheGuestNetwork() throws {
+        var mac = FakeMac()
+        mac.present = ["/usr/local/bin/container"]
+        mac.containerModes = ["nat"]
+        let networks = VirtualizationDiscovery.guestNetworks(
+            interfaces: [
+                interface("vmenet0", kind: .virtualMachine),
+                interface("bridge100", kind: .bridge,
+                          ipv4: ["192.168.64.1"], subnets: ["192.168.64.0/24"]),
+            ],
+            installed: VirtualizationDiscovery.installed(env: mac.environment),
+            appleContainerModes: mac.containerModes)
+        let network = try #require(networks.first)
+        #expect(network.mode == .shared)
+        #expect(network.modeEvidence.contains("Apple"))
+    }
+}
+
+// MARK: - Guests that are running with no network of ours behind them
+
+struct BridgedGuestTests {
+
+    /// A tap already counted as a member of a guest network is NOT reported again.
+    /// This is half of "a guest network appears once": the other half is
+    /// `distinctGuestNetworks`.
+    @Test func aTapBelongingToAGuestNetworkIsNotReportedTwice() {
+        let interfaces = [
+            interface("vmenet0", kind: .virtualMachine),
+            interface("bridge100", kind: .bridge,
+                      ipv4: ["192.168.64.1"], subnets: ["192.168.64.0/24"]),
+        ]
+        let networks = VirtualizationDiscovery.guestNetworks(interfaces: interfaces, installed: [])
+        #expect(networks.first?.attachedGuestInterfaces == ["vmenet0"])
+        #expect(VirtualizationDiscovery.bridgedGuests(interfaces: interfaces,
+                                                      guestNetworks: networks).isEmpty)
+    }
+
+    /// A tap with NO guest network behind it is the bridged case: something is
+    /// running, and this Mac is not on its path. Worth saying — it is the one
+    /// arrangement a user could see nothing at all about before.
+    @Test func aTapWithNoGuestNetworkBehindItIsReportedAsBridged() throws {
+        let interfaces = [
+            interface("vmenet0", kind: .virtualMachine),
+            interface("bridge0", kind: .bridge,
+                      ipv4: ["192.168.9.88"], subnets: ["192.168.9.0/24"]),
+        ]
+        let networks = VirtualizationDiscovery.guestNetworks(interfaces: interfaces, installed: [])
+        #expect(networks.isEmpty)   // bridge0 is a real LAN, never a guest network
+        let bridged = VirtualizationDiscovery.bridgedGuests(interfaces: interfaces,
+                                                            guestNetworks: networks)
+        #expect(bridged.count == 1)
+        let guest = try #require(bridged.first)
+        #expect(guest.interfaceName == "vmenet0")
+        #expect(guest.mode == .bridged)
+    }
+
+    /// No guests at all is an empty answer, not a phantom row.
+    @Test func aMacWithNoGuestsReportsNone() {
+        let interfaces = [interface("en0", kind: .wifi, ipv4: ["10.0.7.9"], subnets: ["10.0.7.0/24"])]
+        #expect(VirtualizationDiscovery.bridgedGuests(interfaces: interfaces,
+                                                      guestNetworks: []).isEmpty)
+    }
+}
+
+// MARK: - A guest network appears ONCE
+
+struct DistinctGuestNetworkTests {
+
+    /// A bridge holding a secondary address on the SAME subnet is still one guest
+    /// network. Drawing it twice would put the same containers on the diagram twice,
+    /// with two controls that fight over one subnet.
+    @Test func oneBridgeIsOneGuestNetworkHoweverManyAddressesItHolds() {
+        let interfaces = [
+            interface("bridge100", kind: .bridge,
+                      ipv4: ["192.168.64.1", "192.168.64.2"],
+                      subnets: ["192.168.64.0/24", "192.168.64.0/24"]),
+        ]
+        let networks = VirtualizationDiscovery.guestNetworks(interfaces: interfaces, installed: [])
+        // The raw list is per ADDRESS — both are genuinely on the interface…
+        #expect(networks.count == 2)
+        // …and everything that DRAWS one takes the distinct list, which is per
+        // interface.
+        let snapshot = VirtualizationSnapshot(guestNetworks: networks)
+        #expect(snapshot.distinctGuestNetworks.count == 1)
+        #expect(snapshot.distinctGuestNetworks.first?.hostAddress == "192.168.64.1")
+    }
+
+    /// Two genuinely different guest networks stay two.
+    @Test func twoDifferentBridgesStayTwo() {
+        let interfaces = [
+            interface("bridge100", kind: .bridge,
+                      ipv4: ["192.168.64.1"], subnets: ["192.168.64.0/24"]),
+            interface("bridge101", kind: .bridge,
+                      ipv4: ["192.168.65.1"], subnets: ["192.168.65.0/24"]),
+        ]
+        let snapshot = VirtualizationSnapshot(
+            guestNetworks: VirtualizationDiscovery.guestNetworks(interfaces: interfaces,
+                                                                 installed: []))
+        #expect(snapshot.distinctGuestNetworks.count == 2)
     }
 }
 

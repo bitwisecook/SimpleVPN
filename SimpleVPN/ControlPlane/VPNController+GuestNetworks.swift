@@ -147,6 +147,83 @@ extension VPNController {
         dismissedGuestNetworkCaptures.insert(id)
     }
 
+    // MARK: The route graph's per-guest-network question
+
+    /// Which live VPNs are carrying the traffic that reaches this guest network —
+    /// the input `GuestNetworkRouting.decide` needs, and the answer the Routes
+    /// window's guest card is built from.
+    ///
+    /// **The same judgement as the connect-time banner, deliberately.**
+    /// `VirtualizationBypass.captured(from:wantsFullTunnel:carriedSubnets:)` decides
+    /// whether a tunnel would swallow a guest subnet; this asks it of every ACTIVE
+    /// profile instead of one connecting profile. A VPN that is not up carries
+    /// nothing, so it is not a carrier and must not appear on the card claiming to
+    /// be one — the graph draws what is true now.
+    func guestNetworkCarriers(subnet: String) -> [GuestNetworkCarrier] {
+        profiles
+            .filter { UI.isActive($0.status) }
+            .filter { profile in
+                profileWantsFullTunnel(profile.id)
+                    || gatewaySubnets(for: profile.id)
+                        .contains { RoutePrefixMath.overlaps($0, subnet) }
+            }
+            .map { profile in
+                GuestNetworkCarrier(
+                    profileID: profile.id,
+                    name: profile.name,
+                    keptDirect: GuestNetworkRouting.isKeptDirect(
+                        subnet: subnet, rules: routingRules(for: profile.id)),
+                    canDivert: profile.kind.canDivertOutside,
+                    divertUnsupportedReason: profile.kind.divertOutsideUnsupportedReason)
+            }
+    }
+
+    /// Apply the user's choice for one guest network to every VPN carrying it.
+    ///
+    /// EVERY GATE IS RE-APPLIED HERE, not trusted from the view:
+    ///  • `ManagedPolicy.allowDivertOutside` (which is `!ForceKeepInsideVPN &&
+    ///    !DisableDivertRules`) is checked before anything is written, so a control
+    ///    that somehow stayed enabled cannot store a rule;
+    ///  • the rule is built by `GuestNetworkRouting.rule`, whose `routeDest`
+    ///    validation refuses a `/0` — a guest subnet can never become a whole-tunnel
+    ///    bypass;
+    ///  • the write goes through `addRoutingRule`/`removeRoutingRule`, which are the
+    ///    ordinary guarded paths (they re-check policy again and re-materialise every
+    ///    profile's include-set), and the extension re-applies `policyKeepInside` when
+    ///    it builds the `DivertPlan`. Four gates, none of them this file's own.
+    ///
+    /// Doing nothing is always a legitimate outcome and never an error: a kind that
+    /// cannot divert, or a subnet that will not validate, is simply skipped.
+    func setGuestNetworkKeptDirect(_ keptDirect: Bool,
+                                   subnet: String,
+                                   attribution: String,
+                                   interfaceName: String) async {
+        guard ManagedPolicy.allowDivertOutside else { return }
+        // Validated ONCE, up front: if the subnet will not make a rule there is
+        // nothing to do on any profile, and finding that out per profile would mean
+        // a half-applied choice.
+        guard GuestNetworkRouting.rule(subnet: subnet, attribution: attribution,
+                                       interfaceName: interfaceName) != nil else { return }
+        for carrier in guestNetworkCarriers(subnet: subnet) where carrier.canDivert {
+            if keptDirect {
+                guard !carrier.keptDirect,
+                      // A fresh rule per profile: `RoutingRule.id` identifies a row in
+                      // ONE profile's list, and `removeRoutingRule(id:for:)` deletes by
+                      // it, so sharing one id across profiles would be two rows with the
+                      // same name in two lists.
+                      let rule = GuestNetworkRouting.rule(subnet: subnet, attribution: attribution,
+                                                          interfaceName: interfaceName)
+                else { continue }
+                await addRoutingRule(rule, for: carrier.profileID)
+            } else {
+                for stored in routingRules(for: carrier.profileID)
+                where stored.action == .outside && stored.destination == subnet {
+                    await removeRoutingRule(id: stored.id, for: carrier.profileID)
+                }
+            }
+        }
+    }
+
     /// The user accepted the consequence: add the offered divert rules to this
     /// profile's own routing rules.
     ///

@@ -82,6 +82,44 @@ A feature that skipped this distinction would look like it worked, fix nothing a
 users, and leave us confidently wrong. Hence: detection **classifies**, and the UI must never offer a
 routing fix for a `.userspace` product.
 
+## The three ARRANGEMENTS — a second axis, and not a refinement of the first
+
+`GuestNetworkClass` above answers *is there a host interface at all*. It does not answer *who decides
+where the guests' traffic goes*, and those come apart: a `.routedSubnet` product can put its guests
+behind this Mac, beside it on the LAN, or in a cul-de-sac with it, and the three route differently
+enough that one UI sentence for all of them is wrong for two of them. `GuestNetworkMode` is that
+second axis; `ONTOLOGY.md` binds the words.
+
+| | **shared** | **bridged** | **host-only** |
+|---|---|---|---|
+| Where the guests are | behind this Mac | on the same network as this Mac | with this Mac and nothing else |
+| Is this Mac's routing table on their path? | **yes** | **no** | yes, for the only path there is |
+| Can a VPN here change where their traffic goes? | yes | **no** | there is nowhere for it to go |
+| What a tunnel capturing the subnet costs | their way out, maybe | nothing — it never sees them | this Mac's own path to them |
+| Is the through/around choice offered? | yes | **no** | yes |
+| Vendor words | `nat`, Shared, `vmnet8` | Bridged, `vmnet0` | Host, host-only, private, `vmnet1`, `vboxnet0` |
+
+**And a fourth answer, which is the one that took the most care.** Telling *shared* from *host-only*
+means knowing whether this Mac is translating the guests' traffic, and that lives in `pf` —
+`Docs/Networking.md` §6.1 measured `pfctl -sr` as `Permission denied` for an unprivileged process, and
+this app does not elevate. So the mode is read from **the vendors' own on-disk records** where they
+keep one, and is `.unknown` otherwise, with a sentence in the UI saying so. Never assumed.
+
+| Source | What it gives | Where |
+|---|---|---|
+| Apple `container`'s network record | the mode verbatim (`"mode":"nat"` — **measured 2026-08-07**) | `~/Library/Application Support/com.apple.container/networks/<name>/entity.json` |
+| UTM's per-VM config | `Shared` / `Bridged` / `Host` / `Emulated` | each `.utm` bundle's `config.plist` |
+| VMware, Parallels, VirtualBox | the vendor's own fixed adapter convention (`vmnet1` host-only, `vmnet8` NAT, `vnic0` shared, `vnic1` host-only, `vboxnet*` host-only by construction) | the interface name — no filesystem, so the never-blocking half of the scan gets it too |
+| everything else | nothing | `.unknown`, said out loud |
+
+**Only a UNANIMOUS record is used.** Nothing on disk maps `default` to `bridge100`, so with two
+different arrangements recorded on one Mac we do not know which bridge is which, and the answer is
+`.unknown` rather than the first match. Saying "shared" on a coin toss is a security claim.
+
+**`net/if_bridge.h` is not in the macOS SDK** (checked, Xcode 26.5), so bridge membership — which
+would separate bridged from the rest directly — would mean re-declaring the kernel's `ioctl` structs
+by hand. Not done: a hand-copied struct that drifts is worse than an honest `.unknown`.
+
 ## Per product (current versions only — the vendor's page is the authority)
 
 | Product | Class | Host interface | Documented subnet | Run here? |

@@ -1159,6 +1159,71 @@ Both-fail means routing or filtering and points at their kill switch; IP-works-n
 which is the search-domain and resolver-inheritance story already recorded above and which no routing
 toggle of ours would fix.
 
+### 6.5 ✅ Guests on the route graph — and the sentence that had to be split in two
+
+§6.3 ended with "if the measurement shows containers break, the fix is a setting and not a behaviour
+change… the change would be to *surface* it". That is what is now built, and **no default routing
+behaviour moved**: with no rule stored, a guest network goes through the tunnel exactly as before, and
+`LocalNetworkCarveOut` still rejects `bridge100`+ for the reason §6.3 gives.
+
+**What is new is visibility.** The Routes window draws every live guest network as a card in a
+**column of its own, to the left of This Mac** — because that is where a guest is in the packet's
+journey: it sends *into* this Mac, which then decides by which interface the packet leaves. The edge
+from the card to This Mac is badged with the answer in words ("through Tig Lab", "around Tig Lab",
+"around some of Tig Lab and Work", "not through this Mac"). Cards appear and disappear as guests start
+and stop: the scan is re-taken off the main actor whenever a guest-shaped interface appears or goes
+away, keyed narrowly so an ordinary Wi-Fi address change does not send the app back to the filesystem
+(the `snapshotOffMain` freeze lesson is load-bearing here — nothing on this path is read on the main
+thread).
+
+The same window also stops calling a guest bridge a **"Local network"**. That card title contradicted
+§4.2.1 — the carve-out rejects `bridge100`+ *precisely because* it is not the LAN the printer is on —
+and the diagram was quietly teaching the opposite. It now reads "Guest network".
+
+**THE SENTENCE THAT HAD TO BE SPLIT, and it is the finding of this piece of work.** It is tempting to
+label the control "keep my containers out of the VPN". That would be false, and the falseness is a
+security claim rather than a wording quibble:
+
+* a `RoutingRule(.outside)` is **destination-based** — `NEPacketTunnelNetworkSettings` routes at the
+  network layer, so the rule takes traffic *addressed to* `192.168.64.0/24` out of the tunnel;
+* a guest's own outbound traffic is **not addressed to `192.168.64.0/24`**. vmnet translates its source
+  to this Mac's address and the packet is then destined for, say, `1.1.1.1` — so it follows this Mac's
+  default route into the tunnel whether the rule is there or not.
+
+So the divert controls **"reaching them"** (this Mac → the guests) and not **"their way out"** (the
+guests → the internet). The UI states both, separately, on every card; the code keeps them apart in
+`GuestNetworkRouting`, whose header carries the argument. Anyone tempted to merge them into one
+reassuring line should read this paragraph first. This also **does not** resolve §6.1–§6.4: whether a
+full tunnel breaks a guest at all is still unmeasured, and the experiment in §6.4 is still the way to
+find out.
+
+**Three arrangements, because they route differently** (`ONTOLOGY.md`; the full table is in
+`Docs/LocalVirtualNetworks.md`). *Shared* guests are behind this Mac and the choice applies; *bridged*
+guests are beside it on the LAN, this Mac's routing table is not consulted at all, and **no control is
+offered** — a rule there would apply perfectly and change nothing; *host-only* guests have no way out
+to lose, so the only thing a tunnel can take is this Mac's own path to them, and the choice still
+applies. Where a vendor does not write the arrangement down somewhere unprivileged we can read, the
+card **says we cannot see it** rather than assuming, because the thing that would settle it is `pf`
+and §6.1 measured that as `Permission denied`.
+
+**The gates, all four, and none of them new.** `ManagedPolicy.allowDivertOutside` is checked before
+anything is written; the prefix is re-validated by `RoutingRule.routeDest`, which refuses a `/0` — so a
+guest network can never become the whole-tunnel bypass that `ForceKeepInsideVPN` exists to prevent; the
+write goes through `addRoutingRule`/`removeRoutingRule`, which re-check policy; and the extension
+re-applies `policyKeepInside` when it builds the `DivertPlan`. **`ForceKeepInsideVPN` overrides the
+stored state and not merely the control**: under it the card reads "through the VPN" even with a rule
+saved, because `DivertPlan.make(keepInside: true, …)` drops it — reporting "around the VPN" there would
+tell somebody their guests were outside a tunnel they are inside, which is the inversion that matters
+most.
+
+**Not carried by export/import, and that is pre-existing rather than a decision made here.**
+`ConfigSnapshot.VPN` reflects the typed config structs; a profile's divert rules live in
+`providerConfiguration["routingRules"]` as an encoded blob, which the structural reflection does not
+reach — so **no** divert rule has ever survived an export, guest-network ones included. Fixing that
+means giving `routingRules` a first-class place in the config document (and deciding what an imported
+`.outside` rule means on a Mac with different interfaces), which is its own piece of work with its own
+security question, not a rider on this one.
+
 ---
 
 ## 7. What a future reader would otherwise have to rediscover

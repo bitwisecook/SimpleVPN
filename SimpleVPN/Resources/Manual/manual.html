@@ -387,6 +387,8 @@
   <a href="#vm-what-is-it">What This Is</a>
   <a href="#vm-detect">Look for Virtual Machines on This Mac</a>
   <a href="#vm-warn-on-connect">Warn Before a VPN Captures Them</a>
+  <a href="#vm-on-the-route-graph">Seeing Your Guests on the Routes Map</a>
+  <a href="#vm-through-or-around">Through the VPN, or Around It</a>
 </nav>
 
 <main>
@@ -1869,6 +1871,23 @@ who wants them.</p>
 <p><strong>SimpleVPN never changes routing on its own.</strong> The offer is an offer: accept it and the subnet joins that one VPN&rsquo;s list of networks kept out, where it stays visible and removable. Decline it and nothing is touched. There is deliberately no setting that would do this automatically for every VPN, because sending traffic outside a tunnel is not a decision to make on somebody&rsquo;s behalf.</p>
 <p><strong>The offer only appears where it could work.</strong> For a product whose guests have no network of their own there is no subnet to keep out, so instead of a routing offer you are told the two things that do help &mdash; the guest&rsquo;s MTU and the guest&rsquo;s DNS. A routing change offered there would look like a fix and be none.</p>
 <p>Off means SimpleVPN keeps looking but stops speaking up: the facts are still available in a problem report and in the connection details, and no banner appears when you connect. Turn off <a href="#vm-detect">Look for Virtual Machines on This Mac</a> instead if you would rather it did not look at all.</p>
+
+<h2 id="vm-on-the-route-graph">Seeing Your Guests on the Routes Map</h2>
+<p class="default">In <strong>Window &#9656; Routes</strong>, in the first column, whenever something is running.</p>
+<p>The Routes map draws where this Mac&rsquo;s traffic goes. Virtual machines and containers appear in it as <strong>cards of their own, to the left of This Mac</strong> &mdash; which is where they are: a guest sends a packet into this Mac, and this Mac then decides whether it leaves by a VPN or by your ordinary connection, exactly as it does for any app. Cards appear and disappear as guests start and stop; you never have to reopen the window.</p>
+<p>Each card names the guest network, its subnet, how many guests are on it, and <strong>which of the three arrangements it is</strong>, because they do not route the same way:</p>
+<ul>
+<li><strong>Shared network</strong> &mdash; the guests sit behind this Mac and share its connection, so their traffic goes wherever this Mac&rsquo;s does. This is what Apple&rsquo;s <code>container</code> and UTM&rsquo;s <em>Shared</em> mode give you.</li>
+<li><strong>Bridged network</strong> &mdash; the guests are on the same network as this Mac, with addresses of their own from it. <strong>This Mac is not in the way</strong>, so no VPN here can change where their traffic goes, and SimpleVPN offers no control that pretends otherwise.</li>
+<li><strong>Host-only network</strong> &mdash; the guests can reach this Mac and each other and nothing else. There is no way out for a VPN to take away; the only thing at stake is whether this Mac can still reach them. Some products call this a <em>private</em> or <em>internal</em> network.</li>
+</ul>
+<p><strong>&ldquo;SimpleVPN cannot tell&rdquo; is a fourth answer, and you will see it.</strong> Telling a shared network from a host-only one means reading this Mac&rsquo;s packet filter, and macOS does not let an app do that without administrator access &mdash; which SimpleVPN does not take. Where the product writes the answer down somewhere readable, the card says so and says where it read it. Where it does not, the card says it does not know, rather than assuming.</p>
+<p>The line joining a guest card to This Mac carries the answer to the question the map exists for: <strong>through a VPN, or around it</strong>. It names the VPN, and it says &ldquo;around some of&rdquo; when you have more than one and they disagree &mdash; a state nobody chooses on purpose and one you cannot otherwise see.</p>
+<h3 id="vm-through-or-around">Through the VPN, or Around It</h3>
+<p class="default">Nothing changes until you press the button. Guest traffic goes through the VPN today, and stays that way.</p>
+<p>Click a guest card and it offers one action: <strong>Keep Reachable Outside the VPN</strong>, or, if you already have, <strong>Send Through the VPN</strong>. It is the same kept-direct route you could add by hand in that VPN&rsquo;s own settings &mdash; it appears there, and you can see and remove it there &mdash; not a second, hidden mechanism.</p>
+<div class="warn"><strong>Two different journeys, and this changes one of them.</strong> Keeping a guest network direct changes what <em>this Mac sends to your guests</em>: traffic to that subnet leaves outside the VPN, over your ordinary connection, so the VPN neither carries nor protects it. It does <strong>not</strong> change how the guests themselves reach the internet &mdash; that follows this Mac&rsquo;s own way out, whichever way this is set, and the card says which interface that is. Anyone who tells you a routing toggle puts your containers outside a tunnel is describing something else.</div>
+<p><strong>When there is no choice, the card says why</strong> instead of showing a dead switch: no VPN is carrying it; the guests are bridged and this Mac does not decide; the VPN is a kind whose routes macOS owns; or your organisation has locked traffic inside the VPN. That last one wins over anything already stored &mdash; under a managed <em>keep everything inside the VPN</em> policy the card reads &ldquo;through the VPN&rdquo; even if a kept-direct route is saved, because that is what will actually happen when the tunnel is built.</p>
 
 <hr style="border: none; border-top: 1px solid var(--border); margin-top: 48px">
 <p class="muted" style="font-size: 13px">SimpleVPN uses the OpenVPN 3, OpenConnect, libssh and Tailscale engines, the gVisor network stack, Sparkle for app updates, and the 1Password Go SDK for item lookup. <a href="https://db-ip.com">IP Geolocation by DB-IP</a>, licensed CC BY 4.0. Coastlines from Natural Earth. Every component and its licence is listed in <strong>SimpleVPN &#9656; About SimpleVPN</strong>.</p>
