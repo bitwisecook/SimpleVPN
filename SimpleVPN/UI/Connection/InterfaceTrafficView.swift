@@ -22,6 +22,18 @@
 //  Pinned at the trailing edge the chart follows live data; scroll back and it stops
 //  following until you scroll home again or press the fixed "Now" button.
 //
+//  GUESTS ARE HERE TOO, AND WHAT THEIR LINE MEANS IS LOAD-BEARING. Every packet a
+//  virtual machine or container sends crosses its own guest tap (`vmenet0`), and a
+//  tap carries the same `if_data` counters every other interface does — so "how much
+//  is this container moving right now" is a REAL measurement, unprivileged, not an
+//  apportionment. What is NOT measurable, and is never drawn, is how much of it went
+//  through a VPN: by the time a guest's packet reaches a tunnel, vmnet has translated
+//  it to this Mac's address and nothing distinguishes it from Safari's. `ONTOLOGY.md`
+//  binds the wording — a guest's series is "with this Mac" and never "through Tig
+//  Lab" — and the caption under the chart says so in the user's words, on the same
+//  principle as the latency chart's separate "Lost" series: an unknown is never
+//  encoded as a plausible-looking number.
+//
 //  DEFAULT: only our own VPN tunnels are plotted — that's what this app is for, and
 //  a graph opening with awdl0/bridge100/Tailscale in it is noise. Everything else is
 //  one click away in the legend. Choices are stored as explicit show/hide OVERRIDES
@@ -46,6 +58,15 @@ struct InterfaceTrafficView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Only ever holds an SSID if the user opted into location; see LocationAuthority.
     @State private var location = LocationAuthority.shared
+
+    /// The named guests, from the ONE poller. Never scanned here: `TopologyMonitor`
+    /// owns the (bounded, off-main) filesystem scan precisely so this view and the
+    /// route diagram read the same answer and neither runs a second one.
+    private var guests: VirtualizationSnapshot { topo?.guests ?? VirtualizationSnapshot() }
+    /// Guest taps that are up. Held apart from `inUse` because a tap has no address of
+    /// its own — that is what a tap is — so it can never satisfy the ordinary test.
+    private var guestTaps: Set<String> { Set(guests.guestTaps) }
+    private var guestHosts: Set<String> { Set(guests.distinctGuestNetworks.map(\.interfaceName)) }
 
     /// Left edge of the visible window. Bound to the chart's scroll position, so it
     /// is written by the user's drag AND by us when we're following live data.
@@ -93,7 +114,13 @@ struct InterfaceTrafficView: View {
     private var interfaces: [NetInterface] {
         guard let topo else { return [] }
         let t = topo.topology
-        return t.interfaces.filter(\.inUse).sorted { a, b in
+        // GUEST TAPS ARE ADMITTED EXPLICITLY. `inUse` means "up and holding an
+        // address", and a tap holds none by design (the subnet lives on the bridge),
+        // so the ordinary test drops exactly the interfaces that carry a per-guest
+        // measurement. Admitted by NAME, from the guest scan, rather than by relaxing
+        // `inUse` — every other consumer of that property means what it says.
+        let taps = guestTaps
+        return t.interfaces.filter { $0.inUse || taps.contains($0.name) }.sorted { a, b in
             func rank(_ i: NetInterface) -> Int {
                 if i.kind == .tunnel { return 0 }
                 if t.carriesDefault(i.name) { return 1 }
@@ -125,6 +152,7 @@ struct InterfaceTrafficView: View {
                 // read, so they belong before it, not as a footnote after it.
                 legend
                 chart
+                guestCaption
                 if visible.isEmpty {
                     Text("Nothing plotted \u{2014} switch on a connection above.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -249,11 +277,17 @@ struct InterfaceTrafficView: View {
         // under the same names the legend chips use.
         .accessibilityChartDescriptor(InterfaceTrafficChartDescriptor(
             series: series.map { s in
-                (name: visible.first { $0.name == s.id }.map(chipLabel) ?? s.id,
-                 buckets: s.buckets)
+                // A guest's series is qualified in the AUDIO GRAPH too, not only in
+                // the caption: a VoiceOver user hearing "postgres, download" with no
+                // caption in earshot would draw exactly the conclusion the caption
+                // exists to prevent.
+                let isGuest = guestTaps.contains(s.id) || guestHosts.contains(s.id)
+                let base = visible.first { $0.name == s.id }.map(chipLabel) ?? s.id
+                return (name: isGuest ? "\(base), with this Mac" : base, buckets: s.buckets)
             },
             window: scrollX...scrollX.addingTimeInterval(Self.visibleSpan),
-            peak: visiblePeak(series)))
+            peak: visiblePeak(series),
+            hasGuests: plottingAnyGuest))
         .onAppear { if following { scrollX = trailingEdge } }
         .onChange(of: newestTime) { _, _ in
             guard following else { return }
@@ -335,11 +369,44 @@ struct InterfaceTrafficView: View {
         .accessibilityValue(shown ? "plotted" : "hidden")
     }
 
-    /// VPN name for our own tunnels, the Wi-Fi network's name when we may read it,
-    /// otherwise the interface's display name.
+    /// VPN name for our own tunnels, the GUEST'S OWN NAME for a tap we can attribute,
+    /// the Wi-Fi network's name when we may read it, otherwise the interface's display
+    /// name.
+    ///
+    /// "Bridge (bridge100)" and "VM network (vmenet0)" are what the OS calls these,
+    /// and they are useless on a legend: the whole point of naming guests is that
+    /// "postgres" is actionable and `vmenet0` is not. The fallbacks are deliberate and
+    /// ordered — a guest we cannot name is "A guest on vmenet0", which says what it is
+    /// without claiming which one.
     private func chipLabel(_ iface: NetInterface) -> String {
         if iface.kind == .wifi, let ssid = location.ssid, !ssid.isEmpty { return ssid }
+        if guestTaps.contains(iface.name) {
+            if let placed = guests.guest(onTap: iface.name) { return placed.guest.displayName }
+            return "A guest on \(iface.name)"
+        }
+        if guestHosts.contains(iface.name) {
+            let network = guests.distinctGuestNetworks.first { $0.interfaceName == iface.name }
+            return network.map { "\($0.attribution) guests" } ?? iface.friendlyName
+        }
         return iface.friendlyName
+    }
+
+    /// Is this line a guest's own traffic? Decides whether the caption below the chart
+    /// appears, and it appears only when something on screen needs it explained.
+    private var plottingAnyGuest: Bool {
+        visible.contains { guestTaps.contains($0.name) || guestHosts.contains($0.name) }
+    }
+
+    /// THE SENTENCE THAT STOPS THE CHART OVERCLAIMING. Shown only while a guest series
+    /// is plotted, because a caption nobody needs is a caption nobody reads.
+    @ViewBuilder private var guestCaption: some View {
+        if plottingAnyGuest {
+            Text("A guest\u{2019}s line is everything it sends and receives through this Mac. How "
+                 + "much of that went through a VPN cannot be measured \u{2014} once it leaves this "
+                 + "Mac it looks like any other traffic from it.")
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     /// Record an explicit override, and clear the opposite one so the two sets can
@@ -380,6 +447,10 @@ nonisolated private struct InterfaceTrafficChartDescriptor: AXChartDescriptorRep
     let series: [(name: String, buckets: [TrafficHistory.Bucket])]
     let window: ClosedRange<Date>
     let peak: Double
+    /// Whether the summary has to carry the guest caveat. Passed rather than inferred
+    /// from the names, so the spoken summary and the printed caption are decided by
+    /// the same expression in the view.
+    var hasGuests = false
 
     private func axes() -> (x: AXNumericDataAxisDescriptor, y: AXNumericDataAxisDescriptor) {
         let span = window.upperBound.timeIntervalSince(window.lowerBound)
@@ -422,7 +493,10 @@ nonisolated private struct InterfaceTrafficChartDescriptor: AXChartDescriptorRep
     private var summary: String {
         guard !series.isEmpty else { return "Nothing is plotted." }
         let names = series.map(\.name).formatted(.list(type: .and))
-        return "Five minutes of traffic for \(names); scroll back for up to 24 hours."
+        let base = "Five minutes of traffic for \(names); scroll back for up to 24 hours."
+        guard hasGuests else { return base }
+        return base + " A guest\u{2019}s line is everything it sends and receives through this "
+            + "Mac; how much of that went through a VPN cannot be measured."
     }
 
     func makeChartDescriptor() -> AXChartDescriptor {

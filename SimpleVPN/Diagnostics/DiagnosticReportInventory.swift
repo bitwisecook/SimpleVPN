@@ -363,6 +363,30 @@ nonisolated enum DiagnosticReportInventory {
             }
         }
 
+        // THE NAMES ARE DELIBERATELY NOT HERE, and the absence is reported so nobody
+        // adds them later thinking it was an oversight.
+        //
+        // A problem report is SENT. A guest network is `192.168.64.0/24` and says
+        // nothing about anybody; a virtual machine called "client-acme-prod" says a
+        // great deal, and a person attaching a report to fix a routing bug has not
+        // agreed to disclose their client list. The count and the arrangement are what
+        // a maintainer actually needs to reason about a packet path — the names add
+        // nothing diagnostic and carry the whole of the risk. They stay in the app,
+        // where the user is the only reader.
+        if !snapshot.placedGuests.isEmpty {
+            let placed = snapshot.placedGuests.filter { $0.attachment.interfaceName != nil }.count
+            out.append(DiagnosticReportField(
+                label: "Named guests found",
+                value: .count(snapshot.placedGuests.count),
+                detail: [
+                    .count(placed),
+                    .words("\(placed) of them could be matched to a network on this Mac"),
+                    .words("their names are shown in the app but deliberately left out of this "
+                           + "report \u{2014} a virtual machine\u{2019}s name can say who you work "
+                           + "for, and it is not needed to diagnose routing"),
+                ]))
+        }
+
         // Guests running with no network of this Mac's behind them. Reported
         // separately because the fix is different and the honest description is
         // narrow: we can see a guest, and we cannot see a network of ours.

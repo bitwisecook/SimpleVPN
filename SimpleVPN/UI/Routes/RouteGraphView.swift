@@ -150,21 +150,14 @@ struct RouteGraphView: View {
     /// themselves with `.accessibilityRotorEntry(id:in:)` against this.
     @Namespace var rotorNamespace   // internal — the marks live in the split files
 
-    /// What is running on this Mac in the way of virtual machines and containers.
+    /// What is running on this Mac in the way of virtual machines and containers,
+    /// with names attached to the networks we can prove they are on.
     ///
-    /// KEPT IN STATE AND REFRESHED OFF THE MAIN ACTOR, never read inline. The scan
-    /// reads the filesystem, and `contentsOfDirectory` on UTM's sandbox container has
-    /// been MEASURED to block in `open` and never return — doing that from `body`
-    /// would freeze the window, which is exactly how it froze the app once already
-    /// (`VirtualizationDiscovery.snapshotOffMain`).
-    @State var virtualization = VirtualizationSnapshot()   // internal — read by the split files
-    /// The guest-shaped interfaces the last scan was taken against. Containers start
-    /// and stop, so the graph has to follow WITHOUT A RELAUNCH: the 1 Hz topology
-    /// poll notices the new `bridge100`/`vmenet0`, this signature changes, and the
-    /// scan is re-run. Keyed on the interfaces that could possibly BE a guest network
-    /// so an ordinary Wi-Fi address change does not re-scan the filesystem.
-    @State private var guestScanSignature = ""
-    @State private var guestScan: Task<Void, Never>?
+    /// READ FROM THE ONE POLLER, never scanned here. `TopologyMonitor` owns it for the
+    /// reason its own comment gives: the traffic graph wants the same answer, and two
+    /// views each running their own bounded filesystem scan would scan twice, disagree
+    /// in between, and double the exposure to the read that once blocked for ever.
+    var virtualization: VirtualizationSnapshot { topo?.guests ?? VirtualizationSnapshot() }
 
     var body: some View {
         // Resolved ONCE and handed down: every card, row and edge that lights up is
@@ -289,51 +282,12 @@ struct RouteGraphView: View {
         // Initial focus: the search field — typing filters at once, and the
         // diagram (arrows/+/−) is one Tab away.
         .onAppear { topo?.startWatching(); searchFocused = true }
-        .onDisappear { topo?.stopWatching(); guestScan?.cancel(); guestScan = nil }
-        // Containers start and stop while the window is open, so the scan follows the
-        // interface list rather than running once. `initial: true` takes the first
-        // one; after that only a guest-shaped interface appearing or going away
-        // re-runs it.
-        .onChange(of: guestInterfaceSignature, initial: true) { _, signature in
-            rescanGuests(signature)
-        }
+        .onDisappear { topo?.stopWatching() }
         .overlay {
             if layout.nodes.count <= 1 {
                 ContentUnavailableView("No Active Routes", systemImage: "arrow.triangle.branch",
                     description: Text("Connect a VPN, or wait for the routing table to be read."))
             }
-        }
-    }
-
-    // MARK: Guests — noticing one start or stop, without a relaunch
-
-    /// The interfaces that could possibly be part of a guest network, and their
-    /// subnets. NARROW ON PURPOSE: a Wi-Fi address change, a new `utun`, or a rate
-    /// tick must not send the app back to the filesystem, and this is what keeps the
-    /// scan to the moments that actually change the answer — a guest booting or
-    /// shutting down.
-    private var guestInterfaceSignature: String {
-        (topo?.topology.interfaces ?? [])
-            .filter { $0.kind == .virtualMachine || $0.kind == .bridge }
-            .map { "\($0.name):\($0.ipv4Subnets.joined(separator: ","))" }
-            .sorted()
-            .joined(separator: "|")
-    }
-
-    /// Re-take the snapshot off the main actor. One in flight at a time — a guest
-    /// that flaps must not queue a scan per tick, and the stalled-`open` lesson says
-    /// a scan costs a thread even after we stop waiting for it.
-    private func rescanGuests(_ signature: String) {
-        guard signature != guestScanSignature || virtualization.guestNetworks.isEmpty else { return }
-        guestScanSignature = signature
-        guestScan?.cancel()
-        let detect = VirtualizationSettings.detectionEnabled
-        guestScan = Task {
-            let interfaces = TopologyMonitor.liveInterfaces()
-            let snapshot = await VirtualizationDiscovery.snapshotOffMain(
-                interfaces: interfaces, detectionEnabled: detect, env: .live())
-            guard !Task.isCancelled else { return }
-            virtualization = snapshot
         }
     }
 

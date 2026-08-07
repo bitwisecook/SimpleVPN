@@ -67,6 +67,10 @@ struct GuestGraphCard: Identifiable, Equatable {
     var modeEvidence: String
     /// How many guest taps are attached — how many guests are actually running.
     var guestCount: Int
+    /// The guests we can PROVE are on this network, named. Empty is the ordinary
+    /// answer and not a failure: `GuestInventory` attaches a name only on evidence,
+    /// and a card with a count and no names is telling the truth about what is known.
+    var named: [PlacedGuest] = []
     var routing: GuestNetworkRouting
     /// Where the guests' OWN traffic leaves this Mac by, in words. Nil when this Mac
     /// is not on their path or there is no way out at all.
@@ -77,6 +81,25 @@ struct GuestGraphCard: Identifiable, Equatable {
     var outRate: Double = 0
 
     var isActive: Bool { inRate > 512 || outRate > 512 }
+
+    /// The names, on one line, for a 230-point card. Two and a count: three names
+    /// wrap, and the inspector lists every one of them anyway.
+    var namesLine: String? {
+        guard !named.isEmpty else { return nil }
+        let shown = named.prefix(2).map(\.guest.displayName)
+        let extra = named.count - shown.count
+        return extra > 0 ? shown.joined(separator: ", ") + " +\(extra)"
+            : shown.joined(separator: ", ")
+    }
+
+    /// "2 guests running" / "2 running: postgres, redis". THE line that answers "what
+    /// is actually on this network", and it degrades honestly: a count when we have no
+    /// names, names when we have them.
+    var populationLine: String {
+        let count = guestCount == 1 ? "1 guest running" : "\(guestCount) guests running"
+        guard let names = namesLine else { return count }
+        return "\(count): \(names)"
+    }
 }
 
 // MARK: - Building the cards
@@ -103,6 +126,7 @@ extension RouteGraphView {
                 allowDivertOutside: ManagedPolicy.allowDivertOutside,
                 forceKeepInside: ManagedPolicy.forceKeepInsideVPN)
             let iface = topo?.topology.interfaces.first { $0.name == network.interfaceName }
+            let named = virtualization.guests(on: network.interfaceName)
             out.append(GuestGraphCard(
                 id: "guest-\(network.interfaceName)",
                 title: network.attribution,
@@ -111,7 +135,13 @@ extension RouteGraphView {
                 hostAddress: network.hostAddress,
                 mode: network.mode,
                 modeEvidence: network.modeEvidence,
+                // The TAPS are the count — one per running guest, and the only
+                // measurement of how many are up. `named` may be shorter (a guest
+                // whose product records nothing matchable) or, on a bridged network,
+                // describe machines that are not behind this interface at all; the two
+                // are shown as what they are rather than reconciled into one number.
                 guestCount: network.attachedGuestInterfaces.count,
+                named: named,
                 routing: routing,
                 wayOut: wayOutSentence(mode: network.mode),
                 inRate: iface?.inRate ?? 0,
@@ -132,6 +162,7 @@ extension RouteGraphView {
                     "A guest is running on \(guest.interfaceName) and there is no network of this "
                     + "Mac\u{2019}s behind it, so this Mac is not on its path.",
                 guestCount: 1,
+                named: virtualization.guests(on: guest.interfaceName),
                 routing: GuestNetworkRouting.decide(
                     mode: .bridged, carriers: [],
                     allowDivertOutside: ManagedPolicy.allowDivertOutside,
@@ -198,9 +229,14 @@ extension RouteGraphView {
                 Text(card.mode.title)
                     .font(.caption2).foregroundStyle(.secondary)
                     .lineLimit(1).frame(height: guestLineHeight, alignment: .leading)
-                Text(card.guestCount == 1 ? "1 guest running" : "\(card.guestCount) guests running")
+                // NAMES WHERE WE HAVE THEM, a count where we do not. This is the line
+                // the whole naming feature exists for: "2 guests running" tells you
+                // nothing you can act on, "postgres, redis" tells you what you are
+                // about to route.
+                Text(card.populationLine)
                     .font(.caption2).foregroundStyle(.tertiary)
-                    .lineLimit(1).frame(height: guestLineHeight, alignment: .leading)
+                    .lineLimit(1).truncationMode(.tail)
+                    .frame(height: guestLineHeight, alignment: .leading)
 
                 Divider().padding(.vertical, 2)
 
@@ -290,7 +326,13 @@ extension RouteGraphView {
     /// why not.
     func guestAXValue(_ card: GuestGraphCard) -> String {
         var parts = [
-            card.guestCount == 1 ? "1 guest running" : "\(card.guestCount) guests running",
+            // Every name, not the card's truncated two — VoiceOver has no width limit
+            // and abbreviating for it would hide guests a sighted user can reach by
+            // opening the inspector.
+            card.named.isEmpty
+                ? (card.guestCount == 1 ? "1 guest running" : "\(card.guestCount) guests running")
+                : "\(card.guestCount) running: "
+                    + card.named.map(\.guest.displayName).formatted(.list(type: .and)),
             "reaching them, \(card.routing.edgeLabel)",
         ]
         if let wayOut = card.wayOut { parts.append("their way out, \(wayOut)") }
@@ -304,8 +346,12 @@ extension RouteGraphView {
     /// diagram, exactly as "VPNs" does for tunnels.
     func guestRotorTargets() -> [RotorTarget] {
         guestCards.map { card in
-            RotorTarget(id: "rotor-guest-\(card.id)",
-                        label: "\(card.title) \u{2014} \(card.routing.edgeLabel)")
+            // Named guests lead the entry: "postgres, redis" is what somebody turning
+            // the rotor is looking for, and the product title is the fallback rather
+            // than the headline.
+            let what = card.namesLine ?? card.title
+            return RotorTarget(id: "rotor-guest-\(card.id)",
+                               label: "\(what) \u{2014} \(card.routing.edgeLabel)")
         }
     }
 
@@ -350,6 +396,8 @@ extension RouteGraphView {
                 }
             }
 
+            guestRoster(card)
+
             Divider()
             VStack(alignment: .leading, spacing: 3) {
                 Text("Reaching them: \(card.routing.edgeLabel)")
@@ -390,5 +438,85 @@ extension RouteGraphView {
         }
         .padding(14)
         .frame(width: 300, alignment: .leading)
+    }
+
+    /// WHO IS ON THIS NETWORK, BY NAME \u{2014} and, for each, the sentence that says
+    /// why we believe it. Then the ones we could not place, under `ONTOLOGY.md`'s
+    /// heading.
+    ///
+    /// THE EVIDENCE IS SHOWN, NOT SUMMARISED. "postgres" on a routing diagram is a
+    /// claim somebody is about to act on, and "because Apple's own records put it on
+    /// the only guest network this Mac has" is the difference between a fact and a
+    /// guess. There is deliberately no confidence score anywhere in here: a percentage
+    /// invites the reader to round it up.
+    @ViewBuilder private func guestRoster(_ card: GuestGraphCard) -> some View {
+        let guestInterfaces = Set(virtualization.distinctGuestNetworks.map(\.interfaceName))
+            .union(virtualization.bridgedGuests.map(\.interfaceName))
+        if !card.named.isEmpty {
+            Divider()
+            VStack(alignment: .leading, spacing: 6) {
+                Text("On this network").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                ForEach(card.named) { placed in
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 6) {
+                            Text(placed.guest.displayName).font(.callout)
+                            Text(placed.guest.productTitle)
+                                .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                        }
+                        if let detail = placed.guest.detail {
+                            Text(detail).font(.caption2.monospaced()).foregroundStyle(.secondary)
+                                .lineLimit(1).truncationMode(.middle)
+                        }
+                        Text(placed.attachment.evidence)
+                            .font(.caption2).foregroundStyle(.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(
+                        "\(placed.guest.displayName), \(placed.guest.productTitle), "
+                        + "\(presenceWords(placed, guestInterfaces: guestInterfaces)). "
+                        + placed.attachment.evidence)
+                }
+            }
+        }
+        // The unattached list hangs off the FIRST card only, so a Mac with two guest
+        // networks does not repeat it. It is not about this network \u{2014} it is
+        // about everything we found and could not place.
+        if card.id == guestCards.first?.id, !virtualization.unattachedGuests.isEmpty {
+            Divider()
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Also on this Mac").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text("SimpleVPN found these but cannot show which network they are on, so they are "
+                     + "not on the diagram.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(virtualization.unattachedGuests) { placed in
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 6) {
+                            Text(placed.guest.displayName).font(.callout)
+                            Text(placed.guest.productTitle)
+                                .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                        }
+                        Text(placed.attachment.evidence)
+                            .font(.caption2).foregroundStyle(.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(
+                        "\(placed.guest.displayName), \(placed.guest.productTitle), "
+                        + "not shown on the diagram. " + placed.attachment.evidence)
+                }
+            }
+        }
+    }
+
+    /// `ONTOLOGY.md`'s three states, in its words. Never "online"/"offline" \u{2014}
+    /// that vocabulary belongs to connection state and means something else.
+    func presenceWords(_ placed: PlacedGuest, guestInterfaces: Set<String>) -> String {
+        switch placed.presence(guestInterfaces: guestInterfaces) {
+        case .runningHere: "running here"
+        case .runningOnYourNetwork: "running on your network"
+        case .notRunning: "not running"
+        }
     }
 }

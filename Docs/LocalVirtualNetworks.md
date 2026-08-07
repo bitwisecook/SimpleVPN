@@ -120,6 +120,72 @@ different arrangements recorded on one Mac we do not know which bridge is which,
 would separate bridged from the rest directly — would mean re-declaring the kernel's `ioctl` structs
 by hand. Not done: a hand-copied struct that drifts is worse than an honest `.unknown`.
 
+## Naming the guests — where the names come from, and what may be attached to what
+
+A name on a routing diagram is a claim somebody acts on, so it is held to the diagram's standard:
+**attach only on evidence, list as unattached otherwise, and say which.** `GuestInventory` is the
+implementation; `ONTOLOGY.md` binds the words (*guest name*, *unattached*, *evidence*, and the three
+presence states).
+
+| Product | Name from | Attachment evidence | Verified here |
+|---|---|---|---|
+| Apple `container` | `containers/<id>/config.json` → `id` (+ `image.reference`) | `networks[].network` — the product's own network NAME | **yes, real record read 2026-08-07** |
+| UTM | each `.utm` bundle's `config.plist` → `Information.Name` | `Network[].MacAddress` matched against the live neighbour cache | **yes, real record read 2026-08-07** |
+| Parallels Desktop | `~/Parallels/*.pvm/config.pvs` → `<VmName>` | `<MAC>` in the same file | no — written from vendor docs |
+| VMware Fusion | `*.vmwarevm/*.vmx` → `displayName` | `ethernet0.address` / `.generatedAddress` | no — written from vendor docs |
+| VirtualBox | `~/VirtualBox VMs/<n>/<n>.vbox` → `<Machine name=…>` | `<Adapter MACAddress=…>` | no — written from vendor docs |
+| **Docker Desktop, Podman** | **nothing** — container names live behind a daemon socket | — | **out of scope by rule** |
+
+**Docker and Podman are out by rule, not by omission.** Their names are not in a file; getting them
+means asking a daemon. `LocalToolRunner` never consults `PATH`, this app does not run a vendor's CLI
+to discover things, and a daemon query is a different privacy and latency proposition from reading a
+settings file the user's own tools wrote. The UI says so rather than showing an empty list that reads
+as "you have none".
+
+**Two verbatim records, so a future reader need not re-derive them.** Apple `container`:
+
+```json
+{"id":"6a20af99-…","image":{"reference":"docker.io/library/alpine:latest"},
+ "networks":[{"options":{"mtu":1280,"hostname":"6a20af99-…"},"network":"default"}]}
+```
+
+UTM (`BIGIP-21.1.0.1.utm`): `Information.Name` = `BIGIP-21.1.0.1`, `Network[0]` =
+`{Mode: Bridged, BridgeInterface: en0, MacAddress: EA:85:74:8B:18:97}`.
+
+**THE SPELLING TRAP, and it would have failed silently.** `netstat` prints a hardware address with no
+leading zeros in lower case (`42:0:5c:85:fa:1a` — measured); UTM records `EA:85:74:8B:18:97`.
+Compared raw they never match, and the symptom is "names are never attached" rather than a crash.
+`NetworkTopology.normalisedMAC` is the one place both are reduced to the same string; VirtualBox and
+Parallels write it with no separators at all, which gets its own converter rather than loosening that
+comparison.
+
+**The two surfaces do not support the same set of vendors, and the reason is the interface shape.**
+A *per-guest* line on the traffic graph needs one tap per guest, and only Apple's vmnet stack creates
+them (`vmenet0`, `vmenet1`, …). VMware's `vmnet1`/`vmnet8`, Parallels' `vnic0` and VirtualBox's
+`vboxnet0` are the *host* interfaces for a whole network — real counters, but the whole network's.
+
+| | Route diagram: named card | Traffic graph: per-network line | Traffic graph: per-guest line |
+|---|---|---|---|
+| Apple `container`, UTM (Apple backend) | yes | yes | **yes** — one `vmenet` tap per guest |
+| Parallels, VMware Fusion, VirtualBox | yes | yes | no — one host interface for the network |
+| Docker Desktop, Podman (containers) | no name at all | n/a — no host interface | no |
+
+**Two elimination rules, both stated so neither is mistaken for a heuristic:**
+
+* **network name → interface.** Nothing on disk maps `default` to `bridge100`. With exactly one live
+  guest network *and* exactly one recorded network, the mapping is forced. Two of either and the
+  guest is unattached.
+* **tap → guest** (the traffic graph's). Nothing records which `vmenet` a guest was given. With
+  exactly one tap on the network and exactly one named guest on it, no other assignment is possible.
+  Otherwise the line keeps the tap's own name.
+
+**A BUG THIS WORK FOUND: the taps were never in the interface list.** `TopologyMonitor.readInterfaces`
+kept only interfaces with an address (or a tunnel), and a `vmenet` tap has no address by design — so
+`GuestNetwork.attachedGuestInterfaces` was always empty and "N guests running" could only ever read
+zero on a real machine. Fixed by admitting `.virtualMachine` interfaces; `inUse` is unchanged, so
+every existing `filter(\.inUse)` behaves exactly as before. It is also what makes a per-guest
+throughput series possible at all.
+
 ## Per product (current versions only — the vendor's page is the authority)
 
 | Product | Class | Host interface | Documented subnet | Run here? |

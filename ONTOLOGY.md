@@ -161,6 +161,29 @@ so a UI that lumps them together tells the user the wrong thing about where thei
 | The network a guest sits on | **guest network** | VM network, container network, `docker` network, vmnet, virtual switch |
 | The interface on **this Mac** that a guest network hangs off | **host interface** | bridge, `bridge100`, `vmnet8`, `vboxnet0`, host adapter, virtual switch uplink |
 | The per-guest virtual cable into that network | **guest tap** | tap, `vmenet0`, vNIC, virtual adapter, veth |
+| What the user called this guest | **guest name** | name, container name, VM name, `displayName`, `Information.Name`, `--name`, label, tag |
+| A guest whose name we found but whose network we cannot prove | **unattached** (adjective), listed under **"Also on this Mac"** | orphan, unknown, unassigned — none of which say *why* |
+| Why we believe a guest is on a network | **evidence** (a sentence, never a score) | confidence, likelihood, heuristic, best guess |
+
+**Naming a guest is a claim about the routing diagram, so it is held to the diagram's standard.**
+A name is attached to a guest network only where the mapping is **evidenced** — the guest's own
+recorded hardware address seen on that interface right now, or the guest's own recorded network name
+when exactly one such network exists to match it to. Everything else is listed as **unattached**,
+under "Also on this Mac", and says why. A guest shown on the wrong network is worse than a guest
+shown with no network at all: somebody deciding whether to route it around a VPN would be looking at
+the wrong one.
+
+**Three states, and they must never be blurred**, because the diagram is a picture of the packet
+path and a name must not imply a guest is live:
+
+| State | House term | Means |
+|---|---|---|
+| Running, and on a guest network of this Mac's | **running here** | It is on the diagram, on its network |
+| Running, but on the same network as this Mac | **running on your network** | Bridged — visible, but this Mac is not on its path |
+| Known to the product, not seen running | **not running** — heading **"Also on this Mac"** | Its settings are on disk; nothing of it is on the network |
+
+**Never** as our label: *offline* / *online* (that is the connection-state vocabulary, and it means
+something else), *stale*, *ghost*, *orphaned*, *inactive*.
 
 **The three arrangements.** These are the terms the app uses everywhere a guest network is
 described — the graph card, the inspector, the diagnostic report and the manual:
@@ -181,6 +204,19 @@ means knowing whether this Mac is translating the guests' traffic, and that live
 no unprivileged process on macOS may read (`Docs/Networking.md` §6.1: `pfctl -sr` is
 `Permission denied`). Where the product does not record the answer on disk, the app says it does
 not know rather than guessing. **Never** write copy that assumes shared.
+
+**What the traffic graph may claim about a guest, and what it may not.** Two different measurements,
+and only one of them exists:
+
+| Concept | House term | Means | Measurable? |
+|---|---|---|---|
+| Bytes across a guest's own connection to this Mac | **its traffic with this Mac** | Every packet the guest sends or receives crosses its own guest tap, and the tap has counters any process may read | **yes** — this is a real per-guest number |
+| Bytes a guest sent *through a VPN* | — **no house term, because we must never say it** | By the time a guest's packet reaches a tunnel it has been translated to this Mac's address and is indistinguishable from any app's | **no** |
+
+So a guest's series is labelled **"with this Mac"** and never "through *Tig Lab*". A chart that
+apportioned tunnel bytes between containers would be inventing them, and the rule the latency chart
+already set — *lost pings are a discrete "Lost" series, not zero-latency lies* — says an unknown is
+never encoded as a plausible-looking number.
 
 **Never** as our label: *guest OS*, *hypervisor*, *NAT* (as our word for the arrangement — it is
 the mechanism, and it is also what a home router does, which is not the thing being named),

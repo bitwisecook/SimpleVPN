@@ -132,6 +132,13 @@ struct ManualAnchorParityTests {
         // security weight either way, and a global switch would make it once for
         // every VPN at once.
         "vm-on-the-route-graph", "vm-through-or-around",
+        // Naming the guests, and what their line on the traffic graph does and does
+        // not claim. PROSE for the same reason as the two above: nothing here is a
+        // value anybody sets. `vm.detect` governs whether names are read at all and
+        // has its own section; these two chapters are what the map and the chart then
+        // show, and — for the traffic one — the measurement it deliberately refuses
+        // to draw.
+        "vm-guest-names", "vm-guest-traffic",
         // Prose about a WAY of signing in rather than a setting: what an SSH
         // agent is, which agents work, what its three failures mean, and why
         // agent forwarding isn't offered. The setting itself is

@@ -26,13 +26,25 @@ enum VirtualizationSettings {
     /// filesystem and the interface list, executes nothing, wakes no virtualization
     /// daemon and sends nothing anywhere — and a detection feature that defaults to
     /// not detecting is inert.
+    /// THE SUMMARY NAMES THE NAMES, and it has to.
+    ///
+    /// This switch used to govern subnets and interfaces. It now also reads the
+    /// virtual machines' and containers' OWN NAMES out of the settings files their
+    /// products keep — which is a materially more personal thing to read, because
+    /// `192.168.64.0/24` says nothing about anybody and "client-acme-prod" says a
+    /// great deal. Leaving the old summary in place would have been consent obtained
+    /// for something smaller than what happens, so the sentence changed with the
+    /// behaviour. The promise that is NOT weakened, and is what makes one switch
+    /// enough: still only this Mac, still only reading, still nothing executed, still
+    /// no daemon asked, still nothing sent anywhere.
     static let detect = EngineSettingSpec(
         id: "vm.detect",
         name: "Look for Virtual Machines on This Mac",
-        summary: "Lets SimpleVPN notice the virtual machines and containers you run, and which of "
-            + "their networks are live, so it can warn you before a VPN cuts one off. It only reads "
-            + "this Mac \u{2014} nothing is run, no virtual machine is started, and nothing is sent "
-            + "anywhere.",
+        summary: "Lets SimpleVPN notice the virtual machines and containers you run \u{2014} their "
+            + "names, and which of their networks are live \u{2014} so it can show them on the "
+            + "Routes map and warn you before a VPN cuts one off. It reads the settings files your "
+            + "own virtualization apps keep and nothing else: nothing is run, no virtual machine is "
+            + "started, no name leaves this Mac, and names are left out of problem reports.",
         group: .traffic,
         default: true)
 

@@ -1224,6 +1224,51 @@ means giving `routingRules` a first-class place in the config document (and deci
 `.outside` rule means on a Mac with different interfaces), which is its own piece of work with its own
 security question, not a rider on this one.
 
+### 6.6 ✅ Naming the guests, and the one thing the traffic graph must not draw
+
+§6.5 put guest networks on the route diagram as anonymous cards with a tap count. They now carry
+**names** — and the interesting half of that work is the two things it refused to do.
+
+**Attachment is evidenced or it is not made.** `Docs/LocalVirtualNetworks.md` has the source table and
+both elimination rules. The discipline is the one §6.1's mode detection already set: two records that
+disagree yield `.unknown` rather than first-match-wins, and here two candidate networks yield
+*unattached* rather than a coin toss. A guest shown on the wrong network is worse than a guest shown
+with no network, because the whole point of the card is that somebody makes a routing decision on it.
+Unattached guests are listed under "Also on this Mac", with the reason, rather than hidden.
+
+**A name must not imply a live guest**, so three states are kept apart: *running here* (on a guest
+network of this Mac's), *running on your network* (bridged — the hardware-address match lands on
+`en0`, which is exactly the right answer and says a VPN here cannot affect it), and *not running*
+(settings on disk, address nowhere).
+
+**THE TRAFFIC GRAPH: presence and activity, never attribution.** This is the load-bearing finding.
+
+* **Per-guest throughput IS measurable.** Every packet a guest sends crosses its own tap, and a tap
+  carries the same `if_data` counters everything else does. So a guest's own line is a real number,
+  unprivileged, no daemon asked.
+* **How much of it went through a VPN is NOT measurable**, and no series claims it. By the time a
+  guest's packet reaches a tunnel, vmnet has rewritten its source to this Mac's address and nothing
+  distinguishes it from Safari's. A chart apportioning tunnel bytes between containers would be
+  inventing the split — the same error the latency chart refuses when it draws lost pings as a
+  discrete `Lost` series instead of zero-latency lies.
+
+So a guest's series is labelled **"with this Mac"**, in the legend, in the caption under the chart and
+in the audio graph's series names and summary alike (`ONTOLOGY.md` binds the phrasing). The caption
+appears only while a guest line is plotted.
+
+**Names are shown in the app and withheld from the diagnostic report.** A subnet says nothing about
+anybody; a virtual machine called `client-acme-prod` says who you work for, and a problem report is a
+thing you *send*. The report carries the count and the arrangement — which is what a maintainer needs
+to reason about a packet path — and says out loud that the names are missing on purpose, so nobody
+adds them later thinking it an oversight. **No new setting**: `vm.detect` already governs the scan and
+its summary and manual section were rewritten to say that names are now read, because consent
+obtained for something smaller than what happens is not consent.
+
+**One poller, not two.** The guest scan moved onto `TopologyMonitor`, which already ticks at 1 Hz and
+is refcounted: two surfaces want the answer now, and two views each running their own bounded
+filesystem scan would scan twice, disagree in the gap, and double the exposure to the UTM read that
+once blocked for ever. It re-runs only when a guest-shaped interface appears or goes away.
+
 ---
 
 ## 7. What a future reader would otherwise have to rediscover

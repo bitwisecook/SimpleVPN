@@ -106,6 +106,23 @@ nonisolated struct RouteEntry: Sendable, Equatable {
 nonisolated struct NetworkTopology: Sendable, Equatable {
     var interfaces: [NetInterface] = []
     var routes: [RouteEntry] = []
+    /// Hardware addresses seen on each interface right now, BSD name → normalised
+    /// MACs. The kernel's neighbour cache, which `netstat -rn` prints as host rows
+    /// with a link-layer gateway.
+    ///
+    /// WHY IT IS KEPT AT ALL, given the route parser has always thrown these rows
+    /// away: it is the one unprivileged way to prove *which guest network a named
+    /// guest is on*. A virtual machine's own settings record the hardware address it
+    /// will use (UTM, Parallels, VMware and VirtualBox all do); seeing that address
+    /// on `bridge100` right now is evidence rather than a guess, and guessing is what
+    /// `ONTOLOGY.md` forbids here.
+    ///
+    /// A SET OF ADDRESSES, NOT A MAP TO THEIR OWNERS, and never displayed. This is
+    /// every device on the user's LAN, which is more than this app has any business
+    /// showing; it is only ever asked "is this particular address here?" — a
+    /// membership test whose answer is a yes or a no about a machine the user already
+    /// configured themselves.
+    var neighbours: [String: Set<String>] = [:]
     /// The FULL routing table — both families, unfiltered, with flags — for
     /// `RouteResolver`. Kept separate from `routes` on purpose: `routes` stays
     /// IPv4-only and noise-filtered so every existing consumer of the railroad
@@ -149,6 +166,32 @@ nonisolated struct NetworkTopology: Sendable, Equatable {
         guard let name = RouteResolver(topology: self).resolve(ip)?.interfaceName
         else { return nil }
         return interfaces.first { $0.name == name }
+    }
+
+    /// A hardware address in ONE spelling, or nil if this is not one.
+    ///
+    /// THE TWO SPELLINGS ARE BOTH REAL AND THEY DO NOT MATCH AS STRINGS. `netstat`
+    /// prints octets without leading zeros and in lower case
+    /// (`42:0:5c:85:fa:1a` — measured on this Mac); UTM's `config.plist` records
+    /// `EA:85:74:8B:18:97`, zero-padded and upper case. Comparing those raw finds
+    /// nothing, silently, which would present as "we can never attach a name" rather
+    /// than as a bug. Normalising to lower-case zero-padded octets is the fix, and it
+    /// is done in ONE place so the two sides cannot drift.
+    ///
+    /// Six groups of 1–2 hex digits and nothing else: an IPv6 next hop
+    /// (`fe80::1%en0`) must not be mistaken for a hardware address, which is the same
+    /// trap `RouteGraphLayout.isGatewayAddress` guards from the other side.
+    nonisolated static func normalisedMAC(_ text: String) -> String? {
+        let groups = text.split(separator: ":", omittingEmptySubsequences: false)
+        guard groups.count == 6 else { return nil }
+        var out: [String] = []
+        out.reserveCapacity(6)
+        for group in groups {
+            guard (1...2).contains(group.count), group.allSatisfy(\.isHexDigit),
+                  let value = UInt8(group, radix: 16) else { return nil }
+            out.append(String(format: "%02x", value))
+        }
+        return out.joined(separator: ":")
     }
 
     static func ipv4ToUInt32(_ s: String) -> UInt32? {
@@ -221,6 +264,65 @@ final class TopologyMonitor {
         names.compactMap { history[$0]?.newestTime }.max()
     }
 
+    // MARK: Guests — named, placed, and refreshed when one starts or stops
+
+    /// The virtual machines and containers on this Mac, with names attached to the
+    /// networks we can PROVE they are on (`GuestInventory`).
+    ///
+    /// IT LIVES HERE BECAUSE THIS IS THE ONE POLLER. Two surfaces want it — the route
+    /// diagram's guest column and the traffic graph's per-guest series — and the house
+    /// invariant a few lines up is "no per-view pollers": two views each running their
+    /// own bounded filesystem scan would scan twice, disagree during the gap between
+    /// them, and double the exposure to the read that once blocked forever.
+    private(set) var guests = VirtualizationSnapshot()
+    /// The guest-shaped interfaces the last scan was taken against. NARROW ON PURPOSE:
+    /// a Wi-Fi address change, a new `utun` or a rate tick must not send the app back
+    /// to the filesystem — only a guest booting or shutting down changes the answer.
+    private var guestSignature = ""
+    private var guestScan: Task<Void, Never>?
+    /// Has a scan ever been STARTED? The initial run cannot key off the signature (a
+    /// Mac with no virtual machines has an empty one, which equals the initial value)
+    /// and must not key off the RESULT being empty either — on a Mac that runs no
+    /// guests at all that condition is permanently true, and the scan would then walk
+    /// the filesystem once a second for ever. A flag is the only thing that says
+    /// "asked once" without also saying "found something".
+    private var hasScannedGuests = false
+
+    /// Re-take the guest scan when — and only when — a guest-shaped interface appears
+    /// or goes away. This is what makes the diagram follow a container starting
+    /// without a relaunch.
+    ///
+    /// OFF THE MAIN ACTOR AND BOUNDED, because `snapshotOffMain` reads another
+    /// application's sandbox container and that read has been MEASURED to block in
+    /// `open` and never return. One scan in flight at a time: a guest that flaps must
+    /// not queue a scan per tick, and an abandoned scan still costs a thread.
+    private func refreshGuestsIfNeeded(interfaces: [NetInterface],
+                                       neighbours: [String: Set<String>]) {
+        let signature = interfaces
+            .filter { $0.kind == .virtualMachine || $0.kind == .bridge }
+            .map { "\($0.name):\($0.ipv4Subnets.joined(separator: ","))" }
+            .sorted()
+            .joined(separator: "|")
+        // The neighbour table is deliberately NOT in the signature: it churns as
+        // devices come and go on the LAN, and re-reading every virtual machine's
+        // settings because a phone joined the Wi-Fi would be absurd. It is passed to
+        // whatever scan does run, which is close enough for a placement that is only
+        // read while the window is open.
+        guard !hasScannedGuests || signature != guestSignature else { return }
+        hasScannedGuests = true
+        guestSignature = signature
+        guestScan?.cancel()
+        let detect = VirtualizationSettings.detectionEnabled
+        guestScan = Task { [weak self] in
+            let snapshot = await VirtualizationDiscovery.snapshotOffMain(
+                interfaces: interfaces, detectionEnabled: detect, env: .live(),
+                neighbours: neighbours)
+            guard !Task.isCancelled, let self else { return }
+            if snapshot != self.guests { self.guests = snapshot }
+            self.guestScan = nil
+        }
+    }
+
     func startWatching() {
         watchers += 1
         guard pollTask == nil else { return }
@@ -228,11 +330,12 @@ final class TopologyMonitor {
             var tick = 0
             var routes: [RouteEntry] = []
             var snapshot = RouteTableSnapshot.empty
+            var neighbours: [String: Set<String>] = [:]
             while !Task.isCancelled {
                 if tick % 5 == 0 {
-                    (routes, snapshot) = await Self.readRoutes()
+                    (routes, snapshot, neighbours) = await Self.readRoutes()
                 }
-                self?.update(routes: routes, snapshot: snapshot)
+                self?.update(routes: routes, snapshot: snapshot, neighbours: neighbours)
                 tick += 1
                 try? await Task.sleep(for: .seconds(1))
             }
@@ -244,10 +347,13 @@ final class TopologyMonitor {
         if watchers == 0 {
             pollTask?.cancel()
             pollTask = nil
+            guestScan?.cancel()
+            guestScan = nil
         }
     }
 
-    private func update(routes: [RouteEntry], snapshot: RouteTableSnapshot = .empty) {
+    private func update(routes: [RouteEntry], snapshot: RouteTableSnapshot = .empty,
+                        neighbours: [String: Set<String>] = [:]) {
         var (interfaces, counters) = Self.readInterfaces()
         let now = Date()
         for i in interfaces.indices {
@@ -276,8 +382,14 @@ final class TopologyMonitor {
         // Only publish when something actually changed, so idle ticks don't
         // invalidate every topology consumer once a second (NetworkTopology is
         // Equatable — rates differ under load, so this only quiets the idle case).
-        let updated = NetworkTopology(interfaces: interfaces, routes: routes, snapshot: snapshot)
+        let updated = NetworkTopology(interfaces: interfaces, routes: routes,
+                                      neighbours: neighbours, snapshot: snapshot)
         if updated != topology { topology = updated }
+
+        // Containers start and stop while a window is open, so the guest scan rides
+        // the same tick — but only re-runs when the interface list says a guest
+        // actually appeared or went away.
+        refreshGuestsIfNeeded(interfaces: interfaces, neighbours: neighbours)
     }
 
     // MARK: getifaddrs (addresses + link byte counters)
@@ -356,9 +468,24 @@ final class TopologyMonitor {
         }
 
         // Interfaces that are down with no addresses are clutter, except tunnels
-        // (a VPN mid-connect is interesting) — drop them.
+        // (a VPN mid-connect is interesting) and GUEST TAPS — drop them.
+        //
+        // THE TAPS WERE BEING DROPPED, AND THAT WAS A BUG WITH A VISIBLE SYMPTOM.
+        // Apple's vmnet gives a guest tap NO IPv4 address at all (the subnet is on
+        // the bridge — `VirtualizationDiscovery`'s trap 1), so `primaryAddress` is
+        // nil and `.virtualMachine` is not `.tunnel`: every `vmenet*` was filtered
+        // out here before any consumer saw it. `GuestNetwork.attachedGuestInterfaces`
+        // is built from exactly that list, so "2 guests running" could only ever read
+        // "0 guests running" on a real machine, however many were up. Keeping them is
+        // also what makes a PER-GUEST throughput series possible at all: every packet
+        // a guest sends crosses its own tap, and the tap carries `if_data` counters.
+        //
+        // Safe for everything already written: `inUse` is unchanged
+        // (`isUp && has an address`), so it is still false for an addressless tap and
+        // every existing `filter(\.inUse)` — the railroad's interface column, the
+        // traffic graph's default list — behaves exactly as before.
         let interfaces = order.compactMap { byName[$0] }.filter { i in
-            i.isUp && (i.primaryAddress != nil || i.kind == .tunnel)
+            i.isUp && (i.primaryAddress != nil || i.kind == .tunnel || i.kind == .virtualMachine)
         }
         return (interfaces, counters)
     }
@@ -445,12 +572,15 @@ final class TopologyMonitor {
 
     /// Returns the diagram's IPv4 route list (filtered exactly as it always was)
     /// AND the full unfiltered both-family snapshot that `RouteResolver` needs.
-    private nonisolated static func readRoutes() async -> (routes: [RouteEntry], snapshot: RouteTableSnapshot) {
+    private nonisolated static func readRoutes()
+        async -> (routes: [RouteEntry], snapshot: RouteTableSnapshot,
+                  neighbours: [String: Set<String>]) {
         await Task.detached(priority: .utility) {
             let v4 = netstat(family: "inet")
             let v6 = netstat(family: "inet6")
 
             var routes: [RouteEntry] = []
+            var neighbours: [String: Set<String>] = [:]
             for line in v4.split(separator: "\n") {
                 let cols = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
                 // Destination Gateway Flags Netif [Expire]
@@ -460,12 +590,18 @@ final class TopologyMonitor {
                 // Skip host-scoped noise: broadcast/multicast and link-local rows.
                 if dest.hasPrefix("224.0") || dest.hasPrefix("255.255.255.255")
                     || dest.hasPrefix("169.254") { continue }
-                // Skip per-host ARP-ish entries with MAC gateways on the LAN.
-                if gateway.contains(":") && gateway.count == 17 && !dest.contains("/") { continue }
+                // Per-host neighbour entries with a link-layer gateway. Still skipped
+                // as ROUTES — they are not networks and the railroad never wanted
+                // them — but the address is KEPT now, because it is the evidence that
+                // attaches a named virtual machine to the network it is really on.
+                if let mac = NetworkTopology.normalisedMAC(gateway), !dest.contains("/") {
+                    neighbours[netif, default: []].insert(mac)
+                    continue
+                }
                 routes.append(RouteEntry(destination: dest, gateway: gateway,
                                          interfaceName: netif, flags: flags))
             }
-            return (routes, RouteTableSnapshot(ipv4Text: v4, ipv6Text: v6))
+            return (routes, RouteTableSnapshot(ipv4Text: v4, ipv6Text: v6), neighbours)
         }.value
     }
 

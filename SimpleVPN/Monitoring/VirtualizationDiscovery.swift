@@ -471,12 +471,35 @@ nonisolated struct BridgedGuest: Sendable, Equatable, Identifiable {
     }
 }
 
+/// One container as `~/Library/Application Support/com.apple.container/containers/
+/// <id>/config.json` records it. MEASURED on a real Mac, 2026-08-07 — the file really
+/// does carry all three, and `network` is the product's own name for the network
+/// (`"default"`), which is what `GuestInventory` attaches a guest by.
+nonisolated struct ContainerRecord: Sendable, Equatable {
+    /// What `container ls` shows and what the user types to address it: the name when
+    /// `--name` was given, a UUID when it was not.
+    var id: String
+    /// `image.reference` — "docker.io/library/alpine:latest".
+    var image: String?
+    /// `networks[].network` — the product's own name for the network it is on.
+    var network: String?
+}
+
 /// One UTM network interface as its config records it. UTM's own spelling is kept
 /// verbatim (`Shared`, `Bridged`, `Host`, `Emulated`) rather than translated —
 /// the house rule is to keep another product's proper terms.
 nonisolated struct UTMNetworkConfig: Sendable, Equatable {
     var mode: String
     var bridgeInterface: String?
+    /// `Information.Name` — the name UTM itself shows. Preferred over the bundle's
+    /// filename: renaming a `.utm` bundle in Finder does not rename the machine.
+    var machineName: String?
+    /// `Information.UUID`, so a renamed machine is still the same machine.
+    var machineUUID: String?
+    /// `Network[].MacAddress`, verbatim in UTM's spelling — normalised at the one
+    /// comparison point (`NetworkTopology.normalisedMAC`), never here.
+    /// **MEASURED**: `EA:85:74:8B:18:97` on this Mac's one UTM machine.
+    var macAddresses: [String] = []
 }
 
 /// A UTM virtual machine's network mode, read from its own config. UTM is the
@@ -511,9 +534,64 @@ nonisolated struct VirtualizationSnapshot: Sendable, Equatable {
     /// showing and must never be offered a routing change.
     var bridgedGuests: [BridgedGuest] = []
     var utmGuests: [UTMGuest] = []
+    /// EVERY NAMED GUEST, and where it turned out to be — or why we cannot say.
+    /// `GuestInventory` has the whole argument; the short version is that a name on a
+    /// routing diagram is a claim, so it is attached only on evidence and listed as
+    /// unattached otherwise.
+    var placedGuests: [PlacedGuest] = []
     /// False when the user turned detection off (`vm.detect`). Reported rather
     /// than implied, so an empty result is never mistaken for "you have none".
     var detectionEnabled = true
+
+    /// The names on one host interface, in a stable order. THE accessor every
+    /// surface uses, so the route diagram's card, the traffic graph's chip and the
+    /// inspector cannot disagree about who is where.
+    func guests(on interfaceName: String) -> [PlacedGuest] {
+        placedGuests
+            .filter { $0.attachment.interfaceName == interfaceName }
+            .sorted { $0.guest.displayName < $1.guest.displayName }
+    }
+
+    /// Every guest tap that is up right now, in a stable order. One per running
+    /// guest: every packet a guest sends crosses its own tap, which is what makes a
+    /// per-guest throughput series a real measurement rather than an apportionment.
+    var guestTaps: [String] {
+        (guestNetworks.flatMap(\.attachedGuestInterfaces) + bridgedGuests.map(\.interfaceName))
+            .reduce(into: [String]()) { out, name in
+                if !out.contains(name) { out.append(name) }
+            }
+    }
+
+    /// WHICH NAMED GUEST IS ON THIS TAP — only where it is forced, never as a tiebreak.
+    ///
+    /// **Nothing on disk records a tap name.** Neither Apple's `container` nor UTM
+    /// writes down which `vmenet` its guest got, so there is no evidence of kind 1 or
+    /// 2 (`GuestInventory`) to be had here at all. What there IS, sometimes, is
+    /// elimination: if this tap is the ONLY tap on a guest network and exactly ONE
+    /// named guest is placed on that network, then no other assignment is possible.
+    ///
+    /// Two taps, or two names, and the answer is nil — the traffic graph then plots
+    /// the tap under its own name rather than pinning somebody's container to a line
+    /// that might be a different container's. A mislabelled throughput series is the
+    /// same class of error as a mislabelled routing card: it is acted on.
+    func guest(onTap tapName: String) -> PlacedGuest? {
+        guard let network = guestNetworks.first(where: {
+            $0.attachedGuestInterfaces.contains(tapName)
+        }) else { return nil }
+        guard network.attachedGuestInterfaces.count == 1 else { return nil }
+        let named = guests(on: network.interfaceName)
+        return named.count == 1 ? named[0] : nil
+    }
+
+    /// Named guests we could not place. `ONTOLOGY.md` calls these **unattached** and
+    /// puts them under "Also on this Mac" — listing them is the honest alternative to
+    /// guessing, and hiding them would leave a user wondering where their container
+    /// went.
+    var unattachedGuests: [PlacedGuest] {
+        placedGuests
+            .filter { $0.attachment.interfaceName == nil }
+            .sorted { $0.guest.displayName < $1.guest.displayName }
+    }
 
     var isEmpty: Bool { installed.isEmpty && guestNetworks.isEmpty && bridgedGuests.isEmpty }
 
@@ -577,7 +655,44 @@ nonisolated struct VirtualizationEnvironment: Sendable {
               let first = networks.first,
               let mode = first["Mode"] as? String
         else { return nil }
-        return UTMNetworkConfig(mode: mode, bridgeInterface: first["BridgeInterface"] as? String)
+        let information = plist["Information"] as? [String: Any]
+        return UTMNetworkConfig(
+            mode: mode,
+            bridgeInterface: first["BridgeInterface"] as? String,
+            machineName: information?["Name"] as? String,
+            machineUUID: information?["UUID"] as? String,
+            macAddresses: networks.compactMap { $0["MacAddress"] as? String })
+    }
+
+    /// One container as Apple's `container` records it.
+    ///
+    /// A NARROW ACCESSOR, for exactly the reason `readUTMNetwork` above is one:
+    /// `[String: Any]` is not `Sendable`, so a generic "read me this JSON" closure
+    /// cannot be captured by a test that wants to supply a fixture — the compiler
+    /// says so, and the answer is the same as it was for the plist. This is also the
+    /// honest shape: two fields and a network name are the whole of what this file
+    /// asks of that record.
+    var readContainerRecord: @Sendable (String) -> ContainerRecord? = { path in
+        guard let data = FileManager.default.contents(atPath: path),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let id = json["id"] as? String, !id.isEmpty
+        else { return nil }
+        return ContainerRecord(
+            id: id,
+            image: (json["image"] as? [String: Any])?["reference"] as? String,
+            network: (json["networks"] as? [[String: Any]])?
+                .compactMap { $0["network"] as? String }.first)
+    }
+
+    /// A text file, for the two vendors whose records are XML and `key = "value"`.
+    /// Bounded: a `.vbox` or `.vmx` is kilobytes, but a path can point anywhere, and
+    /// reading an arbitrarily large file to scrape one name is not a trade worth
+    /// making.
+    var readText: @Sendable (String) -> String? = { path in
+        guard let handle = FileManager.default.contents(atPath: path),
+              handle.count <= 1_048_576
+        else { return nil }
+        return String(data: handle, encoding: .utf8)
     }
 
     /// The `mode` Apple's `container` records for each network it has created, in
@@ -860,10 +975,16 @@ nonisolated enum VirtualizationDiscovery {
     /// that nothing visible waits on it.
     nonisolated static let scanBudget: Duration = .seconds(2)
 
+    ///
+    /// `neighbours` is the kernel's neighbour cache (`NetworkTopology.neighbours`),
+    /// defaulted so every existing caller is untouched. Without it the named guests
+    /// are still found and still listed; they simply cannot be ATTACHED by hardware
+    /// address, which is exactly what an unattached guest means.
     nonisolated static func snapshotOffMain(
         interfaces: [NetInterface],
         detectionEnabled: Bool,
-        env: VirtualizationEnvironment) async -> VirtualizationSnapshot {
+        env: VirtualizationEnvironment,
+        neighbours: [String: Set<String>] = [:]) async -> VirtualizationSnapshot {
 
         guard detectionEnabled else { return VirtualizationSnapshot(detectionEnabled: false) }
 
@@ -888,25 +1009,62 @@ nonisolated enum VirtualizationDiscovery {
         // it BLOCKS, and it blocked for as long as it was left to. Waiting on that from
         // a connect or from the report is not acceptable at any duration, so the answer
         // is bounded and the missing half is simply absent.
-        let filesystem = await answer(within: scanBudget) {
-            () -> ([InstalledVirtualization], [UTMGuest], [String]) in
-            (installed(env: env), utmGuests(env: env), env.appleContainerNetworkModes(env.home))
-        }
-        guard let (found, guests, containerModes) = filesystem else {
+        let filesystem = await answer(within: scanBudget) { readEverything(env: env) }
+        guard let scan = filesystem else {
             return VirtualizationSnapshot(
                 guestNetworks: networksWithoutAttribution,
                 bridgedGuests: bridgedGuests(interfaces: interfaces,
                                              guestNetworks: networksWithoutAttribution),
                 detectionEnabled: true)
         }
-        let networks = guestNetworks(interfaces: interfaces, installed: found,
-                                     appleContainerModes: containerModes, utmGuests: guests)
-        return VirtualizationSnapshot(
+        return assemble(interfaces: interfaces, scan: scan, neighbours: neighbours)
+    }
+
+    /// Everything the filesystem half reads, in one value.
+    ///
+    /// A STRUCT RATHER THAN A GROWING TUPLE: this is what `answer(within:)` carries
+    /// across the deadline, and a five-element tuple whose members are told apart by
+    /// position is how the wrong list ends up in the wrong field on the next
+    /// addition.
+    nonisolated struct FilesystemScan: Sendable {
+        var installed: [InstalledVirtualization] = []
+        var utmGuests: [UTMGuest] = []
+        var appleContainerModes: [String] = []
+        var named: [NamedGuest] = []
+    }
+
+    /// The whole filesystem half. Ordered so `installed` comes first — every other
+    /// reader is gated on it, and a product nobody has is never searched for.
+    static func readEverything(env: VirtualizationEnvironment) -> FilesystemScan {
+        let found = installed(env: env)
+        return FilesystemScan(
             installed: found,
+            utmGuests: utmGuests(env: env),
+            appleContainerModes: env.appleContainerNetworkModes(env.home),
+            named: GuestInventory.guests(env: env, installed: found))
+    }
+
+    /// The filesystem half plus the live half, combined. Shared by the async and the
+    /// synchronous entry points so the two can never build a different snapshot from
+    /// the same facts.
+    static func assemble(interfaces: [NetInterface],
+                         scan: FilesystemScan,
+                         neighbours: [String: Set<String>]) -> VirtualizationSnapshot {
+        let networks = guestNetworks(interfaces: interfaces, installed: scan.installed,
+                                     appleContainerModes: scan.appleContainerModes,
+                                     utmGuests: scan.utmGuests)
+        return VirtualizationSnapshot(
+            installed: scan.installed,
             guestNetworks: networks,
             bridgedGuests: bridgedGuests(interfaces: interfaces, guestNetworks: networks)
-                .map { withCandidates($0, installed: found) },
-            utmGuests: guests,
+                .map { withCandidates($0, installed: scan.installed) },
+            utmGuests: scan.utmGuests,
+            placedGuests: GuestInventory.place(
+                scan.named, neighbours: neighbours, guestNetworks: networks,
+                // Every network name the products know of — the denominator of the
+                // elimination rule. Apple's own network records are the only source
+                // today, and `mode(...)` already reads them.
+                recordedNetworkNames: Set(scan.named.compactMap(\.recordedNetwork))),
             detectionEnabled: true)
     }
 
@@ -951,19 +1109,10 @@ nonisolated enum VirtualizationDiscovery {
     /// `snapshotOffMain`. Never from the main actor — see above.
     static func snapshot(interfaces: [NetInterface],
                          detectionEnabled: Bool,
-                         env: VirtualizationEnvironment) -> VirtualizationSnapshot {
+                         env: VirtualizationEnvironment,
+                         neighbours: [String: Set<String>] = [:]) -> VirtualizationSnapshot {
         guard detectionEnabled else { return VirtualizationSnapshot(detectionEnabled: false) }
-        let found = installed(env: env)
-        let guests = utmGuests(env: env)
-        let networks = guestNetworks(interfaces: interfaces, installed: found,
-                                     appleContainerModes: env.appleContainerNetworkModes(env.home),
-                                     utmGuests: guests)
-        return VirtualizationSnapshot(
-            installed: found,
-            guestNetworks: networks,
-            bridgedGuests: bridgedGuests(interfaces: interfaces, guestNetworks: networks)
-                .map { withCandidates($0, installed: found) },
-            utmGuests: guests,
-            detectionEnabled: true)
+        return assemble(interfaces: interfaces, scan: readEverything(env: env),
+                        neighbours: neighbours)
     }
 }
