@@ -4,9 +4,9 @@ Design doc, 2026-08-07. Status: **📐 DESIGNED / DEFERRED to a future release.*
 
 **Nothing here is built and nothing here is scheduled work.** No mechanism, no loader, no
 engine, no entitlement change, no new repository. This is a **decision record**: the
-constraints were established from this repo's own code and history, the obvious designs were
+constraints were established from this repo's own code and history, the plausible designs were
 evaluated against them, and the survivors are written down so the question does not have to be
-re-derived. It is deliberately **not** a specification — that comes later, if at all.
+re-derived. It is deliberately **not** a specification.
 
 Read `Docs/Networking.md` §2 and §3 first. The process boundaries and packet path recorded
 there are the premises for everything below, and this document does not repeat them.
@@ -19,31 +19,42 @@ there are the premises for everything below, and this document does not repeat t
 > justification for the extension mechanism is **to allow other developers to add their own VPN
 > types into SimpleVPN**."
 
-The concrete case that prompted it — and the running example throughout — is **an obfuscated
-WireGuard variant**: a third-party fork of `wireguard-go` that adds DPI-resistant framing
-(junk packets, header randomisation, padding). It is a good example precisely because it looks
-like it should be nearly free, given that this project already builds `wireguard-go`.
+and, later, an alternative shape for the same goal:
+
+> "things to think through in the future — throughput cost, if we could **let a 3rd party make
+> their own vpn network extension and then IPC to our UI for auth/config/etc**. a lot to think
+> of but all for later."
+
+Those are two genuinely different architectures, not a design and a refinement. They are
+recorded here as **Option A** and **Option B**, as peers (§3).
+
+The concrete case that prompted the question — and the running example — is **an obfuscated
+WireGuard variant**: a third-party fork of `wireguard-go` adding DPI-resistant framing (junk
+packets, header randomisation, padding). It is a good example precisely because it looks like
+it should be nearly free, given this project already builds `wireguard-go`.
 
 ### Short answers
 
-1. **A loadable-plugin mechanism inside the app or the packet-tunnel extension is impossible**
-   on this platform. AMFI forbids the required entitlement on anything embedding a system
-   extension, and this project has already shipped a notarized build that would not launch for
-   exactly that reason (§1.1). This is not a trade-off to weigh; it is a wall.
+1. **A loadable-plugin mechanism inside the app or the packet-tunnel extension is impossible.**
+   AMFI forbids the required entitlement on anything embedding a system extension, and this
+   project already shipped a notarized build that would not launch for exactly that reason
+   (§1.1). Not a trade-off — a wall. Both options below are shaped by routing around it.
 
-2. **A separate signed helper process hosting the engine is architecturally sound, and the
-   per-packet cost is survivable** (§3). It is blocked today on a single unverified platform
-   question — whether the sandboxed packet-tunnel extension can reach *any* process outside
-   itself (§3.3, ❓O1). That one question decides the feature and could not be answered without
-   a notarization cycle.
+2. **Option A** — a separate signed helper on our packet path — is architecturally sound and
+   its per-packet cost is survivable, but it is blocked on one unverified platform question:
+   whether the sandboxed extension can reach *any* process outside itself (§4.3, ❓O1).
 
-3. **An obfuscated `wireguard-go` fork is NOT a modest delta on the engine we already build**
+3. **Option B** — the third party ships their own NetworkExtension provider and uses our UI for
+   sign-in and configuration — **eliminates** the per-packet cost, the AMFI question and the
+   supervision problem outright. It pays for that by **giving up our routing model for their
+   VPNs** (§5.3), and it has its own likely blocker: our app probably cannot drive another
+   developer's tunnel configuration at all (§5.4, ❓O11).
+
+4. **An obfuscated `wireguard-go` fork is NOT a modest delta on the engine we already build**
    (§2). This was expected to go the other way, and it is the most durable finding here.
 
-4. **Trust is the hard part, not the plumbing** (§4). macOS lets us enforce *identity*, never
-   *behaviour*. The honest recommendation is a narrow, consent-gated, Team-ID-pinned
-   arrangement — **not** an open plugin ecosystem, which is a safety claim this architecture
-   cannot stand behind (§4.5).
+5. **Trust is the hard part in both options** (§6) — it does not disappear in B, it *moves*,
+   from "what code do we host" to "who holds the user's credentials".
 
 ### Markers
 
@@ -54,8 +65,6 @@ built · ❓ open, stated with what would have been checked.
 
 ## 1. Constraints, established before designing anything
 
-These were confirmed first because they had the power to decide the answer. Two of them did.
-
 ### 1.1 AMFI forbids the library-validation relaxation on this app ✅
 
 `SimpleVPN/SimpleVPN.entitlements` carries the finding as a comment in the file it governs:
@@ -65,7 +74,7 @@ These were confirmed first because they had the power to decide the answer. Two 
 > System Extension that has one at launch: "Hardened Runtime relaxation entitlements
 > disallowed on System Extensions" (**build 87 was dead on arrival this way**).
 
-Corroborated in four other places, which is why it is treated as settled:
+Corroborated in four other places, which is why it is settled:
 
 | Where | What it says |
 |---|---|
@@ -75,21 +84,21 @@ Corroborated in four other places, which is why it is treated as settled:
 | `Docs/AuthPwd1Password.md` | the cross-team dylib load is out-of-process for exactly this reason |
 
 **Consequence, absolute:** `dlopen`ing a third-party engine **into the app or into the
-packet-tunnel extension is not available**. Any design whose first step is "load the plugin
-bundle" dies on this line, regardless of how the plugin is signed.
+packet-tunnel extension is not available**. Any design beginning "load the plugin bundle" dies
+here, regardless of how the plugin is signed.
 
-`Docs/AuthSecPKCS11.md` also forecloses the obvious escape hatch: linking a *loader* library
-into the extension "changes the failure from *this binary built without support* to *could not
-load the module*, and buys nothing. **Obstacle 2 is upstream of obstacle 1.**" That sentence
-applies verbatim to an engine loader.
+`Docs/AuthSecPKCS11.md` forecloses the escape hatch too: linking a *loader* library into the
+extension "changes the failure from *this binary built without support* to *could not load the
+module*, and buys nothing. **Obstacle 2 is upstream of obstacle 1.**" That applies verbatim to
+an engine loader.
 
 ### 1.2 The rule about who owns the packet path ✅ — restated correctly
 
 `Docs/Networking.md:391` states it compressed, in passing: "the rule that **sign-in may leave
 the process while carrying traffic must not**."
 
-Read literally, that forbids §3 outright. Read for what it protects, it does not — and the
-distinction matters enough to record, because it was got wrong once in the course of this
+Read literally, that forbids Option A outright. Read for what it protects, it does not — and
+the distinction matters enough to record, because it was got wrong once in the course of this
 design:
 
 > **What the rule protects is that SimpleVPN owns the interface, the routes and the DNS.** The
@@ -100,58 +109,71 @@ design:
 
 A helper that receives IP packets and returns IP packets, while the extension keeps
 `packetFlow`, `setTunnelNetworkSettings`, `includedRoutes`, `excludedRoutes` and `dnsSettings`,
-**satisfies what the rule protects**. A helper that hands back a SOCKS port does not. That is
-the test, and it is the test because upcoming work (PBR, the mediators) depends on the packet
-path being ours.
+**satisfies what the rule protects**. A helper that hands back a SOCKS port does not.
+
+**Option B does not satisfy it, and does not try to** — it hands the whole interface to someone
+else. That is the trade, stated in §5.3 rather than hidden.
 
 ### 1.3 The established extension pattern is a separate signed *executable* ✅
-
-This codebase already extends itself out-of-process, twice, and both are whole executables
-rather than loadable bundles:
 
 | Helper | Entitlements | Why separate |
 |---|---|---|
 | `opnative-helper` (`OPNativeHelper`) | `disable-library-validation`, nothing else | it `dlopen`s a cross-team dylib; the app legally cannot |
 | `ocauth-helper` (`OCAuthHelper`) | **"HARD POLICY: no entitlements, ever"** (`AGENTS.md`) | libopenconnect is statically linked and **dlopens nothing** |
 
-`ocauth-helper` is the more instructive precedent, and its policy line does real work later:
-**a helper that statically links its engine needs no entitlement at all** (§3.2).
+`ocauth-helper` is the instructive precedent, and its policy line does real work in §4.2: **a
+helper that statically links its engine needs no entitlement at all.**
 
 ### 1.4 The packet-tunnel extension is sandboxed, runs as root, and spawns nothing ✅
 
 `PacketTunnel/PacketTunnel.entitlements` carries `com.apple.security.app-sandbox`,
 `application-groups`, `network.client` and `network.server`. Three recorded consequences bear
-directly on §3:
+on Option A:
 
 1. **It cannot open `PF_ROUTE`** — `SimpleVPN/Mediators/PFRouteMonitor.swift` and
    `Docs/Networking.md:1195`; that is why the route-drift monitor lives app-side.
-2. **Forking a child is already refused here on these grounds.** `Docs/Networking.md:360`, on
-   why a host-checker wrapper forces the subprocess path: "`openconnect_setup_csd` works by
-   forking a child, and **the extension is sandboxed *and* root**".
+2. **Forking a child is already refused here on these grounds.** `Docs/Networking.md:360`:
+   "`openconnect_setup_csd` works by forking a child, and **the extension is sandboxed *and*
+   root**".
 3. **`Process()` appears zero times anywhere under `PacketTunnel/`** ✅ (grep). Every subprocess
    this app spawns is spawned by the **app**, which is unsandboxed.
 
-The sandbox is not total: the extension does successfully write `/Library/Application
-Support/SimpleVPN/tailscale/<profile>` at 0700, with a fallback whose comment reads "**the
-sandbox profile, not root-ness, is what can refuse this path**"
-(`PacketTunnelProvider.swift:846`). Filesystem reach exists but is uncharacterised.
+The sandbox is not total: the extension does write `/Library/Application
+Support/SimpleVPN/tailscale/<profile>` at 0700, with a fallback commented "**the sandbox
+profile, not root-ness, is what can refuse this path**" (`PacketTunnelProvider.swift:846`).
+Filesystem reach exists but is uncharacterised.
 
 ### 1.5 Nothing crosses the app↔extension boundary except plists and strings ✅
 
-`Docs/Networking.md` §2: **app → extension** is `startTunnel(options:)` (a dictionary) at start
-and `handleAppMessage` (strings) while running; **extension → app** is only ever a reply, plus
-`os_log` and `TunnelIncidentStore`. "The extension cannot push to the app at all." App-group
-files and `UserDefaults` "do not cross the root/system-context ↔ user boundary".
+`Docs/Networking.md` §2: **app → extension** is `startTunnel(options:)` (a dictionary) and
+`handleAppMessage` (strings); **extension → app** is only ever a reply, plus `os_log` and
+`TunnelIncidentStore`. "The extension cannot push to the app at all." App-group files and
+`UserDefaults` "do not cross the root/system-context ↔ user boundary".
 
 **There is therefore no way to pass a file descriptor from the app to the extension.** This
-constraint reshapes §3 more than any other, and it is the one most likely to be assumed away.
+reshapes Option A more than any other constraint, and it is the one most likely to be assumed
+away.
+
+### 1.6 macOS will not arbitrate two tunnels over the default route ✅
+
+Directly load-bearing for Option B, and already settled in this tree.
+`Docs/Networking.md` §5.3, on `Docs/PolicyRouting.md` tier 2:
+
+> "argues that two NE tunnels fighting over `0.0.0.0/0` is something **macOS will not
+> arbitrate** … The shipped implementation … several ordinary NE tunnels run in parallel, the
+> routing table merges their routes by specificity, and **the app guarantees that at most one
+> of them advertises a default route by demoting the others live**."
+
+The mechanism is `MultiTunnelRealizer` — **per-tunnel gateway IPC**. We keep that invariant
+only because every tunnel is ours and answers our `gateway:full` / `gateway:split` messages.
+**We have no such IPC into another developer's extension** (§5.3).
 
 ---
 
 ## 2. What an obfuscated `wireguard-go` fork actually costs ✅
 
-Worth recording in full, because the intuition is wrong and the correction is durable
-regardless of when — or whether — the work happens.
+Recorded in full because the intuition is wrong and the correction is durable regardless of
+which option — if either — is ever built.
 
 ### 2.1 Our WireGuard engine is already built on a fork
 
@@ -161,7 +183,7 @@ from **`github.com/tailscale/wireguard-go`** — *Tailscale's* fork, pinned in
 WireGuard kind rides along in the same Go c-archive, and the file says why: "two Go c-archives
 cannot be linked into one binary, and `PacketTunnel` already links this one."
 
-A DPI-resistant obfuscated variant is a **different, independent fork of the same upstream**
+A DPI-resistant variant is a **different, independent fork of the same upstream**
 (`golang.zx2c4.com/wireguard`). Comparing the `device/` package of one such fork against
 Tailscale's, file by file (sizes in bytes, from each project's source listing):
 
@@ -176,114 +198,159 @@ Tailscale's, file by file (sizes in bytes, from each project's source listing):
 | `aead_arm.go`, `deadlock_test.go`, `lookup_test.go`, `sessionstate_test.go` | present | absent | Tailscale-only |
 
 Read the middle rows carefully. **Tailscale's fork is itself heavily diverged from upstream, in
-several of the same files the obfuscated fork modifies.** There is no merge here and no "same
-engine with a flag". Adopting one means carrying a **third lineage of the same codebase** in
-the same product, with a third set of security updates to track.
+several of the same files the obfuscated fork modifies.** No merge, and no "same engine with a
+flag". Adopting one means a **third lineage of the same codebase** in one product, with a third
+set of security updates to track.
 
-> This reverses the hopeful case. It was expected that such a fork might be a small delta on an
-> engine we already build, which would have made the extensibility question *less* urgent. It
-> is not — which makes an out-of-tree engine the only shape that avoids a third `wireguard-go`
-> in our build, and therefore makes the extensibility question **more** urgent.
+> This reverses the hopeful case. Such a fork was expected to be a small delta on an engine we
+> already build, which would have made extensibility *less* urgent. It is not — which makes an
+> out-of-tree engine the only shape that avoids a third `wireguard-go` in our build, and
+> therefore makes the extensibility question **more** urgent.
 
 ### 2.2 What such a config carries beyond a `wg-quick` file
 
-The obfuscation parameters arrive as additional **device-level** UAPI keys alongside the
-standard ones. In the fork examined they fall into four groups:
+Obfuscation parameters arrive as additional **device-level** UAPI keys beside the standard ones.
+In the fork examined, four groups:
 
 | Group | Shape | What it does |
 |---|---|---|
-| junk packets | three uint32 (count, min size, max size) | send N junk datagrams of random size before the handshake |
-| message padding | four uint32, one per message type | pad handshake-init / handshake-response / cookie / **transport** messages |
-| header values | four ranges (`x-y` or a single value) | replace WireGuard's four plaintext message-type values |
+| junk packets | three uint32 (count, min, max) | send N junk datagrams of random size before the handshake |
+| message padding | four uint32, one per message type | pad handshake-init / response / cookie / **transport** messages |
+| header values | four ranges (`x-y` or single) | replace WireGuard's four plaintext message-type values |
 | custom signature packets | five slots, each a small **tag language** (`<b>` bytes, `<t>` timestamp, `<r>` random, …) parsed into a chain applied in sequence | arbitrary decoy/prelude packets |
 
-Newer revisions of that fork add three more classes, and these are the ones that matter
-architecturally:
+Newer revisions add three more classes, and these are the architecturally decisive ones:
 
 - a **32-byte header-protection cipher key** — the header transform becomes *cryptographic*;
 - **content padding**, reaching into transport-message framing;
-- **WireGuard's protocol timers made configurable** (rekey-after, rekey-timeout,
-  reject-after, keepalive-timeout, max-handshake-attempts) — values that are `const` upstream.
+- **WireGuard's protocol timers made configurable** (rekey-after, rekey-timeout, reject-after,
+  keepalive-timeout, max-handshake-attempts) — `const` upstream.
 
-**The attractive shortcut, and why it fails.** The *first* three groups look like a pure
+**The attractive shortcut, and why it fails.** The first three groups look like a pure
 transformation of the **outer UDP datagrams**: junk packets are separate datagrams, padding
-prepends bytes to handshake packets, and the header values rewrite a plaintext 4-byte field.
-If that were all of it, the whole feature could be a small **UDP relay** between our existing
-plain-WireGuard engine and the server — no new engine, no new lineage, a few hundred lines.
-The three newer classes close that door: a keyed header transform means reimplementing crypto,
-transport padding means touching framing, and configurable timers change behaviour compiled in
-as constants. Chasing that outside the device means tracking someone else's protocol revision
-by revision.
+prepends bytes to handshake packets, header values rewrite a plaintext 4-byte field. If that
+were all, the feature could be a small **UDP relay** between our existing plain-WireGuard
+engine and the server — no new engine, no new lineage, a few hundred lines. The three newer
+classes close that door: a keyed header transform means reimplementing crypto, transport
+padding means touching framing, configurable timers change behaviour compiled in as constants.
+Chasing it outside the device means tracking someone else's protocol revision by revision.
 
-❓**O2** — this is drawn from the UAPI key list and the obfuscation-chain structure, **not**
-from reading `noise-protocol.go`/`send.go`/`receive.go` in full. If the relay shortcut is ever
-re-litigated, that is the diff to read, and the answer may well differ for a config that uses
-only the original three groups.
+❓**O2** — drawn from the UAPI key list and the obfuscation-chain structure, **not** from
+reading `noise-protocol.go` / `send.go` / `receive.go` in full. That is the diff to read if the
+relay shortcut is ever re-litigated, and the answer may differ for a config using only the
+original three groups.
 
-**Could `WireGuardConfig` carry these?** Mechanically yes, and cheaply —
-`Shared/WireGuardConfig.swift` already round-trips a `wg-quick` file, and `renderWGUAPI`
-already builds a UAPI string; optional fields would follow `OpenVPNOverrides`' invariant
-("every field Optional, `nil` = engine default, never touched"). **But it must not.**
-`tailscale/wireguard-go`'s `IpcSet` **rejects unknown keys**, so a `WireGuardConfig` carrying
-them would be a config surface with no engine behind it — precisely the promise
-`AuthPlan.swift` warns about. Those parameters belong to whatever runs that device, and travel
-in that engine's own config.
+**Could `WireGuardConfig` carry these?** Mechanically yes and cheaply — `Shared/WireGuardConfig.swift`
+already round-trips a `wg-quick` file and `renderWGUAPI` already builds a UAPI string; optional
+fields would follow `OpenVPNOverrides`' invariant ("every field Optional, `nil` = engine
+default, never touched"). **But it must not.** `tailscale/wireguard-go`'s `IpcSet` **rejects
+unknown keys**, so a `WireGuardConfig` carrying them is a config surface with no engine behind
+it — precisely the promise `AuthPlan.swift` warns about.
 
 ### 2.3 Licensing a fork we would link ✅
 
 `wireguard-go` and its forks are **MIT** ("Copyright (C) 2017-2025 WireGuard LLC"). SimpleVPN
 is **GPL-3.0-only** (`LICENSE`, and the SPDX header on every source file). **MIT is compatible
 with GPL-3.0** — MIT code may be combined into a GPL-3.0 work provided the notice is preserved.
-That is the same relationship the tree already has with the MIT-licensed Go SDK credited in
-`AboutView.swift`, and the acknowledgements surface is where such a component would be named.
+Same relationship the tree already has with the MIT-licensed Go SDK credited in
+`AboutView.swift`.
 
 Two cautions:
 
-- A fork's **own dependency set** is not the parent's. The one examined pulls in transport and
-  serialisation libraries the upstream does not. ❓**O3** — their licences were not checked,
-  and a static link makes them ours to account for.
-- **Nothing here bundles or installs a third-party tool.** That policy is unchanged and is not
-  in tension with any of this: a helper built from source in a separate repository under the
-  user's own account is not a vendor's shipped tool, and `AboutView.swift`'s standing sentence
-  ("SimpleVPN never bundles or installs a vendor's tool") stays true.
+- A fork's **own dependency set** is not the parent's; the one examined pulls in transport and
+  serialisation libraries upstream does not. ❓**O3** — their licences were not checked, and a
+  static link makes them ours to account for.
+- **Nothing here bundles or installs a third-party tool.** Policy unchanged, and not in tension:
+  a helper built from source in a separate repository is not a vendor's shipped tool, and
+  `AboutView.swift`'s standing sentence stays true. **Note this cuts differently for Option B**,
+  where the third party ships an *app* the user installs themselves — not us bundling anything,
+  but a new distribution story (§5.3).
 
 ### 2.4 Out of scope, permanently
 
-Clients of this class typically also **provision servers** — standing up containers running
-several protocols and handing back configurations. **SimpleVPN does not provision servers**,
-has no account integration of any kind, and `SimpleVPN/Providers/VPNServiceProviders.swift`
-exists to keep that honest ("a list saves typing, it never signs anyone in"). Scope here is
-**consuming a configuration the user already has**, and nothing more.
+Clients of this class typically also **provision servers** — standing up containers and handing
+back configurations. **SimpleVPN does not provision servers**, has no account integration, and
+`SimpleVPN/Providers/VPNServiceProviders.swift` keeps that honest ("a list saves typing, it
+never signs anyone in"). Scope is **consuming a configuration the user already has**.
 
 ---
 
-## 3. Can an engine live outside the packet-tunnel extension?
-
-Four shapes. One impossible, one rejected on merits, one real but off-target, one candidate.
+## 3. The option space — two live options
 
 ```mermaid
 flowchart TB
-    A["dlopen a plugin bundle into<br/>the app or the extension"] --> DEAD["❌ impossible — AMFI, build 87 (§1.1)"]
-    B["out-of-process packet carriage<br/>helper owns interface, routes, DNS"] --> REJ["❌ rejected — fails what §1.2 protects"]
-    C["separate signed helper OFF the packet path<br/>sign-in, provisioning"] --> REAL["✅ proven pattern, twice (§1.3)<br/>but not what this feature needs"]
-    D["separate signed helper ON the packet path<br/>extension keeps utun, routes, DNS"] --> CAND["📐 the candidate<br/>blocked on ❓O1 (§3.3)"]
+    subgraph DEAD["❌ ruled out"]
+        A1["dlopen a plugin bundle into<br/>the app or the extension"]
+        A2["split ownership — helper owns<br/>interface, routes, DNS"]
+    end
+    subgraph LIVE["📐 live options — peers, not a design and a refinement"]
+        OA["<b>Option A</b><br/>separate signed helper ON our packet path<br/>WE keep utun, routes, DNS<br/>they transform packets"]
+        OB["<b>Option B</b><br/>THEY ship their own NetworkExtension<br/>their utun, routes, DNS, signing<br/>our UI drives auth/config over IPC"]
+    end
+    A1 -.->|"AMFI, build 87 (§1.1)"| DEAD
+    A2 -.->|"fails what §1.2 protects"| DEAD
+    OA -.->|"blocked on ❓O1 — can the sandboxed<br/>extension reach anything at all?"| LIVE
+    OB -.->|"blocked on ❓O11 — can our app drive<br/>another team's tunnel config?"| LIVE
 ```
 
-### 3.1 Out-of-process packet carriage — evaluated, rejected 📐
+### 3.1 The trade, in one line each
 
-The shape where the helper owns the interface, installs routes and configures DNS. **Rejected**,
-and not for the per-packet cost:
+> **Option A keeps our routing model and pays for it per packet.**
+> **Option B gives up our routing model for their VPNs and pays nothing per packet.**
 
-- It fails §1.2 on the thing the rule actually protects. The mediators
-  (`Docs/StateMediators.md`), the divert plan (`Docs/PolicyRouting.md`) and gateway arbitration
-  (`Docs/Networking.md` §4–5) all assume a single owner, and that owner is us.
-- It is the `ocproxy` failure mode with extra steps — see §1.2.
+| | Option A | Option B |
+|---|---|---|
+| Who owns utun / routes / DNS | **us** ✅ | **them** |
+| Per-packet cost on our side | one extra process hop each way (§4.4) | **none** |
+| AMFI / library validation | **does not apply** — whole executable, static link (§4.2) | **does not apply** — nothing of theirs is in our process |
+| Supervision of their code | ours to do (§4.6) | **theirs** — their extension crashing is their problem |
+| Policy routing, carve-outs, route graph, guest networks apply to their VPN? | **yes** | **no**, unless they reimplement it (§5.3) |
+| Default-route arbitration (§1.6) | ours, works | **breaks** — we have no gateway IPC into them (§5.3) |
+| System-extension approvals the user faces | one (ours) | **two** — ours and theirs, different developers |
+| IPC contract | per-packet + control | **larger**, but not per-packet: auth, config, status, errors, live stats |
+| Who holds the user's credentials | secrets stay ours — the helper gets packets, not credentials | **we hand credentials to their process** (§6.6) |
+| Blocked on | ❓O1 (§4.3) | ❓O11 (§5.4) |
+
+### 3.2 The product question this turns on — pose it, do not decide it
+
+Both options are technically defensible. Choosing between them is **not** an engineering
+judgement, and should not be made by whoever implements it:
+
+> **Should a third-party VPN participate in SimpleVPN's routing model at all?**
+>
+> If **yes** — a third-party VPN should honour policy routing, the local-network carve-out,
+> guest-network control, the divert plan and the route graph, and appear in them as a
+> first-class tunnel — then **Option A is the only shape that delivers it**, and the per-packet
+> cost is the price.
+>
+> If **no** — a third-party VPN is its own island that our UI merely signs into and reports on,
+> and users understand it will not appear in the routing features — then **Option B is strictly
+> better**: cheaper, cleaner, less code, less trust surface in our process.
+
+That question has not been answered, and the rest of the app leans hard toward *yes* — the
+routing model is what most of `Docs/PolicyRouting.md`, `Docs/StateMediators.md` and
+`Docs/Networking.md` §4–5 are about. But leaning is not deciding, and Option B's advantages are
+real enough to deserve a deliberate answer rather than an inherited one.
+
+---
+
+## 4. Option A — a separate signed helper on our packet path 📐
+
+### 4.1 The variant that is rejected outright
+
+Where the helper owns the interface, installs routes and configures DNS. **Rejected** — not for
+cost:
+
+- It fails §1.2 on the thing the rule protects. The mediators, the divert plan and gateway
+  arbitration all assume a single owner, and that owner is us.
+- It is the `ocproxy` failure mode with extra steps (§1.2).
 - It cannot work anyway: only the extension has `packetFlow`, and the utun is created by the
   system when `setTunnelNetworkSettings` succeeds. A helper cannot be handed it (§1.5).
 
-Recorded rather than skipped, because it is the design people reach for first.
+This is **not** Option B. Option B moves the whole provider out, coherently. This variant splits
+ownership incoherently, which is worse than either.
 
-### 3.2 The candidate — extension keeps the interface, helper transforms packets 📐
+### 4.2 The shape
 
 ```mermaid
 flowchart LR
@@ -301,72 +368,55 @@ flowchart LR
     NS -.->|"pins the server IP as<br/>tunnelRemoteAddress"| UTUN
 ```
 
-Why this is the right shape if any shape works:
+- **Routes, DNS and the interface stay entirely ours.** §1.2 satisfied on substance.
+- **It is an increment on an existing boundary.** `Docs/Networking.md` §3.2: `openvpn3` and
+  `libopenconnect` **never see a utun** — each holds one end of a `socketpair(AF_UNIX,
+  SOCK_DGRAM)` while a pump copies to `packetFlow`. This moves that seam across a process line.
+- **No entitlement change and no library validation anywhere.** The unit of extension is a
+  **whole executable that statically links its engine**, so `disable-library-validation` is
+  needed by **nobody** — `ocauth-helper`'s "no entitlements, ever" applied to the packet path.
+  **AMFI is not what blocks this**, which is the pleasant surprise of the exercise.
 
-- **Routes, DNS and the interface stay entirely ours.** The helper never calls
-  `setTunnelNetworkSettings`, never installs a route, never touches the resolver. §1.2 is
-  satisfied on substance.
-- **It is an increment on an existing boundary.** `Docs/Networking.md` §3.2 records that
-  **`openvpn3` and `libopenconnect` never see a utun** — each holds one end of a
-  `socketpair(AF_UNIX, SOCK_DGRAM)` while a pump copies between the other end and `packetFlow`.
-  This moves that same seam across a process line.
-- **No entitlement change, and no library validation anywhere.** Because the unit of extension
-  is a **whole executable that statically links its engine**, not a loadable bundle,
-  `disable-library-validation` is needed by **nobody**. This is `ocauth-helper`'s "no
-  entitlements, ever" applied to the packet path — and it means **AMFI is not what blocks
-  this**, which is the pleasant surprise of the whole exercise.
-- **The helper may need no privilege at all** (§3.5).
+### 4.3 What blocks it: the channel ❓**O1**
 
-### 3.3 What blocks it: the channel ❓**O1** — the decisive question
-
-The assumption going in was "packets cross a socketpair". **They cannot, on this boundary.**
-
-A socketpair is only shareable with a process you `fork`/`posix_spawn`. So:
+The assumption going in was "packets cross a socketpair". **They cannot on this boundary.** A
+socketpair is only shareable with a process you `fork`/`posix_spawn`:
 
 | Who spawns the helper? | Can it hand over a socketpair? | Verdict |
 |---|---|---|
 | the **extension** | yes — *if it may spawn at all* | ❓ unverified |
-| the **app** (unsandboxed; spawns everything else today) | to the helper yes; **to the extension no** — `startTunnel(options:)` is a plist, `handleAppMessage` is `Data`, and **no fd passing exists** (§1.5) | ❌ closed |
-
-The design therefore reduces to one question:
+| the **app** (unsandboxed; spawns everything else today) | to the helper yes; **to the extension no** — `startTunnel(options:)` is a plist, `handleAppMessage` is `Data`, **no fd passing** (§1.5) | ❌ closed |
 
 > **Can a sandboxed `NEPacketTunnelProvider` system extension, running as root in the system
 > context, either `posix_spawn` a helper outside its bundle, or `connect()` to a rendezvous
 > that helper is listening on?**
 
-What is known is suggestive and insufficient:
+Known, and insufficient: `Process()` is used nowhere under `PacketTunnel/` ✅ (absence of use is
+not proof of denial); `Docs/Networking.md:360` refuses the CSD host-checker on "sandboxed *and*
+root" grounds ✅ but that sentence doubles as a **security** judgement and is not a measured
+result; the extension **can** write under `/Library/Application Support/SimpleVPN/` ✅ so a
+unix-domain rendezvous is open; and it holds `network.client` **and** `network.server` ✅ so
+**loopback** is likeliest to survive — and is the worst outcome for trust. A socketpair is
+unforgeable; a loopback port can be connected to, or raced for, by any local process.
+`ControlServer.swift` solves the analogous problem with "`chmod(path, 0o600)` — same-user only —
+**this IS the auth boundary**", and **that trick does not exist for a TCP port**.
 
-- `Process()` is used **nowhere** under `PacketTunnel/` ✅ — absence of use is not proof of
-  denial.
-- `Docs/Networking.md:360` refuses the CSD host-checker because forking a child from a
-  "sandboxed *and* root" extension is unacceptable ✅ — but that sentence is doing double duty
-  as a **security** judgement (running a vendor script as root) as much as a capability claim,
-  and must not be read as a measured result.
-- The extension **can** write under `/Library/Application Support/SimpleVPN/` ✅, so a
-  unix-domain rendezvous at a system path is genuinely open.
-- The extension holds `network.client` **and** `network.server` ✅, so a **loopback** rendezvous
-  is the likeliest to survive the sandbox — and it is the worst outcome for trust. A socketpair
-  is unforgeable and needs no authentication; a loopback port can be connected to, or raced
-  for, by any local process. `ControlServer.swift` solves the analogous problem with
-  "`chmod(path, 0o600)` — same-user only — **this IS the auth boundary**", and **that trick
-  does not exist for a TCP port**. A loopback design needs a shared secret minted by the app
-  and handed to both sides: more moving parts, weaker boundary.
+**How to answer it:** one throwaway notarized build attempting, at `startTunnel`, (a)
+`posix_spawn` of a bundled no-op, (b) `connect()` to `AF_UNIX` under `/Library/Application
+Support/SimpleVPN/`, (c) `connect()` to `127.0.0.1` — logging each `errno`, then reading
+`log stream` plus Console sandbox denials. One `./Tools/build-notarize-install.sh` cycle; not
+run here.
 
-**How to answer it:** one throwaway notarized build whose provider attempts, at `startTunnel`,
-(a) `posix_spawn` of a bundled no-op, (b) `connect()` to an `AF_UNIX` socket under
-`/Library/Application Support/SimpleVPN/`, (c) `connect()` to `127.0.0.1` — logging each
-`errno`, then reading `log stream` plus Console's sandbox denials. That is one
-`./Tools/build-notarize-install.sh` cycle, and it was not run here.
+### 4.4 Throughput cost — the objection Option B eliminates ❓**O4**
 
-### 3.4 Per-packet cost — the strongest argument against, estimated honestly 📐
+Named explicitly by the user as a thing to think through, and **it is the measurement that would
+settle Option A**. Nobody has taken it.
 
 **What is added:** one extra process hop each way; every inner IP packet crosses the helper
-boundary twice per round trip.
-
-**What it is added to:** the boundary is **not new in kind**. `packetFlow` is already a
-queue-and-copy between the kernel utun and our sysext, and the fd-shaped engines already copy
-through a socketpair pump on top of that. The helper roughly **doubles an existing cost**
-rather than introducing a novel one — the fair statement, in both directions.
+boundary twice per round trip. **What it is added to:** a boundary that is **not new in kind** —
+`packetFlow` is already a queue-and-copy, and the fd-shaped engines already copy through a
+socketpair pump on top of that. The helper roughly **doubles an existing cost** rather than
+introducing a novel one.
 
 Budgeting ~1–2 µs of syscall plus copy per crossing on Apple silicon, so ~2–4 µs added per
 packet round trip:
@@ -378,268 +428,406 @@ packet round trip:
 | 2.5 Gbps | ~208,000 | ~40–80% of a core | marginal |
 | 10 Gbps | ~830,000 | exceeds a core | **unacceptable** |
 
-**It stops being acceptable around 1–2.5 Gbps sustained**, and sooner for small-packet
-workloads where the ceiling is packets/s rather than bits/s. Batching amortises the syscall but
-not the copy, and cannot be pushed far without adding latency to an interactive path.
+**It stops being acceptable around 1–2.5 Gbps sustained**, sooner for small-packet workloads
+where the ceiling is packets/s not bits/s. Batching amortises the syscall but not the copy, and
+cannot be pushed far without adding latency to an interactive path.
 
 **Judgement:** acceptable *for this class of feature* — DPI-resistant access on censored or
-constrained links, where throughput sits well below the point where this bites. It would **not**
-be acceptable as the path for the mainstream engines, and the design must never drift that way.
+constrained links, well below where this bites. **Not** acceptable as the path for the
+mainstream engines, and the design must never drift that way.
 
-❓**O4** — every number above is budgeted, **not measured**. A loopback ping-pong benchmark at
-64/512/1500 B is the check, and it should precede any commitment.
+**Every number above is budgeted, not measured.** The settling experiment: a socketpair (and
+loopback, per ❓O1) ping-pong benchmark at 64 / 512 / 1500 B, reporting packets/s and CPU, on
+representative hardware. **If the real figure lands materially worse than the estimate, Option A
+loses its main advantage over Option B and the choice in §3.2 changes.**
 
-### 3.5 Privilege — the best property of the design 📐
+### 4.5 Privilege — the best property of Option A
 
-If the extension owns the utun, the routes and the DNS, what does the helper need?
+- **No root.** It creates no interface and installs no route; it runs as the user.
+- **No entitlements.** Statically linked, `dlopen`s nothing — `ocauth-helper` exactly.
+- **Network access: yes, and that bounds the good news.** A full engine holds the real protocol
+  session and speaks to the server, so it must reach the network. **An engine helper cannot be
+  denied the network.**
 
-- **No root.** It creates no interface and installs no route. It runs as the user.
-- **No entitlements.** It statically links its engine and `dlopen`s nothing — `ocauth-helper`
-  exactly (§1.3).
-- **Network access: yes — and that is the limit of the good news.** A full engine holds the
-  real protocol session and speaks to the server itself, so it *must* reach the network. **An
-  engine helper cannot be denied the network**; reaching the network is what an engine is for.
+The architecture can make an engine helper **unprivileged** but not **non-exfiltrating** (§6.4).
+A *pure transformer* — obfuscation with no server of its own — could be denied the network and
+sandboxed hard, a genuinely strong position; the motivating example is not that (§2.2).
+❓**O5** — a two-tier contract was not worked through.
 
-That bounds the security story and should be stated rather than glossed: the architecture can
-make an engine helper **unprivileged**, but it cannot make it **non-exfiltrating**. A process
-holding plaintext packets and a socket can, by construction, send them elsewhere (§4.4).
+### 4.6 Supervision
 
-A *pure transformer* — an obfuscation layer with no server of its own — could be denied the
-network and sandboxed hard, which would be a genuinely strong position. The motivating example
-is not that (§2.2), so it does not get the benefit. ❓**O5** — whether a two-tier contract is
-worth it (network-less transformers sandboxed hard; full engines not) was not worked through.
+The worst failure available is a tunnel reading "connected" that silently carries nothing.
 
-### 3.6 Supervision — a crashed helper mid-tunnel 📐
-
-The worst failure available is a tunnel that reads "connected" and silently carries nothing.
-
-- **Detection is free and must be mandatory.** Whatever the channel turns out to be, a dead
-  helper closes its end and a read returns EOF — unambiguous and immediate. A liveness
-  heartbeat on the control channel covers the hung-but-alive case, which EOF does not.
+- **Detection is free and mandatory.** A dead helper closes its end; a read returns EOF —
+  unambiguous, immediate. A heartbeat on the control channel covers hung-but-alive.
 - **Fail the tunnel; do not paper over it.** The provider already tears down unconditionally on
-  a fatal engine error and calls the completion handler. **No silent restart** — a restarted
-  device has lost its session state and needs a fresh handshake anyway, so reconnect is both
-  the honest and the correct behaviour.
-- **Tell the user, in the vocabulary already used.** `TunnelIncidentStore` is the existing
-  channel for "explain a failure that has already happened", and the incident must name the
-  third-party helper and its developer: "your VPN dropped" and "the engine *someone else wrote*
-  crashed" are different facts, and the user is entitled to the second.
-- **The neither-crashed-nor-working case** is covered by machinery that already exists — the
-  app "judges live link health passively from byte counters" (`AGENTS.md`).
+  a fatal engine error. **No silent restart** — a restarted device has lost session state and
+  needs a fresh handshake anyway.
+- **Tell the user in the existing vocabulary.** `TunnelIncidentStore` explains "a failure that
+  has already happened", and the incident must name the third-party helper and its developer:
+  "your VPN dropped" and "the engine *someone else wrote* crashed" are different facts.
+- **Neither-crashed-nor-working** is covered already — the app "judges live link health
+  passively from byte counters" (`AGENTS.md`).
 
-**Supervision does not kill the design.** It is ordinary work and the primitives are all here.
+Ordinary work; the primitives all exist. **In Option B this section does not exist at all.**
 
 ---
 
-## 4. Trust — the part that should worry us
+## 5. Option B — their own network extension, our UI 📐
 
-The stated purpose is **to let other developers add VPN types**. So the honest framing is:
-**code we did not write, processing the user's traffic in the clear.**
+The user's alternative, and **not** a lesser version of A. It inverts the model: instead of
+hosting their engine inside our boundary, **they ship their own NetworkExtension provider —
+their own system extension, their own signing, their own utun — and use our UI for sign-in,
+configuration and status over IPC.**
 
-### 4.1 What a third-party engine can see, stated plainly
+```mermaid
+flowchart TB
+    subgraph OURS["SimpleVPN — our app"]
+        UI["our UI<br/>sign-in · config · status · errors"]
+        CRED["our credential sources<br/>keychain · 1Password · Apple Passwords"]
+        OURSX["our PacketTunnel sysext<br/>our VPNs only"]
+    end
+    subgraph THEIRS["third-party app — their team, their signing"]
+        TAPP["their app"]
+        TSX["their NetworkExtension provider<br/><b>their utun · their routes · their DNS</b>"]
+    end
+    UI <-->|"IPC: auth, config,<br/>status, stats, errors"| TAPP
+    CRED -.->|"credentials leave<br/>our process (§6.6)"| TAPP
+    TAPP --> TSX
+    TSX <--> NET["their server"]
+    TSX -.->|"❌ no gateway IPC — default-route<br/>invariant breaks (§1.6)"| OURSX
+```
 
-**It sees every packet the user sends and receives, decrypted.** Not metadata — the packets.
-Every unencrypted request, every DNS query routed through the tunnel, the plaintext of anything
-not independently encrypted, and the full traffic pattern of everything that is. For a
-full-tunnel profile that is the user's entire network life for the duration.
+### 5.1 What it removes outright — and these are not small
 
-That is not a footnote. It is the feature.
+- **All per-packet cost on our side.** No socketpair, no copy, no context switch; their packets
+  never touch our process. This is the objection most likely to kill Option A, and Option B does
+  not reduce it — it **eliminates** it.
+- **The library-validation problem, completely.** Nothing of theirs loads into our process. We
+  never host code we did not sign, so the AMFI constraint simply stops applying rather than
+  being routed around as in §4.2.
+- **The supervision problem.** Their extension crashing is *their extension crashing* — the
+  system reports it, their code restarts it, our UI reports what it observes. §4.6 vanishes.
+- **The channel question ❓O1.** Our sandboxed extension is not involved at all; the IPC is
+  app↔app, in user context.
+- **Our exfiltration exposure via the packet path.** We never hold their plaintext packets,
+  because we never see them. (It reappears differently in §6.6.)
 
-### 4.2 What macOS lets us **enforce** ✅ / ❓
+### 5.2 It fits the codebase's existing IPC posture
 
-Because the unit of extension is an executable rather than a dylib, the available checks are
-code-signing checks on that binary:
+`ControlServer.swift` already hosts a **unix-socket JSON-lines** interface for the `simplevpn`
+CLI, with `chmod(path, 0o600)` as an explicit auth boundary, and `ControlSurface.swift` is
+already "commands/queries/events as pure data" whose "wire format is a public contract pinned by
+`ControlSurfaceTests`". Option B's IPC is the same shape as something that already works — a
+genuine argument in its favour, and a better starting point than Option A's channel.
+
+### 5.3 What it costs — stated as plainly as the benefits
+
+**1. We no longer own the interface, the routes or the DNS for their VPNs.** This is the whole
+price and it should not be softened. Concretely, for a third-party VPN:
+
+| Feature | Applies? |
+|---|---|
+| Policy routing / the Tcl flow router (`Docs/PolicyRouting.md`) | **no** |
+| The divert plan — route a destination around or into it (`Shared/RoutingRule.swift`) | **no** |
+| Local-network carve-out (`Shared/LocalNetworkCarveOut.swift`) | **no** |
+| Guest-network / virtualization control | **no** |
+| The route graph and the routes UI | **no** — at best whatever they report |
+| The state mediators — route, DNS, proxy arbitration (`Docs/StateMediators.md`) | **no** |
+
+…unless the third party implements each themselves, in their own extension, correctly. That is
+not a small ask, and nothing makes them do it.
+
+**2. The default-route invariant breaks (§1.6).** The sharpest concrete consequence, and already
+documented in our own tree. `Docs/PolicyRouting.md` tier 2 concluded that two NE tunnels
+fighting over `0.0.0.0/0` is "something **macOS will not arbitrate**", and the shipped answer is
+that "the app guarantees that **at most one of them advertises a default route by demoting the
+others live**" — via `MultiTunnelRealizer`'s **per-tunnel gateway IPC**. That holds only because
+every tunnel is ours and honours our `gateway:full` / `gateway:split` messages. **A third-party
+extension answers to nobody.** Either the demotion protocol becomes part of the published
+contract and they implement it faithfully, or a third-party VPN running alongside one of ours is
+an unarbitrated fight the OS will not settle. ❓**O12** — whether gateway demotion can be made a
+contract obligation with any enforcement behind it, or is purely advisory, is unresolved and is
+the most important design question inside Option B.
+
+**3. The user approves a second system extension**, from a different developer, with all the
+consent friction that carries — System Settings ▸ Login Items & Extensions, and a second "add
+VPN configurations" prompt. Our onboarding walks a user through this **once** today and it is
+already the roughest part of setup (`AGENTS.md` runbook, `Docs/Onboarding.md`).
+
+**4. The IPC contract becomes larger, not smaller.** No longer per-packet, but it must now carry
+sign-in (including interactive/SSO flows, OTP, credential-source selection), configuration
+(their settings, which we must render without knowing them), status, live statistics and errors.
+**Different shape, not obviously less work** — and rendering settings we do not define collides
+with `EngineSettingCatalog`, `SettingSurface` global namespaces, manual anchors and
+`ManualAnchorParityTests` (❓O10) at least as hard as Option A does.
+
+**5. A new distribution story.** The user installs someone else's app. We bundle nothing —
+policy intact — but "SimpleVPN works with X, install X separately" is a support and trust
+surface that does not exist today.
+
+### 5.4 The likely blocker ❓**O11** — can our app drive their configuration at all?
+
+Option A's blocker is ❓O1. Option B has its own, and it may be harder.
+
+NetworkExtension configurations are managed through `NETunnelProviderManager`, and **a VPN
+configuration is associated with the app that created it** — an app's `loadAllFromPreferences()`
+returns *its own* configurations. If that scoping is what it appears to be, then:
+
+> **SimpleVPN cannot enumerate, configure, start or stop another developer's tunnel provider.**
+
+Our UI could not drive their extension **directly**. The IPC would have to be **our app ↔ their
+app**, with *their* app driving *their* extension — so "let a third party make their own network
+extension and IPC to our UI" is really "…and ship an app alongside it that we talk to". Still
+viable — close to how our own CLI talks to our own app — but a third process, an app the user
+must have running or launchable, and a larger surface than the phrase suggests.
+
+**How to answer it:** confirm the cross-team scoping of
+`NETunnelProviderManager.loadAllFromPreferences()`, and whether any supported mechanism permits
+one app to manage another's tunnel configuration. Not verifiable here. **If the answer is "no
+cross-app management", Option B is app↔app IPC and should be described that way from the
+outset**, not discovered late.
+
+---
+
+## 6. Trust
+
+The stated purpose is **to let other developers add VPN types**. In Option A that means code we
+did not write processing the user's traffic in our boundary. In Option B it means the user's
+**credentials** leaving our process. Trust does not disappear in B; it **moves**.
+
+### 6.1 What a third-party engine can see
+
+**Every packet the user sends and receives, decrypted.** Not metadata — the packets. Every
+unencrypted request, every DNS query routed through the tunnel, the plaintext of anything not
+independently encrypted, and the traffic pattern of everything that is. For a full-tunnel
+profile that is the user's entire network life for the duration. Not a footnote — the feature.
+
+In **Option B** they see the same thing, but as *their own VPN*, which the user installed and
+approved as a separate product. A meaningfully different consent story, and an easier one to
+explain honestly.
+
+### 6.2 What macOS lets us **enforce** ✅ / ❓
+
+Both options reduce to code-signing checks on a binary we did not build:
 
 | Requirement | Enforceable? | How |
 |---|---|---|
-| Signed at all / untampered | ✅ | `SecStaticCodeCheckValidity`; and on the *running* process via `SecCodeCopyGuestWithAttributes` |
+| Signed at all / untampered | ✅ | `SecStaticCodeCheckValidity`; running process via `SecCodeCopyGuestWithAttributes` |
 | **A specific Team ID** | ✅ | requirement string — `anchor apple generic and certificate leaf[subject.OU] = "<TEAMID>"` |
-| Developer ID (not ad-hoc, not self-signed) | ✅ | same mechanism, plus the Developer ID CA marker OID |
+| Developer ID (not ad-hoc, not self-signed) | ✅ | same mechanism plus the Developer ID CA marker OID |
 | Hardened runtime enabled | ✅ | signature flags |
-| Notarized | ✅ *with care* | ticket is checkable via Gatekeeper/`SecAssessment`. ❓**O6** — which API suits a non-quarantined helper we launch ourselves, and **whether it works offline**, is unestablished. This matters: a VPN client must work when the network doesn't |
+| Notarized | ✅ *with care* | ❓**O6** — which API suits something we launch ourselves, and **whether it works offline**. Matters: a VPN client must work when the network doesn't |
 | Which identities are acceptable | ✅ | it is our list |
 | **That it behaves** | ❌ | nothing in code signing constrains behaviour |
-| **That it does not exfiltrate** | ❌ | §3.5 — an engine needs the network by definition |
+| **That it does not exfiltrate** | ❌ | §4.5 — an engine needs the network by definition |
 
-**The load-bearing distinction:** signing establishes **who** wrote it and that it has not been
-altered. It says **nothing about what it does**. Identity is accountability, not containment.
-Any design leaning on "it's signed" as a *safety* argument is leaning on the wrong thing.
+**Signing establishes who wrote it and that it is unaltered. It says nothing about what it
+does.** Identity is accountability, not containment. Any design leaning on "it's signed" as a
+*safety* argument is leaning on the wrong thing — in **either** option.
 
-❓**O7** — whether the sandboxed extension can perform these `SecCode` checks and read the
-helper's binary to do so is unverified, and entangled with ❓O1.
+❓**O7** — whether the sandboxed extension can perform these `SecCode` checks at all is
+unverified and entangled with ❓O1. **Option B does not have this problem**: the checks happen
+app-side, unsandboxed.
 
-### 4.3 Consent — what the user must see and agree to 📐
+### 6.3 Consent — what the user must see
 
-Installing a third-party VPN engine is more consequential than adding a password source. This
-tree's existing rule — permissions and lookups opt-in, off by default, requested only on toggle
-— applies with more force, not less.
+Applies to both options; the tree's rule (opt-in, off by default, requested only on toggle) has
+more force here, not less.
 
 1. **Never a side effect of importing a configuration.** Opening a config file must never
-   install, enable, or one-click-offer an engine. The two acts stay separate, always. This is
-   the most important rule here, because "import a config, get an engine" is exactly how this
-   goes wrong.
-2. **Explicit, informed consent naming the developer** — identity and Team ID **as read from
-   the signature**, never as claimed by the helper's own metadata. The sentence must say what
-   §4.1 says.
-3. **Revocable, and revocation must bite** — stop the helper and refuse to start it, not merely
-   hide a row.
+   install, enable or one-click-offer an engine. The most important rule here, because "import a
+   config, get an engine" is exactly how it goes wrong.
+2. **Explicit consent naming the developer** — identity and Team ID **as read from the
+   signature**, never as claimed by the component's own metadata.
+3. **Revocable, and revocation must bite** — stop it and refuse to start it, not hide a row.
 4. **Marked third-party in every surface** — profile row, editor, traffic log, diagnostics
-   bundle. A user must never have to remember which engines are ours.
-5. **Maturity registered honestly.** `FeatureMaturityRegistry` has exactly the right vocabulary
-   (`.tested` / `.partlyVerified(checked:)` / `.untested`, with badge, symbol *and* word so
-   colour is never the only carrier). A third-party engine is `.untested` by us, permanently.
-   ❓**O8** — the registry is keyed by `VPNKind`, a closed enum with a totality test; how a
-   third-party kind registers at all is unresolved.
-6. **`ONTOLOGY.md` needs a row first.** There is no agreed noun for "the thing another developer
-   writes", and "extension", "plugin", "engine" and "backend" are all already loaded here —
-   "extension" especially, where it means the system extension. ❓**O9**.
+   bundle. **In Option B this must additionally say what does *not* apply**: that policy routing,
+   carve-outs and the route graph do not cover this VPN (§5.3). A user who assumes otherwise has
+   a security-relevant wrong belief.
+5. **Maturity registered honestly.** `FeatureMaturityRegistry` has the right vocabulary
+   (`.tested` / `.partlyVerified(checked:)` / `.untested`, with badge, symbol *and* word).
+   Third-party is `.untested` by us, permanently. ❓**O8** — the registry is keyed by `VPNKind`,
+   a closed enum with a totality test.
+6. **`ONTOLOGY.md` needs a row first.** No agreed noun exists for "the thing another developer
+   writes"; "extension", "plugin", "engine" and "backend" are all taken here — "extension"
+   especially. ❓**O9**.
 
-### 4.4 Blast radius — claiming no more than the design earns
+### 6.4 Blast radius — Option A
 
 | Failure | Prevented? | Detected? | Notes |
 |---|---|---|---|
 | Helper crashes | no | ✅ immediately | EOF; fails closed; incident names the developer |
-| Helper hangs, passes nothing | no | ✅ | heartbeat + passive byte-counter health |
+| Hangs, passes nothing | no | ✅ | heartbeat + passive byte-counter health |
 | Silently drops *some* traffic | no | ⚠️ partially | hard to distinguish from a bad network |
-| Corrupts packets | no | ⚠️ partially | shows up as a broken tunnel, not a security event |
-| **Exfiltrates the user's traffic** | ❌ **no** | ❌ **no** | holds plaintext and a socket. **The architecture cannot prevent or detect this** |
-| Tampers with routes/DNS | ✅ **yes** | ✅ | it has no route or DNS API; the extension owns `setTunnelNetworkSettings`. **This is the design's real security win** |
-| Escalates privilege | ✅ mostly | — | unprivileged, no entitlements, no root (§3.5) |
-| Loads a malicious dylib | ✅ **yes** | — | nobody carries `disable-library-validation` in this design |
-| A local process impersonates the helper | depends on ❓O1 | — | a socketpair makes it impossible; **a loopback port does not** (§3.3) |
+| Corrupts packets | no | ⚠️ partially | shows as a broken tunnel, not a security event |
+| **Exfiltrates the user's traffic** | ❌ **no** | ❌ **no** | holds plaintext and a socket. **Cannot be prevented or detected** |
+| Tampers with routes/DNS | ✅ **yes** | ✅ | no route or DNS API; we own `setTunnelNetworkSettings`. **The design's real security win** |
+| Escalates privilege | ✅ mostly | — | unprivileged, no entitlements, no root |
+| Loads a malicious dylib | ✅ **yes** | — | nobody carries `disable-library-validation` |
+| Local process impersonates it | depends on ❓O1 | — | socketpair impossible; **loopback not** (§4.3) |
 
-**Exfiltration is the one that cannot be mitigated**, and no amount of signing changes it.
+### 6.5 Blast radius — Option B
 
-### 4.5 Recommendation — what I would ship, and what I would refuse
+| Failure | Prevented? | Detected? | Notes |
+|---|---|---|---|
+| Their extension crashes | no | ✅ | the OS reports it; our UI shows what it observes. **Not ours to fix** |
+| **Exfiltrates traffic** | ❌ no | ❌ no | same as A — but it is *their* VPN, installed knowingly |
+| **Tampers with routes/DNS** | ❌ **no** | ⚠️ partially | **the row that flips.** They own the interface; `PFRouteMonitor` would *see* route changes but cannot prevent or arbitrate them |
+| Fights us for the default route | ❌ **no** | ⚠️ | §1.6 / ❓O12 — macOS will not arbitrate and we have no IPC to demote them |
+| **Misuses credentials we hand over** | ❌ **no** | ❌ **no** | §6.6 — the central Option B risk |
+| Loads a malicious dylib in *our* process | ✅ **yes** | — | nothing of theirs is in our process at all |
+| Compromises our extension | ✅ **yes** | — | no shared process boundary |
 
-**Refuse:** an open plugin ecosystem. Anything the user can drop in a folder; any "install this
-engine" flow reachable from a config import or a URL; any design whose answer to "can this
-engine see my traffic?" is a shrug. The exfiltration row makes an open ecosystem a promise we
-cannot keep, and a VPN client that loads arbitrary traffic-handling code is making a safety
-claim it cannot stand behind.
+**The two tables differ exactly as the trade predicts.** A protects routes and DNS and exposes
+our process; B protects our process and exposes routes, DNS and credentials.
 
-**Ship, if anything — the narrow version:**
+### 6.6 The Option B pivot — who holds the secret
 
-- a **Team-ID allow-list we control**, checked at **every launch**, not once at install;
-- **Developer ID + hardened runtime + notarization** required (subject to ❓O6 — if it cannot
-  be checked offline it cannot be a hard gate, and that must be *stated*, not fudged);
-- **off by default, per-engine**, behind the §4.3 consent sheet naming the developer;
-- **marked third-party everywhere**, permanently `.untested` by us;
-- a **published contract** (§5) implementable without reading our source — which is what makes
-  a first out-of-tree engine a *proof* rather than a special case.
+In Option A secrets never leave us: the helper gets packets, not credentials. In Option B **our
+UI signs the user in and must then hand the result to another developer's process.**
+
+- Our keychain group is `$(AppIdentifierPrefix)com.bragi0.SimpleVPN.shared` — **scoped to our
+  team prefix**. We cannot share keychain items across teams, so a credential reaches them **over
+  IPC, in memory**, and what happens to it afterwards is entirely theirs. They may persist it
+  anywhere, in any form.
+- That collides with promises the credential surface makes today. `Docs/CredentialSources.md`
+  and the 1Password / Apple Passwords providers rest on secrets read once and handed to *our
+  own* extension in memory via `startTunnel(options:)`. "We fetched this from your password
+  manager and gave it to a third party" is a different promise needing different words.
+- **The consent sheet must say so explicitly**, as a *separate* grant from installing the
+  engine: signing in is not the same act as authorising a third party to hold the credential.
+
+❓**O13** — whether SimpleVPN should ever hand a password-manager-sourced credential to another
+developer's process, or whether third-party VPNs must do their own sign-in entirely (our UI
+merely launching it), is a **policy** question, not a technical one. The narrower answer — never
+relay a manager-sourced secret — costs Option B much of its appeal, since "IPC to our UI for
+auth" was the point.
+
+### 6.7 Recommendation
+
+**Refuse, in both options:** an open plugin ecosystem. Anything a user can drop in a folder; any
+"install this engine" flow reachable from a config import or URL; any design whose answer to
+"can this see my traffic?" is a shrug.
+
+**If Option A:** a **Team-ID allow-list we control**, checked at **every launch**; Developer ID +
+hardened runtime + notarization (subject to ❓O6); off by default per-engine behind the §6.3
+sheet; marked third-party everywhere; a published contract (§7).
+
+**If Option B:** the same allow-list and consent discipline, **plus** an explicit statement in
+the UI of which SimpleVPN features do not apply to that VPN (§5.3), **plus** a resolved position
+on ❓O13 before any credential crosses.
 
 Stated plainly for whoever reads this next: **this is "we decide what loads", not "third-party
-plugins".** Those are different features, and the difference must never be blurred in the UI or
-in how the feature is described. If the intent is genuinely the open version, the honest answer
-is that this architecture does not make it safe, and the answer should be no.
+plugins".** Different features; the difference must never be blurred in the UI or in how this is
+described. If the intent is genuinely the open version, the honest answer is that neither
+architecture makes it safe.
 
 ---
 
-## 5. The cross-boundary contract — sketch only 📐
+## 7. The cross-boundary contract — sketch only 📐
 
-Full specification is explicitly deferred. What follows is the shape and the two hazards.
+Full specification deferred. The two options need **different** contracts — A's is per-packet
+plus control, B's is auth/config/status only — but the hazards below apply to both.
 
-### 5.1 The dead-code objection, and how it is answered
+### 7.1 The dead-code objection
 
-The standing rule against adding a loader "for later" applies. The answer is not "the mechanism
-is nice to have", it is:
+The standing rule against adding a loader "for later" applies. The answer:
 
-> **The mechanism lands together with a consumer that exercises it end to end, plus a test
-> double in-tree that pins the wire format.**
+> **The mechanism lands together with a consumer that exercises it end to end, plus a test double
+> in-tree that pins the wire format.**
 
-The precedent is exact: **`ControlSurface.swift`** is "commands/queries/events as pure data;
-**the wire format is a public contract pinned by `ControlSurfaceTests`**", consumed
-out-of-process by the `simplevpn` CLI. Same shape — a published contract, a consumer that is
-not the app, tests holding our half honest. An out-of-tree producer is a real producer.
+Precedent is exact: **`ControlSurface.swift`** is "commands/queries/events as pure data; **the
+wire format is a public contract pinned by `ControlSurfaceTests`**", consumed out-of-process by
+the `simplevpn` CLI. An out-of-tree producer is a real producer.
 
-### 5.2 Framing — the hazard this section exists to carry
+### 7.2 Framing — the hazard this section exists to carry (Option A)
 
 `Docs/Networking.md` §3.2 records that **our two existing socketpair users already disagree**:
-`openvpn3`'s fd is framed like a real utun (a 4-byte big-endian address-family prefix, both
-directions), while `libopenconnect`'s carries **raw IP with no prefix**, inferring the family
-from the IP version nibble. The OpenConnect bridge carries an explicit note that if that ever
-changes, **the read and write must change together**.
+`openvpn3`'s fd is framed like a real utun (4-byte big-endian AF prefix, both directions), while
+`libopenconnect`'s carries **raw IP with no prefix**, inferring family from the version nibble —
+with an explicit note that if that changes, **read and write must change together**.
 
-That is one inconsistency, inside one repository, between two engines written by the same
-people. Across many repositories and many authors it is a certainty unless nailed down. So the
-contract must state, normatively and once:
+One inconsistency, one repository, two engines by the same people. Across many repositories it is
+a certainty unless nailed down. So Option A's contract must state, normatively and once: **raw
+IP, no AF prefix, both directions** (matching the Go/netstack engines, already the majority
+convention); **one packet per message with an explicit length**, so framing never depends on
+datagram-boundary preservation; **a maximum packet size** echoing `maxPacketSize`; and **a worked
+hex example** — a contract without one gets implemented two ways.
 
-- **raw IP packets, no address-family prefix, both directions** — matching the Go/netstack
-  engines (`WGPacketIn`/`WGSetCallbacks`), which is already the majority convention here;
-- **one packet per message with an explicit length**, so framing never depends on
-  datagram-boundary preservation (which varies by channel type, and the channel is undecided);
-- **a maximum packet size**, echoing `maxPacketSize` in the Go shim;
-- **a worked hex example.** A contract without one gets implemented two ways.
+### 7.3 Everything else, in outline
 
-### 5.3 Everything else, in outline
+Model on `WGStart` / `WGStop` / `WGStatus` in `Vendor/tailscale-engine/src/wireguard.go` — a good
+contract already proven across a language boundary:
 
-Model it on `WGStart` / `WGStop` / `WGStatus` in `Vendor/tailscale-engine/src/wireguard.go` — a
-good contract, already proven across a language boundary:
-
-- **Handshake before any packet**: contract version + helper identity.
-- **Version mismatch is a refusal naming both versions**, never best-effort. A silent mismatch
-  in a packet path is the worst outcome available.
-- **Config**: one JSON object, engine-defined, opaque to SimpleVPN — *not* `WireGuardConfig`
-  (§2.2). Secrets ride in memory as `startTunnel(options:)` does it; never
-  `providerConfiguration`, never disk, never logs.
-- **Start reply** `{ok, endpoint}` or `{error:{kind,message}}` with an **enumerated** kind set
-  so failures are classified without string-matching (`WGStart`'s
-  `badRequest | alreadyRunning | endpoint | engine | other` is the model). The **resolved
-  endpoint** must come back, because it becomes `tunnelRemoteAddress` — the literal address NE
-  uses to route the tunnel's own traffic *around* the tunnel (`Docs/Networking.md` §3.1 calls
-  this out as load-bearing).
-- **Status**: a **strict whitelist** payload. `parseWGIpcStatus`'s comment says why — it is
-  "the one place that guarantees" key material never crosses.
-- **Teardown**: idempotent stop; **EOF authoritative** in both directions.
+- **Handshake before anything**: contract version + identity. **Version mismatch is a refusal
+  naming both versions**, never best-effort.
+- **Config**: one JSON object, engine-defined, opaque to us — *not* `WireGuardConfig` (§2.2).
+- **Secrets** in memory as `startTunnel(options:)` does it; never `providerConfiguration`, never
+  disk, never logs. **In Option B, see ❓O13 first.**
+- **Start reply** `{ok, endpoint}` or `{error:{kind,message}}` with an **enumerated** kind set so
+  failures are classified without string-matching. The **resolved endpoint** must come back — in
+  Option A it becomes `tunnelRemoteAddress`, the literal address NE uses to route the tunnel's own
+  traffic *around* the tunnel (`Docs/Networking.md` §3.1 calls this load-bearing).
+- **Status**: a **strict whitelist** payload. `parseWGIpcStatus`'s comment says why — "the one
+  place that guarantees" key material never crosses.
+- **Teardown**: idempotent stop; **EOF authoritative** both directions.
 - **Logging**: relayed to `os_log`, tagged third-party, never trusted as UI copy.
+- **Option B only**: gateway demotion (§5.3 / ❓O12), and a declaration of which routing features
+  the provider does or does not honour, so the UI can say so (§6.3).
 
-### 5.4 Absence is the ordinary state 📐
+### 7.4 Absence is the ordinary state 📐
 
-Almost nobody will have a helper installed, and that must be **quiet**: no error, no nag, no
-dead button, no empty list with an apology. The tree's own idiom is **absence, never a disabled
-item** (`AGENTS.md`, on export formats: "Absence, never a disabled item, for a format that can
-never exist"). An uninstalled engine's kind simply is not offered.
+Almost nobody will have one installed, and that must be **quiet**: no error, no nag, no dead
+button, no empty list with an apology. The tree's idiom is **absence, never a disabled item**
+(`AGENTS.md`, on export formats). An uninstalled engine's kind simply is not offered.
 
 The one case that must speak is a **profile referring to a missing engine**, because the user
-made that deliberately. It gets the `SettingNeeds` / `toolOnlyCaveat` treatment already used
-for an uninstalled subprocess tool: a specific sentence, on that profile, at connect time — not
-a global banner.
+made it deliberately: the `SettingNeeds` / `toolOnlyCaveat` treatment already used for an
+uninstalled subprocess tool — a specific sentence, on that profile, at connect time, not a global
+banner.
 
 ---
 
-## 6. Open questions ❓
+## 8. Open questions ❓
 
 | # | Question | How to answer it |
 |---|---|---|
-| **O1** | **Can the sandboxed extension `posix_spawn`, or `connect()` to a unix socket outside its container, or to loopback?** *This decides the feature* (§3.3) | one throwaway notarized build logging `errno` for all three, plus Console sandbox denials |
-| **O2** | Is the outer-UDP-relay shortcut really dead, or only for the newer revisions? (§2.2) | read `noise-protocol.go` / `send.go` / `receive.go` in the fork; check whether an original-parameters-only config is transformable outside the device |
+| **O1** | **Option A blocker.** Can the sandboxed extension `posix_spawn`, or `connect()` to a unix socket outside its container, or to loopback? (§4.3) | one throwaway notarized build logging `errno` for all three, plus Console sandbox denials |
+| **O4** | **Throughput cost — named by the user, and the measurement that settles Option A.** §4.4's numbers are budgeted, **not measured** | socketpair (and loopback) ping-pong benchmark at 64 / 512 / 1500 B; report packets/s and CPU. If materially worse than estimated, Option A loses its edge and §3.2 changes |
+| **O11** | **Option B blocker.** Can our app drive another team's `NETunnelProviderManager` configuration at all, or must the IPC be app↔app? (§5.4) | confirm cross-team scoping of `loadAllFromPreferences()`; look for any supported cross-app NE management path |
+| **O12** | **Option B's hardest design question.** Can gateway demotion (§1.6) be a contract obligation with enforcement, or only advisory? Two unarbitrated default routes is a real failure mode | design; depends on O11 |
+| **O13** | **Option B policy question.** Should SimpleVPN ever hand a password-manager-sourced credential to another developer's process — or must third parties do their own sign-in? (§6.6) | product/policy decision. The safe answer removes much of Option B's appeal |
+| **O2** | Is the outer-UDP-relay shortcut really dead, or only for newer revisions? (§2.2) | read `noise-protocol.go` / `send.go` / `receive.go`; check an original-parameters-only config |
 | **O3** | Licences of the fork's *own* dependencies (§2.3) | read each `LICENSE`; a static link makes them ours to acknowledge |
-| **O4** | §3.4's cost numbers are budgeted, **not measured** | loopback ping-pong benchmark at 64/512/1500 B |
-| **O5** | Is a two-tier contract worth it — network-less transformers sandboxed hard, full engines not? (§3.5) | design; depends on whether any plausible consumer is a pure transformer |
-| **O6** | Can notarization be verified **offline** for a helper we launch ourselves? (§4.2) | `SecAssessment` with the network down; if not, it cannot be a hard gate |
-| **O7** | Can the sandboxed extension perform `SecCode` checks and read the helper's binary? (§4.2) | same build as O1 |
-| **O8** | How does a third-party kind register in `FeatureMaturityRegistry`, keyed by the closed `VPNKind` enum with a totality test? (§4.3) | design; touches `VPNKind`, the editors, `SettingSurface`, `ManualAnchorParityTests` |
-| **O9** | **What is this thing called?** `ONTOLOGY.md` needs a row; the obvious words are all taken (§4.3) | settle **before** publishing a contract — the contract fixes the vocabulary |
-| **O10** | Everything downstream of a third-party kind: global `SettingSurface` namespaces, two-way manual-anchor parity, MDM policy, CLI addressing | not started; plausibly comparable in size to the mechanism itself |
+| **O5** | Two-tier contract — network-less transformers sandboxed hard, full engines not? (§4.5) | design; depends on whether any plausible consumer is a pure transformer |
+| **O6** | Can notarization be verified **offline** for something we launch ourselves? (§6.2) | `SecAssessment` with the network down; if not, it cannot be a hard gate |
+| **O7** | Can the sandboxed extension perform `SecCode` checks? (§6.2) — Option A only | same build as O1 |
+| **O8** | How does a third-party kind register in `FeatureMaturityRegistry`, keyed by the closed `VPNKind` enum with a totality test? (§6.3) | design; touches `VPNKind`, editors, `SettingSurface`, `ManualAnchorParityTests` |
+| **O9** | **What is this thing called?** `ONTOLOGY.md` needs a row; the obvious words are taken (§6.3) | settle **before** publishing a contract — the contract fixes the vocabulary |
+| **O10** | Downstream of a third-party kind: global `SettingSurface` namespaces, two-way manual-anchor parity, MDM policy, CLI addressing. **Both options**, and in B we must render settings we do not define | not started; plausibly comparable in size to the mechanism itself |
 
 ---
 
-## 7. Decisions
+## 9. Decisions
 
 | Decision | Status |
 |---|---|
 | `dlopen` a third-party engine into the app or the extension | ❌ **impossible** — AMFI; build 87; four corroborating records (§1.1) |
-| Out-of-process packet *carriage* (helper owns routes/DNS) | ❌ **rejected** — fails what §1.2 protects; the `ocproxy` failure mode |
+| Split ownership: helper owns routes/DNS while we own the provider | ❌ **rejected** — incoherent; the `ocproxy` failure mode (§4.1) |
 | Statically linking an obfuscated `wireguard-go` fork into `libtsengine.a` | ❌ it would mean a **third `wireguard-go` lineage** in one product (§2.1) |
 | Carrying such a fork's parameters in `WireGuardConfig` | ❌ **no** — `IpcSet` rejects them; a config surface with no engine behind it (§2.2) |
 | A separate signed helper **off** the packet path | ✅ **proven pattern**, twice (§1.3) — not what this feature needs |
-| A separate signed helper **on** the packet path, extension keeping utun/routes/DNS | 📐 **the candidate.** Not blocked by AMFI, not blocked by cost — **blocked on ❓O1** (§3) |
-| An **open** third-party plugin ecosystem | ❌ **would refuse** — exfiltration can be neither prevented nor detected (§4.4–4.5) |
-| A **Team-ID allow-list we control**, consent-gated, marked third-party | 📐 the narrow version, and the only recommendable one (§4.5) |
+| **Option A** — signed helper on our packet path, we keep utun/routes/DNS | 📐 **live.** Not blocked by AMFI or by cost — **blocked on ❓O1**, settled by ❓O4 (§4) |
+| **Option B** — their own NetworkExtension, our UI over IPC | 📐 **live, and a genuine peer.** Removes per-packet cost, AMFI and supervision outright; costs the routing model, the default-route invariant and credential custody — **blocked on ❓O11** (§5) |
+| Choosing between A and B | ⏸ **not an engineering decision** — turns on whether third-party VPNs should participate in our routing model at all (§3.2). **Posed, not decided** |
+| An **open** third-party plugin ecosystem | ❌ **would refuse** — exfiltration can be neither prevented nor detected in either option (§6.4–6.5, §6.7) |
+| A **Team-ID allow-list we control**, consent-gated, marked third-party | 📐 the narrow version, and the only recommendable one, in either option (§6.7) |
 | Licence compatibility for linking an MIT `wireguard-go` fork into this GPL-3.0-only work | ✅ **compatible** (§2.3) |
 | Server provisioning | ❌ **out of scope**, permanently (§2.4) |
 
-**If ❓O1 comes back negative — the extension can reach nothing outside itself — the mechanism
-is not viable at all, and third-party engines are not supportable on this platform under the
-current entitlement set.** That would be a legitimate answer rather than a failure, and it is
-the single thing worth checking first.
+**Two independent blockers, one per option, each one experiment away from an answer:** ❓O1 for A
+(one notarized build), ❓O11 for B (one API question). **Neither has been run.** If both come back
+negative, third-party engines are not supportable on this platform under the current entitlement
+set — a legitimate answer rather than a failure, and far cheaper to establish than either
+implementation.
