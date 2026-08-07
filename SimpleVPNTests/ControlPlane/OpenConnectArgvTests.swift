@@ -327,6 +327,58 @@ struct OpenConnectArgvTests {
         }
     }
 
+    /// …and the two of those that look like ordinary tuning say so ON THEIR OWN
+    /// ROW, while they are set. Base MTU is a number and keepalive-off is a
+    /// checkbox; neither looks like "give up routes, DNS and the whole-Mac tunnel",
+    /// which is what it costs. The user used to find out at connect time, if at
+    /// all. A caveat on an UNSET field would be noise on every profile that never
+    /// touches these, so absence is asserted just as hard as presence.
+    @Test func theTwoSettingsThatLookLikeTuningWarnOnTheirOwnRow() {
+        for setting in SubprocessTunnelManager.ToolOnlySetting.allCases {
+            // Unset: nothing to say. Both are opt-in and most profiles never
+            // carry one, so the row stays quiet.
+            let untouched = config { _ in }
+            #expect(!setting.isSet(untouched))
+            #expect(SubprocessTunnelManager.toolOnlyCaveat(setting, untouched) == nil,
+                    "\(setting.rawValue): an empty field must not be caveated")
+
+            var c = config { _ in }
+            switch setting {
+            case .baseMTU: c.baseMTU = 1400
+            case .noHTTPKeepalive: c.noHTTPKeepalive = true
+            }
+            #expect(setting.isSet(c))
+            let caveat = SubprocessTunnelManager.toolOnlyCaveat(setting, c)
+            #expect(caveat != nil, "\(setting.rawValue): a set value must be caveated")
+            // The consequence, not the mechanism: no routes and no DNS, the port
+            // that replaces them, and the sidebar section the row moves to.
+            #expect(caveat?.contains("no routes") == true)
+            #expect(caveat?.contains("no DNS") == true)
+            #expect(caveat?.contains("\(c.socksPort)") == true,
+                    "\(setting.rawValue): name the port that opens instead")
+            #expect(caveat?.contains("Local Ports") == true)
+            #expect(caveat?.contains("Whole-Mac VPNs") == true)
+            // ONE SENTENCE, TWO PLACES. The clause naming the setting is the same
+            // one the connect path uses, so the editor cannot drift away from the
+            // message a user sees when the connection actually falls back.
+            let noun = SubprocessTunnelManager.inProcessRefusalNoun(c)
+            #expect(caveat?.contains(noun) == true,
+                    "\(setting.rawValue): reuse inProcessRefusalNoun, don't restate it")
+            // And it is the clause for THIS row, not whichever gate happens to be
+            // first when a profile trips both.
+            var both = c
+            both.baseMTU = 1400
+            both.noHTTPKeepalive = true
+            #expect(SubprocessTunnelManager.toolOnlyCaveat(setting, both)?.contains(noun) == true,
+                    "\(setting.rawValue): each row must name its own setting")
+        }
+        // The caveat is an SSL-VPN statement; SSH is a different engine and this
+        // editor's Advanced group is never drawn for it.
+        var ssh = config { $0.kind = .ssh }
+        ssh.baseMTU = 1400
+        #expect(SubprocessTunnelManager.toolOnlyCaveat(.baseMTU, ssh) == nil)
+    }
+
     /// Every SSL-VPN kind can go in-process, because the extension dispatches on
     /// `VPNKind.openconnectProtocol` and that covers all seven. The connect path
     /// used to name only fortinet / f5apm / anyconnect while `willRunInProcess`

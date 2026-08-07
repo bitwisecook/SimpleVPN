@@ -1047,6 +1047,7 @@ who wants them.</p>
 <h2 id="oc-no-http-keepalive">Disable HTTP Keepalive</h2>
 <p class="default">Default: off (connections are reused).</p>
 <p>Opens a fresh connection for each request to the gateway instead of reusing one. A workaround for old proxies and gateways that mishandle a reused connection and stall during sign-in; it costs a little speed and nothing else.</p>
+<p><strong>It costs the whole-Mac tunnel.</strong> SimpleVPN's built-in engine can't turn HTTP keepalive off, so turning this on runs the VPN with the <code>openconnect</code> tool instead, and that only offers a SOCKS proxy on <code>127.0.0.1</code> and the <a href="#oc-socks-port">port you set</a>: no interface, no routes and no DNS of its own. The VPN is listed under Local Ports instead of Whole-Mac VPNs, and only apps you point at the proxy use it. Turn it off to get <a href="#oc-prefer-in-process">Run In-Process</a> back. The row in the editor says so while it is on.</p>
 
 <h2 id="oc-local-hostname">Reported Hostname</h2>
 <p class="default">Default: this Mac's real computer name.</p>
@@ -1088,6 +1089,7 @@ who wants them.</p>
 <h2 id="oc-base-mtu">Base MTU</h2>
 <p class="default">Default: auto-detected.</p>
 <p>The MTU of the network path <em>underneath</em> the tunnel, which OpenConnect uses to size the tunnel itself. Leave empty; set it only when the link's real MTU can't be detected (some mobile or PPPoE paths).</p>
+<p><strong>It costs the whole-Mac tunnel.</strong> SimpleVPN's built-in engine can't take a base MTU, so setting it runs the VPN with the <code>openconnect</code> tool instead, and that only offers a SOCKS proxy on <code>127.0.0.1</code> and the <a href="#oc-socks-port">port you set</a>: no interface, no routes and no DNS of its own. The VPN is listed under Local Ports instead of Whole-Mac VPNs, and only apps you point at the proxy use it. Leave it empty to get <a href="#oc-prefer-in-process">Run In-Process</a> back. This is not the same number as <a href="#oc-mtu">MTU</a>, which is carried in-process and is the one to lower when transfers stall. The row in the editor says so while a value is set.</p>
 
 <h2 id="oc-force-dpd">Dead-Peer Detection</h2>
 <p class="default">Default: the protocol's own interval.</p>

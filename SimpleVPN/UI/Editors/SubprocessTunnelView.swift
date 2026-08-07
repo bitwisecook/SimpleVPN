@@ -1298,6 +1298,12 @@ struct SubprocessTunnelView: View {
                 }
                 toggleRow("oc.disable-ipv6", isOn: $draft.disableIPv6)
                 toggleRow("oc.no-http-keepalive", isOn: $draft.noHTTPKeepalive)
+                // One of the two settings the built-in engine can't carry that
+                // looks like ordinary tuning. Say what it costs HERE — the
+                // alternative is finding out when the routes never arrive.
+                if let caveat = SubprocessTunnelManager.toolOnlyCaveat(.noHTTPKeepalive, draft) {
+                    SettingCaveat(caveat)
+                }
                 row("oc.local-hostname", text: $draft.localHostname, prompt: "optional")
                 row("oc.user-agent", text: $draft.userAgent, prompt: "optional")
                 row("oc.version-string", text: $draft.versionString, prompt: "4.10.05085")
@@ -1310,6 +1316,12 @@ struct SubprocessTunnelView: View {
                          invalidMessage: "Enter the path's MTU, between 576 and 9000 (jumbo frames). Leave empty to let OpenConnect work it out.",
                          step: 100)
                     .padding(.vertical, 2)
+                // The other one. `--mtu` (Traffic → MTU) is carried in-process;
+                // this one is not, and the pair is easy to confuse, so the row
+                // that costs the tunnel is the row that says so.
+                if let caveat = SubprocessTunnelManager.toolOnlyCaveat(.baseMTU, draft) {
+                    SettingCaveat(caveat)
+                }
                 intRow("oc.force-dpd", value: $draft.forceDPD, prompt: "off",
                        range: SubprocessTunnelConfig.forceDPDRange,
                        invalidMessage: "Enter an interval between 0 and 3600 seconds — 0 leaves the protocol's own rate.")

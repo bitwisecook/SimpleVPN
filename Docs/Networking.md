@@ -394,8 +394,16 @@ reason:
    public header contains **no keepalive symbol at all**, which is verified. ✅
 
 So the remaining option is to **patch the vendored library** to add the two setters, applied by
-`Tools/build-openconnect-xcframework.sh` from a patch file in the repo. That work is **not done
-yet**. Note the constraint it must respect: the script pins `OPENSSL_PIN` and fails hard if
+`Tools/build-openconnect-xcframework.sh` from a patch file in the repo. That work is **deliberately
+deferred**, not merely outstanding: the decision is to live with the limitation rather than start
+carrying a local patch now, so the two settings stay **unsupported on the in-process path** and the
+job is to say so honestly where a user meets them. That is
+`SubprocessTunnelManager.toolOnlyCaveat` — a caveat on each of the two rows, naming the setting with
+the same `inProcessRefusalNoun` clause the connect path uses, and only while the setting is actually
+set — plus the matching paragraphs under `#oc-base-mtu` and `#oc-no-http-keepalive` in
+`manual.html`. **The gates stay.** A clause may only be removed once the setting is genuinely
+carried, and neither is. Note the constraint the patch must respect when it is eventually written:
+the script pins `OPENSSL_PIN` and fails hard if
 Homebrew disagrees, because three engine archives statically carry OpenSSL and must agree — a patch
 must not become an excuse to move that pin.
 

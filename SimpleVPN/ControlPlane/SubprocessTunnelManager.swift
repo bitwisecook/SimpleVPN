@@ -1287,7 +1287,7 @@ final class SubprocessTunnelManager {
     /// longer refuses is named at all. When the gates moved, eight of these
     /// sentences became lies (they described settings the bridge now carries), which
     /// is why the two live next to each other.
-    private static func inProcessRefusalNoun(_ c: SubprocessTunnelConfig) -> String {
+    static func inProcessRefusalNoun(_ c: SubprocessTunnelConfig) -> String {
         if !c.csdWrapper.isEmpty || c.disableCSD { return "the built-in engine can't run a host-checker script" }
         if c.baseMTU != nil { return "the built-in engine can't take a base MTU" }
         if c.noHTTPKeepalive { return "the built-in engine can't turn HTTP keepalive off" }
@@ -1301,6 +1301,63 @@ final class SubprocessTunnelManager {
             return "the built-in engine can't take extra arguments"
         }
         return "a setting on this VPN needs the tool (the Run In-Process row names which)"
+    }
+
+    /// The two settings the built-in engine cannot carry that a user is likely to
+    /// reach for without meaning to give up the whole-Mac tunnel.
+    ///
+    /// A host-checker script and extra arguments are on the same gate, but both
+    /// already say what they are for on their own rows and neither is set by
+    /// accident. These two look like ordinary tuning — a number and a checkbox —
+    /// so the cost has to be stated where they are chosen, not discovered later
+    /// when the routes never arrive. Adding the setters to the vendored library
+    /// would retire this type; that patch is deliberately deferred
+    /// (`Docs/Networking.md` §3).
+    enum ToolOnlySetting: String, CaseIterable, Sendable {
+        case baseMTU = "oc.base-mtu"
+        case noHTTPKeepalive = "oc.no-http-keepalive"
+
+        /// Whether this profile actually sets it. A caveat on an untouched field
+        /// is noise, and both of these are opt-in: most profiles never carry one.
+        func isSet(_ c: SubprocessTunnelConfig) -> Bool {
+            switch self {
+            case .baseMTU: c.baseMTU != nil
+            case .noHTTPKeepalive: c.noHTTPKeepalive
+            }
+        }
+
+        /// A config carrying THIS setting and nothing else, so the shared refusal
+        /// clause names this row rather than whichever gate happens to be first
+        /// when a profile trips several.
+        fileprivate var alone: SubprocessTunnelConfig {
+            var probe = SubprocessTunnelConfig()
+            switch self {
+            case .baseMTU: probe.baseMTU = 1400
+            case .noHTTPKeepalive: probe.noHTTPKeepalive = true
+            }
+            return probe
+        }
+
+        /// How to get the whole-Mac tunnel back, in the row's own terms.
+        fileprivate var undo: String {
+            switch self {
+            case .baseMTU: "Leave it empty to keep the whole-Mac tunnel."
+            case .noHTTPKeepalive: "Turn it off to keep the whole-Mac tunnel."
+            }
+        }
+    }
+
+    /// What this setting costs, said on its own row at the point of choice — or
+    /// nil when the profile doesn't set it and there is nothing to warn about.
+    ///
+    /// The clause naming the setting is `inProcessRefusalNoun`, the same sentence
+    /// the connect path uses, so the editor and the connect-time message cannot
+    /// drift apart. The rest is the consequence rather than the mechanism: the
+    /// tool offers a port, not an interface, so the routing story is off and the
+    /// row moves sidebar section.
+    static func toolOnlyCaveat(_ setting: ToolOnlySetting, _ c: SubprocessTunnelConfig) -> String? {
+        guard c.kind.isSSLVPN, setting.isSet(c) else { return nil }
+        return "Setting this runs the VPN with the openconnect tool — \(inProcessRefusalNoun(setting.alone)) — which only offers a SOCKS proxy on 127.0.0.1:\(c.socksPort): no interface, no routes and no DNS of its own, and the VPN is listed under Local Ports instead of Whole-Mac VPNs. \(setting.undo)"
     }
 
     /// Why this profile is being offered the built-in engine, or nil when there is
