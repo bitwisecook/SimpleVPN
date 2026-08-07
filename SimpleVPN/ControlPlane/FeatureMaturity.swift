@@ -449,22 +449,27 @@ nonisolated struct MaturityNotice: Sendable, Equatable {
         case .partlyVerified(let checked):
             return MaturityNotice(
                 subject: name, maturity: maturity, key: "kind.\(kind.rawValue)",
-                title: "\(name) is only partly tested",
-                detail: "Part of it is proven: \(checked). But no \(name) tunnel has ever carried "
-                    + "real traffic in SimpleVPN \u{2014} there is no \(name) server here to try. "
-                    + "The rest of the code is written and reviewed, and it may well work. If a "
-                    + "connect fails it should say so and stop, not disturb anything else on this "
-                    + "Mac. Telling us what happened is what gets this notice removed.")
+                title: "Nobody has fully tested \(name) yet",
+                detail: "Nothing is missing from this VPN and nothing is switched off \u{2014} this "
+                    + "is about our confidence, not about your setup. Part of it is already proven: "
+                    + "\(checked), and the rest of the \(name) code is written and reviewed. What "
+                    + "has never happened is a \(name) tunnel carrying real traffic in SimpleVPN, "
+                    + "because there is no \(name) server here to try it against. So it may well "
+                    + "work. If a connect fails it should say so and stop, not disturb anything "
+                    + "else on this Mac. Either way we would like to know how it went: telling us "
+                    + "what happened is what gets this notice removed.")
         case .untested:
             return MaturityNotice(
                 subject: name, maturity: maturity, key: "kind.\(kind.rawValue)",
-                title: "\(name) has never been tested",
-                detail: "The \(name) code is written and reviewed, but nobody has connected "
-                    + "SimpleVPN to a real \(name) server \u{2014} there isn\u{2019}t one here to "
-                    + "try. So this may well work, and it may not. If it fails it should say why "
-                    + "and stop, rather than disturb anything else on this Mac. Whichever happens, "
-                    + "telling us is what gets this notice removed \u{2014} a single report is "
-                    + "usually enough.")
+                title: "Nobody has tested \(name) yet",
+                detail: "Nothing is missing from this VPN and nothing is switched off \u{2014} this "
+                    + "is about our confidence, not about your setup. The \(name) code is written "
+                    + "and reviewed; what has never happened is a connection from SimpleVPN to a "
+                    + "real \(name) server, because there isn\u{2019}t one here to try it against. "
+                    + "So it may well work, and it may not. If it fails it should say why and stop, "
+                    + "rather than disturb anything else on this Mac. Whichever happens, we would "
+                    + "like to know how it went \u{2014} telling us is what gets this notice "
+                    + "removed, and a single report is usually enough.")
         }
     }
 

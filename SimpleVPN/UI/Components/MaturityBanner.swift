@@ -70,6 +70,11 @@ import SwiftUI
 /// measuring question sensibly.
 struct NoticeParagraph: View {
     let text: String
+    /// `.callout` for the explanation, `.caption` for the smaller line under it.
+    /// A parameter rather than a second view, because the FLOOR is the whole point
+    /// of this type: a second paragraph styled by hand would reintroduce the bug
+    /// above at one font size down.
+    var font: Font = .callout
 
     /// The narrowest column this paragraph is ever measured for. Not a design
     /// decision about line length — a statement about the smallest editor pane the
@@ -78,9 +83,46 @@ struct NoticeParagraph: View {
 
     var body: some View {
         Text(text)
-            .font(.callout).foregroundStyle(.secondary)
+            .font(font).foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
             .frame(minWidth: Self.minimumWidth, alignment: .leading)
+    }
+}
+
+// MARK: - What the two buttons in a notice banner do
+
+/// THE LINE THAT SAYS WHAT CLICKING DOES, shared by both banners because both have
+/// the same two buttons.
+///
+/// WHY IT IS ON SCREEN rather than in a tooltip. Reported as: "there was some sort
+/// of banner at the top about untested, it wasn't clear, i clicked on it, it scrolled
+/// to the bottom". Everything that answered "what happens if I click this" lived in
+/// `.help` and in an accessibility hint — i.e. nowhere, for the person who clicks
+/// first. The sentence a reader needs before clicking is that NEITHER button touches
+/// the VPN: one folds the explanation away and keeps the label, the other opens a
+/// report they can read before it is sent.
+///
+/// `label` is the report button's own title, passed in rather than repeated, so the
+/// sentence can never name a button that isn't there.
+struct NoticeActionsCaption: View {
+    /// The disclosure button's title, e.g. "Hide Details".
+    let hideTitle: String
+    /// The report button's title, without its ellipsis.
+    let reportTitle: String
+    /// What stays behind after the explanation is folded away, as a noun phrase —
+    /// the badge word for a maturity notice, the notice line itself for the other.
+    let keeps: String
+
+    /// The one sentence, also used as this caption's spoken form so VoiceOver hears
+    /// exactly what is on screen.
+    var sentence: String {
+        "Neither button changes this VPN: \u{201C}\(hideTitle)\u{201D} folds this explanation away "
+            + "and keeps \(keeps), and \u{201C}\(reportTitle)\u{201D} opens a report you can read "
+            + "and edit before anything is sent."
+    }
+
+    var body: some View {
+        NoticeParagraph(text: sentence, font: .caption)
     }
 }
 
@@ -105,6 +147,18 @@ struct MaturityBanner: View {
         _collapsed = AppStorage(wrappedValue: false, "maturityBannerCollapsed.\(notice.key)")
     }
 
+    /// The button titles, written once, so the on-screen sentence that says what each
+    /// button does and the buttons themselves cannot drift apart.
+    static let reportTitle = "Tell Us What Happened"
+    static let showTitle = "Show Details"
+    static let hideTitle = "Hide Details"
+
+    /// The "neither button changes this VPN" line, for the screen and for VoiceOver.
+    private var actionsCaption: NoticeActionsCaption {
+        NoticeActionsCaption(hideTitle: Self.hideTitle, reportTitle: Self.reportTitle,
+                             keeps: "the \u{201C}\(notice.badgeText)\u{201D} label")
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: notice.symbolName)
@@ -122,22 +176,28 @@ struct MaturityBanner: View {
                 } else {
                     Text(notice.title).font(.callout.weight(.semibold))
                     NoticeParagraph(text: notice.detail)
+                    // Says what clicking does, on screen — see NoticeActionsCaption.
+                    actionsCaption
                 }
             }
             Spacer(minLength: 8)
             VStack(alignment: .trailing, spacing: 6) {
                 if !collapsed {
-                    Button("Tell Us What Happened\u{2026}") {
+                    Button("\(Self.reportTitle)\u{2026}") {
                         DiagnosticReportCoordinator.shared.presentReport(request)
                     }
                     .buttonStyle(.glass)
                     .help("Report whether \(notice.subject) worked \u{2014} that is what gets this notice removed")
                     .accessibilityLabel("Tell us what happened with \(notice.subject)")
-                    .accessibilityHint("Opens a report you can send. Saying it worked is as "
-                                       + "useful as saying it didn\u{2019}t.")
+                    .accessibilityHint("Opens a report you can read and edit before sending. Saying "
+                                       + "it worked is as useful as saying it didn\u{2019}t.")
                     .accessibilityIdentifier("maturity-report-\(notice.key)")
                 }
-                Button(collapsed ? "Details\u{2026}" : "Hide") {
+                // "Details…" promised a dialog (an ellipsis means "more input is
+                // needed") and "Hide" did not say WHAT it hid — which is the button
+                // that got clicked when the banner "wasn't clear". Both now name the
+                // thing they show and fold away.
+                Button(collapsed ? Self.showTitle : Self.hideTitle) {
                     collapsed.toggle()
                     // A collapse or an expand is otherwise only visible, so it is
                     // spoken — and what is spoken is what is now on screen.
@@ -160,8 +220,9 @@ struct MaturityBanner: View {
         // Holds two buttons: a container with its own sentence, never .combine.
         .accessibilityElement(children: .contain)
         // What is read is what is shown: the clause when collapsed, the whole
-        // notice when not.
-        .accessibilityLabel(collapsed ? notice.spokenValue : notice.spokenSummary)
+        // notice PLUS the what-the-buttons-do line when not.
+        .accessibilityLabel(collapsed ? notice.spokenValue
+                                      : "\(notice.spokenSummary) \(actionsCaption.sentence)")
         .accessibilityIdentifier("maturity-banner-\(notice.key)")
     }
 }
@@ -236,6 +297,19 @@ struct FeatureRequestBanner: View {
         _collapsed = AppStorage(wrappedValue: false, "featureRequestBannerCollapsed.\(notice.key)")
     }
 
+    /// Same three titles as `MaturityBanner`, for the same reason — the sentence that
+    /// says what clicking does names them, so they are written once.
+    static let reportTitle = "Tell Us What You Need"
+    static let showTitle = MaturityBanner.showTitle
+    static let hideTitle = MaturityBanner.hideTitle
+
+    /// What stays behind here is the notice line itself, not a badge word — the
+    /// collapsed form still states the absence.
+    private var actionsCaption: NoticeActionsCaption {
+        NoticeActionsCaption(hideTitle: Self.hideTitle, reportTitle: Self.reportTitle,
+                             keeps: "the notice itself")
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: notice.symbolName)
@@ -250,6 +324,8 @@ struct FeatureRequestBanner: View {
                 } else {
                     Text(notice.title).font(.callout.weight(.semibold))
                     NoticeParagraph(text: notice.detail)
+                    // Says what clicking does, on screen — see NoticeActionsCaption.
+                    actionsCaption
                 }
             }
             Spacer(minLength: 8)
@@ -258,7 +334,7 @@ struct FeatureRequestBanner: View {
                     // "Tell Us What You Need" rather than "Request This Feature": the
                     // button asks for a situation, and its label should not read as a
                     // queue somebody is joining.
-                    Button("Tell Us What You Need\u{2026}") {
+                    Button("\(Self.reportTitle)\u{2026}") {
                         DiagnosticReportCoordinator.shared.presentReport(
                             .init(kind: kind, profileID: profileID, reason: notice.reason))
                     }
@@ -269,7 +345,7 @@ struct FeatureRequestBanner: View {
                                        + "Nothing is promised in return.")
                     .accessibilityIdentifier("feature-request-\(notice.key)")
                 }
-                Button(collapsed ? "Details\u{2026}" : "Hide") {
+                Button(collapsed ? Self.showTitle : Self.hideTitle) {
                     collapsed.toggle()
                     AccessibilityAnnouncer.sayNow(collapsed ? notice.title : notice.spokenSummary)
                 }
@@ -286,7 +362,8 @@ struct FeatureRequestBanner: View {
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
         .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: collapsed)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(collapsed ? notice.title : notice.spokenSummary)
+        .accessibilityLabel(collapsed ? notice.title
+                                      : "\(notice.spokenSummary) \(actionsCaption.sentence)")
         .accessibilityIdentifier("feature-request-banner-\(notice.key)")
     }
 }

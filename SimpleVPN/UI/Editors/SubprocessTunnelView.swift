@@ -69,7 +69,23 @@ struct SubprocessTunnelView: View {
         Form {
             SettingsSearchSection(search: search)
             Section("Connection") {
-                TextField("Name", text: $draft.name)
+                // A BLANK NAME HOLDS EVERY OTHER EDIT IN THE EDITOR. It is the first
+                // check in `saveDisabledReason`, so with the name cleared `save()`
+                // refuses the whole draft — clear it, turn "Run In-Process" off, close
+                // the window, and NOTHING is written. That is the original report
+                // ("the toggle did not persist") reached through a second gate, and
+                // live save alone did not close it.
+                //
+                // `needs` cannot say so: it is keyed by SETTING ID, and this row is a
+                // bare TextField with no spec and no `SettingRowLayout`. So the row
+                // says it itself, in the three channels the shared row uses — the
+                // words, the red, and the field's own accessibility value
+                // (`Docs/Accessibility.md`: validation rides the value).
+                VStack(alignment: .leading, spacing: 6) {
+                    TextField("Name", text: $draft.name)
+                        .accessibilityValue(nameNeed.map { "needed \u{2014} \($0)" } ?? "")
+                    if let reason = nameNeed { SettingNeedLabel(reason: reason) }
+                }
                 Picker("Kind", selection: $draft.kind) {
                     ForEach([VPNKind.ssh, .fortinet, .f5apm, .ciscoAnyConnect,
                              .globalProtect, .juniper, .pulse, .arrayNetworks], id: \.self) {
@@ -200,6 +216,17 @@ struct SubprocessTunnelView: View {
         guard let need = SubprocessTunnelReadiness.need(for: draft, facts: facts),
               let id = need.settingID else { return SettingNeeds() }
         return SettingNeeds(byID: [id: need.sentence])
+    }
+
+    /// Why the Name row is holding every edit in this editor, or nil.
+    ///
+    /// Separate from `needs` because the two are keyed differently, not because the
+    /// rule is different: `needs` reaches rows by setting id, and Name has none.
+    /// The sentence is `saveDisabledReason`'s own, so the row cannot drift from the
+    /// gate it is explaining.
+    private var nameNeed: String? {
+        draft.name.trimmingCharacters(in: .whitespaces).isEmpty
+            ? "Give this tunnel a name first." : nil
     }
 
     // MARK: Sections
