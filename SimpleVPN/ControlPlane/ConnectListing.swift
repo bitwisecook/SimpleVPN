@@ -316,6 +316,18 @@ enum ConnectListing {
         sections(profiles: profiles, tunnels: tunnels, native: native).flatMap(\.tags)
     }
 
+    /// The initial selection for a connection window that has exactly one row.
+    /// Keeping this beside `rowTags` makes the first-selection rule answer the
+    /// same existence question as the sidebar and empty state. In particular, a
+    /// lone F5 APM is a subprocess row, so looking only at `vpn.profiles` would
+    /// hide its sidebar and leave the detail pane with nothing selected.
+    static func soleTag(profiles: [Profile],
+                        tunnels: [SubprocessTunnelConfig],
+                        native: [NativeVPNConfig]) -> String? {
+        let tags = rowTags(profiles: profiles, tunnels: tunnels, native: native)
+        return tags.count == 1 ? tags[0] : nil
+    }
+
     /// Whether the empty-state page ("No VPNs Configured") is the honest thing to
     /// show. Existence again — it used to ask whether anything was RUNNING, so
     /// somebody whose only VPN was an F5 BIG-IP APM was told they had none.
@@ -395,6 +407,14 @@ nonisolated struct ConnectNeed: Equatable, Sendable {
     /// from the vocabulary, then the reason that makes it actionable.
     var spokenValue: String { "\(statusWord) \u{2014} \(sentence)" }
 
+    /// A connection is otherwise configured and can collect this value in the
+    /// first-connect UI.  Configuration editors must not paint these fields red
+    /// or imply that saving a password is mandatory; they are sign-in prompts,
+    /// not missing configuration.
+    var isDeferredUntilConnect: Bool {
+        readiness == .needsSignIn || readiness == .needsCode
+    }
+
     init(_ readiness: ConnectReadiness, locus: AuthLocus, _ sentence: String,
          setting settingID: String? = nil) {
         self.readiness = readiness
@@ -425,6 +445,9 @@ enum SubprocessTunnelReadiness {
         var installedTools: Set<TunnelCLI> = []
         /// A password saved for this tunnel (`tunnel.<id>`).
         var hasPassword = false
+        /// A transient verification code supplied for this connection attempt.
+        /// It is never read from or written to persistent storage.
+        var hasOneTimeCode = false
         // `hasTokenSecret` and `hasSmartcardPIN` USED TO BE HERE. Both are gone with
         // the features they described: a profile that still asks for a smartcard, or
         // for a verification code SimpleVPN generates, is now `.blocked` by
@@ -432,9 +455,11 @@ enum SubprocessTunnelReadiness {
         // this level-3 question of "what has to be supplied" is reached. Keeping
         // either fact would mean a keychain read per redraw to answer nothing.
 
-        init(installedTools: Set<TunnelCLI> = [], hasPassword: Bool = false) {
+        init(installedTools: Set<TunnelCLI> = [], hasPassword: Bool = false,
+             hasOneTimeCode: Bool = false) {
             self.installedTools = installedTools
             self.hasPassword = hasPassword
+            self.hasOneTimeCode = hasOneTimeCode
         }
     }
 
@@ -485,6 +510,9 @@ enum SubprocessTunnelReadiness {
             return ConnectNeed(.blocked, locus: .instance,
                                "This \(c.kind.displayName) has no server address yet \u{2014} add the address your administrator gave you.",
                                setting: serverID)
+        }
+        if c.kind.isSSLVPN, let problem = SubprocessTunnelConfig.sslServerAddressProblem(c.server) {
+            return ConnectNeed(.blocked, locus: .instance, problem, setting: serverID)
         }
         // A password inside the address would be persisted unencrypted AND handed to
         // the tool on a command line every local process can read with `ps`.
@@ -614,7 +642,15 @@ enum SubprocessTunnelReadiness {
                 }
                 if !facts.hasPassword {
                     return ConnectNeed(.needsSignIn, locus: .entry,
-                                       "No password is saved for this VPN. Save one to connect from here, or connect from its own settings and type it.",
+                                       "Enter this VPN’s username and password to connect. You can choose whether to save the password.",
+                                       setting: passwordSettingID(for: c.kind))
+                }
+                // A chosen code mode is only a hard requirement once a successful
+                // sign-in has confirmed it. Before that the main card deliberately
+                // lets a person change the choice and retry.
+                if c.isOTPRequirementLocked, c.needsOneTimeCode, !facts.hasOneTimeCode {
+                    return ConnectNeed(.needsCode, locus: .entry,
+                                       "Enter the current verification code to connect. It is used once and never saved.",
                                        setting: passwordSettingID(for: c.kind))
                 }
             // A client certificate and single sign-on both need nothing typed:

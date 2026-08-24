@@ -18,6 +18,7 @@
 //
 
 import Foundation
+import simd
 import Testing
 @testable import SimpleVPN
 
@@ -79,6 +80,95 @@ struct IPAddressScopeTests {
         for text in ["", "vpn.example.com", "not-an-ip", "999.1.1.1", "10.0.0"] {
             #expect(!IPAddressScope.isPrivateOrReserved(text), "\(text) should not be private")
         }
+    }
+}
+
+struct TunnelStatsEndpointTests {
+
+    @Test func activeAddressUsesTheLiteralTransportEndpointWhenPresent() {
+        var sample = TunnelStats(profile: "wireguard", timestamp: 1, connectedSince: 1,
+                                 reconnects: 0, bytesIn: 0, bytesOut: 0,
+                                 serverEndpoint: "8.8.8.8:51820", tunnelIPv4: "",
+                                 dnsServers: [], proxies: [])
+        #expect(sample.activeServerAddress == "8.8.8.8")
+
+        sample.serverIP = "1.1.1.1"
+        #expect(sample.activeServerAddress == "1.1.1.1")
+    }
+
+    @Test func activeAddressKeepsBareIPv6AndUnwrapsBracketedIPv6() {
+        #expect(TunnelStats.hostPart(of: "2606:4700:4700::1111") == "2606:4700:4700::1111")
+        #expect(TunnelStats.hostPart(of: "[2606:4700:4700::1111]:51820") == "2606:4700:4700::1111")
+    }
+}
+
+@MainActor
+struct GlobeCameraTests {
+
+    private let london = MapPin(id: "home", kind: .user, lat: 51.5072, lon: -0.1276,
+                                title: "This Mac", subtitle: "London")
+    private let tokyo = MapPin(id: "vpn", kind: .endpoint(selected: true), lat: 35.6762, lon: 139.6503,
+                               title: "Tokyo VPN", subtitle: "Japan")
+
+    @Test func defaultOrientationCentresTheActiveGreatCircle() {
+        var camera = GlobeCamera()
+        camera.orient(from: london, to: tokyo)
+        let route = GreatCircle.points(from: (london.lat, london.lon), to: (tokyo.lat, tokyo.lon), samples: 2)
+
+        #expect(abs(camera.visibility(of: route[1]) - 1) < 0.000_001,
+                "the middle of the active great circle must face the viewer")
+        #expect(camera.visibility(of: route[0]) > 0)
+        #expect(camera.visibility(of: route[2]) > 0)
+    }
+
+    @Test func defaultOrientationKeepsGeographicNorthUp() {
+        var camera = GlobeCamera()
+        camera.orient(from: london, to: tokyo)
+        let geographicNorth = SIMD3<Double>(0, 1, 0)
+        let projectedNorth = simd_normalize(
+            geographicNorth - simd_dot(geographicNorth, camera.forward) * camera.forward)
+        let measured = acos(max(-1, min(1, simd_dot(projectedNorth, camera.up)))) * 180 / .pi
+
+        #expect(measured < 0.000_001)
+    }
+
+    @Test func defaultOrientationPlacesEastToTheRight() {
+        let camera = GlobeCamera()
+        let eastOfCentre = GreatCircle.vector(lat: 0, lon: 135)
+        let westOfCentre = GreatCircle.vector(lat: 0, lon: 45)
+        let size = CGSize(width: 300, height: 300)
+
+        #expect(camera.projectUnclipped(eastOfCentre, in: size).x > 150)
+        #expect(camera.projectUnclipped(westOfCentre, in: size).x < 150)
+    }
+
+    @Test func farHemisphereStillHasAnOrthographicRoutePosition() {
+        let camera = GlobeCamera()
+        let farSide = -camera.forward
+        #expect(camera.project(farSide, in: CGSize(width: 600, height: 300)) == nil)
+        #expect(camera.projectUnclipped(farSide, in: CGSize(width: 600, height: 300)) != .zero)
+    }
+
+    @Test func screenPlaneRollMovesTheGlobeInTheGestureDirection() {
+        var camera = GlobeCamera()
+        let geographicNorth = SIMD3<Double>(0, 1, 0)
+        camera.roll(angle: .pi / 2, from: camera)
+        let point = camera.projectUnclipped(geographicNorth, in: CGSize(width: 300, height: 300))
+
+        // At a quarter turn, something at the top moves to the right — a
+        // clockwise screen-space globe rotation rather than a camera-like inverse.
+        #expect(point.x > 250)
+    }
+
+    @Test func solarPositionTracksTheEquinoxNearTheEquator() throws {
+        let date = try #require(ISO8601DateFormatter().date(from: "2026-03-20T12:00:00Z"))
+        let sun = SolarPosition(date: date).vector
+
+        // At the March equinox the subsolar latitude is near zero. The exact
+        // apparent longitude varies with equation-of-time, so this checks the
+        // astronomical invariant rather than an arbitrary clock convention.
+        #expect(abs(sun.y) < 0.03)
+        #expect(abs(simd_length(sun) - 1) < 0.000_001)
     }
 }
 
@@ -151,6 +241,19 @@ struct WorldMapModelTests {
         // Nothing about this topology may be dashed — dashed means "not through the VPN".
         #expect(!r.connections.contains { $0.kind == MapConnection.Kind.bypass })
         #expect(r.hasUnlocatableTunnel)
+    }
+
+    @Test func liveEndpointLiteralDrivesTheGatewayWhenTheEngineHasNoSeparateIP() {
+        let r = WorldMapModel.build(vantage: home,
+                                    stats: ["p1": stats("p1", serverIP: nil,
+                                                       endpoint: "8.8.8.8:51820")],
+                                    locate: locator(["8.8.8.8": gbPlace]),
+                                    name: { _ in "WireGuard" })
+        let node = pin(r, "vpn.p1")
+        #expect(node?.lat == gbPlace.lat)
+        #expect(node?.lon == gbPlace.lon)
+        #expect(node?.placement == .exact)
+        #expect(node?.subtitle.contains("Gateway 8.8.8.8") == true)
     }
 
     @Test func gatewaySubtitleSaysWhyItIsUnplaced() {

@@ -576,13 +576,12 @@ nonisolated struct PushedIntentSnapshot: Codable, Sendable, Equatable {
     var isEmpty: Bool { routes.isEmpty && dns.isEmpty && (proxy?.isEmpty ?? true) }
 }
 
-/// Reads/writes `PushedIntentSnapshot`s in the App Group (the profile store the mediators
-/// already use for the gateway pick). Injectable `UserDefaults` for tests. `nonisolated` +
-/// value semantics so it's callable from any actor.
+/// Reads/writes app-owned `PushedIntentSnapshot`s. Injectable `UserDefaults` for tests.
+/// `nonisolated` + value semantics so it's callable from any actor.
 nonisolated struct PushedIntentStore {
     let defaults: UserDefaults?
 
-    init(defaults: UserDefaults? = UserDefaults(suiteName: "group.com.bragi0.SimpleVPN")) {
+    init(defaults: UserDefaults? = .standard) {
         self.defaults = defaults
     }
 

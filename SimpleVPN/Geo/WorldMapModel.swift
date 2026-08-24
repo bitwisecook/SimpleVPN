@@ -290,10 +290,10 @@ enum WorldMapModel {
         build(vantage: Vantage(publicIP), stats: stats, device: device, hints: hints, name: name)
     }
 
-    /// `hints` carries what the app knows about each connected profile's
-    /// CONFIGURED concentrator (keyed by profile id) — see `GatewayHint`. It stays
-    /// a parameter rather than a lookup so the builder never reaches into a
-    /// controller, and the tests can drive every rung of the ladder by hand.
+    /// `hints` carries what the app knows about each connected profile's active
+    /// endpoint (keyed by profile id) — see `GatewayHint`. It stays a parameter
+    /// rather than a lookup so the builder never reaches into a controller, and
+    /// the tests can drive every rung of the ladder by hand.
     static func build(vantage: Vantage,
                       stats: [String: TunnelStats],
                       device: (lat: Double, lon: Double, place: String?)? = nil,
@@ -329,7 +329,11 @@ enum WorldMapModel {
         var approximate = false
         var tethered = 0                                // satellite slots already handed out
         for (id, s) in stats.sorted(by: { $0.key < $1.key }) {
-            let ip = (s.serverIP ?? "").trimmingCharacters(in: .whitespaces)
+            // `serverIP` is the literal address when the engine can report it;
+            // otherwise the live transport endpoint still tells us what this
+            // session actually connected to (for example WireGuard's ip:port).
+            // Never use the selected/configured endpoint at this layer.
+            let ip = s.activeServerAddress
             let hint = hints[id] ?? GatewayHint()
             if let fix = locateGateway(serverIP: ip, hint: hint, locate: locate) {
                 var node = MapPin(id: "vpn.\(id)", kind: .endpoint(selected: true),

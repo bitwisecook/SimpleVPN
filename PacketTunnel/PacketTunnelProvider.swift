@@ -280,6 +280,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         s.protocol = ocProto
         s.username = (options?["username"] as? String) ?? ""
         s.password = options?["password"] as? String
+        s.oneTimeCode = options?["oneTimeCode"] as? String
         s.realm = conf?["realm"] as? String
         s.serverCertSHA256 = conf?["serverCert"] as? String
         s.externalBrowser = conf?["samlBrowser"] as? String

@@ -322,6 +322,13 @@ nonisolated struct AuthFailure: Error, Equatable, Sendable {
     }
 }
 
+/// Keep an authentication failure's carefully-written, scrubbed sentence when it
+/// crosses a generic Error boundary. Without this, Foundation substitutes its
+/// opaque type-and-code description in the support sheet.
+nonisolated extension AuthFailure: LocalizedError {
+    var errorDescription: String? { sentence }
+}
+
 // MARK: - Can it serve? And if not, WHERE is it broken?
 
 /// WHETHER A VPN'S CONFIGURED SIGN-IN CAN SERVE, and where the problem is when it

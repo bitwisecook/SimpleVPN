@@ -650,29 +650,15 @@ struct SignInSourceCatalogTests {
         #expect(apple.explanation.contains("Verification codes"))
     }
 
-    // MARK: - Apple Passwords promises AutoFill, not a fetch
+    // MARK: - Apple Passwords promises one authorized selection, not a catalogue
 
-    /// THE FALSE PROMISE THIS PINS. The row used to say "macOS fills the username and
-    /// password in for you", which SimpleVPN cannot deliver: Safari's and the
-    /// Passwords app's items live in the data-protection keychain under the
-    /// `com.apple.cfnetwork` access group, which this app's entitlement does not
-    /// contain — so they are unreachable by construction, not merely absent.
-    ///
-    /// What is true is AutoFill: the key in the field, driven by the user, decided by
-    /// macOS. The copy must promise that and stop there — including not promising
-    /// that the menu will HAVE a match, which is macOS's business and which nobody
-    /// has yet watched happen in our fields.
-    @Test func applePasswordsPromisesOnlyWhatAutoFillDelivers() {
+    @Test func applePasswordsDescribesTheSystemPickerBoundary() {
         let apple = SignInSourceCatalog.applePasswords()
-        // It names the affordance, and says whose decision the contents are.
-        #expect(apple.summary.contains("click the key"))
-        #expect(apple.explanation.contains("AutoFill"))
-        #expect(apple.explanation.contains("macOS\u{2019}s decision"))
-        // It says plainly that SimpleVPN does not read Apple Passwords.
-        #expect(apple.explanation.contains("doesn\u{2019}t read Apple Passwords"))
-        // …and it does NOT claim we fill the fields, which was the old promise.
-        #expect(!apple.explanation.contains("macOS fills the username and password in for you"))
-        #expect(!apple.summary.lowercased().contains("simplevpn gets"))
+        #expect(apple.summary.contains("searchable password picker"))
+        #expect(apple.explanation.contains("macOS owns the chooser"))
+        #expect(apple.explanation.contains("only the username and password you select"))
+        #expect(apple.explanation.contains("cannot browse or index"))
+        #expect(apple.explanation.contains("in memory for this connection"))
     }
 
     /// Nothing may imply SAVING into Apple Passwords. SimpleVPN has no way to write
@@ -696,6 +682,10 @@ struct SignInSourceCatalogTests {
     @Test func applePasswordsStillSuppliesNoVerificationCode() {
         #expect(!CredentialSourceKind.applePasswords.suppliesOTP)
         #expect(SignInSourceCatalog.applePasswords().storedKind == .applePasswords)
+    }
+
+    @Test func choosingApplePasswordsDoesNotInheritARememberPasswordSetting() {
+        #expect(SignInSourceCatalog.applePasswords().remembers == false)
     }
 
     // MARK: - Mapping a stored source back to its row
@@ -872,10 +862,18 @@ struct SignInSourceCatalogTests {
 
 struct SignInFlowTests {
 
-    /// A brand-new VPN with nothing stored and no successful connect is the ONLY
-    /// case that asks.
-    @Test func aBrandNewVPNIsAsked() {
-        #expect(SignInFlow.step(SignInFlowInputs()) == .chooseHowToSignIn)
+    /// A brand-new manual VPN begins with fields and an explicit save choice;
+    /// it must not make retaining a password look compulsory.
+    @Test func aBrandNewManualVPNShowsItsFields() {
+        #expect(SignInFlow.step(SignInFlowInputs()) == .connectStraightThrough)
+    }
+
+    @Test func aChosenPasswordAppWithoutAnItemOpensItsConfigurator() {
+        var inputs = SignInFlowInputs()
+        inputs.chosenKind = .onePassword
+        inputs.chosenSourceNeedsSetup = true
+        inputs.chosenSourceAvailable = false
+        #expect(SignInFlow.step(inputs) == .chooseHowToSignIn)
     }
 
     /// The returning requirement, stated twice over because either fact alone is
@@ -920,7 +918,7 @@ struct SignInFlowTests {
         var inputs = SignInFlowInputs()
         inputs.chosenKind = .manual
         inputs.chosenSourceAvailable = false   // nonsense input, defensively handled
-        #expect(SignInFlow.step(inputs) == .chooseHowToSignIn)
+        #expect(SignInFlow.step(inputs) == .connectStraightThrough)
     }
 
     /// Recovery clears once the source is back, without anything being re-asked.
@@ -1012,8 +1010,8 @@ struct SignInFlowTests {
                     inputs.chosenKind = kind
                     let step = SignInFlow.step(inputs)
                     if step == .chooseHowToSignIn {
-                        #expect(!stored && !connected && !nothing,
-                                "asked an already-set-up VPN: \(inputs)")
+                        #expect(!stored && !connected && !nothing && kind != .manual,
+                                "asked an already-set-up or manual VPN: \(inputs)")
                     }
                 }
             }}

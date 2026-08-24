@@ -196,10 +196,25 @@ flowchart TB
     E -.->|"quit halfway"| B
 ```
 
-**Step 1 — the first VPN.** `EmptyVPNsPrompt` ✅ already exists and is already right: the primary
-path is a dropped or imported configuration file, with "Add VPN…" as the alternative, and the type is
-detected rather than asked for (`ConfigDetector`). Most people arrive with a file. Nothing in this
-design replaces it.
+**Step 1 — the first VPN.** `EmptyVPNsPrompt` ✅ keeps the primary path as a dropped or imported
+configuration file, with "Add VPN…" as the alternative, and the type is detected rather than asked
+for (`ConfigDetector`). A person who starts from a provider name now sees a four-column row of
+roughly 2.5 cm square Liquid Glass buttons containing only provider names, rather than four
+instruction blocks; each opens `ProviderFirstRunView` ✅, a scrollable second page with the
+provider-specific steps, the same Liquid Glass drag target as the landing page, and the same
+configuration importer. This is preparation for import, not a
+second sign-in wizard: after the file is imported, the existing first-connect card still owns every
+sign-in question.
+
+The provider page's Mac affordance map is deliberately small because this is a utility workflow,
+not a document editor:
+
+| Element | Native substrate | Keyboard | Finder / pasteboard | State | Accessibility |
+|---|---|---|---|---|---|
+| Provider choice | SwiftUI `Button` in a four-column grid | Tab, Shift-Tab, Space, Return | none — it is navigation | navigation path is transient | button named for the provider, with a setup hint |
+| Configuration drop target | SwiftUI `dropDestination(for: URL.self)` on the window | native picker is the equivalent path | accepts Finder file URLs and the app's supported 1Password payload | no drag state survives the session | named drop zone; picker alternative is stated |
+| Choose Configuration | SwiftUI `Button` + `fileImporter` | default action; full keyboard access | standard macOS open panel | the panel chooses its own useful recent location | button names the provider's configuration kind |
+| Provider instructions | `NavigationStack` + `ScrollView` | standard scrolling and back navigation | instructions can be selected and copied as text | window size/position remains macOS-owned | headings, ordered steps, Reduce Motion and resizable layout |
 
 **Step 2 — its sign-in, in the same flow.** `FirstConnectSetupCard` ✅ already exists, already
 appears exactly when the flow needs it (a VPN that has never connected successfully), already asks
@@ -212,7 +227,7 @@ That card's own header records the invariant this design must respect:
 
 > This card is deliberately the ONE first-run surface — extended, not joined by a competitor.
 
-**So there is no wizard.** A wizard would have to duplicate the card's OTP question, its chooser, its
+**So there is no sign-in wizard.** A wizard would have to duplicate the card's OTP question, its chooser, its
 per-vendor detail and its drag well, and then argue with it about which of them was showing. It would
 also animate between steps, and this app has a real layout-loop crash on record from putting a
 platform-backed view — a spinner, an `NSTextView`, a `Switch` — inside a transform-animated
@@ -335,7 +350,7 @@ Evidence column says *how we know*, because "probably" is not a design.
 | **Passbolt** | ❓ | ❓ | Its resources are addressed by identifier; enumeration would be a **network call to somebody else's server**, which is exactly the `.wouldSignInToServer` ceiling. |
 | **Dashlane** | ❓ | ❌ **filter, not enumerate** | `dcli` matches an entry's **address or title** and returns one; `--output json` avoids the interactive picker when a filter matches twice. There is no list verb we would use. |
 | **KeePassXC** | ❓ | ❌ **impossible through this channel** | Its browser protocol's actions are `associate`, `test-associate`, `get-databasehash`, `get-logins`, `get-totp`. **`get-logins` matches a URL; there is no enumeration action at all.** So KeePassXC is named by the address its entry's URL field matches — which is what the card already asks for. Not a gap in our code: a property of the protocol. |
-| **Apple Passwords** | ❌ | ❌ | Safari's and the Passwords app's items live under the `com.apple.cfnetwork` access group, which this app's entitlement does not contain. **Unreachable by construction.** What works is macOS's own AutoFill — the key in the field — driven by the user. |
+| **Apple Passwords** | ⚠️ metadata only | ✅ system picker | A live drag supplies title, username and protection-space metadata but no password; Apple's public authorization request cannot accept its opaque id. `ASAuthorizationPasswordProvider` supplies one user-selected username/password pair through macOS's searchable chooser. |
 
 **Every ❓ in the drag-in column is the same ❓**, and it is honest to say so once: `OnePasswordDropItem`
 parses **1Password's** payload. Generalising means observing what each other app puts on the drag
@@ -513,8 +528,9 @@ verify most of what a first-run flow asserts about ten products.
 - **Whether any vendor's AutoFill extension is switched on.** There is no public API:
   `ASCredentialIdentityStore` reports the *calling* app's own extension, and SimpleVPN ships none. So
   every AutoFill sentence says "if you have switched it on" ✅ and never claims it works.
-- **Whether Apple Passwords' AutoFill menu offers anything in *our* fields.** Nobody here has watched
-  it. The copy is deliberately modest for that reason ✅.
+- **Whether an Apple Passwords row dropped directly on our native fields invokes a private
+  system fill.** The explicit authorization picker is proven; this direct-field drag remains
+  a probe question and is never promised by production copy.
 - **Bitwarden's second data directory**, LastPass's `lpass ls`, Keeper Commander's `search`, Passbolt
   enumeration, Proton Pass and Dashlane drags — each needs an account with that vendor.
 

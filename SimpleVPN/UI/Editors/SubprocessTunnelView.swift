@@ -32,15 +32,21 @@ struct SubprocessTunnelView: View {
                                                kind: .ssh)
 
     @State private var password = ""
+    /// Per-attempt only. A verification code is never persisted with the VPN or
+    /// in the keychain, even when its accompanying password is remembered.
+    @State private var oneTimeCode = ""
     @State private var proxyPassword = ""
     @State private var jumpPassword = ""
     @State private var keyPassphrase = ""
-    @State private var remember = true
+    // New tunnels never assume a password should be retained. `loadOnce` flips
+    // this on only when this tunnel already has a keychain item.
+    @State private var remember = false
     @State private var loaded = false
     // Shown when a saved "sso" was migrated back to password (unsupported kind).
     @State private var authNote: String?
     // SSH import (drop well) state.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.liveVisualPolicy) private var liveVisuals
     @State private var importTargeted = false
     @State private var importFeedback: (text: String, ok: Bool)?
     @State private var feedbackClearTask: Task<Void, Never>?
@@ -114,7 +120,9 @@ struct SubprocessTunnelView: View {
                     // Through the spec machinery now (it was a bare TextField): the
                     // connect list's "no server address yet" banner reveals this row,
                     // which needs an id to scroll to, expand to and highlight.
-                    row("oc.server", text: $draft.server, prompt: "vpn.example.com")
+                    row("oc.server", text: $draft.server,
+                        prompt: "vpn.example.com or https://vpn.example.com/my.policy",
+                        warning: SubprocessTunnelConfig.sslServerAddressProblem(draft.server))
                     portField
                     connectionProxyRows
                     // Connection LIFECYCLE, so it belongs here with the other
@@ -183,6 +191,17 @@ struct SubprocessTunnelView: View {
         .padding(.top, 10)
         .navigationTitle(draft.name)
         .task { loadOnce() }
+        // The first successful password sign-in confirms whether this gateway
+        // requested a verification code. Until then the toggle remains an
+        // experiment; afterwards it is a normal, editable VPN setting here.
+        .onChange(of: manager.status(draft.id)) { _, status in
+            guard case .connected = status,
+                  draft.kind.isSSLVPN,
+                  sslMethod == "password",
+                  !draft.isOTPRequirementLocked else { return }
+            draft.otpRequirementLocked = true
+            save()
+        }
         // LIVE SAVE — no confirming button in any editor now. See `SettingCommit`.
         //
         // THIS EDITOR WAS THE LAST ONE STILL CARRYING THE TICK, and it was skipped by
@@ -211,11 +230,21 @@ struct SubprocessTunnelView: View {
     /// fields rather than the keychain, for the same reason `connectBlockedReason`
     /// does: a password typed and not yet committed counts as present.
     private var needs: SettingNeeds {
-        var facts = SubprocessTunnelReadiness.Facts(installedTools: TunnelCLI.installed())
-        facts.hasPassword = !password.isEmpty
-        guard let need = SubprocessTunnelReadiness.need(for: draft, facts: facts),
+        guard let need = readinessNeed,
+              !need.isDeferredUntilConnect,
               let id = need.settingID else { return SettingNeeds() }
         return SettingNeeds(byID: [id: need.sentence])
+    }
+
+    private var readinessNeed: ConnectNeed? {
+        var facts = SubprocessTunnelReadiness.Facts(installedTools: TunnelCLI.installed())
+        facts.hasPassword = !password.isEmpty
+        return SubprocessTunnelReadiness.need(for: draft, facts: facts)
+    }
+
+    private var deferredSignInNeed: ConnectNeed? {
+        guard let need = readinessNeed, need.isDeferredUntilConnect else { return nil }
+        return need
     }
 
     /// Why the Name row is holding every edit in this editor, or nil.
@@ -368,6 +397,7 @@ struct SubprocessTunnelView: View {
                         .font(.callout.monospaced())
                         .autocorrectionDisabled()
                         .multilineTextAlignment(.trailing)
+                        .scalarConfigurationValue()
                         // The problem and the live status ride the FIELD's value,
                         // so VoiceOver hears them where the value is spoken
                         // (Docs/Accessibility.md) rather than as ambient text.
@@ -470,8 +500,9 @@ struct SubprocessTunnelView: View {
                     SecureField("", text: $password, prompt: Text("optional"))
                         .textContentType(.password)
                         .multilineTextAlignment(.trailing)
+                        .scalarConfigurationValue()
                 } label: { EngineSettingLabel(spec: spec("ssh.password"), value: password) }
-                Toggle("Remember password", isOn: $remember)
+                PasswordSavingToggle(isOn: $remember)
             }
         }
         if sshMethod == "password" {
@@ -507,6 +538,7 @@ struct SubprocessTunnelView: View {
                         .font(.callout.monospaced())
                         .autocorrectionDisabled()
                         .multilineTextAlignment(.trailing)
+                        .scalarConfigurationValue()
                         .accessibilityValue(pinnedKeyError.map { "Problem: \($0)" } ?? "")
                 } label: { EngineSettingLabel(spec: s, value: pinned) }
                 if let error = pinnedKeyError {
@@ -566,7 +598,7 @@ struct SubprocessTunnelView: View {
                     .foregroundStyle(importTargeted ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
                     .contentTransition(.symbolEffect(.replace))
                     .symbolEffect(.wiggle, options: .repeat(.periodic(delay: 6)),
-                                  isActive: !reduceMotion && !importTargeted)
+                                  isActive: liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion) && !importTargeted)
                 Text("Drag your SSH config, a key, or a certificate here")
                     .font(.callout).foregroundStyle(.secondary)
                 Text("Forwards, jump hosts and keys defined for this server are picked up automatically.")
@@ -744,7 +776,8 @@ struct SubprocessTunnelView: View {
             VStack(alignment: .leading, spacing: 4) {
                 LabeledContent {
                     TextField("", value: $draft.socksPort, format: .number.grouping(.never), prompt: Text("1080"))
-                        .multilineTextAlignment(.trailing).frame(maxWidth: 120)
+                        .multilineTextAlignment(.trailing).scalarConfigurationValue()
+                        .frame(maxWidth: 120, alignment: .trailing)
                         // Validation rides the field's value (Docs/Accessibility.md).
                         .accessibilityValue(socksPortError.map { "Problem: \($0)" } ?? "")
                 } label: { EngineSettingLabel(spec: spec(portID), value: draft.socksPort) }
@@ -925,6 +958,9 @@ struct SubprocessTunnelView: View {
                     Text("Single sign-on (SAML / passkey)").tag("sso")
                 }
             }
+            if let need = deferredSignInNeed {
+                FirstConnectSignInBanner(need: need)
+            }
             if let note = authNote {
                 Label(note, systemImage: "info.circle")
                     .font(.callout).foregroundStyle(.orange)
@@ -983,8 +1019,9 @@ struct SubprocessTunnelView: View {
                 EngineSettingRow(spec: Self.specs["oc.key-password"], value: keyPassphrase,
                                  disabledReason: certificateUnused) {
                     LabeledContent {
-                        SecureField("", text: $keyPassphrase, prompt: Text("if the key or .p12 is encrypted"))
-                            .multilineTextAlignment(.trailing)
+                    SecureField("", text: $keyPassphrase, prompt: Text("if the key or .p12 is encrypted"))
+                        .multilineTextAlignment(.trailing)
+                        .scalarConfigurationValue()
                     } label: {
                         EngineSettingLabel(spec: Self.specs["oc.key-password"], value: keyPassphrase)
                     }
@@ -1239,6 +1276,7 @@ struct SubprocessTunnelView: View {
                         .font(.callout.monospaced())
                         .autocorrectionDisabled()
                         .multilineTextAlignment(.trailing)
+                        .scalarConfigurationValue()
                         .accessibilityValue(pinnedServerCertError.map { "Problem: \($0)" }
                                             ?? draft.trustedCertSHA256)
                 } label: { EngineSettingLabel(spec: s, value: draft.trustedCertSHA256) }
@@ -1387,11 +1425,29 @@ struct SubprocessTunnelView: View {
                     SecureField("", text: $password, prompt: Text("Password"))
                         .textContentType(.password)
                         .multilineTextAlignment(.trailing)
+                        .scalarConfigurationValue()
                 } label: {
                     EngineSettingLabel(spec: Self.specs["oc.password"], value: password)
                 }
-                Toggle("Remember password", isOn: $remember)
+                PasswordSavingToggle(isOn: $remember)
             }
+        }
+        if sslMethod == "password" {
+            Toggle("Verification code required", isOn: Binding(
+                get: { draft.needsOneTimeCode },
+                set: { draft.requiresOTP = $0 ? true : nil }))
+                .toggleStyle(.checkbox)
+            if draft.needsOneTimeCode {
+                LabeledContent("Verification code") {
+                    TextField("Current code", text: $oneTimeCode)
+                        .textContentType(.oneTimeCode)
+                        .multilineTextAlignment(.trailing)
+                }
+            }
+            Text(draft.isOTPRequirementLocked
+                 ? "Confirmed after a successful sign-in. Change it here if this VPN’s requirements change; the code itself is never saved."
+                 : "You can change this until the first successful sign-in, when SimpleVPN confirms the setting. The code itself is never saved.")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -1406,7 +1462,7 @@ struct SubprocessTunnelView: View {
                 } else {
                     Button("Connect") { connect() }
                         .buttonStyle(.glassProminent)   // primary "go" — consistent with OpenVPN Connect
-                        .disabled(connectBlockedReason != nil)
+                        .disabled(readinessNeed != nil)
                 }
             }
             // A dead button must say why (the rule ConnectionView follows).
@@ -1442,6 +1498,9 @@ struct SubprocessTunnelView: View {
     private var saveDisabledReason: String? {
         if draft.name.trimmingCharacters(in: .whitespaces).isEmpty { return "Give this tunnel a name first." }
         if draft.server.isEmpty { return "Enter the server address first." }
+        if draft.kind.isSSLVPN, let problem = SubprocessTunnelConfig.sslServerAddressProblem(draft.server) {
+            return problem
+        }
         if usesSOCKSPort, let reason = socksPortError { return reason }
         return nil
     }
@@ -1459,18 +1518,10 @@ struct SubprocessTunnelView: View {
     /// password in hand here, while the connect list can only see what is stored. Same
     /// rules, different evidence — which is what an injected-facts derivation is for.
     private var connectBlockedReason: String? {
-        var facts = SubprocessTunnelReadiness.Facts(installedTools: TunnelCLI.installed())
-        facts.hasPassword = !password.isEmpty
-        if let need = SubprocessTunnelReadiness.need(for: draft, facts: facts) {
-            return need.sentence
-        }
-        // A CHECK THAT USED TO BE HERE AND IS GONE WITH ITS FEATURE: "this token's
-        // PIN is locked" was the one refusal that came from the HARDWARE rather than
-        // the configuration, read by a survey that only ran while this editor was
-        // open. There is no survey, no PIN and no attempt to spend, and a smartcard
-        // profile is refused by `SubprocessTunnelReadiness` above for a reason that
-        // needs no hardware.
-        return nil
+        // A token PIN lock used to be a separate refusal here, but no longer is:
+        // readiness owns the complete answer for every supported sign-in method.
+        guard let need = readinessNeed, !need.isDeferredUntilConnect else { return nil }
+        return need.sentence
     }
 
     @ViewBuilder private var statusBadge: some View {
@@ -1534,7 +1585,8 @@ struct SubprocessTunnelView: View {
                 // they are this editor's own two extra caption channels.
                 SettingValueField(spec: spec(id), text: text, prompt: prompt,
                                   extraSpoken: [warning, note].compactMap { $0 }
-                                                              .joined(separator: ". "))
+                                                              .joined(separator: ". "),
+                                  acceptsURL: id == "oc.server")
                 if let warning, disabled == nil {
                     Label(warning, systemImage: "exclamationmark.triangle.fill")
                         .font(.callout).foregroundStyle(.orange)
@@ -1584,6 +1636,7 @@ struct SubprocessTunnelView: View {
                     HStack(spacing: 6) {
                         TextField(prompt, text: Binding(get: { binding.wrappedValue[i] }, set: { binding.wrappedValue[i] = $0 }))
                             .font(.callout.monospaced())
+                            .lineLimit(1)
                             .accessibilityLabel("\(spec(id).name) line \(i + 1)")
                         // .onDelete draws NO affordance in a macOS Form — without
                         // this button a line can't be removed by mouse or keyboard.
@@ -1617,6 +1670,7 @@ struct SubprocessTunnelView: View {
         search.kind = draft.kind
         if let c = KeychainCredentialStore.loadCredentials(profile: "tunnel." + draft.id) {
             password = c.password
+            remember = !c.password.isEmpty
         }
         proxyPassword = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(draft.id).proxy")?.password ?? ""
         jumpPassword = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(draft.id).jump")?.password ?? ""
@@ -1701,6 +1755,8 @@ struct SubprocessTunnelView: View {
 
     private func connect() {
         save()
-        manager.connect(draft, password: password.isEmpty ? nil : password)
+        manager.connect(draft, password: password.isEmpty ? nil : password,
+                        oneTimeCode: oneTimeCode.isEmpty ? nil : oneTimeCode)
+        oneTimeCode = ""
     }
 }

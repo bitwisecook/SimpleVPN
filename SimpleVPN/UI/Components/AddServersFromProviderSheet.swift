@@ -102,7 +102,7 @@ struct AddServersFromProviderSheet: View {
             buttons
         }
         .padding(18)
-        .frame(width: 460, height: 520)
+        .resizablePanel(idealWidth: 460, idealHeight: 520)
         .onDisappear { task?.cancel() }
         .confirmationDialog(ProviderPickerCopy.consentTitle(provider),
                             isPresented: $consenting, titleVisibility: .visible) {

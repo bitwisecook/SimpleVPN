@@ -41,6 +41,7 @@ enum OpenConnectProfileStore {
     /// memory — same invariant as every credential, NEVER providerConfiguration
     /// (which persists) — and the extension skips its own sign-in.
     static func start(_ config: SubprocessTunnelConfig, password: String?,
+                      oneTimeCode: String? = nil,
                       auth: OCAuthDone? = nil,
                       onEvent: @escaping @MainActor (Event) -> Void) async -> Bool {
         guard config.kind.isSSLVPN else { return false }
@@ -72,6 +73,9 @@ enum OpenConnectProfileStore {
                 "username": config.username as NSString,
                 "password": (password ?? "") as NSString,
             ]
+            if let oneTimeCode, !oneTimeCode.isEmpty {
+                options["oneTimeCode"] = oneTimeCode as NSString
+            }
             // The secret half: a client key's passphrase and a proxy password, read
             // from the keychain here (the extension is root and cannot) and carried
             // in memory only — never providerConfiguration, which persists.

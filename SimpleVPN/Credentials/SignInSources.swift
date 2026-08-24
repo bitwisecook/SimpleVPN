@@ -9,7 +9,7 @@
 //  Two classes of entry, and the difference between them is the whole point:
 //
 //   • FETCHABLE (`.fetches`) — SimpleVPN gets the sign-in itself: typing it, the
-//     Apple keychain, Apple Passwords' AutoFill, or a password app we can really
+//     Apple keychain, Apple Passwords' authorized picker, or a password app we can really
 //     talk to locally (1Password, KeePassXC, Keeper). Picking one changes what
 //     happens when you connect.
 //   • A POINTER (`.hint`) — a password app that IS installed but that nothing on
@@ -670,7 +670,10 @@ nonisolated enum LocalVaultCopyBook {
             .needsUpdate: ("1Password needs updating on this Mac",
                            ["Update **1Password** to version 8 or later.",
                             "Come back here and pick 1Password again."]),
-            .integrationOff: ("1Password needs one setting turned on", []),
+            // This state is only produced after a real SDK call identifies the
+            // current Developer Integration switch as off. Keep the chooser and
+            // the guided check on the same concrete, actionable wording.
+            .integrationOff: (OnePasswordPreflight.headline(for: .integrationOff), []),
         ],
         guidance: [
             .integrationOff: EnablementGuidance(
@@ -1287,25 +1290,14 @@ nonisolated enum SignInSourceCatalog {
             storedKind: .manual, remembers: true)
     }
 
-    /// Apple Passwords — AN AUTOFILL ROW, NOT A PROVIDER, and the wording has to say
-    /// so.
+    /// Apple Passwords — a user-authorized system picker, not a catalogue API.
     ///
-    /// This row USED to promise fetch-like behaviour ("macOS fills the username and
-    /// password in for you"), and that promise was not ours to make. SimpleVPN cannot
-    /// read what Safari and the Passwords app manage: those items live in the
-    /// data-protection keychain under the `com.apple.cfnetwork` access group, which
-    /// this app's entitlement does not contain, so they are unreachable by
-    /// construction rather than merely missing (see ApplePasswordsProvider's header).
-    /// What actually works is AUTOFILL — the key in the field — which is macOS's own
-    /// affordance, driven by the user, needing no entitlement and no lookup from us.
+    /// `ASAuthorizationPasswordProvider` lets the signed app ask macOS to present
+    /// Passwords' own searchable chooser. SimpleVPN receives only the one selected
+    /// username/password pair; it cannot enumerate the catalogue or resolve the
+    /// opaque `id` that Passwords places on the drag pasteboard.
     ///
-    /// So the copy promises exactly that much and no more: click the key, and macOS
-    /// decides what it can offer. It deliberately does NOT claim the menu will
-    /// contain a match, because whether it does is macOS's business and nobody here
-    /// has watched it happen in OUR fields. Until a human confirms that, the honest
-    /// sentence is the modest one.
-    ///
-    /// Two further honesties the copy carries:
+    /// Two further boundaries the copy carries:
     ///  • Verification codes stay in Apple Passwords — it exposes none of them to
     ///    other apps, so the code is still typed (`suppliesOTP` is false, correctly).
     ///  • NOTHING IS SAVED INTO APPLE PASSWORDS by picking this. SimpleVPN has no way
@@ -1317,19 +1309,16 @@ nonisolated enum SignInSourceCatalog {
         SignInSourceOption(
             id: .applePasswords, role: .fetches,
             title: "Apple Passwords",
-            summary: "Fill the fields yourself from Apple Passwords \u{2014} click the key in the "
-                + "username or password field.",
-            explanation: "This is macOS\u{2019}s own AutoFill, the same key you see in Safari: click it "
-                + "in the username or password field and macOS offers whatever it can for this VPN. "
-                + "SimpleVPN doesn\u{2019}t read Apple Passwords itself and can\u{2019}t \u{2014} macOS "
-                + "keeps Safari\u{2019}s and the Passwords app\u{2019}s entries where other apps "
-                + "can\u{2019}t reach them \u{2014} so what the menu offers is macOS\u{2019}s decision, "
-                + "not ours. Verification codes stay in Apple Passwords whatever happens: it "
-                + "doesn\u{2019}t hand those to other apps, so you type the code yourself. Picking "
-                + "this saves nothing anywhere; if you want your sign-in remembered, use "
+            summary: "Choose one saved sign-in in macOS\u{2019}s searchable password picker.",
+            explanation: "macOS owns the chooser, search and authorization. SimpleVPN receives only "
+                + "the username and password you select and keeps them in memory for this connection; "
+                + "it cannot browse or index your Apple Passwords catalogue itself. Verification codes "
+                + "stay in Apple Passwords: the picker doesn\u{2019}t hand those to other apps, so you "
+                + "type the code yourself. Picking this saves nothing anywhere; if you want your "
+                + "sign-in remembered, use "
                 + "\u{201C}Save it securely in SimpleVPN\u{201D}.",
             symbol: "person.badge.key.fill",
-            storedKind: .applePasswords, remembers: nil)
+            storedKind: .applePasswords, remembers: false)
     }
 
     // MARK: Vendor rows (one shape, every vendor)
@@ -1596,6 +1585,10 @@ nonisolated struct SignInFlowInputs: Sendable, Equatable {
     /// Whether that source can serve right now (its app installed / running /
     /// signed in, and something linked for it to fetch).
     var chosenSourceAvailable = true
+    /// A password app was selected, but no item has been linked yet.  This is
+    /// setup, not an outage: show the source configurator before judging whether
+    /// the app can serve a credential.
+    var chosenSourceNeedsSetup = false
     /// The user closed the setup card for this run.
     var dismissedForNow = false
     /// Nothing to collect at all (Tailscale, WireGuard, autologin, a proxy
@@ -1622,20 +1615,26 @@ nonisolated enum SignInFlow {
     /// recovery notice all read. The order matters and IS the design:
     ///
     /// 1. Nothing to collect wins outright — asking would be nonsense.
-    /// 2. A chosen-but-unavailable source wins over everything else: a dead
+    /// 2. A selected source with no linked item is configured inline.  Fresh
+    ///    manual sign-in goes straight to the username/password fields instead
+    ///    of making saving a password look like the default choice.
+    /// 3. A chosen-but-unavailable source wins over everything else: a dead
     ///    option must never be discovered as a connect failure.
-    /// 3. Anything already set up (connected before, or a sign-in on file) is
+    /// 4. Anything already set up (connected before, or a sign-in on file) is
     ///    NOT re-asked. That is the whole "returning" requirement.
     /// 4. A dismissed card stays dismissed for this run.
     /// 5. Otherwise it is the first time: ask.
     static func step(_ inputs: SignInFlowInputs) -> SignInFlowStep {
         if inputs.collectsNothing { return .nothingToCollect }
+        if inputs.chosenKind != .manual, inputs.chosenSourceNeedsSetup {
+            return .chooseHowToSignIn
+        }
         if inputs.chosenKind != .manual, !inputs.chosenSourceAvailable {
             return .recoverUnavailableSource(inputs.chosenKind)
         }
         if inputs.hasConnectedBefore || inputs.hasStoredSignIn { return .connectStraightThrough }
         if inputs.dismissedForNow { return .connectStraightThrough }
-        return .chooseHowToSignIn
+        return .connectStraightThrough
     }
 
     /// Whether the chooser is on screen for these inputs.
@@ -1702,11 +1701,7 @@ nonisolated enum SignInFlow {
             "SimpleVPN can\u{2019}t read your KeePass database file right now. Check it in "
             + "Settings \u{25B8} Sign-In Sources \u{2014} it will say which part is missing."
         case .applePasswords:
-            // Not "Apple Passwords is unavailable" — it isn't, and SimpleVPN was never
-            // reading it. What is missing is the server to match, and the way that
-            // actually works is the key in the field.
-            "SimpleVPN doesn\u{2019}t know which saved sign-in to look for. Click the key in the "
-            + "username or password field and macOS will offer what it can."
+            "Choose the saved sign-in again from macOS\u{2019}s Apple Passwords picker."
         case .manual:
             "SimpleVPN can\u{2019}t get your sign-in."
         case .passwordStore:

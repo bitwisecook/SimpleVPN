@@ -79,7 +79,7 @@ struct CompositionEditor: View {
                 }
             }
         }
-        .frame(width: 480, height: 460)
+        .resizablePanel(idealWidth: 480, idealHeight: 460)
         // A new composition starts with one required field — the cursor is in it.
         .onAppear { nameFocused = true }
         // The conflict footer sits below every member row; someone who just

@@ -220,7 +220,7 @@ struct EndpointRegionSheet: View {
             }
             .padding(12)
         }
-        .frame(width: 420, height: 520)
+        .resizablePanel(idealWidth: 420, idealHeight: 520)
         // Done already owns Return; ESC must also close a picker-only sheet.
         .onExitCommand { dismiss() }
     }

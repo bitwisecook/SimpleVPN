@@ -347,7 +347,7 @@ nonisolated enum SettingRelations {
         // Noticing them and saying something about them are different consents,
         // and the warning cannot fire with the noticing off — the sentence on both
         // rows, as a link.
-        ["vm.detect", "vm.warn-on-connect"],
+        ["vm.detect", "vm.read-utm-configurations", "vm.warn-on-connect"],
     ]
 
     /// Relations that genuinely run one way only, as (from, to). Empty, and that

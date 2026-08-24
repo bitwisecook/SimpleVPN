@@ -59,7 +59,10 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     var kind: VPNKind = .ssh
 
     // Common
-    var server = ""             // host or host:port (SSH), or https URL (SSL-VPN)
+    /// SSH accepts a host (and optional port).  The web-based OpenConnect VPNs
+    /// accept either a gateway name such as `vpn.example.com` or the complete
+    /// HTTP(S) login URL an administrator gave the user, including its path.
+    var server = ""
     var port: Int? = nil        // SSH port (default 22) / SSL-VPN port
     var username = ""
 
@@ -133,6 +136,13 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     //    smartcard finds where to ask for it instead of finding nothing.
     // See Docs/AuthSecPKCS11.md for why it is not implemented.
     var authMode = "password"    // "password" | "certificate" | "token" | "sso"
+    /// Whether this password profile should send a separate verification code.
+    /// Optional so old persisted profiles decode; nil is an unconfirmed “off”.
+    var requiresOTP: Bool? = nil
+    /// Becomes true only after a successful password sign-in. Until then the
+    /// user may correct the OTP choice and retry; after it, the discovered
+    /// requirement is part of this VPN's confirmed configuration.
+    var otpRequirementLocked: Bool? = nil
     var realm = ""               // optional auth realm/group (--authgroup)
     var trustedCertSHA256 = ""   // pin the server cert (openconnect --servercert)
     var caFile = ""              // --cafile <path>
@@ -220,6 +230,9 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     /// should unwrap `preferInProcess` itself, or "never chose" starts meaning
     /// "chose the old thing" again in a second place.
     var runsInProcess: Bool { preferInProcess ?? true }
+
+    var needsOneTimeCode: Bool { requiresOTP ?? false }
+    var isOTPRequirementLocked: Bool { otpRequirementLocked ?? false }
 
     /// Whether a transport was ever chosen for this profile. False only for
     /// profiles created after the default moved (and for configs imported without
@@ -447,6 +460,43 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
         guard !p.isEmpty else { return nil }
         return FileManager.default.fileExists(atPath: (p as NSString).expandingTildeInPath)
             ? nil : "No file at that path."
+    }
+
+    /// One definition of an OpenConnect gateway address.  A web VPN often starts
+    /// at a policy path (F5 APM's `/my.policy` is a common example), so treating
+    /// its address as a hostname and stripping/rejecting the URL loses the one
+    /// piece of information that gets us to its real sign-in flow.
+    ///
+    /// Empty is deliberately allowed here: the readiness layer owns the "required"
+    /// message.  This only distinguishes a valid FQDN/IP literal from a valid web
+    /// URL, and is shared by the editor and the Connect gate.
+    static func sslServerAddressProblem(_ raw: String) -> String? {
+        let address = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !address.isEmpty else { return nil }
+        guard address.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else {
+            return "The server address cannot contain spaces. Use a gateway name or its full http(s) URL."
+        }
+
+        if address.contains("://") {
+            guard let parts = URLComponents(string: address),
+                  let scheme = parts.scheme?.lowercased(),
+                  scheme == "https" || scheme == "http",
+                  let host = parts.host, !host.isEmpty else {
+                return "Use an http(s) URL with a gateway host, for example https://vpn.example.com/my.policy."
+            }
+            return nil
+        }
+
+        // Parse a scheme-free FQDN, IP literal, or legacy host:port without
+        // changing what the user typed.  URLComponents supplies the one parser
+        // for both forms; the synthetic scheme never reaches storage or the UI.
+        guard let parts = URLComponents(string: "https://\(address)"),
+              let host = parts.host, !host.isEmpty,
+              parts.path.isEmpty, parts.query == nil, parts.fragment == nil,
+              parts.user == nil, parts.password == nil else {
+            return "Use a gateway name such as vpn.example.com, or its full http(s) URL."
+        }
+        return nil
     }
 
     /// The SSH key types that live on a hardware security key (FIDO2/U2F): the

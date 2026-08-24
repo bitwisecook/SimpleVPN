@@ -95,6 +95,7 @@ struct TailscaleView: View {
                         SecureField("", text: $authKey,
                                     prompt: Text("empty = sign in with a browser"))
                             .multilineTextAlignment(.trailing)
+                            .scalarConfigurationValue()
                             .accessibilityLabel(Self.specs["ts.auth-key"].name)
                             .accessibilityValue(authKey.isEmpty ? "not set — sign in with a browser"
                                                 : (authKeyWarning.map { "set. \($0)" } ?? "set"))

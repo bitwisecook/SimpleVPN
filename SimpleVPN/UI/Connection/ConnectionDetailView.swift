@@ -13,6 +13,15 @@
 
 import SwiftUI
 import os
+import LocalAuthentication
+
+/// The intentionally short-lived copy used only while a person has explicitly
+/// revealed their own saved sign-in. It is never persisted and is cleared when
+/// hidden, when the view goes away, or after the short reveal interval.
+private struct RevealedSignIn: Equatable {
+    var username: String
+    var password: String
+}
 
 // MARK: - Connection detail (connection only)
 
@@ -37,14 +46,42 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     @State var nudgeTick = 0   // was private — internal for the file split
     /// First-connect hand-holding: true until a successful connect writes a
     /// baseline (persisted — survives restarts until the setup is PROVEN).
-    @State private var neverConnected = false
+    ///
+    /// This value must be seeded from durable state, rather than changed by an
+    /// asynchronous `.task` after the first frame.  Starting it as `true` made
+    /// a returning 1Password profile briefly mount its setup card on launch;
+    /// that card could start a 1Password helper before the success marker was
+    /// read, producing an unexplained Touch ID request before Connect.
+    @State private var neverConnected: Bool
     @State private var setupDismissed = false
-    /// The "change how you sign in" popover — the unobtrusive way back for a VPN
-    /// that is already set up, so nobody has to go to Manage VPNs to switch.
-    @State var showSignInChooser = false   // internal: the manager/typed forms open it
+    /// A menu selection must be visible immediately, before its NetworkExtension
+    /// preference write finishes. Cleared on success or restored on failure.
+    @State private var pendingSignInSource: SignInSourceID?
+    /// Change… expands the exact same inline setup card used before the first
+    /// connection.  A popover here used to cover the VPN with a second,
+    /// independently scrolling picker.
+    @State private var showInlineSignInConfiguration = false
+    /// Values revealed by an explicit eye action. This state never receives a
+    /// protected keychain item until LocalAuthentication has succeeded.
+    @State private var revealedSignIn: RevealedSignIn?
     /// What this Mac can offer, shared app-wide (one set of probes for every
     /// surface).
     @State var sources = SignInSourceAvailability.shared   // internal: read by both forms
+
+    /// One close button serves both uses of the shared sign-in card.  Before a
+    /// successful connection it hides the coaching until the next launch;
+    /// afterwards it simply collapses Change… back to the compact summary.
+    private var signInConfigurationDismissal: Binding<Bool> {
+        Binding(get: {
+            neverConnected ? setupDismissed : !showInlineSignInConfiguration
+        }, set: { dismissed in
+            if neverConnected {
+                setupDismissed = dismissed
+            } else {
+                showInlineSignInConfiguration = !dismissed
+            }
+        })
+    }
     /// The big green "Connected" banner shrinks to a compact chip beside the
     /// stop button 5s after connecting — the reassurance, then out of the way.
     @State var bannerCollapsed = false   // was private — internal for the file split
@@ -89,6 +126,13 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     /// The object that swallows the key's own trailing Return. Held (not rebuilt
     /// per frame) because `AutoFillField`'s coordinator consults it by reference.
     @State private var yubiKeyReturnPolicy: YubiKeyFieldReturnPolicy?
+
+    init(vpn: VPNController, profile: VPNController.Profile) {
+        self._vpn = Bindable(wrappedValue: vpn)
+        self.profile = profile
+        self._neverConnected = State(initialValue:
+            !FirstSuccessfulConnectionStore.hasSucceeded(profile: profile.id))
+    }
 
     private var yubiKeyConfig: YubiKeyAuthConfig { vpn.authConfig(for: profile.id).yubiKey }
 
@@ -168,6 +212,15 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     /// the connect will really use. See `VPNController.effectiveCredentialKind`.
     var credentialKind: CredentialSourceKind { vpn.effectiveCredentialKind(for: profile.id) }   // was private — internal for the file split
     var usesManager: Bool { credentialKind != .manual }   // was private — internal for the file split
+    /// The selected source is distinct from the source that can connect *right
+    /// now*. A newly selected password app has no linked item yet, so it safely
+    /// falls back to manual for a connect attempt — but the UI must still show
+    /// that app's setup, rather than looking as if its menu item did nothing.
+    private var selectedManagerNeedsSetup: Bool {
+        let source = vpn.credentialSource(for: profile.id)
+        return source.kind != .manual
+            && source.reference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     /// The whole answer, computed once: `signInStep` and `signInBlock` are two readings
     /// of the SAME satisfaction, and deriving them separately is how a notice ends up
@@ -192,6 +245,8 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
             || profile.kind == .wireGuard || isAutologin
         let source = vpn.credentialSource(for: profile.id)
         inputs.chosenKind = source.kind
+        inputs.chosenSourceNeedsSetup = source.kind != .manual
+            && source.reference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         // ONE answer, shared with the unattended reconnect path — `canServe`'s Bool used
         // to be derived here while `connectWithSavedCredentials` derived the same
         // question its own way. `.typedInstead` counts as available: typing IS a way to
@@ -266,12 +321,43 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
 
     /// The shared Remember preference (persisted with the profile's auth config).
     private var remember: Binding<Bool> {
-        Binding(get: { vpn.authConfig(for: profile.id).rememberCredentials },
+        Binding(get: {
+                    // A Touch ID item is a saved password with stronger access
+                    // control. Older configurations may have omitted the
+                    // explicit bit, so the UI derives the durable truth too.
+                    vpn.authConfig(for: profile.id).protectWithBiometrics
+                        || vpn.remembersPassword(for: profile.id)
+                },
                 set: { on in
                     var auth = vpn.authConfig(for: profile.id)
                     auth.rememberCredentials = on
                     Task { try? await vpn.setAuthConfig(auth, for: profile.id) }
                     if !on { KeychainCredentialStore.deleteCredentials(profile: profile.id) }
+                })
+    }
+
+    /// The normal first-connect decision. A static challenge is declared by the
+    /// VPN itself, so it is shown but cannot be turned off here.
+    private var otpRequirement: Binding<Bool> {
+        Binding(get: { requiresOTP },
+                set: { on in
+                    guard !hasStaticChallenge else { return }
+                    var auth = vpn.authConfig(for: profile.id)
+                    auth.requiresOTP = on
+                    if !on { otp.wrappedValue = "" }
+                    Task { try? await vpn.setAuthConfig(auth, for: profile.id) }
+                })
+    }
+
+    /// Advanced users can change how the gateway receives the password and the
+    /// fresh code. `VPNAuthConfig` validates the persisted template, so a bad
+    /// draft can never make the connect path omit the code.
+    private var otpTemplate: Binding<String> {
+        Binding(get: { vpn.authConfig(for: profile.id).passwordTemplate },
+                set: { template in
+                    var auth = vpn.authConfig(for: profile.id)
+                    auth.passwordTemplate = template
+                    Task { try? await vpn.setAuthConfig(auth, for: profile.id) }
                 })
     }
 
@@ -350,34 +436,72 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                             .font(.callout).foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
+                        if let repair = vpn.signInRepair(for: profile.id) {
+                            OnePasswordRepairBanner(
+                                error: repair,
+                                fixSignIn: {
+                                    vpn.clearFailure()
+                                    showInlineSignInConfiguration = true
+                                },
+                                retry: {
+                                    Task { await vpn.retryConnect(id: profile.id) }
+                                },
+                                dismiss: { vpn.clearFailure() })
+                                .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
+                        }
                         // First time versus every other time is ONE decision
                         // (SignInFlow.step) rather than three views each guessing:
                         // ask only when nothing is set up, never re-ask a VPN
                         // that has connected, and when the chosen password app
                         // has gone away say so HERE instead of letting the
                         // connect discover it.
-                        switch signInStep {
-                        case .chooseHowToSignIn:
+                        if (neverConnected && !setupDismissed) || showInlineSignInConfiguration {
+                            // Until a first connection succeeds, this walkthrough
+                            // remains on screen even after an entry is linked.  An
+                            // imported configuration cannot tell us whether its
+                            // password app entry carries a verification code, or
+                            // how the server expects it to be combined.
                             FirstConnectSetupCard(vpn: vpn, profile: profile,
                                                   allowsPasswordSave: allowPasswordSave,
-                                                  dismissed: $setupDismissed.animation(.snappy(duration: 0.25)))
+                                                  isFirstConnection: neverConnected,
+                                                  dismissed: signInConfigurationDismissal.animation(.snappy(duration: 0.25)))
                                 .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
-                        case .recoverUnavailableSource(let kind):
-                            SignInSourceRecoveryNotice(
-                                kind: kind,
-                                // The block, so the notice can say WHICH problem this
-                                // is. Same satisfaction the step was decided from.
-                                block: signInBlock,
-                                onTypeItOnce: {
-                                    vpn.setTypedSignInOnce(true, for: profile.id)
-                                    focusedField = firstMissingField
-                                },
-                                onChange: { showSignInChooser = true })
-                                .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
-                        case .connectStraightThrough, .nothingToCollect:
-                            EmptyView()
+                        } else {
+                            switch signInStep {
+                            case .chooseHowToSignIn:
+                            // A direct sign-in starts at the fields, whose source
+                            // popup is the first control above them. Password-app
+                            // choices need their source-specific setup card.
+                            if selectedManagerNeedsSetup {
+                                FirstConnectSetupCard(vpn: vpn, profile: profile,
+                                                      allowsPasswordSave: allowPasswordSave,
+                                                      isFirstConnection: neverConnected,
+                                                      dismissed: signInConfigurationDismissal.animation(.snappy(duration: 0.25)))
+                                    .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
+                            }
+                            case .recoverUnavailableSource(let kind):
+                                SignInSourceRecoveryNotice(
+                                    kind: kind,
+                                    // The block, so the notice can say WHICH problem this
+                                    // is. Same satisfaction the step was decided from.
+                                    block: signInBlock,
+                                    onTypeItOnce: {
+                                        vpn.setTypedSignInOnce(true, for: profile.id)
+                                        focusedField = firstMissingField
+                                    },
+                                    onChange: { showInlineSignInConfiguration = true })
+                                    .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
+                            case .connectStraightThrough, .nothingToCollect:
+                                EmptyView()
+                            }
                         }
-                        if usesManager { managerForm } else { credentialForm }
+                        if selectedManagerNeedsSetup {
+                            EmptyView()
+                        } else if usesManager {
+                            managerForm
+                        } else {
+                            credentialForm
+                        }
                     }
                     if let incident = vpn.incidents[profile.id] {
                         ConnectionIncidentCard(vpn: vpn, profile: profile, incident: incident,
@@ -441,10 +565,9 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                         .matchedGeometryEffect(id: "connectedChip", in: connectedBannerNS)
                         .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
                 }
-                // The endpoint picker (and its little map) lives HERE, always — one
-                // fixed home below the Connection Manager. It used to appear in the
-                // middle column when disconnected and in the inspector when live, which
-                // put a second world map under the topology one.
+                // The endpoint picker and its compact globe live HERE, always. The
+                // globe previews the selected route before connecting and turns blue
+                // only when telemetry confirms the endpoint in use.
                 EndpointSection(vpn: vpn, profile: profile)
                 if UI.isActive(profile.status) || vpn.isReconfiguring(profile.id) {
                     Divider()
@@ -520,13 +643,11 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
             vpn.captivePortalSuspected = false
             vpn.captivePortalURL = nil
         }
-        // First-success detection for the setup card: the baseline is written a
-        // few seconds after .connected, so re-check on status changes too.
-        .task(id: profile.id) {
-            neverConnected = ConnectionBaselineStore.load(profile: profile.id) == nil
-        }
         .onChange(of: profile.status) { _, new in
-            if new == .connected { neverConnected = false }
+            if new == .connected {
+                FirstSuccessfulConnectionStore.markSucceeded(profile: profile.id)
+                neverConnected = false
+            }
         }
         // The big "Connected" banner shows for 5s on connect, then shrinks to
         // the header chip. Reset the moment the tunnel isn't cleanly connected.
@@ -734,14 +855,14 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
             // A statement, not a question — this VPN's sign-in is already
             // decided. The Change button is the whole "unobtrusive way to change
             // it" requirement: one click, right here, no trip to Manage VPNs.
-            SignInSourceSummary(
-                option: SignInSourceCatalog.option(
-                    for: credentialKind, remembers: true,
-                    facts: sources.facts(allowsPasswordSave: allowPasswordSave)),
-                footnote: managerFootnote,
-                onChange: { showSignInChooser = true })
-                .signInChooserPopover(isPresented: $showSignInChooser, vpn: vpn, profile: profile,
-                                      allowsPasswordSave: allowPasswordSave, sources: sources)
+            if (!neverConnected || setupDismissed) && !showInlineSignInConfiguration {
+                SignInSourceSummary(
+                    option: SignInSourceCatalog.option(
+                        for: credentialKind, remembers: true,
+                        facts: sources.facts(allowsPasswordSave: allowPasswordSave)),
+                    footnote: managerFootnote,
+                    onChange: { showInlineSignInConfiguration = true })
+            }
             if managerNeedsTypedOTP {
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
                     verificationCodeGridRow
@@ -756,6 +877,16 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
             if managerNeedsTypedOTP { focusedField = .otp }
             prepareSecurityKey()
         }
+        .task(id: revealedSignIn != nil) {
+            // Revealing is intentional, but leaving credentials visible after
+            // walking away from the window is not. A fresh eye tap starts a new
+            // interval; hiding or leaving the view cancels this task.
+            guard revealedSignIn != nil else { return }
+            try? await Task.sleep(for: .seconds(30))
+            guard !Task.isCancelled else { return }
+            revealedSignIn = nil
+        }
+        .onDisappear { revealedSignIn = nil }
     }
 
     // MARK: The verification-code row, and the security key behind it
@@ -776,7 +907,8 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                           text: otp, focus: $focusedField, focusValue: .otp,
                           onSubmit: attemptConnect,
                           returnPolicy: yubiKeyActive ? yubiKeyReturnPolicy : nil)
-                .requiredEmphasis(missing: otp.wrappedValue.isEmpty, attempted: submitAttempted, nudge: nudgeTick)
+                .requiredEmphasis(missing: requiresOTP && otp.wrappedValue.isEmpty,
+                                  attempted: submitAttempted, nudge: nudgeTick)
         }
     }
 
@@ -918,107 +1050,49 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     }
 
     // Inline credentials so you can connect straight from here (Remember saves them).
-    @ViewBuilder private var credentialForm: some View {
-        if isProtected { protectedForm } else { typedCredentialForm }
-    }
-
-    /// The steady state of the fingerprint flow: no fields at all, just the
-    /// promise of the prompt. The only field that can appear is the code, and
-    /// only for an OTP profile with no stored authenticator secret.
-    private var protectedForm: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Image(systemName: "touchid")
-                    .font(.title2)
-                    .foregroundStyle(.pink)
-                    .accessibilityHidden(true)   // decorative; the text says "Touch ID"
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Sign-in protected by Touch ID").font(.callout.weight(.semibold))
-                    Text(requiresOTP && biometricInfo.hasTOTP
-                         ? "Connecting asks for your fingerprint, which unlocks the username, password and verification code in one go."
-                         : "Connecting asks for your fingerprint to unlock the saved sign-in.")
-                        .font(.callout).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 8)
-                Menu {
-                    Button("Change How You Sign In\u{2026}") { showSignInChooser = true }
-                    Button("Remove Touch ID Protection…") {
-                        Task {
-                            do { try await vpn.setBiometricProtection(false, for: profile.id) }
-                            catch is CancellationError {}
-                            catch { vpn.lastError = error.localizedDescription }
-                        }
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle").frame(width: 28, height: 22).contentShape(Rectangle())
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .help("Change how these credentials are stored")
-                .accessibilityLabel("Credential protection options")
-            }
-            .padding(12)
-            .background(.pink.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-            .signInChooserPopover(isPresented: $showSignInChooser, vpn: vpn, profile: profile,
-                                  allowsPasswordSave: allowPasswordSave, sources: sources)
-
-            if requiresOTP && !biometricInfo.hasTOTP {
-                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
-                    verificationCodeGridRow
-                }
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 380)
-                securityKeyPrompt
-                Text("Add your authenticator's setup key in Manage VPNs and the fingerprint will cover the code too.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        // Same courtesy as the typed form: if a code is needed, the cursor is
-        // already in the field that needs it.
-        .onAppear { focusedField = firstMissingField; prepareSecurityKey() }
-    }
+    // A Touch ID sign-in remains part of this form: it is a storage choice, not
+    // a competing status banner with a hidden overflow menu.
+    private var credentialForm: some View { typedCredentialForm }
 
     private var typedCredentialForm: some View {
         VStack(alignment: .leading, spacing: 14) {
+            if vpn.credentialSource(for: profile.id).kind == .applePasswords {
+                ApplePasswordsPickerButton(onPick: useApplePassword)
+                Text("Choose one saved sign-in in macOS's searchable password picker, or click the key in either field below.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
-                GridRow {
-                    Text("Username").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
-                    // A userlocked profile fixes the username: prefilled (see
-                    // loadOnce) and read-only, matching the editor's behaviour.
-                    AutoFillField(kind: .username, placeholder: "Username",
-                                  text: username, focus: $focusedField, focusValue: .username,
-                                  onSubmit: attemptConnect)
-                        .disabled(!lockedUsername.isEmpty)
-                        .requiredEmphasis(missing: username.wrappedValue.isEmpty && lockedUsername.isEmpty,
-                                          attempted: submitAttempted, nudge: nudgeTick)
-                        .help(lockedUsername.isEmpty ? "" : "This VPN's configuration fixes the username.")
-                }
-                GridRow {
-                    Text("Password").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
-                    AutoFillField(kind: .password, placeholder: "Password",
-                                  text: password, focus: $focusedField, focusValue: .password,
-                                  onSubmit: attemptConnect)
-                        .requiredEmphasis(missing: password.wrappedValue.isEmpty, attempted: submitAttempted, nudge: nudgeTick)
-                }
-                if requiresOTP {
-                    verificationCodeGridRow
-                }
+                credentialGridRows
+                verificationCodeGridRow
+                    .disabled(!requiresOTP)
+                    .opacity(requiresOTP ? 1 : 0.55)
             }
             .textFieldStyle(.roundedBorder)
             .frame(maxWidth: 380)
             securityKeyPrompt
 
+            if !neverConnected || setupDismissed {
+                VerificationCodeConfiguration(required: otpRequirement, passwordTemplate: otpTemplate,
+                                              requiredByServer: hasStaticChallenge)
+            }
+
             if allowPasswordSave {
-                Toggle("Remember username & password", isOn: remember)
-                    .toggleStyle(.checkbox)
+                PasswordSavingToggle(isOn: remember)
+                    // Touch ID protection is the saved-password choice; it
+                    // cannot be turned off independently without first moving
+                    // the sign-in out of the protected store.
+                    .disabled(isProtected)
+                    .help(isProtected
+                          ? "Touch ID protection keeps this saved password in the Apple keychain. Turn off Touch ID below to change this."
+                          : "Keep this password in the Apple keychain for future connections")
                 // The fingerprint upgrade: saved credentials move into a Touch
                 // ID-gated keychain item; the plain copy is destroyed. Only
                 // offered once there's something to protect.
                 Toggle("Protect them with Touch ID", isOn: protectBinding)
                     .toggleStyle(.checkbox)
-                    .disabled(!canEnableProtection)
+                    .disabled(!canEnableProtection && !isProtected)
                     .help("Connecting will ask for your fingerprint (or Apple Watch, or your password) to unlock the sign-in.")
                 if requiresOTP, vpn.authConfig(for: profile.id).protectWithBiometrics {
                     Text("Tip: add your authenticator's setup key in Manage VPNs so the fingerprint covers the verification code too.")
@@ -1038,16 +1112,6 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            // The quiet way to change your mind, for a VPN that is already set
-            // up: the first-run chooser is gone by then, and Manage VPNs is a
-            // long way to go to switch to 1Password.
-            Button("Change how you sign in\u{2026}") { showSignInChooser = true }
-                .buttonStyle(.link)
-                .font(.caption)
-                .help("Choose a different way to sign in to this VPN \u{2014} type it, save it securely, or use a password app")
-                .accessibilityHint("Choose a different way to sign in to this VPN: type it each time, save it securely, or use a password app.")
-                .signInChooserPopover(isPresented: $showSignInChooser, vpn: vpn, profile: profile,
-                                      allowsPasswordSave: allowPasswordSave, sources: sources)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear {
@@ -1055,6 +1119,136 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
             focusedField = firstMissingField
             prepareSecurityKey()
         }
+    }
+
+    private func useApplePassword(_ selection: ApplePasswordSelection) {
+        var credentials = vpn.transientCredentials(for: profile.id)
+        credentials.username = selection.username
+        credentials.password = selection.password
+        vpn.setTransientCredentials(credentials, for: profile.id)
+        focusedField = requiresOTP ? .otp : nil
+    }
+
+    /// The ordinary fields remain editable. Saved rows deliberately show a
+    /// neutral run of dots rather than a blank box: a blank looked like missing
+    /// input even though Connect could use the keychain. The eye is the single
+    /// explicit reveal action for BOTH fields, keeping a Touch ID-protected pair
+    /// behind one authentication prompt rather than prompting twice.
+    @ViewBuilder private var credentialGridRows: some View {
+        if hasSavedManualSignIn {
+            GridRow {
+                Text("Username").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
+                SavedCredentialField(label: "Username", value: revealedSignIn?.username,
+                                     touchIDProtected: isProtected, revealed: revealedSignIn != nil,
+                                     toggleReveal: toggleSavedSignInReveal)
+            }
+            GridRow {
+                Text("Password").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
+                SavedCredentialField(label: "Password", value: revealedSignIn?.password,
+                                     touchIDProtected: isProtected, revealed: revealedSignIn != nil,
+                                     toggleReveal: toggleSavedSignInReveal)
+            }
+        } else {
+            GridRow {
+                Text("Username").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
+                // A userlocked profile fixes the username: prefilled (see
+                // loadOnce) and read-only, matching the editor's behaviour.
+                AutoFillField(kind: .username, placeholder: "Username",
+                              text: username, focus: $focusedField, focusValue: .username,
+                              onSubmit: attemptConnect)
+                    .disabled(!lockedUsername.isEmpty)
+                    .requiredEmphasis(missing: username.wrappedValue.isEmpty && lockedUsername.isEmpty,
+                                      attempted: submitAttempted, nudge: nudgeTick)
+                    .help(lockedUsername.isEmpty ? "" : "This VPN's configuration fixes the username.")
+            }
+            GridRow {
+                Text("Password").gridColumnAlignment(.trailing).foregroundStyle(.secondary)
+                AutoFillField(kind: .password, placeholder: "Password",
+                              text: password, focus: $focusedField, focusValue: .password,
+                              onSubmit: attemptConnect)
+                    .requiredEmphasis(missing: password.wrappedValue.isEmpty, attempted: submitAttempted, nudge: nudgeTick)
+            }
+        }
+    }
+
+    /// A normal keychain item can be read by this foreground app without a
+    /// biometric prompt. The protected store is checked by its metadata-only
+    /// probe, so this predicate itself never wakes a Touch ID sheet.
+    private var hasSavedManualSignIn: Bool {
+        guard !usesManager else { return false }
+        if isProtected { return true }
+        guard let saved = KeychainCredentialStore.loadCredentials(profile: profile.id) else { return false }
+        return !saved.username.isEmpty && !saved.password.isEmpty
+    }
+
+    private func toggleSavedSignInReveal() {
+        if revealedSignIn != nil {
+            revealedSignIn = nil
+            return
+        }
+        if isProtected {
+            Task {
+                let context = LAContext()
+                do {
+                    try await context.evaluatePolicy(
+                        .deviceOwnerAuthentication,
+                        localizedReason: "Reveal the saved sign-in for (profile.name)")
+                    let saved = try BiometricCredentialStore.load(profile: profile.id, context: context)
+                    guard !Task.isCancelled else { return }
+                    revealedSignIn = .init(username: saved.username, password: saved.password)
+                } catch is CancellationError {
+                    // Choosing not to reveal is not a connection failure.
+                } catch let error as LAError where error.code == .userCancel || error.code == .appCancel
+                    || error.code == .systemCancel {
+                    // Same user decision, expressed by LocalAuthentication.
+                } catch {
+                    vpn.report(error, profile: profile.id)
+                }
+            }
+        } else if let saved = KeychainCredentialStore.loadCredentials(profile: profile.id) {
+            revealedSignIn = .init(username: saved.username, password: saved.password)
+        }
+    }
+
+    /// One selection action for the direct menu. The detailed first-connect
+    /// card and the returning-user popover use the same persistence contract.
+    private func chooseSignInSource(_ option: SignInSourceOption) {
+        guard let kind = option.storedKind else { return }
+        pendingSignInSource = option.id
+        var source = vpn.credentialSource(for: profile.id)
+        source.kind = kind
+        var auth = vpn.authConfig(for: profile.id)
+        if let remembers = option.remembers { auth.rememberCredentials = remembers }
+        Task {
+            do {
+                try await vpn.setCredentialSource(source, for: profile.id)
+                if auth != vpn.authConfig(for: profile.id) {
+                    try await vpn.setAuthConfig(auth, for: profile.id)
+                }
+                if option.id == .typeEachTime { vpn.forgetSavedSignIn(id: profile.id) }
+                pendingSignInSource = nil
+            } catch is CancellationError {
+                pendingSignInSource = nil
+            } catch {
+                pendingSignInSource = nil
+                vpn.lastError = "Couldn’t change the sign-in source: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// The menu's selected row. The pending value gives the standard macOS
+    /// popup immediate feedback; the persisted profile becomes authoritative as
+    /// soon as its save completes.
+    private var signInSourcePickerSelection: SignInSourceID? {
+        if let pendingSignInSource { return pendingSignInSource }
+        let source = vpn.credentialSource(for: profile.id)
+        if source.kind == .manual {
+            return remember.wrappedValue ? .saveInSimpleVPN : .typeEachTime
+        }
+        return SignInSourceCatalog.option(
+            for: source.kind,
+            remembers: remember.wrappedValue,
+            facts: sources.facts(allowsPasswordSave: allowPasswordSave))?.id
     }
 
     var firstMissingField: CredentialField? {   // was private — internal for the file split
@@ -1113,6 +1307,47 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
             // which VPN to re-run, and the redactor knows this profile's secrets.
             vpn.report(error, profile: profile.id)
         }
+    }
+}
+
+/// One saved username/password row. The dots are a presence indicator, not a
+/// character count. A parent shares its eye action between both rows so Touch ID
+/// authenticates once and the saved values are cleared together.
+private struct SavedCredentialField: View {
+    let label: String
+    let value: String?
+    let touchIDProtected: Bool
+    let revealed: Bool
+    let toggleReveal: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(value ?? "••••••••")
+                .foregroundStyle(value == nil ? .secondary : .primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 8)
+            Button(action: toggleReveal) {
+                Image(systemName: revealed ? "eye.slash" : "eye")
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .help(revealed ? "Hide saved sign-in" : touchIDProtected
+                  ? "Reveal with Touch ID" : "Reveal saved sign-in")
+            .accessibilityLabel(revealed ? "Hide saved sign-in" : touchIDProtected
+                                ? "Reveal saved sign-in with Touch ID" : "Reveal saved sign-in")
+        }
+        .font(.body)
+        .padding(.horizontal, 8)
+        .frame(minHeight: 28)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label), saved\(touchIDProtected ? " and protected by Touch ID" : "")")
+        .accessibilityValue(revealed ? "Revealed" : "Hidden")
+        .accessibilityHint(revealed ? "Choose the eye to hide it again."
+                           : touchIDProtected ? "Choose the eye to authenticate and reveal it."
+                           : "Choose the eye to reveal it.")
     }
 }
 

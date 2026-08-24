@@ -107,11 +107,14 @@ leading `v` stripped; the build number (`CURRENT_PROJECT_VERSION`) is the
 `release.yml` (`CURRENT_PROJECT_VERSION="$(cat BUILDNUMBER)"`). That is the
 same counter `Tools/build-notarize-install.sh` bumps on every local live-test
 build, and the sharing is deliberate: a released app reports the same
-`v0.3 (114)` the dev loop showed, and the appcast's `sparkle:version` is that
-same number, so Sparkle's version comparison lines up with what users see.
-`github.run_number` is deliberately NOT used. (`Tools/build-release-dmg.sh`
-has a `build/buildnumber.txt` fallback for standalone local runs; CI always
-sets `CURRENT_PROJECT_VERSION`, so that path never fires in CI.)
+`v<marketing version> (<build number>)` the dev loop showed, and the appcast's
+`sparkle:version` is that same number, so Sparkle's version comparison lines
+up with what users see.
+`github.run_number` is deliberately NOT used. `Tools/bump-build-number.sh` is
+the only way to advance the counter: it updates both `BUILDNUMBER` and
+`project.yml`'s Debug default, after which XcodeGen regenerates the project.
+`Tools/build-release-dmg.sh` reads that same committed counter when no explicit
+build number is supplied; it has no machine-local fallback.
 
 The Sparkle appcast is generated in the same job: it is written to
 `build/dist/appcast.xml`, uploaded as an artifact, and served from

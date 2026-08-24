@@ -180,6 +180,49 @@ nonisolated enum OnePasswordAccountMemory {
         return ""
     }
 
+    /// Turn the account UUID carried by a 1Password item drag into the named
+    /// connection used everywhere else in the app. The UUID is sufficient for
+    /// the SDK but is never suitable UI: it lives in the connection's hidden
+    /// account field, while pickers continue to show only `SourceInstance.name`.
+    ///
+    /// Prefer an already matching connection. Otherwise fill an explicitly
+    /// selected blank connection, then the sole blank connection, and finally
+    /// create one when policy permits. A configured connection is never
+    /// overwritten merely because an item from another account was dragged.
+    @MainActor
+    static func connectionForDroppedAccount(
+        _ rawAccount: String,
+        preferred: SourceInstanceID? = nil,
+        store settings: SignInSourceSettingsStore = .shared
+    ) -> SourceInstanceID? {
+        let account = rawAccount.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !account.isEmpty,
+              let field = SignInSourceSettings.instanceFields(for: .onePassword).first
+        else { return nil }
+
+        let instances = settings.instances(for: .onePassword)
+        if let match = instances.first(where: {
+            connectionAccount($0.id, store: settings)
+                .localizedCaseInsensitiveCompare(account) == .orderedSame
+        }) {
+            return match.id
+        }
+
+        let blankPreferred = preferred.flatMap { wanted in
+            instances.first {
+                $0.id == wanted && connectionAccount($0.id, store: settings).isEmpty
+            }
+        }
+        let blankOnly = instances.count == 1
+            && connectionAccount(instances[0].id, store: settings).isEmpty
+            ? instances[0] : nil
+        let target = blankPreferred ?? blankOnly ?? settings.instanceStore.add(
+            named: instances.isEmpty ? "1Password" : "", for: .onePassword)
+        guard let target else { return nil }
+        settings.setValue(account, for: field, instance: target)
+        return target.id
+    }
+
     /// Whether a success should update what we remember. Nothing to learn from
     /// an empty name, or from the one already stored.
     static func shouldRemember(_ account: String, current: String) -> Bool {

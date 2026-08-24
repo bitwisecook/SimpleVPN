@@ -70,6 +70,12 @@ nonisolated struct VPNServiceProvider: Sendable, Identifiable, Equatable {
     /// Where the list lives. `nil` ⇒ unreachable without an account; see `blocked`.
     let listURL: URL?
 
+    /// The provider-owned page where the person obtains the configuration this
+    /// setup flow needs.  It is deliberately distinct from `listURL`: opening a
+    /// browser to get an account-specific configuration is a user action, while a
+    /// server-list fetch is a separately consented network request by SimpleVPN.
+    let setupURL: URL
+
     /// About how many bytes that URL returns, measured rather than estimated.
     ///
     /// It is a FACT ABOUT THE DOWNLOAD and it belongs in the catalogue because the
@@ -160,6 +166,7 @@ nonisolated enum VPNServiceProviderCatalog {
         displayName: "Mullvad",
         kind: .wireGuard,
         listURL: URL(string: "https://api.mullvad.net/www/relays/all/"),
+        setupURL: URL(string: "https://mullvad.net/en/account/#/wireguard-config")!,
         // MEASURED 2026-08-07: 300,032 bytes for all 580 relays. The lightest list of
         // the three by a wide margin, and small enough that the progress indicator
         // will usually never appear at all — which is the correct outcome.
@@ -189,6 +196,7 @@ nonisolated enum VPNServiceProviderCatalog {
         displayName: "IPVanish",
         kind: .openVPN,
         listURL: URL(string: "https://configs.ipvanish.com/configs/"),
+        setupURL: URL(string: "https://www.ipvanish.com/software/configs/")!,
         // MEASURED 2026-08-07: 2,084,884 bytes of HTML for all 3,576 filenames.
         //
         // THE INDEX RATHER THAN `configs.zip` (1,283,217 bytes), even though the zip
@@ -247,6 +255,7 @@ nonisolated enum VPNServiceProviderCatalog {
         displayName: "NordVPN",
         kind: .openVPN,
         listURL: URL(string: "https://api.nordvpn.com/v2/servers?limit=8000"),
+        setupURL: URL(string: "https://my.nordaccount.com/dashboard/nordvpn/manual-configuration/")!,
         approximateBytes: 9_000_000,
         hostnameSuffix: ".nordvpn.com",
         caFingerprintSHA256: nil,   // ❓ to be pinned when the fetch lands; fails closed until then
@@ -274,6 +283,7 @@ nonisolated enum VPNServiceProviderCatalog {
         displayName: "Proton VPN",
         kind: nil,
         listURL: nil,
+        setupURL: URL(string: "https://account.protonvpn.com/downloads")!,
         approximateBytes: 0,        // nothing is fetched, so nothing is downloaded
         hostnameSuffix: ".protonvpn.net",
         caFingerprintSHA256: nil,

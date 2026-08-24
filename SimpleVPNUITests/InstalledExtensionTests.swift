@@ -41,7 +41,7 @@ final class InstalledExtensionTests: XCTestCase {
     /// the matching quit) belong to the test itself.
     @MainActor
     private func launchInstalledApp() -> XCUIApplication {
-        let app = XCUIApplication(bundleIdentifier: Self.bundleID)
+        let app = makeSimpleVPNTestApplication(bundleIdentifier: Self.bundleID)
         app.launch()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 30),
                       "The installed app didn't come to the foreground — check the Automation permission prompt.")

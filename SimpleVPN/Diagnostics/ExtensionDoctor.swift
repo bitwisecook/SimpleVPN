@@ -189,6 +189,16 @@ final class ExtensionDoctor {
         case connectGate     // the ensureExtensionReady seam, before a connect
         case statsTimeout    // a connected tunnel's stats IPC stopped answering
         case doctorCard      // the user pressed the Doctor card's button
+
+        /// A background observation may diagnose and surface a repair, but it
+        /// must never put up a modal choice whose affirmative action drops a
+        /// live VPN. Consent UI belongs only to an action the person just took.
+        var allowsConsentPrompt: Bool {
+            switch self {
+            case .connectGate, .doctorCard: true
+            case .launch, .statsTimeout: false
+            }
+        }
     }
 
     /// The quiet indicator on the Doctor surface: a postponed heal ("Not Now")
@@ -265,9 +275,12 @@ final class ExtensionDoctor {
 
         Self.log.log("check-up begins (trigger: \(trigger.rawValue, privacy: .public))")
         var episode = Episode()
-        // "Not Now" must not become a nag: while a heal is already surfaced,
-        // automatic runs verify quietly and leave the card as the way back in.
-        if trigger != .doctorCard, surface != nil { episode.consentSuppressed = true }
+        // Automatic checks verify and may leave a quiet Doctor card, but never
+        // raise an unsolicited system-modal repair choice. A previously
+        // postponed repair also stays quiet until its card is pressed.
+        if !trigger.allowsConsentPrompt || (trigger != .doctorCard && surface != nil) {
+            episode.consentSuppressed = true
+        }
 
         // Bounded by the ladder's own escalation (each rung runs once).
         for _ in 0..<5 {

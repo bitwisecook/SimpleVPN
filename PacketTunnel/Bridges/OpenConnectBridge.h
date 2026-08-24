@@ -31,6 +31,9 @@ typedef NS_ENUM(NSInteger, OCStatus) {
 @property (copy) NSString *protocol;        // "fortinet" | "f5" | "gp" | "anyconnect"
 @property (copy) NSString *username;
 @property (nullable, copy) NSString *password;
+/// A fresh code for a distinct `OC_FORM_OPT_TOKEN` field.  It rides the session
+/// payload only; unlike password it is never persisted or reused.
+@property (nullable, copy) NSString *oneTimeCode;
 /// A session cookie obtained OUT of process (the app's ocauth-helper SSO
 /// sign-in). When set, the bridge skips openconnect_obtain_cookie entirely —
 /// no forms, no credentials — and connects with this cookie. In-memory only

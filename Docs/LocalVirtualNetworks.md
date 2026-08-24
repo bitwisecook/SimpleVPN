@@ -1,7 +1,7 @@
 # Local virtual networks — virtual machines and containers under a VPN
 
 `SimpleVPN/Monitoring/VirtualizationDiscovery.swift` · settings in `VirtualizationSettingDescriptors.swift`
-(**Settings ▸ General ▸ Privacy**) · manual anchors `vm-what-is-it`, `vm-detect`, `vm-warn-on-connect`
+(**Settings ▸ General ▸ Privacy**) · manual anchors `vm-what-is-it`, `vm-detect`, `vm-read-utm-configurations`, `vm-warn-on-connect`
 
 **Two products were installed on the machine this was written on: Apple `container` 1.0.0 and UTM
 4.7.5. Everything else in the table below is reasoned from the vendor's own documentation and has not

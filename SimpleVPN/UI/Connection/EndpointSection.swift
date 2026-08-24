@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 //  EndpointSection.swift
-//  Endpoint choice for a VPN: the dropdown (canonical control, full list, the
-//  accessibility path) plus the Mercator map with a pin per geolocated endpoint
-//  and the "you are here" marker. Servers are grouped under region headings and
-//  offered quickest-first where we've measured them, nearest-first where we
-//  haven't. Picking an endpoint just writes the server/port/protocol overrides —
-//  Automatic clears them — so it round-trips through exactly the same machinery
-//  as the Options tab, and changing it while connected raises the usual "takes
-//  effect on reconnect" notice.
+//  Endpoint choice for a VPN: the dropdown is the canonical control and full
+//  accessibility path. Its compact main-window globe previews the selected route
+//  in grey, then turns it blue only after tunnel telemetry confirms the endpoint
+//  actually in use. Servers are grouped under region headings and offered
+//  quickest-first where we've measured them, nearest-first where we haven't.
+//  Picking an endpoint just writes the server/port/protocol overrides — Automatic
+//  clears them — so it round-trips through exactly the same machinery as the
+//  Options tab, and changing it while connected raises the usual "takes effect on
+//  reconnect" notice.
 //
 
 import SwiftUI
@@ -21,6 +22,12 @@ struct EndpointSection: View {
     @Environment(EndpointLocator.self) private var locator
     @Environment(PublicIPMonitor.self) private var publicIP
     @Environment(EndpointProbeStore.self) private var probes: EndpointProbeStore?
+    @Environment(ReachabilityMonitor.self) private var reach: ReachabilityMonitor?
+
+    /// Eight centimetres is the maximum *drawn globe* diameter. The Metal surface
+    /// itself is wider (2:1) so the surrounding card never claims this is a
+    /// full-window map. It remains allowed to shrink with a narrow detail pane.
+    private static let previewGlobeDiameter: CGFloat = 8 / 2.54 * 72
 
     private var endpoints: [VPNEndpoint] { vpn.endpoints(for: profile.id) }
 
@@ -30,31 +37,48 @@ struct EndpointSection: View {
         EndpointRegions.groups(endpoints, locator: locator, probes: probes, home: home)
     }
 
+    private var rankedEndpoints: [RankedEndpoint] { groups.flatMap(\.endpoints) }
+
     /// This VPN is up, or coming up (see VPNController.isEngaged). Its servers
     /// are then neither measured nor described by a measurement: the check would
     /// travel through the very tunnel it is asking about and come back as a
     /// timeout, which the user reads as "the server I'm connected to is down".
     private var connected: Bool { vpn.isEngaged(id: profile.id) }
 
+    /// The one server telemetry says is carrying this session. A `.connecting`
+    /// state is deliberately not enough: blue means that the transport has already
+    /// reported the endpoint, not that a button was pressed.
+    private var liveEndpoint: RankedEndpoint? {
+        guard vpn.displayStatus(for: profile.id) == .connected,
+              let stats = reach?.stats(for: profile.id) else { return nil }
+        return rankedEndpoints.first {
+            ServersTableCopy.isInUse($0, serverIP: stats.serverIP,
+                                      serverEndpoint: stats.serverEndpoint)
+        }
+    }
+
+    /// What a route preview should point at while no session has named a server:
+    /// the selected override, or the first endpoint in the configuration's own
+    /// automatic order. Never invent a location when neither is available.
+    private var previewEndpoint: RankedEndpoint? {
+        if let liveEndpoint { return liveEndpoint }
+        let selection = selectedEndpointID(rankedEndpoints.map(\.endpoint))
+        return selection.flatMap { id in rankedEndpoints.first { $0.id == id } }
+            ?? rankedEndpoints.first
+    }
+
     var body: some View {
         let endpoints = endpoints
         let groups = groups
-        let items = groups.flatMap(\.endpoints)
-        if endpoints.count > 1 || items.contains(where: { $0.point != nil }) {
+        if !endpoints.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
-                picker(groups)
-                Text(EndpointRegions.orderExplanation(groups, home: home, connected: connected))
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                let pins = locatedPins(items)
-                if pins.contains(where: { $0.kind != .user }) {
-                    MercatorMapView(pins: pins) { id in
-                        if let e = endpoints.first(where: { $0.id == id }) { select(e) }
-                    }
-                    Text("Server locations are country-level. Pick a pin, or use the menu above.")
+                if endpoints.count > 1 {
+                    picker(groups)
+                    Text(EndpointRegions.orderExplanation(groups, home: home, connected: connected))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+                routePreview
             }
             // Opening a VPN's page is the user asking about its servers, so this
             // is a fair moment to measure them — and the only kind of moment that
@@ -69,11 +93,51 @@ struct EndpointSection: View {
         }
     }
 
+    // MARK: Compact route preview
+
+    @ViewBuilder
+    private var routePreview: some View {
+        if let home, let endpoint = previewEndpoint, let point = endpoint.point {
+            let isLive = liveEndpoint?.id == endpoint.id
+            let userPin = MapPin(id: "preview.home", kind: .user,
+                                 lat: home.lat, lon: home.lon,
+                                 title: publicIP.homeCountryName ?? "Your location",
+                                 subtitle: "This Mac")
+            let endpointPin = MapPin(
+                id: "preview.endpoint.\(endpoint.id)",
+                kind: .endpoint(selected: true),
+                lat: point.lat, lon: point.lon,
+                title: endpoint.primaryLabel,
+                subtitle: isLive ? "Connected server" : "Selected server",
+                placement: endpoint.endpoint.country == nil && endpoint.geoPoint != nil ? .exact : .approximate)
+            let link = MapConnection(from: userPin.id, to: endpointPin.id,
+                                     kind: isLive ? .tunnel : .pending)
+
+            VStack(alignment: .leading, spacing: 5) {
+                MetalGlobeMapView(pins: [userPin, endpointPin], connections: [link],
+                                   maximumGlobeDiameter: Self.previewGlobeDiameter,
+                                   usesMetalSurface: false) { id in
+                    guard id == endpointPin.id else { return }
+                    select(endpoint.endpoint)
+                }
+                .frame(maxWidth: .infinity)
+                Text(isLive
+                     ? "Connected route — blue shows the server in use."
+                     : "Selected route — grey until it connects.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
+            .accessibilityElement(children: .contain)
+        }
+    }
+
     // MARK: Dropdown (canonical)
 
     private func picker(_ groups: [RegionGroup]) -> some View {
         let items = groups.flatMap(\.endpoints)
         let selection = selectedEndpointID(items.map(\.endpoint))
+        let liveEndpointID = liveEndpoint?.id
         return Picker("Server", selection: Binding(
             get: { selection },
             set: { newID in select(items.first { $0.id == newID }?.endpoint) }
@@ -92,7 +156,7 @@ struct EndpointSection: View {
                 Section {
                     ForEach(group.endpoints) { item in
                         Text(EndpointRowLabel.oneLine(
-                            item, connected: connected && item.id == selection))
+                            item, connected: item.id == liveEndpointID))
                             .tag(String?.some(item.id))
                     }
                 } header: {
@@ -157,31 +221,4 @@ struct EndpointSection: View {
         }
     }
 
-    // MARK: Pins
-
-    private func locatedPins(_ items: [RankedEndpoint]) -> [MapPin] {
-        let selectedID = selectedEndpointID(items.map(\.endpoint))
-        var pins: [MapPin] = items.compactMap { item in
-            // A corrected country moves the pin too — the map and the list must
-            // never disagree about where a server is.
-            guard let point = item.point else { return nil }
-            var subtitle = item.countryName ?? ""
-            let note = connected && item.id == selectedID
-                ? "Connected" : item.measurement?.rttText
-            if let note {
-                subtitle += subtitle.isEmpty ? note : " · \(note)"
-            }
-            return MapPin(id: item.id,
-                          kind: .endpoint(selected: item.id == selectedID),
-                          lat: point.lat, lon: point.lon,
-                          title: item.endpoint.displayLabel,
-                          subtitle: subtitle)
-        }
-        if let lat = publicIP.lat, let lon = publicIP.lon {
-            pins.append(MapPin(id: "you", kind: .user, lat: lat, lon: lon,
-                               title: "This Mac",
-                               subtitle: publicIP.countryName ?? ""))
-        }
-        return pins
-    }
 }

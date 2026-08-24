@@ -79,7 +79,7 @@ struct NoticeParagraph: View {
     /// The narrowest column this paragraph is ever measured for. Not a design
     /// decision about line length — a statement about the smallest editor pane the
     /// app can produce, kept well below it so this can never clip anything.
-    static let minimumWidth: CGFloat = 320
+    static let minimumWidth: CGFloat = BannerMetrics.minimumReadableWidth
 
     var body: some View {
         Text(text)
@@ -214,8 +214,7 @@ struct MaturityBanner: View {
                 .accessibilityIdentifier("maturity-disclose-\(notice.key)")
             }
         }
-        .padding(12)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+        .bannerSurface(tint: .quaternary, opacity: 0.5)
         .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: collapsed)
         // Holds two buttons: a container with its own sentence, never .combine.
         .accessibilityElement(children: .contain)
@@ -358,8 +357,7 @@ struct FeatureRequestBanner: View {
                 .accessibilityIdentifier("feature-request-disclose-\(notice.key)")
             }
         }
-        .padding(12)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+        .bannerSurface(tint: .quaternary, opacity: 0.5)
         .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: collapsed)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(collapsed ? notice.title

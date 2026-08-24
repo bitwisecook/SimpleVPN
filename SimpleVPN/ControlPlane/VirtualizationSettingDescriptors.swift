@@ -22,31 +22,28 @@ import Foundation
 @MainActor
 enum VirtualizationSettings {
 
-    /// The master switch for the local scan. On by default: it reads the
-    /// filesystem and the interface list, executes nothing, wakes no virtualization
-    /// daemon and sends nothing anywhere — and a detection feature that defaults to
-    /// not detecting is inert.
-    /// THE SUMMARY NAMES THE NAMES, and it has to.
-    ///
-    /// This switch used to govern subnets and interfaces. It now also reads the
-    /// virtual machines' and containers' OWN NAMES out of the settings files their
-    /// products keep — which is a materially more personal thing to read, because
-    /// `192.168.64.0/24` says nothing about anybody and "client-acme-prod" says a
-    /// great deal. Leaving the old summary in place would have been consent obtained
-    /// for something smaller than what happens, so the sentence changed with the
-    /// behaviour. The promise that is NOT weakened, and is what makes one switch
-    /// enough: still only this Mac, still only reading, still nothing executed, still
-    /// no daemon asked, still nothing sent anywhere.
+    /// The master switch for the ordinary local scan. It deliberately excludes
+    /// protected data owned by another app; that is a separately chosen option.
     static let detect = EngineSettingSpec(
         id: "vm.detect",
         name: "Look for Virtual Machines on This Mac",
-        summary: "Lets SimpleVPN notice the virtual machines and containers you run \u{2014} their "
-            + "names, and which of their networks are live \u{2014} so it can show them on the "
-            + "Routes map and warn you before a VPN cuts one off. It reads the settings files your "
-            + "own virtualization apps keep and nothing else: nothing is run, no virtual machine is "
-            + "started, no name leaves this Mac, and names are left out of problem reports.",
+        summary: "Lets SimpleVPN notice local virtual-network interfaces and virtualization apps so it "
+            + "can warn before a VPN cuts off a live guest network. It does not open another app’s "
+            + "data; nothing is run, no virtual machine is started, and nothing leaves this Mac.",
         group: .traffic,
         default: true)
+
+    /// UTM keeps its VM bundles inside its sandboxed Documents container. macOS
+    /// treats that as protected app data, so it must never be entered by a background
+    /// discovery pass or a Connect click.
+    static let readUTMConfigurations = EngineSettingSpec(
+        id: "vm.read-utm-configurations",
+        name: "Read UTM Virtual-Machine Configurations",
+        summary: "Lets SimpleVPN read UTM’s saved virtual-machine names and network modes, so it can "
+            + "describe UTM guests more precisely. When you turn this on, SimpleVPN explains why and "
+            + "then macOS asks once for access. Off means UTM’s own data is never opened.",
+        group: .traffic,
+        default: false)
 
     /// The warning itself. Separate from detection because "notice it" and "say
     /// something about it" are different consents: someone may want the facts in a
@@ -60,7 +57,7 @@ enum VirtualizationSettings {
         group: .traffic,
         default: true)
 
-    static let all: [EngineSettingSpec] = [detect, warnOnConnect]
+    static let all: [EngineSettingSpec] = [detect, readUTMConfigurations, warnOnConnect]
 
     static let catalog = EngineSettingCatalog(all)
 
@@ -68,9 +65,16 @@ enum VirtualizationSettings {
     /// switch rather than two.
     /// `nonisolated` so the off-main scan and its gate can read them (see `isEnabled`).
     nonisolated static let detectDefaultsKey = "vm.detect"
+    nonisolated static let readUTMConfigurationsDefaultsKey = "vm.read-utm-configurations"
     nonisolated static let warnOnConnectDefaultsKey = "vm.warn-on-connect"
 
-    /// Both switches default ON, so a `UserDefaults` that has never been written
+    /// UI tests must never reach macOS's Files and Folders consent sheet.  The UTM
+    /// integration is already opt-in, and this process-local guard makes that
+    /// invariant explicit for test launchers too.
+    nonisolated static let suppressProtectedFileScanEnvironmentKey =
+        "SIMPLEVPN_UI_TEST_SUPPRESS_PROTECTED_FILE_SCAN"
+
+    /// The ordinary switches default ON, so a `UserDefaults` that has never been written
     /// must read as true — `bool(forKey:)` alone would read as false and silently
     /// disable a feature nobody turned off.
     ///
@@ -83,6 +87,25 @@ enum VirtualizationSettings {
         store.object(forKey: key) as? Bool ?? true
     }
 
-    nonisolated static var detectionEnabled: Bool { isEnabled(detectDefaultsKey) }
+    nonisolated static func effectiveDetectionEnabled(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        store: UserDefaults = .standard
+    ) -> Bool {
+        _ = environment // kept in the signature for source compatibility with UI tests.
+        return isEnabled(detectDefaultsKey, store: store)
+    }
+
+    nonisolated static func protectedUTMConfigurationAccessEnabled(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        store: UserDefaults = .standard
+    ) -> Bool {
+        guard environment[suppressProtectedFileScanEnvironmentKey] != "1" else { return false }
+        return store.object(forKey: readUTMConfigurationsDefaultsKey) as? Bool ?? false
+    }
+
+    nonisolated static var detectionEnabled: Bool { effectiveDetectionEnabled() }
+    nonisolated static var protectedUTMConfigurationAccessEnabled: Bool {
+        protectedUTMConfigurationAccessEnabled()
+    }
     nonisolated static var warningEnabled: Bool { isEnabled(warnOnConnectDefaultsKey) }
 }

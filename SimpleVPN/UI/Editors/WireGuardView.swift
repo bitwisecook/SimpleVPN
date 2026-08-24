@@ -290,11 +290,13 @@ struct WireGuardView: View {
                     // Assigning `tableNumberText` here is what makes the state
                     // below do its job: it was never written, so flipping to
                     // auto/off and back always came up empty.
-                    TextField("main or 51820", text: Binding(
+                    TextField("", text: Binding(
                         get: { draft.table },
-                        set: { draft.table = $0; tableNumberText = $0 }))
+                        set: { draft.table = $0; tableNumberText = $0 }),
+                              prompt: Text("main or 51820"))
                         .font(.callout.monospaced())
                         .multilineTextAlignment(.trailing)
+                        .scalarConfigurationValue()
                         .autocorrectionDisabled()
                         .accessibilityLabel("Routing table name or number")
                         .accessibilityValue(tableProblem.map { "\(draft.table). Problem: \($0)" } ?? draft.table)
@@ -337,9 +339,10 @@ struct WireGuardView: View {
             .help(Self.exportOnlyHelp)
             if isCustom {
                 LabeledContent("Mark") {
-                    TextField("0x1234 or 4660", text: $draft.fwMark)
+                    TextField("", text: $draft.fwMark, prompt: Text("0x1234 or 4660"))
                         .font(.callout.monospaced())
                         .multilineTextAlignment(.trailing)
+                        .scalarConfigurationValue()
                         .autocorrectionDisabled()
                         .accessibilityLabel("Firewall mark value")
                         .accessibilityValue(fwMarkProblem.map { "\(draft.fwMark). Problem: \($0)" } ?? draft.fwMark)
@@ -408,9 +411,10 @@ struct WireGuardView: View {
                 EngineSettingLabel(spec: Self.specs["wg.private-key"], value: hasPrivateKey)
             }
             LabeledContent("Set / Replace Key") {
-                SecureField("paste base64 private key", text: $newPrivateKey)
+                SecureField("", text: $newPrivateKey, prompt: Text("paste base64 private key"))
                     .font(.callout.monospaced())
                     .multilineTextAlignment(.trailing)
+                    .scalarConfigurationValue()
                     .autocorrectionDisabled()
                     .accessibilityLabel("Set or replace the private key")
                     // Validation rides the field's value (Docs/Accessibility.md).
@@ -439,9 +443,10 @@ struct WireGuardView: View {
                 EngineSettingLabel(spec: Self.specs["wg.preshared-key"], value: hasPresharedKey)
             }
             LabeledContent("Set / Replace Key") {
-                SecureField("paste base64 pre-shared key", text: $newPresharedKey)
+                SecureField("", text: $newPresharedKey, prompt: Text("paste base64 pre-shared key"))
                     .font(.callout.monospaced())
                     .multilineTextAlignment(.trailing)
+                    .scalarConfigurationValue()
                     .autocorrectionDisabled()
                     .accessibilityLabel("Set or replace the pre-shared key")
                     // Validation rides the field's value (Docs/Accessibility.md).

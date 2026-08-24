@@ -212,7 +212,7 @@ struct ConnectionRowLayout<Accessory: View>: View {
                                                               : AnyShapeStyle(.secondary))
                     }
                     if !labels.isEmpty {
-                        HStack(spacing: 4) { ForEach(labels) { LabelPill(label: $0) } }
+                        LabelPills(labels: labels)
                     }
                 }
 

@@ -44,6 +44,113 @@ struct OnePasswordProvider: CredentialProvider {
         var isOTP: Bool { type == "OTP" }
     }
 
+    /// A deliberately non-secret description of the linked entry for the
+    /// connection screen.  The username is an identifier the user asked to
+    /// review; password and verification-code *contents* never leave this
+    /// short-lived inspection — only their presence does.
+    struct EntryInspection: Sendable, Equatable {
+        let title: String
+        let vaultID: String
+        let fields: [OPField]
+        let fieldMap: [String: String]
+        let username: String?
+        let hasPassword: Bool
+        let hasVerificationCode: Bool
+    }
+
+    /// One approved full-item read, split into the two things its callers need:
+    /// the non-secret facts SimpleVPN may remember and the short-lived values the
+    /// current connection consumes.  Keeping them together is what lets a first
+    /// Connect learn an unmapped dragged item's fields without making a second
+    /// 1Password request (and therefore without showing a second approval prompt).
+    struct PreparedEntry: Sendable {
+        let inspection: EntryInspection
+        let credentials: RawCredentials
+    }
+
+    /// Seed a field map from the roles 1Password itself puts on a Login item.
+    /// This is deliberately a pure helper so every surface that links an entry
+    /// reaches the same answer: a dragged entry with a current verification code
+    /// must not quietly turn into a username/password-only connection.
+    static func inferredFieldMap(from fields: [OPField]) -> [String: String] {
+        var map: [String: String] = [:]
+        if let field = fields.first(where: { $0.purpose == "USERNAME" }) {
+            map[AuthKind.username.rawValue] = field.id
+        }
+        if let field = fields.first(where: { $0.purpose == "PASSWORD" }) {
+            map[AuthKind.password.rawValue] = field.id
+        }
+        if let field = fields.first(where: { $0.isOTP }) {
+            map[AuthKind.otp.rawValue] = field.id
+        }
+
+        // Custom 1Password fields do not carry the built-in Login purposes.
+        // Take the same conservative names the resolver uses so the first
+        // connection works without asking people to map ordinary entries by
+        // hand.  An explicit mapping always wins when one already exists.
+        if map[AuthKind.username.rawValue] == nil {
+            let names: Set<String> = ["username", "user", "login", "email"]
+            if let field = fields.first(where: {
+                !$0.isOTP && $0.type != "CONCEALED" && names.contains($0.label.lowercased())
+            }) {
+                map[AuthKind.username.rawValue] = field.id
+            }
+        }
+        if map[AuthKind.password.rawValue] == nil,
+           let field = fields.first(where: { $0.type == "CONCEALED" }) {
+            map[AuthKind.password.rawValue] = field.id
+        }
+        return map
+    }
+
+    /// Inspect precisely one linked entry.  This centralises the three things
+    /// every UI surface needs to agree on: which fields 1Password identified,
+    /// how they map to VPN roles, and which values may be acknowledged without
+    /// displaying a secret.  It does not scan a vault or retain a password or
+    /// code in app state.
+    static func prepareEntry(itemReference ref: String, vault: String,
+                             account: String = "") async throws -> PreparedEntry {
+        let r = ref.trimmingCharacters(in: .whitespaces)
+        guard !r.isEmpty else { throw OPError.noReference }
+        let item: OnePasswordNative.OPItem
+        do {
+            item = try await OnePasswordNative.getItem(
+                reference: r, vault: vault.trimmingCharacters(in: .whitespaces),
+                account: account.trimmingCharacters(in: .whitespaces))
+        } catch let error as OnePasswordNativeError {
+            if case .userCancelled = error { throw CancellationError() }
+            throw error
+        }
+        return preparedEntry(from: item)
+    }
+
+    /// Pure half of `prepareEntry`, kept internal so tests can pin the security
+    /// boundary: field coordinates may be persisted; password and current code
+    /// stay only in the returned connection value.
+    static func preparedEntry(from item: OnePasswordNative.OPItem) -> PreparedEntry {
+        let fields: [OPField] = item.fields.compactMap { f in
+            // OTP fields carry their derived current value separately.  Empty
+            // slots cannot serve a sign-in role and should not look configured.
+            guard !f.value.isEmpty || f.otp?.isEmpty == false else { return nil }
+            return OPField(id: f.id, label: f.label.isEmpty ? f.id : f.label,
+                           purpose: f.purpose, type: f.type)
+        }
+        let map = inferredFieldMap(from: fields)
+        let raw = credentials(from: item, map: map)
+        let inspection = EntryInspection(
+            title: item.title, vaultID: item.vaultID,
+            fields: fields, fieldMap: map,
+            username: raw.username,
+            hasPassword: raw.password?.isEmpty == false,
+            hasVerificationCode: raw.otp?.isEmpty == false)
+        return PreparedEntry(inspection: inspection, credentials: raw)
+    }
+
+    static func inspectEntry(itemReference ref: String, vault: String,
+                             account: String = "") async throws -> EntryInspection {
+        try await prepareEntry(itemReference: ref, vault: vault, account: account).inspection
+    }
+
     private static let log = Logger(subsystem: "com.bragi0.SimpleVPN", category: "1password")
 
     func isAvailable(for profile: String) async -> Bool {
@@ -190,19 +297,8 @@ struct OnePasswordProvider: CredentialProvider {
     static func listFields(itemReference ref: String, vault: String,
                            account: String = "") async throws
         -> (title: String, vaultID: String, fields: [OPField]) {
-        let r = ref.trimmingCharacters(in: .whitespaces)
-        guard !r.isEmpty else { throw OPError.noReference }
-        let item = try await OnePasswordNative.getItem(
-            reference: r, vault: vault.trimmingCharacters(in: .whitespaces),
-            account: account.trimmingCharacters(in: .whitespaces))
-        let fields: [OPField] = item.fields.compactMap { f in
-            // Skip empty fields — a slot with nothing in it can't feed a role.
-            // (OTP fields carry their value as `otp`; `value` is always empty.)
-            guard !f.value.isEmpty || f.otp?.isEmpty == false else { return nil }
-            return OPField(id: f.id, label: f.label.isEmpty ? f.id : f.label,
-                           purpose: f.purpose, type: f.type)
-        }
-        return (item.title, item.vaultID, fields)
+        let inspection = try await inspectEntry(itemReference: ref, vault: vault, account: account)
+        return (inspection.title, inspection.vaultID, inspection.fields)
     }
 
     // MARK: Field selection

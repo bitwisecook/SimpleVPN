@@ -20,7 +20,8 @@
 //  a competitor. It already appears exactly when the flow needs a chooser (no
 //  successful connect yet), it already owns the OTP question the chooser's
 //  wording refers to, and it already hosts the per-source detail (the 1Password
-//  drag-in well, the address a KeePassXC/Keeper/Apple Passwords lookup matches).
+//  drag-in well, Apple Passwords' system picker, and the address a KeePassXC
+//  lookup or Keeper record matches).
 //  A second sheet or window would have to duplicate all of that and then argue
 //  with this card about which of them was showing.
 //
@@ -42,22 +43,43 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
     /// passed in rather than re-derived, so the card and the form below it can
     /// never disagree about whether the keychain row is on offer.
     var allowsPasswordSave = true
+    /// This same surface is also used by Change… after a connection has
+    /// succeeded.  Keeping one configuration view prevents a second, taller
+    /// source chooser from drifting away from the first-connect experience.
+    var isFirstConnection = true
     @Binding var dismissed: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// Marching-ants phase for the drop well (pure Shape drawing — safe).
-    @State private var dashPhase: CGFloat = 0
+    @Environment(\.liveVisualPolicy) private var liveVisuals
     @State private var apServer = ""
     /// A multi-selection drag, waiting to be narrowed to the one item this VPN
     /// signs in with. Empty = nothing pending.
     @State private var choices: [OnePasswordDrop] = []
+    @State private var onePasswordDrops = OnePasswordDropCollector()
     /// The 1Password setup check — run when 1Password is CHOSEN here, never on
     /// appear, and skipped once the integration has been proven to work.
     @State private var preflight = OnePasswordPreflightModel()
-    /// Collapses the several deliveries macOS makes of one drag into one apply.
-    @State private var drops = OnePasswordDropCollector()
+    @State private var isOnePasswordDropTargeted = false
+    @State private var onePasswordDropError: String?
+    @State private var onePasswordItems: [OnePasswordNative.OPItemInVault] = []
+    @State private var loadingOnePasswordItems = false
+    @State private var showOnePasswordBrowser = false
+    @State private var onePasswordBrowseError: String?
+    /// The selected entry's field list, loaded only after the person explicitly
+    /// asks SimpleVPN to use that entry.  It powers the same mapping sheet as
+    /// Manage VPNs, rather than inventing a smaller first-run-only mapper.
+    @State private var opFields: [OnePasswordProvider.OPField] = []
+    @State private var opItemTitle = ""
+    /// A momentary, non-secret description of the linked 1Password entry.  It
+    /// lets the person see what will be supplied without turning the app into
+    /// another password store.
+    @State private var opInspection: OnePasswordProvider.EntryInspection?
+    @State private var loadingOPFields = false
+    @State private var showFieldMap = false
     /// What this Mac can actually offer. Shared app-wide so one set of probes
     /// serves every surface.
     @State private var sources = SignInSourceAvailability.shared
+    @State private var signInSettings = SignInSourceSettingsStore.shared
+    @Environment(SettingsRouter.self) private var settingsRouter: SettingsRouter?
 
     private var auth: VPNAuthConfig { vpn.authConfig(for: profile.id) }
     private var source: CredentialSource { vpn.credentialSource(for: profile.id) }
@@ -65,7 +87,7 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
     /// The row that matches what this VPN is set to right now.
     private var selectedID: SignInSourceID? {
         switch source.kind {
-        case .manual: auth.rememberCredentials ? .saveInSimpleVPN : .typeEachTime
+        case .manual: vpn.remembersPassword(for: profile.id) ? .saveInSimpleVPN : .typeEachTime
         case .applePasswords: .applePasswords
         default: LocalVaultRegistry.adapter(for: source.kind).map { .vault($0.vendor) }
         }
@@ -74,62 +96,50 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Label("Before your first connect", systemImage: "hand.wave")
+                Label(isFirstConnection ? "Before your first connect" : "Set up your sign-in",
+                      systemImage: isFirstConnection ? "hand.wave" : "person.badge.key")
                     .font(.callout.weight(.semibold))
                 Spacer()
                 Button { dismissed = true } label: {
                     Image(systemName: "xmark").frame(width: 22, height: 22).contentShape(Rectangle())
                 }
                     .buttonStyle(.borderless)
-                    .help("Hide until next launch — this card comes back until a connect succeeds")
-                    .accessibilityLabel("Hide setup card")
+                    .help(isFirstConnection
+                          ? "Hide until next launch — this card comes back until a connect succeeds"
+                          : "Close sign-in setup")
+                    .accessibilityLabel(isFirstConnection ? "Hide setup card" : "Close sign-in setup")
             }
-            Text("The configuration file says how to reach \(profile.name) — but not how you sign in. Two quick questions:")
+            Text(isFirstConnection
+                 ? "The configuration file says how to reach \(profile.name) — but not how you sign in. Choose where the sign-in comes from, then check whether it needs a verification code."
+                 : "Choose where \(profile.name)'s sign-in comes from, then check whether it needs a verification code.")
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Toggle(isOn: otpBinding) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("I also enter a verification code")
-                    Text("A short code from an authenticator app, a key fob, or a text message.")
-                        .font(.caption).foregroundStyle(.secondary)
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                GridRow {
+                    Text("Where your sign-in comes from")
+                        .foregroundStyle(.secondary)
+                        .gridColumnAlignment(.trailing)
+                    SignInSourcePicker(
+                        options: SignInSourceCatalog.options(facts),
+                        selection: selectedID,
+                        onChoose: choose)
                 }
             }
-            .toggleStyle(.checkbox)
-
-            SignInSourceChooser(
-                options: SignInSourceCatalog.options(facts),
-                selection: selectedID,
-                onChoose: { choose($0) },
-                onOpenApp: { open($0) },
-                onRecheck: { recheck($0) },
-                compact: true)
+            .frame(maxWidth: 520, alignment: .leading)
 
             switch source.kind {
             case .manual:
                 EmptyView()   // the credential form directly below IS the answer
             case .onePassword:
-                // Same walkthrough as the editor, in the smaller type this card
-                // uses — with the account asked for here, since this card has no
-                // Account field of its own to point at.
-                OnePasswordSetupCard(model: preflight, compact: true, asksForAccount: true,
-                                     onAccount: { useAccount($0) },
-                                     onCheckAgain: { checkOnePassword(force: true) })
-                onePasswordWell
-                Text("Dragging the item itself fills in everything SimpleVPN needs. Dragging one of its fields fills in less.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                onePasswordConfiguration
             case .applePasswords:
-                HStack {
-                    TextField("Website or server the password is saved for", text: $apServer)
-                        .textFieldStyle(.roundedBorder)
-                        .autocorrectionDisabled()
-                        .onSubmit(saveApplePasswords)
-                    Button("Use") { saveApplePasswords() }.buttonStyle(.glass)
-                        .disabled(apServer.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
-                .onAppear {
-                    apServer = source.reference.isEmpty ? profile.server : source.reference
+                VStack(alignment: .leading, spacing: 8) {
+                    ApplePasswordsPickerButton(onPick: useApplePassword)
+                    Text("macOS owns this searchable picker and its authorization. SimpleVPN receives only the one username and password you choose, for this connection.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             case .keePassXC:
                 // Same one-field shape as Apple Passwords: KeePassXC finds the
@@ -340,6 +350,13 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            // The same optional verification-code choice appears for every
+            // sign-in source.  A linked 1Password entry may prefill it, but it
+            // remains visible and editable until this VPN has connected once.
+            VerificationCodeConfiguration(required: otpRequirement,
+                                          passwordTemplate: otpTemplate,
+                                          requiredByServer: vpn.hasStaticChallenge(profile.id))
         }
         .padding(14)
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
@@ -349,63 +366,361 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
         // app had no name and no gate could say so. Names the VPN it is about, because
         // a listener arriving here needs to know which one is being set up.
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Before your first connect to \(profile.name)")
-        // Cheap facts on appear, then the paid-for ones once. The poll is what
-        // makes a 1Password someone quits (or a KeePassXC they launch) show up
-        // in the list without the window being reopened.
+        .accessibilityLabel(isFirstConnection
+                            ? "Before your first connect to \(profile.name)"
+                            : "Set up the sign-in for \(profile.name)")
+        // Gather only the prompt-free facts as the card appears.  A password
+        // manager's deep check can launch its helper and therefore show that
+        // manager's approval UI; it belongs to an explicit recheck, not to
+        // merely opening the VPN window.
         .onAppear { sources.refresh() }
-        .task { await sources.deepScan() }
+        // Deliberately no task keyed on the linked 1Password item. A drop only
+        // records coordinates; the ordinary Connect action is the first read,
+        // so it is also the only Touch ID approval needed to get online.
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
                 sources.refresh()
-                // Following an enablement banner must flip the row without a
-                // restart; the throttle inside keeps this cheap.
-                await sources.recheckIfDue()
+            }
+        }
+        .sheet(isPresented: $showFieldMap) {
+            OnePasswordFieldMapSheet(itemTitle: opItemTitle, fields: opFields,
+                                     roles: applicableOnePasswordRoles, mapping: sourceFieldMap)
+        }
+    }
+
+    private var otpRequirement: Binding<Bool> {
+        Binding(get: { vpn.requiresOTP(for: profile.id) }, set: { on in
+            guard !vpn.hasStaticChallenge(profile.id) else { return }
+            var auth = vpn.authConfig(for: profile.id)
+            auth.requiresOTP = on
+            Task { try? await vpn.setAuthConfig(auth, for: profile.id) }
+        })
+    }
+
+    private var otpTemplate: Binding<String> {
+        Binding(get: { vpn.authConfig(for: profile.id).passwordTemplate }, set: { template in
+            var auth = vpn.authConfig(for: profile.id)
+            auth.passwordTemplate = template
+            Task { try? await vpn.setAuthConfig(auth, for: profile.id) }
+        })
+    }
+
+    private var sourceFieldMap: Binding<[String: String]> {
+        Binding(get: { source.fieldMap }, set: { map in
+            var updated = source
+            updated.fieldMap = map
+            Task { try? await vpn.setCredentialSource(updated, for: profile.id) }
+        })
+    }
+
+    private var applicableOnePasswordRoles: [AuthKind] {
+        var roles: [AuthKind] = [.username, .password]
+        if vpn.requiresOTP(for: profile.id) { roles.append(.otp) }
+        return roles
+    }
+
+    private var onePasswordEntryPreview: some View {
+        Group {
+            if loadingOPFields && opInspection == nil {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Checking the linked 1Password entry…")
+                }
+                .font(.callout).foregroundStyle(.secondary)
+            } else if let inspection = opInspection {
+                VStack(alignment: .leading, spacing: 8) {
+                    Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                        if let username = inspection.username, !username.isEmpty {
+                            linkedCredentialRow(label: fieldLabel(for: .username, in: inspection),
+                                                value: username, symbol: "person", sensitive: false)
+                        }
+                        if inspection.hasPassword {
+                            linkedCredentialRow(label: fieldLabel(for: .password, in: inspection),
+                                                value: "••••••••", symbol: "lock", sensitive: true)
+                        }
+                        if inspection.hasVerificationCode {
+                            linkedCredentialRow(label: fieldLabel(for: .otp, in: inspection),
+                                                value: "••••••", symbol: "clock.arrow.circlepath",
+                                                sensitive: true, trailing: { OnePasswordVerificationCountdown() })
+                        }
+                    }
+                    .font(.callout)
+                    .frame(maxWidth: 460, alignment: .leading)
+
+                    HStack(spacing: 8) {
+                        Button("Change Fields…") { loadOnePasswordFields(showMapping: true) }
+                            .disabled(loadingOPFields)
+                        Text("1Password supplies these values when you connect.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(10)
+                .background(.background.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+            } else {
+                HStack(spacing: 8) {
+                    Button("Choose Fields…") { loadOnePasswordFields(showMapping: true) }
+                        .disabled(source.reference.trimmingCharacters(in: .whitespaces).isEmpty || loadingOPFields)
+                    Text(source.reference.trimmingCharacters(in: .whitespaces).isEmpty
+                         ? "Link a 1Password item first."
+                         : "Linked. 1Password will identify the sign-in fields when you click Connect.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
     }
 
-    /// The drag-in target, with a quiet "things can be dropped here" rhythm:
-    /// slowly marching dashes and an occasional key wiggle (both suppressed
-    /// under Reduce Motion, and both stop once an item is linked).
+    @ViewBuilder
+    private func linkedCredentialRow<Trailing: View>(label: String, value: String, symbol: String,
+                                                     sensitive: Bool, @ViewBuilder trailing: () -> Trailing) -> some View {
+        GridRow {
+            Label(label, systemImage: symbol)
+                .foregroundStyle(.secondary)
+                .gridColumnAlignment(.trailing)
+            HStack(spacing: 8) {
+                TextField("", text: .constant(value))
+                    .textFieldStyle(.roundedBorder)
+                    .font(sensitive ? .body.monospacedDigit() : .body)
+                    .disabled(true)
+                    .accessibilityLabel(label)
+                    .accessibilityValue(sensitive ? "Saved in 1Password" : value)
+                trailing()
+            }
+            .frame(maxWidth: 360, alignment: .leading)
+        }
+    }
+
+    private func linkedCredentialRow(label: String, value: String, symbol: String,
+                                     sensitive: Bool) -> some View {
+        linkedCredentialRow(label: label, value: value, symbol: symbol, sensitive: sensitive) { EmptyView() }
+    }
+
+    private func fieldLabel(for role: AuthKind, in inspection: OnePasswordProvider.EntryInspection) -> String {
+        guard let id = source.fieldMap[role.rawValue] ?? inspection.fieldMap[role.rawValue],
+              let field = inspection.fields.first(where: { $0.id == id }) else {
+            return role.title
+        }
+        return field.label
+    }
+
+    private func loadOnePasswordFields(showMapping: Bool) {
+        guard !loadingOPFields else { return }
+        loadingOPFields = true
+        let selection = source
+        Task {
+            defer { loadingOPFields = false }
+            do {
+                let account = OnePasswordAccountMemory.effectiveAccount(for: selection)
+                let item = try await OnePasswordProvider.inspectEntry(
+                    itemReference: selection.reference, vault: selection.vault, account: account)
+                opItemTitle = item.title
+                opFields = item.fields
+                opInspection = item
+                // This successful, explicitly requested item inspection proves
+                // the integration too.  Do not make a follow-up vault-list call
+                // merely to set the same app-level fact.
+                OnePasswordPreflight.markVerified()
+                preflight.note(.ready(vaults: []))
+                // Entries linked by an earlier build may predate automatic
+                // mapping. Repair them as soon as the person opens this card,
+                // using only the entry they already selected.
+                // Persist everything learned from this one inspection together.
+                // Saving the map and then the vault from two copies of `selection`
+                // used to let the second write put the empty old map back, making
+                // Connect guess field names and issue another 1Password request.
+                var updated = selection
+                var sourceChanged = false
+                if updated.fieldMap.isEmpty, !item.fieldMap.isEmpty {
+                    updated.fieldMap = item.fieldMap
+                    sourceChanged = true
+                }
+                if updated.vault.trimmingCharacters(in: .whitespaces).isEmpty,
+                   !item.vaultID.trimmingCharacters(in: .whitespaces).isEmpty {
+                    updated.vault = item.vaultID
+                    sourceChanged = true
+                }
+                if sourceChanged {
+                    try? await vpn.setCredentialSource(updated, for: profile.id)
+                }
+                if item.hasVerificationCode, !vpn.hasStaticChallenge(profile.id) {
+                    var auth = vpn.authConfig(for: profile.id)
+                    if !auth.requiresOTP {
+                        auth.requiresOTP = true
+                        try? await vpn.setAuthConfig(auth, for: profile.id)
+                    }
+                }
+                if showMapping { self.showFieldMap = true }
+            } catch {
+                OnePasswordPreflight.noteFailure(error)
+                vpn.lastError = "Couldn’t read this 1Password entry: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private var onePasswordAccounts: [SourceInstance] {
+        signInSettings.instances(for: .onePassword)
+    }
+
+    private var selectedOnePasswordAccountID: SourceInstanceID? {
+        source.selection.instance ?? onePasswordAccounts.first?.id
+    }
+
+    private var hasSelectedOnePasswordAccount: Bool {
+        let configured = OnePasswordAccountMemory.connectionAccount(
+            selectedOnePasswordAccountID, store: signInSettings)
+        return !configured.isEmpty
+            || !source.account.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    private var onePasswordConnected: Bool {
+        if preflight.state?.isReady == true { return true }
+        return sources.facts.rawAvailability(.onePassword).isReady
+    }
+
+    private var onePasswordConnectionButtonLabel: String {
+        let hasConnectedBefore = OnePasswordPreflight.isVerified()
+            || sources.facts.rawAvailability(.onePassword).isAnswered
+        if preflight.checking { return hasConnectedBefore ? "Reconnecting…" : "Connecting…" }
+        return hasConnectedBefore ? "Reconnect to 1Password" : "Connect to 1Password"
+    }
+
+    @ViewBuilder private var onePasswordConfiguration: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            OnePasswordSetupCard(model: preflight, compact: true, asksForAccount: false,
+                                 showsCheckAgain: false,
+                                 onAccount: { useAccount($0) },
+                                 onCheckAgain: { recheckOnePassword() })
+
+            if onePasswordAccounts.isEmpty {
+                Button("Set Up 1Password Accounts…") { openOnePasswordAccountSettings() }
+                    .buttonStyle(.glass)
+                Text("Drop an item below to set up its account automatically, or add a named account to browse 1Password first.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Picker("1Password account", selection: Binding(
+                    get: { selectedOnePasswordAccountID },
+                    set: { chooseOnePasswordAccount($0) })) {
+                        ForEach(onePasswordAccounts) { account in
+                            Text(account.name).tag(Optional(account.id))
+                        }
+                    }
+                    .frame(maxWidth: 360, alignment: .leading)
+                    .accessibilityHint("Chooses which named 1Password account this VPN uses. Internal account identifiers are not shown.")
+            }
+
+            // The well is available before authorization and before an account
+            // has been named. A 1Password row drag already carries the account,
+            // vault and item coordinates needed to finish this non-secret link.
+            onePasswordWell
+            if let onePasswordDropError {
+                Text(onePasswordDropError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            if !source.reference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                onePasswordEntryPreview
+            }
+
+            if !onePasswordConnected {
+                Button(onePasswordConnectionButtonLabel) { recheckOnePassword() }
+                    .buttonStyle(.glassProminent)
+                    .disabled(preflight.checking || !hasSelectedOnePasswordAccount)
+                Text(source.reference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                     ? "Connect only if you want to browse before dropping an item. 1Password may ask you to approve SimpleVPN."
+                     : "The item is linked. 1Password will ask for Touch ID when you click this VPN's Connect button.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if hasSelectedOnePasswordAccount {
+                Button {
+                    showOnePasswordBrowser = true
+                    Task { await loadOnePasswordItems() }
+                } label: {
+                    Label("Browse 1Password…", systemImage: "magnifyingglass")
+                }
+                .buttonStyle(.glass)
+                .disabled(loadingOnePasswordItems)
+                .accessibilityHint("Selects a complete 1Password item without dragging it.")
+                .popover(isPresented: $showOnePasswordBrowser) {
+                    OnePasswordBrowsePopover(
+                        searchPrompt: "Search items",
+                        rows: onePasswordItems.map {
+                            OnePasswordBrowseRow(
+                                id: $0.id,
+                                title: $0.title,
+                                subtitle: [$0.vaultTitle, $0.category]
+                                    .filter { !$0.isEmpty }.joined(separator: " · "))
+                        },
+                        loading: loadingOnePasswordItems,
+                        status: onePasswordBrowseError,
+                        onPick: { row in chooseOnePasswordItem(row.id) },
+                        onRefresh: { Task { await loadOnePasswordItems() } })
+                }
+            }
+        }
+    }
+
+    private func chooseOnePasswordAccount(_ id: SourceInstanceID?) {
+        var updated = source
+        updated.instanceID = id?.rawValue ?? ""
+        // The named connection owns the internal account identifier. Keeping a
+        // second copy on the VPN would let a hidden UUID override the picker.
+        updated.account = ""
+        Task { try? await vpn.setCredentialSource(updated, for: profile.id) }
+    }
+
+    private func openOnePasswordAccountSettings() {
+        settingsRouter?.go(to: SignInSourceSettings.instanceListSettingID(.onePassword))
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        AccessibilityAnnouncer.sayNow("Opening 1Password account settings.")
+    }
+
+    /// The drag-in target: deliberately quiet at rest, with one animated down
+    /// arrow to make the next action obvious without a bright, permanent callout.
     private var onePasswordWell: some View {
         let linked = !source.reference.isEmpty
-        return RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [5], dashPhase: dashPhase))
-            .foregroundStyle(linked ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.tint))
-            .frame(height: 52)
-            .overlay {
-                Label(linked ? "Linked to \(linkedName) — drag another item to change"
-                             : "Drag the item from 1Password here",
-                      systemImage: linked ? "checkmark.circle.fill" : "key.fill")
-                    .font(.callout)
-                    .foregroundStyle(linked ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
-                    .symbolEffect(.wiggle, options: .repeat(.periodic(delay: 4)),
-                                  isActive: !reduceMotion && !linked)
-            }
+        return VStack(spacing: 10) {
+            Image(systemName: linked ? "checkmark.circle.fill"
+                                     : isOnePasswordDropTargeted
+                                        ? "arrow.down.circle.fill" : "arrow.down.circle")
+                .font(.system(size: 30))
+            Text(linked ? "Linked to \(linkedName) — drag another item to change"
+                        : isOnePasswordDropTargeted
+                            ? "Release to use this 1Password item"
+                            : "Or drag the item from 1Password here")
+                .font(.headline)
+        }
+            .foregroundStyle((linked || isOnePasswordDropTargeted)
+                             ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+            .frame(maxWidth: .infinity, minHeight: 110)
             .contentShape(Rectangle())
+            .background {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isOnePasswordDropTargeted
+                          ? Color.accentColor.opacity(0.16)
+                          : Color.secondary.opacity(0.08))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(isOnePasswordDropTargeted ? Color.accentColor : Color.secondary,
+                                  style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
+                    .allowsHitTesting(false)
+            }
+            // Match the proven standalone probe: the visible well owns exactly
+            // one destination. Do not hoist this onto the conditional setup
+            // container, where controls, transitions and unrelated drop
+            // destinations complicate AppKit's target negotiation.
+            .onDrop(of: OnePasswordDropItem.acceptedContentTypes,
+                    isTargeted: $isOnePasswordDropTargeted,
+                    perform: acceptOnePasswordDrop)
+            .onChange(of: isOnePasswordDropTargeted) { _, targeted in
+                OnePasswordDropItem.logTargeting(targeted)
+            }
             // One element with the well's own words; the drag itself has no
             // keyboard path, so say where the keyboard-operable one lives.
             .accessibilityElement(children: .combine)
-            .accessibilityHint("Dragging isn't required — you can also link the item under this VPN in Manage VPNs.")
-            // 1Password's own drag payload first (it names account, vault AND
-            // item), then a link, then op://, then the bare title — see
-            // OnePasswordDropItem.
-            .onDrop(of: OnePasswordDropItem.acceptedContentTypes, isTargeted: nil) { providers, _ in
-                guard OnePasswordDropItem.canAccept(providers) else { return false }
-                Task {
-                    // Through the collector: macOS delivers one drag more than
-                    // once, and applying each delivery turned a single dropped
-                    // item into a "which one?" chooser.
-                    guard let dropped = await drops.collect(providers),
-                          let first = dropped.first else { return }
-                    // A VPN signs in with one item; several were dragged, so ask.
-                    if dropped.count > 1 { choices = dropped; return }
-                    link(first)
-                }
-                return true
-            }
+            .accessibilityHint("Drag the item from 1Password, or use Browse 1Password to select it without dragging.")
             .popover(isPresented: Binding(get: { !choices.isEmpty },
                                           set: { if !$0 { choices = [] } })) {
                 VStack(alignment: .leading, spacing: 8) {
@@ -418,22 +733,62 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                 .padding(12)
                 .frame(minWidth: 220)
             }
-            .task(id: linked) {
-                guard !reduceMotion, !linked else { return }
-                dashPhase = 0
-                withAnimation(.linear(duration: 1.8).repeatForever(autoreverses: false)) {
-                    dashPhase = -10   // one full dash+gap cycle → seamless march
-                }
-            }
     }
 
-    private var otpBinding: Binding<Bool> {
-        Binding(get: { auth.requiresOTP },
-                set: { on in
-                    var a = auth
-                    a.requiresOTP = on
-                    Task { try? await vpn.setAuthConfig(a, for: profile.id) }
-                })
+    /// The same small SwiftUI boundary used by OnePasswordProbe. Everything
+    /// after acceptance is domain work and must not influence hit testing.
+    private func acceptOnePasswordDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard OnePasswordDropItem.canAccept(providers) else { return false }
+        let snapshot = OnePasswordDropItem.activeDragSnapshot()
+        Task {
+            guard let drops = await onePasswordDrops.collect(
+                providers, dragSnapshot: snapshot
+            ) else { return }
+            receiveOnePasswordDrops(drops)
+        }
+        return true
+    }
+
+    private func receiveOnePasswordDrops(_ drops: [OnePasswordDrop]) {
+        onePasswordDropError = nil
+        guard let first = drops.first else {
+            onePasswordDropError = "SimpleVPN couldn’t read that item. Drag its row from 1Password, or use Browse 1Password."
+            return
+        }
+        if drops.count > 1 {
+            choices = drops
+        } else {
+            link(first)
+        }
+    }
+
+    private func loadOnePasswordItems() async {
+        guard !loadingOnePasswordItems else { return }
+        loadingOnePasswordItems = true
+        onePasswordBrowseError = nil
+        defer { loadingOnePasswordItems = false }
+        do {
+            let account = OnePasswordAccountMemory.effectiveAccount(for: source,
+                                                                     store: signInSettings)
+            onePasswordItems = try await OnePasswordNative.listItemsAcrossVaults(account: account)
+            if onePasswordItems.isEmpty {
+                onePasswordBrowseError = "1Password didn’t show SimpleVPN any items."
+            }
+        } catch {
+            onePasswordItems = []
+            onePasswordBrowseError = error.localizedDescription
+        }
+    }
+
+    private func chooseOnePasswordItem(_ rowID: String) {
+        guard let item = onePasswordItems.first(where: { $0.id == rowID }) else { return }
+        showOnePasswordBrowser = false
+        let account = OnePasswordAccountMemory.effectiveAccount(for: source,
+                                                                 store: signInSettings)
+        link(OnePasswordDrop(reference: item.itemID,
+                             vault: item.vaultID,
+                             account: account,
+                             title: item.title))
     }
 
     /// Apply a chosen row. Two things are stored, not one: WHERE the sign-in
@@ -454,9 +809,9 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
             // VPN goes, rather than quietly still being there.
             if option.id == .typeEachTime { vpn.forgetSavedSignIn(id: profile.id) }
         }
-        // Choosing 1Password is the first genuine need for a 1Password lookup —
-        // and the only moment this card is allowed to raise its approval prompt.
-        if kind == .onePassword { checkOnePassword(force: false) }
+        // Selecting 1Password and dropping an item do not inspect it. The
+        // ordinary Connect action is the explicit first need, and one approved
+        // response both identifies the fields and supplies this connection.
     }
 
     /// "Check Again" on a row that is waiting on something. THE ANSWER IS SPOKEN AND
@@ -476,7 +831,7 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
             // 1Password's own preflight is the more specific check, and it is the one
             // that clears its "the integration is off" state — so a re-check of that
             // row pays for it as well.
-            if vendor == .onePassword { checkOnePassword(force: true) }
+            if vendor == .onePassword { recheckOnePassword() }
             await sources.deepScan(force: true)
             sources.refresh()
             let after = sources.facts.availability(vendor)
@@ -500,13 +855,24 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
         AccessibilityAnnouncer.sayNow("Opening \(option.title). Copy your password, then paste it below.")
     }
 
-    /// The setup check. `force` is the Check Again button, which re-checks even
-    /// a verified integration — the way back from "it worked yesterday".
+    /// The fallback integration check, used only before an item is linked.  A
+    /// linked item is re-inspected instead, because that one approved request
+    /// answers both "does 1Password work?" and "which fields will this VPN use?".
     private func checkOnePassword(force: Bool) {
-        let account = OnePasswordAccountMemory.effectiveAccount(profile: source.account)
+        let account = OnePasswordAccountMemory.effectiveAccount(for: source,
+                                                                 store: signInSettings)
         Task {
             if force { await preflight.check(account: account) }
             else { await preflight.checkIfNeeded(account: account) }
+            sources.refresh()
+        }
+    }
+
+    private func recheckOnePassword() {
+        if source.reference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            checkOnePassword(force: true)
+        } else {
+            loadOnePasswordFields(showMapping: false)
         }
     }
 
@@ -537,25 +903,28 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
     /// account to ask.
     private func link(_ dropped: OnePasswordDrop) {
         choices = []
-        var s = source
-        s.kind = .onePassword
-        s.reference = dropped.reference
-        if !dropped.vault.isEmpty { s.vault = dropped.vault }
-        if !dropped.account.isEmpty {
-            s.account = dropped.account
-            // The dragged item names its account, and the SDK takes that UUID as
-            // readily as the sidebar name — so one drag answers "which account?"
-            // for every other VPN too.
-            OnePasswordAccountMemory.seed(dropped.account)
+        Task {
+            do {
+                try await vpn.linkOnePasswordEntry(dropped, for: profile.id)
+            } catch {
+                vpn.lastError = "Couldn’t link the 1Password entry: \(error.localizedDescription)"
+            }
         }
-        Task { try? await vpn.setCredentialSource(s, for: profile.id) }
     }
 
-    private func saveApplePasswords() {
-        var s = source
-        s.kind = .applePasswords
-        s.reference = apServer.trimmingCharacters(in: .whitespaces)
-        Task { try? await vpn.setCredentialSource(s, for: profile.id) }
+    private func useApplePassword(_ selection: ApplePasswordSelection) {
+        var credentials = vpn.transientCredentials(for: profile.id)
+        credentials.username = selection.username
+        credentials.password = selection.password
+        vpn.setTransientCredentials(credentials, for: profile.id)
+
+        // A picker result also settles the source's non-secret service hint so
+        // the setup card does not ask the same question again. The password is
+        // deliberately absent from this persisted source value.
+        var updated = source
+        updated.kind = .applePasswords
+        updated.reference = profile.server
+        Task { try? await vpn.setCredentialSource(updated, for: profile.id) }
     }
 
     private func savePasswordStore() {

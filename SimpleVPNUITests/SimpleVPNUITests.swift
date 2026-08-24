@@ -39,6 +39,34 @@ final class SimpleVPNUITests: XCTestCase {
         try runAccessibilityAudit(on: app)
     }
 
+    /// The empty-install provider names are navigation controls, not decorative
+    /// copy. This is the user-visible regression that prompted the two-page flow:
+    /// clicking a company must reveal its instructions and a real import action.
+    ///
+    /// Machines with an existing VPN correctly show the connection list instead,
+    /// so they cannot exercise an empty-install surface and skip this one check.
+    @MainActor
+    func testFreshInstallProviderChoiceOpensItsSetupPage() throws {
+        let app = try launchOrSkip()
+        let provider = app.buttons["Mullvad"]
+        try XCTSkipUnless(provider.waitForExistence(timeout: 5),
+                          "This machine already has a VPN, so the fresh-install provider chooser is not visible.")
+
+        provider.click()
+
+        XCTAssertTrue(app.staticTexts["Set up with Mullvad"].waitForExistence(timeout: 5),
+                      "Choosing Mullvad did not navigate to its setup instructions.")
+        XCTAssertTrue(app.staticTexts["Drop zone for VPN configuration files"]
+            .waitForExistence(timeout: 5),
+                      "The provider setup page has no visible configuration drop target.")
+        let chooseConfiguration = app.buttons["Choose WireGuard Configuration…"]
+        XCTAssertTrue(chooseConfiguration.waitForExistence(timeout: 5),
+                      "The Mullvad setup page has no configuration file-picker action.")
+        XCTAssertTrue(chooseConfiguration.isEnabled,
+                      "The Mullvad configuration file-picker action is disabled.")
+        try runAccessibilityAudit(on: app)
+    }
+
     /// The same gate over the Routes window — the wave-2 flagship (route
     /// diagram, gateway bar, traffic-path strip), opened the way a user opens
     /// it: VPN ▸ Routes…. The main window stays open beside it, which is fine —
@@ -286,7 +314,7 @@ final class SimpleVPNUITests: XCTestCase {
                 """)
         }
 
-        let app = XCUIApplication()
+        let app = makeSimpleVPNTestApplication()
         app.launch()
 
         guard app.wait(for: .runningForeground, timeout: 15),
@@ -481,7 +509,7 @@ final class SimpleVPNUITests: XCTestCase {
     func testLaunchPerformance() throws {
         // This measures how long it takes to launch your application.
         measure(metrics: [XCTApplicationLaunchMetric()]) {
-            XCUIApplication().launch()
+            makeSimpleVPNTestApplication().launch()
         }
     }
 }

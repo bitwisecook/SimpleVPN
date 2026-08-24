@@ -177,6 +177,31 @@ struct OpenConnectArgvTests {
         #expect(SubprocessTunnelManager.addressCredentialReason(config { _ in }) == nil)
     }
 
+    // MARK: Web gateway addresses
+
+    /// An F5 policy URL is the gateway address, not a malformed hostname.  Keep it
+    /// byte-for-byte in the stored draft and make the one runtime formatter put an
+    /// explicit port in the authority — never after the policy path.
+    @Test func webGatewayAddressesAcceptNamesAndPolicyURLsWithoutLosingTheirPath() {
+        let policyURL = "https://gateway.example.com/my.policy"
+        #expect(SubprocessTunnelConfig.sslServerAddressProblem("gateway.example.com") == nil)
+        #expect(SubprocessTunnelConfig.sslServerAddressProblem(policyURL) == nil)
+        #expect(SubprocessTunnelConfig.sslServerAddressProblem("gateway.example.com/my.policy") != nil)
+
+        var c = config { $0.server = policyURL }
+        #expect(c.normalized().server == policyURL,
+                "normalizing a live-saved draft must not blank or rewrite a pasted URL")
+        #expect(SubprocessTunnelManager.serverURL(for: c) == policyURL)
+
+        c.port = 8443
+        #expect(SubprocessTunnelManager.serverURL(for: c)
+                == "https://gateway.example.com:8443/my.policy")
+        #expect(SubprocessTunnelManager.openconnectArgs(for: c).last
+                == "https://gateway.example.com:8443/my.policy")
+        #expect(SubprocessTunnelManager.inProcessConfiguration(c)["server"] as? String
+                == "https://gateway.example.com:8443/my.policy")
+    }
+
     // MARK: The pinned server certificate — the ONE server-identity control
 
     /// A pin is refused unless it is one of the two forms OpenConnect prints. It

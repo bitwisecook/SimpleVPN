@@ -95,9 +95,10 @@ struct SSHNetworkTunnelView: View {
 
                 EngineSettingRow(spec: Self.specs["sshnet.password"], value: !password.isEmpty) {
                     LabeledContent {
-                        SecureField(draft.authMethod == .password ? "password" : "key passphrase",
-                                    text: $password)
+                        SecureField("", text: $password,
+                                    prompt: Text(draft.authMethod == .password ? "password" : "key passphrase"))
                             .multilineTextAlignment(.trailing)
+                            .scalarConfigurationValue()
                             .accessibilityLabel(draft.authMethod == .password
                                                 ? "SSH password" : "Private key passphrase")
                     } label: {
@@ -110,6 +111,7 @@ struct SSHNetworkTunnelView: View {
                         LabeledContent {
                             SecureField("", text: $privateKeyPEM, prompt: Text("-----BEGIN OPENSSH PRIVATE KEY-----"))
                                 .multilineTextAlignment(.trailing)
+                                .scalarConfigurationValue()
                                 .accessibilityLabel("SSH private key")
                         } label: {
                             EngineSettingLabel(spec: Self.specs["sshnet.private-key"],
@@ -123,6 +125,7 @@ struct SSHNetworkTunnelView: View {
                         LabeledContent {
                             SecureField("", text: $certificatePEM, prompt: Text("ssh-ed25519-cert-v01@openssh.com AAAA…"))
                                 .multilineTextAlignment(.trailing)
+                                .scalarConfigurationValue()
                                 .accessibilityLabel("SSH certificate")
                         } label: {
                             EngineSettingLabel(spec: Self.specs["sshnet.certificate"],
@@ -270,7 +273,8 @@ struct SSHNetworkTunnelView: View {
                     LabeledContent {
                         TextField("", value: $draft.keepaliveSeconds, format: .number, prompt: Text("30"))
                             .multilineTextAlignment(.trailing)
-                            .frame(width: 70)
+                            .scalarConfigurationValue()
+                            .frame(maxWidth: 70, alignment: .trailing)
                             .accessibilityLabel("Keepalive seconds")
                     } label: {
                         EngineSettingLabel(spec: Self.specs["sshnet.keepalive"],

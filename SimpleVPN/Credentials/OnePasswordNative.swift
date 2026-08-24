@@ -398,7 +398,9 @@ enum OnePasswordNative {
         // Every real call funnels through here, which makes this the one place
         // that learns the SDK integration has been turned back OFF since setup
         // was verified — so it's where the setup walkthrough is re-armed.
+        #if !ONEPASSWORD_PROBE
         OnePasswordPreflight.noteFailure(error)
+        #endif
         if case .accountNotFound(_, let detail) = error {
             return .accountNotFound(account: account, detail: detail)
         }

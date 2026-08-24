@@ -191,7 +191,7 @@ no instance-level fields, so a meaningless one-row list cannot appear.
 | Type it each time | — | everything typed | — | `.value` |
 | Save in SimpleVPN | `osKeychain` | username, password, totp | — | `.value` |
 | Save + Touch ID | `osKeychain` | username, password, totp | — | `.value` |
-| Apple Passwords | `osAutoFill` | username, password | **totp** | `.value` |
+| Apple Passwords | `osAutoFill` (system authorization picker) | username, password | **totp** | `.value` |
 | 1Password | `signedIPC` | username, password, totp | master password | `.value` |
 | KeePassXC | `appSocket` | username, password, totp | database password | `.value` |
 | Keeper | `localDaemon` → `cli` | username, password | master password | `.value` |

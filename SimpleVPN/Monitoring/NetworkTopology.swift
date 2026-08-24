@@ -294,7 +294,9 @@ final class TopologyMonitor {
         let detect = VirtualizationSettings.detectionEnabled
         guestScan = Task { [weak self] in
             let snapshot = await VirtualizationDiscovery.snapshotOffMain(
-                interfaces: interfaces, detectionEnabled: detect, env: .live(),
+                interfaces: interfaces, detectionEnabled: detect,
+                includeProtectedAppData: VirtualizationSettings.protectedUTMConfigurationAccessEnabled,
+                env: .live(),
                 neighbours: neighbours)
             guard !Task.isCancelled, let self else { return }
             if snapshot != self.guests { self.guests = snapshot }

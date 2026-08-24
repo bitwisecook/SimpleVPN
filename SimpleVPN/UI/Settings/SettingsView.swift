@@ -25,11 +25,16 @@ struct SettingsView: View {
     /// route can ask for one — a global search hit on a `creds.*` setting, or
     /// "Configure…" on a sign-in chooser row, both land here.
     @State private var pane: Pane = .general
+    /// App-level settings use the same reveal/scroll/highlight system as VPN
+    /// editors.  Without this, a route could select General and still leave a
+    /// person to hunt through a long preferences form.
+    @State private var generalSettingsSearch = SettingsSearch(surfaces: [.virtualization], kind: nil)
     @Environment(SettingsRouter.self) private var router: SettingsRouter?
 
     var body: some View {
         TabView(selection: $pane) {
             ExtensionsSettings(ext: ext, updater: updater, labels: labels)
+                .environment(generalSettingsSearch)
                 .tabItem { Label("General", systemImage: "gearshape") }
                 .tag(Pane.general)
             SignInSourcesSettings()
@@ -39,7 +44,8 @@ struct SettingsView: View {
                 .tabItem { Label("Labels", systemImage: "tag") }
                 .tag(Pane.labels)
         }
-        .frame(width: 620, height: 560)
+        .resizablePanel(idealWidth: 620, idealHeight: 560,
+                        minWidth: 520, minHeight: 420)
         // An app-level route selects the tab; the pane itself is what the user then
         // reads. Re-checked on every generation, so asking twice for the same tab
         // still works.
@@ -48,8 +54,17 @@ struct SettingsView: View {
     }
 
     private func followRoute() {
-        guard let wanted = router?.appSettingsRoute?.tab else { return }
+        guard let route = router?.appSettingsRoute else { return }
+        let wanted = route.tab
         pane = Self.pane(for: wanted)
+        guard SettingSurface.owning(route.settingID) == .virtualization else { return }
+        // Let the tab become visible before asking its scroll host to land.  The
+        // reveal modifier retries on appearance too, but yielding makes the common
+        // already-open Settings case immediate without guessing a time delay.
+        Task { @MainActor in
+            await Task.yield()
+            generalSettingsSearch.reveal(id: route.settingID)
+        }
     }
 
     static func pane(for tab: SettingsTab) -> Pane {
@@ -109,6 +124,7 @@ private struct ExtensionsSettings: View {
     @Environment(VPNController.self) private var vpn: VPNController?
     @Environment(SubprocessTunnelStore.self) private var tunnels: SubprocessTunnelStore?
     @Environment(NativeVPNManager.self) private var nativeVPN: NativeVPNManager?
+    @Environment(SettingsRouter.self) private var router: SettingsRouter?
     /// Mirrors Sparkle's own persisted setting (it stores this in defaults);
     /// seeded in onAppear, written back on toggle.
     @State private var autoCheckUpdates = false
@@ -125,14 +141,27 @@ private struct ExtensionsSettings: View {
     @AppStorage(publicIPCustomV6DefaultsKey) private var ipCustomV6 = ""
     // Default false — the permission is only ever requested by flipping this on.
     @AppStorage(LocationAuthority.enabledKey) private var locationEnabled = false
-    // Both on by default: the scan reads only this Mac and a detection feature that
-    // defaults to not detecting is inert.
+    // The ordinary local-network scan defaults on. UTM's protected app data stays
+    // off until the person chooses it and accepts the explained macOS prompt.
     @AppStorage(VirtualizationSettings.detectDefaultsKey) private var vmDetect = true
+    @AppStorage(VirtualizationSettings.readUTMConfigurationsDefaultsKey) private var vmReadUTMConfigurations = false
     @AppStorage(VirtualizationSettings.warnOnConnectDefaultsKey) private var vmWarnOnConnect = true
     @State private var location = LocationAuthority.shared
     @Environment(PublicIPMonitor.self) private var publicIP: PublicIPMonitor?
     @Environment(EndpointProbeStore.self) private var probes: EndpointProbeStore?
     @State private var appBrowser = BrowserDefaults.appDefault
+    @State private var confirmVPNEngineRemoval = false
+    @State private var confirmUTMConfigurationAccess = false
+    @State private var requestingUTMConfigurationAccess = false
+
+    /// The one response to an unavailable protected-app integration: leave it off
+    /// and point at the setting that controls it.  This is deliberately shared by
+    /// both a cancelled/denied macOS request and any later inability to read the
+    /// UTM folder, so an unavailable integration can never remain silently on.
+    private func disableUTMConfigurationAccessAndReveal() {
+        vmReadUTMConfigurations = false
+        router?.go(to: VirtualizationSettings.readUTMConfigurations.id)
+    }
 
     /// Both icons off is allowed but worth a plain warning: the app becomes
     /// hard to find again (nothing in the Dock, nothing in the menu bar). The
@@ -157,7 +186,7 @@ private struct ExtensionsSettings: View {
             // General → Menu Bar & Icons → Updates → Privacy → Advanced.
             Section("General") {
                 Toggle("Open the live-details pane by default", isOn: $inspectorOpenByDefault)
-                Text("The right-hand pane with the traffic graph, map and connection details. It can always be opened from the toolbar; this only sets how the window starts.")
+                Text("The right-hand pane with the traffic graph and connection details. It can always be opened from the toolbar; this only sets how the window starts.")
                     .font(.callout).foregroundStyle(.secondary)
                 BrowserPicker(selection: $appBrowser)
                     .onChange(of: appBrowser) { BrowserDefaults.appDefault = appBrowser }
@@ -212,9 +241,11 @@ private struct ExtensionsSettings: View {
                         TextField("IPv4 URL (plain-text body)", text: $ipCustomV4,
                                   prompt: Text("https://api4.ipify.org"))
                             .autocorrectionDisabled()
+                            .lineLimit(1)
                         TextField("IPv6 URL (optional)", text: $ipCustomV6,
                                   prompt: Text("https://api6.ipify.org"))
                             .autocorrectionDisabled()
+                            .lineLimit(1)
                             .onSubmit { Task { await publicIP?.refresh() } }
                         Text("Each URL must return just the address as plain text.")
                             .font(.callout).foregroundStyle(.secondary)
@@ -285,6 +316,23 @@ private struct ExtensionsSettings: View {
                     }
                 }
                 if vmDetect {
+                    EngineSettingRow(spec: VirtualizationSettings.readUTMConfigurations,
+                                     value: vmReadUTMConfigurations) {
+                        Toggle(isOn: Binding(
+                            get: { vmReadUTMConfigurations },
+                            set: { wantsAccess in
+                                if wantsAccess {
+                                    confirmUTMConfigurationAccess = true
+                                } else {
+                                    vmReadUTMConfigurations = false
+                                }
+                            }
+                        )) {
+                            EngineSettingLabel(spec: VirtualizationSettings.readUTMConfigurations,
+                                               value: vmReadUTMConfigurations)
+                        }
+                        .disabled(requestingUTMConfigurationAccess)
+                    }
                     EngineSettingRow(spec: VirtualizationSettings.warnOnConnect,
                                      value: vmWarnOnConnect) {
                         Toggle(isOn: $vmWarnOnConnect) {
@@ -314,18 +362,82 @@ private struct ExtensionsSettings: View {
             Section("Advanced") {
                 LabeledContent("Extension status", value: ext.status)
                 LabeledContent("Bundled extension version", value: ext.bundledVersion)
-                Button("Re-activate Extension") { Task { await ext.activate() } }
+                if ext.needsApplicationsInstallation || !SystemExtensionManager.isEligibleForActivation {
+                    Label("Open the copy in Applications to manage the VPN engine.", systemImage: "folder")
+                        .foregroundStyle(.orange)
+                    Button("Open Installed SimpleVPN") {
+                        NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/SimpleVPN.app"))
+                    }
+                } else {
+                    Button("Re-activate Extension") { Task { await ext.activate() } }
+                    Button("Remove VPN Engine…", role: .destructive) {
+                        confirmVPNEngineRemoval = true
+                    }
+                    .disabled(ext.isRemoving)
+                    Text("Removes only SimpleVPN’s VPN engine. Your VPN configurations and saved sign-ins stay here; re-activate the engine to use packet-tunnel VPNs again.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
             }
             Section("About") {
                 LabeledContent("Application", value: UI.appVersion)
                 // License terms: DB-IP Country Lite is CC BY 4.0; Natural Earth is
-                // public domain (credited as a courtesy).
-                Text("VPN engine: OpenVPN 3 · [IP Geolocation by DB-IP](https://db-ip.com) · Map data: Natural Earth")
+                // public domain; NASA Blue and Black Marble are used with
+                // attribution under NASA's media usage guidelines.
+                Text("VPN engine: OpenVPN 3 · [IP Geolocation by DB-IP](https://db-ip.com) · Map data: Natural Earth · Globe imagery: NASA Blue & Black Marble")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
+        .revealsSettings()
+        .alert("Remove SimpleVPN’s VPN Engine?", isPresented: $confirmVPNEngineRemoval) {
+            Button("Remove", role: .destructive) {
+                Task {
+                    // A system extension cannot safely disappear under a live
+                    // tunnel.  Stop only SimpleVPN connections; configurations
+                    // and all credentials are deliberately left untouched.
+                    for profile in vpn?.profiles ?? [] where vpn?.isEngaged(id: profile.id) == true {
+                        vpn?.disconnect(id: profile.id)
+                    }
+                    await ext.removeVPNEngine()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(removalMessage)
+        }
+        .alert("Let SimpleVPN read UTM’s virtual-machine configurations?",
+               isPresented: $confirmUTMConfigurationAccess) {
+            Button("Not Now", role: .cancel) {}
+            Button("Continue") {
+                requestingUTMConfigurationAccess = true
+                Task {
+                    // This is deliberately the user-caused moment that asks macOS.
+                    // It must not be deferred to a Connect click or a background scan.
+                    let granted = await VirtualizationDiscovery.requestUTMConfigurationAccess()
+                    requestingUTMConfigurationAccess = false
+                    if granted {
+                        vmReadUTMConfigurations = true
+                    } else {
+                        // The OS request was cancelled, denied, or UTM is not
+                        // presently available.  Do not leave a switch claiming
+                        // that SimpleVPN can read another app's data.
+                        disableUTMConfigurationAccessAndReveal()
+                    }
+                }
+            }
+        } message: {
+            Text("UTM stores its virtual-machine bundles in protected app data. SimpleVPN reads only the saved machine names and network modes, so it can explain whether a VPN can affect a UTM guest. It never changes or sends that data. macOS asks next and remembers your choice; you can turn this option off at any time.")
+        }
+    }
+
+    private var removalMessage: String {
+        let active = vpn?.profiles.filter { vpn?.isEngaged(id: $0.id) == true }.map(\.name) ?? []
+        if active.isEmpty {
+            return "This removes SimpleVPN’s VPN engine from macOS. Your VPN configurations and saved sign-ins will not be removed. macOS may ask you to confirm or restart."
+        }
+        return "This disconnects \(active.joined(separator: ", ")) and removes SimpleVPN’s VPN engine from macOS. Your VPN configurations and saved sign-ins will not be removed. macOS may ask you to confirm or restart."
     }
 }
 
@@ -346,6 +458,7 @@ private struct LabelsSettings: View {
                         ColorPicker("", selection: colorBinding(l)).labelsHidden()
                             .accessibilityLabel("Colour for the \(l.name) label")
                         TextField("Name", text: nameBinding(l))
+                            .lineLimit(1)
                             .accessibilityLabel("Name of the \(l.name) label")
                         Spacer()
                         Button(role: .destructive) { labels.remove(l.id) } label: {
@@ -370,6 +483,7 @@ private struct LabelsSettings: View {
                 ColorPicker("", selection: $newColor).labelsHidden()
                     .accessibilityLabel("Colour for the new label")
                 TextField("New label", text: $newName)
+                    .lineLimit(1)
                     .accessibilityLabel("Name of the new label")
                 Button("Add") {
                     labels.addLabel(name: newName, resolved: newColor.resolve(in: environment)); newName = ""

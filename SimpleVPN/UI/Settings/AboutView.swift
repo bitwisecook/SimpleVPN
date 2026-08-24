@@ -69,8 +69,15 @@ enum Acknowledgements {
               url: "https://gitlab.gnome.org/GNOME/libxml2"),
         .init(name: "zlib", license: "Zlib", role: "OpenConnect / libssh compression (system library)",
               url: "https://zlib.net"),
-        .init(name: "Natural Earth", license: "Public Domain", role: "World map coastlines",
+        .init(name: "Natural Earth", license: "Public Domain",
+              role: "World map coastlines and Admin 0 country boundaries",
               url: "https://www.naturalearthdata.com"),
+        .init(name: "NASA Black Marble 2016", license: "NASA media usage guidelines",
+              role: "VIIRS global night-lights texture for the globe; NASA Earth Observatory / Goddard Space Flight Center",
+              url: "https://visibleearth.nasa.gov/images/144898/earth-at-night-black-marble-2016-color-maps"),
+        .init(name: "NASA Blue Marble Next Generation", license: "NASA media usage guidelines",
+              role: "MODIS true-colour daytime globe texture; NASA Visible Earth / Goddard Space Flight Center",
+              url: "https://visibleearth.nasa.gov/images/74218/december-blue-marble-next-generation"),
         // The URL is db-ip.com, NOT the licence text: DB-IP's CC BY terms require
         // the attribution to LINK TO THEM ("<a href='https://db-ip.com'>IP
         // Geolocation by DB-IP</a>"), which is exactly what this row renders. The
@@ -489,7 +496,8 @@ struct AboutView: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(width: 560, height: 620)
+        .resizablePanel(idealWidth: 560, idealHeight: 620,
+                        minWidth: 420, minHeight: 360)
         .sheet(isPresented: $showReport) {
             IssueReportSheet(facts: facts, capture: configuredCapture)
         }

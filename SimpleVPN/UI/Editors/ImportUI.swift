@@ -9,7 +9,6 @@
 //
 
 import SwiftUI
-import UniformTypeIdentifiers
 
 extension VPNController {
 
@@ -41,17 +40,9 @@ extension VPNController {
 }
 
 extension View {
-
-    /// Accept .ovpn drops (Finder files) anywhere on this view, with the standard
-    /// drop highlight. Dropping is never the only path — every window keeps its
-    /// Import button/menu equivalent.
-    func ovpnDropTarget(vpn: VPNController) -> some View {
-        modifier(OVPNDropTarget(vpn: vpn))
-    }
-
-    /// Accept any config-file drop (Finder files) and hand the URLs to `perform`,
-    /// which decides the engine per file. Same highlight/label as `ovpnDropTarget`,
-    /// but the caller owns routing (used by the multi-engine Manage VPNs window).
+    /// Accept configuration-file URLs from Finder and let the owning window route
+    /// them to the appropriate importer. This remains a SwiftUI modifier so a
+    /// caller can place it on exactly the surface that owns the import action.
     func fileDropTarget(label: String = "Drop to import",
                         perform: @escaping ([URL]) -> Void) -> some View {
         modifier(FileDropTarget(label: label, perform: perform))
@@ -63,40 +54,6 @@ extension View {
     }
 }
 
-private struct OVPNDropTarget: ViewModifier {
-    @Bindable var vpn: VPNController
-    @State private var isTargeted = false
-
-    func body(content: Content) -> some View {
-        content
-            .dropDestination(for: URL.self) { urls, _ in
-                // Take anything that plausibly is a profile; the engine parser is
-                // the real gate and reports a clear reason for junk.
-                let candidates = urls.filter { $0.isFileURL }
-                guard !candidates.isEmpty else { return false }
-                vpn.handleImport(of: candidates)
-                return true
-            } isTargeted: { isTargeted = $0 }
-            .overlay {
-                if isTargeted {
-                    RoundedRectangle(cornerRadius: 10)
-                        .strokeBorder(.tint, lineWidth: 2.5)
-                        .background(.tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-                        .overlay {
-                            Label("Drop to import", systemImage: "arrow.down.doc")
-                                .font(.title3.weight(.medium))
-                                .padding(12)
-                                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-                        }
-                        .padding(6)
-                        .allowsHitTesting(false)
-                }
-            }
-            .animation(.easeOut(duration: 0.12), value: isTargeted)
-    }
-}
-
-/// Generic file drop that delegates routing to the caller (multi-engine import).
 private struct FileDropTarget: ViewModifier {
     let label: String
     let perform: ([URL]) -> Void
@@ -105,7 +62,7 @@ private struct FileDropTarget: ViewModifier {
     func body(content: Content) -> some View {
         content
             .dropDestination(for: URL.self) { urls, _ in
-                let candidates = urls.filter { $0.isFileURL }
+                let candidates = urls.filter(\.isFileURL)
                 guard !candidates.isEmpty else { return false }
                 perform(candidates)
                 return true
@@ -114,12 +71,14 @@ private struct FileDropTarget: ViewModifier {
                 if isTargeted {
                     RoundedRectangle(cornerRadius: 10)
                         .strokeBorder(.tint, lineWidth: 2.5)
-                        .background(.tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                        .background(.tint.opacity(0.08),
+                                    in: RoundedRectangle(cornerRadius: 10))
                         .overlay {
                             Label(label, systemImage: "arrow.down.doc")
                                 .font(.title3.weight(.medium))
                                 .padding(12)
-                                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+                                .background(.regularMaterial,
+                                            in: RoundedRectangle(cornerRadius: 10))
                         }
                         .padding(6)
                         .allowsHitTesting(false)

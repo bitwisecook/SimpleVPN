@@ -85,8 +85,7 @@ struct NotConfiguredBanner: View {
                 }
             }
         }
-        .padding(12)
-        .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+        .bannerSurface(tint: tint)
         // `.contain`: the action must stay reachable (the accessibility rule the
         // other banners in this window follow).
         .accessibilityElement(children: .contain)
@@ -107,6 +106,9 @@ struct OtherConnectionDetailView: View {
     let need: ConnectNeed?
     /// Anything the engine said last time — a failure message or a caution.
     let engineNote: String?
+    /// A password-capable tunnel can be completed here.  Configuration faults
+    /// still use the normal precise-settings banner below.
+    let inlineSignIn: AnyView?
 
     let connect: () -> Void
     let stop: () -> Void
@@ -119,11 +121,18 @@ struct OtherConnectionDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
-                if let need {
-                    NotConfiguredBanner(
-                        vpnName: name, need: need,
-                        reveal: need.settingID.map { id in { reveal(id) } },
-                        openSettings: openSettings)
+                // Never retain the pre-connect banner during an active session.
+                // The readiness cache is based on saved credentials and can lag one
+                // render behind a deliberately transient sign-in.
+                if !isActive {
+                    if let inlineSignIn {
+                        inlineSignIn
+                    } else if let need {
+                        NotConfiguredBanner(
+                            vpnName: name, need: need,
+                            reveal: need.settingID.map { id in { reveal(id) } },
+                            openSettings: openSettings)
+                    }
                 }
                 if let engineNote {
                     Label(engineNote, systemImage: "exclamationmark.circle.fill")
@@ -175,7 +184,7 @@ struct OtherConnectionDetailView: View {
                 // distinction).
                 .accessibilityLabel("Disconnect \(name)")
                 .accessibilityValue(dot.accessibilityDescription)
-        } else {
+        } else if inlineSignIn == nil {
             // DISABLED, NEVER ABSENT. An absent button is indistinguishable from a
             // broken layout — and the reason rides `.help` and the accessibility
             // value, so a dead control always says why (AGENTS.md rule 4).
@@ -189,6 +198,182 @@ struct OtherConnectionDetailView: View {
                 // value, and `ConnectNeed.spokenValue` is the single place that
                 // sentence is composed.
                 .accessibilityValue(need?.spokenValue ?? dot.accessibilityDescription)
+        }
+    }
+}
+
+/// The small, direct sign-in surface for an OpenConnect password VPN in the main
+/// window.  This is deliberately the same persistence contract as its full editor:
+/// username and the *choice* to save are configuration, the base password is saved
+/// only when requested, and a verification code belongs only to this attempt.
+struct SubprocessTunnelInlineSignIn: View {
+    let config: SubprocessTunnelConfig
+    @Bindable var store: SubprocessTunnelStore
+    @Bindable var manager: SubprocessTunnelManager
+
+    @State private var username: String
+    @State private var password: String
+    @State private var rememberPassword: Bool
+    @State private var requiresOneTimeCode: Bool
+    @State private var oneTimeCode = ""
+    @State private var discoveredForm: OCAuthFormSpec?
+    @State private var isDiscoveringForm = false
+    @State private var discoveryNote: String?
+
+    init(config: SubprocessTunnelConfig, store: SubprocessTunnelStore,
+         manager: SubprocessTunnelManager) {
+        self.config = config
+        self.store = store
+        self.manager = manager
+        let saved = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(config.id)")
+        _username = State(initialValue: config.username)
+        _password = State(initialValue: saved?.password ?? "")
+        _rememberPassword = State(initialValue: !(saved?.password ?? "").isEmpty)
+        _requiresOneTimeCode = State(initialValue: config.needsOneTimeCode)
+    }
+
+    private var canConnect: Bool {
+        !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !password.isEmpty
+            && (!requiresOneTimeCode || !config.isOTPRequirementLocked
+                || !oneTimeCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
+    private var missingExplanation: String? {
+        if username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Enter your username." }
+        if password.isEmpty { return "Enter your password." }
+        if requiresOneTimeCode, config.isOTPRequirementLocked,
+           oneTimeCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Enter the current verification code."
+        }
+        return nil
+    }
+
+    private var usernameLabel: String {
+        discoveredForm?.fields.first(where: {
+            $0.type == OCAuthFormField.Kind.text || $0.type == OCAuthFormField.Kind.ssoUser
+        })?.label ?? "Username"
+    }
+
+    private var passwordLabel: String {
+        discoveredForm?.fields.first(where: { $0.type == OCAuthFormField.Kind.password })?.label ?? "Password"
+    }
+
+    private var codeLabel: String {
+        discoveredForm?.fields.first(where: { $0.type == OCAuthFormField.Kind.token })?.label
+            ?? "Verification code"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Sign in to \(config.name)", systemImage: "person.badge.key.fill")
+                .font(.headline)
+            Text("Enter the details for this connection. A password is saved only when you turn on Save password.")
+                .font(.callout).foregroundStyle(.secondary)
+                .textSelection(.enabled)
+
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+                GridRow {
+                    Text(usernameLabel).foregroundStyle(.secondary)
+                    TextField(usernameLabel, text: $username)
+                        .textContentType(.username)
+                }
+                GridRow {
+                    Text(passwordLabel).foregroundStyle(.secondary)
+                    SecureField(passwordLabel, text: $password)
+                        .textContentType(.password)
+                }
+                if requiresOneTimeCode {
+                    GridRow {
+                        Text(codeLabel).foregroundStyle(.secondary)
+                        TextField(codeLabel, text: $oneTimeCode)
+                            .textContentType(.oneTimeCode)
+                    }
+                }
+            }
+
+            PasswordSavingToggle(isOn: $rememberPassword)
+            if !config.isOTPRequirementLocked {
+                Toggle("Verification code required", isOn: $requiresOneTimeCode)
+                    .toggleStyle(.checkbox)
+                Button(isDiscoveringForm ? "Checking sign-in fields…" : "Check sign-in fields") {
+                    discoverSignInForm()
+                }
+                .disabled(isDiscoveringForm)
+                .help("Ask the VPN gateway which sign-in fields it requires")
+                Text("You can change this until the first successful sign-in. After that, Manage VPNs is where you change the confirmed setting.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            if let discoveryNote {
+                Text(discoveryNote).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            if requiresOneTimeCode {
+                Text("The code is used once in the gateway’s separate verification-code field and is never saved.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            HStack {
+                Button("Connect", action: connect)
+                    .buttonStyle(.glassProminent)
+                    .disabled(!canConnect)
+                    .help(missingExplanation ?? "Connect \(config.name)")
+                Spacer()
+            }
+        }
+        .bannerSurface(tint: .blue)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Sign in to \(config.name)")
+        .onChange(of: manager.status(config.id)) { _, status in
+            guard case .connected = status, !config.isOTPRequirementLocked else { return }
+            var confirmed = config
+            confirmed.username = username.trimmingCharacters(in: .whitespacesAndNewlines)
+            confirmed.requiresOTP = requiresOneTimeCode ? true : nil
+            confirmed.otpRequirementLocked = true
+            store.save(confirmed)
+        }
+    }
+
+    private func connect() {
+        var revised = config
+        revised.username = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        revised.requiresOTP = requiresOneTimeCode ? true : nil
+        store.save(revised)
+
+        if rememberPassword {
+            try? KeychainCredentialStore.saveCredentials(
+                profile: "tunnel.\(revised.id)",
+                .init(username: revised.username, password: password))
+        } else {
+            KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(revised.id)")
+        }
+
+        manager.connect(revised, password: password,
+                        oneTimeCode: oneTimeCode.isEmpty ? nil : oneTimeCode)
+        oneTimeCode = ""
+    }
+
+    private func discoverSignInForm() {
+        isDiscoveringForm = true
+        discoveryNote = nil
+        Task {
+            defer { isDiscoveringForm = false }
+            do {
+                let form = try await manager.discoverSignInForm(for: config)
+                discoveredForm = form
+                let hasCode = form.fields.contains { $0.type == OCAuthFormField.Kind.token }
+                requiresOneTimeCode = hasCode
+                var revised = config
+                revised.requiresOTP = hasCode ? true : nil
+                revised.otpRequirementLocked = nil
+                store.save(revised)
+                let labels = form.fields.map(\.label).joined(separator: ", ")
+                discoveryNote = labels.isEmpty
+                    ? "The gateway did not expose any fields before sign-in."
+                    : "This gateway asks for: \(labels)."
+            } catch {
+                discoveryNote = "Couldn’t check the gateway’s sign-in fields: \(error.localizedDescription)"
+            }
         }
     }
 }

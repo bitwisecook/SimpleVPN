@@ -61,6 +61,10 @@ struct SignInSourcesSettings: View {
     @State private var typedPassboltPassphrase = ""
     @State private var securityKeyCheck: KDBXSecurityKeyCheckResult?
     @State private var checkingSecurityKey = false
+    /// A deliberate 1Password check is different from the inexpensive app scan:
+    /// it may ask 1Password to approve SimpleVPN, so retain its real answer here
+    /// rather than presenting a stale inferred status as an instruction.
+    @State private var onePasswordPreflight = OnePasswordPreflightModel()
     @State private var databasePasswordStore = KDBXMasterPasswordStore.shared
     @State private var passboltPassphraseStore = PassboltPassphraseStore.shared
     /// Which vault this PANE is editing, per vendor. Nothing to do with which one a
@@ -307,6 +311,10 @@ struct SignInSourcesSettings: View {
             // switch (`rawAvailability`).
             stateRow(vendor, enabled: enabled)
 
+            if vendor == .onePassword, enabled {
+                onePasswordCheck
+            }
+
             // MATURITY IS A DIFFERENT AXIS FROM THE ROW ABOVE, and the two must not
             // be read as one. `stateRow` answers "what does this Mac have right
             // now" — a live probe that changes when the user installs something.
@@ -336,8 +344,12 @@ struct SignInSourcesSettings: View {
                     instanceRows(vendor)
                     let chosen = chosenInstance(vendor)
                     if let chosen {
-                        ForEach(SignInSourceSettings.instanceFields(for: vendor)) { field in
-                            fieldRows(field, instance: chosen)
+                        if vendor == .onePassword {
+                            onePasswordAccountRow(chosen)
+                        } else {
+                            ForEach(SignInSourceSettings.instanceFields(for: vendor)) { field in
+                                fieldRows(field, instance: chosen)
+                            }
                         }
                     }
                     // Controls that are not paths: a secret to type and whether macOS
@@ -544,6 +556,111 @@ struct SignInSourcesSettings: View {
         // started driving the Sign-In Sources pane rather than whichever tab was
         // remembered — the first real defect that gate caught here.
         .accessibilityAddTraits(.isStaticText)
+    }
+
+    /// The one explicit, user-controlled verification path for 1Password. The
+    /// desktop SDK intentionally does not disclose the accounts signed in to the
+    /// app, so we use the configured account (or ask for one) and let 1Password
+    /// tell us whether the integration is actually usable.
+    @ViewBuilder private func onePasswordAccountRow(_ instance: SourceInstance) -> some View {
+        if let field = SignInSourceSettings.instanceFields(for: .onePassword).first {
+            let spec = specs[field.settingID]
+            let shown = settings.presentation(for: field, instance: instance)
+            let hidesRawIdentifier = OnePasswordDrop.looksLikeItemID(shown.value)
+            EngineSettingRow(
+                spec: spec,
+                changed: spec.isChanged(shown.value),
+                disabledReason: shown.isLockedByPolicy
+                    ? "Your organization has chosen this account."
+                    : (ManagedPolicy.lockConfiguration
+                       ? "Your organization has locked SimpleVPN’s settings." : nil)
+            ) {
+                LabeledContent {
+                    if hidesRawIdentifier {
+                        Text(instance.name)
+                            .accessibilityLabel(spec.name)
+                            .accessibilityValue(instance.name)
+                    } else {
+                        TextField("", text: Binding(
+                            get: { shown.value },
+                            set: { settings.setValue($0, for: field, instance: instance) }),
+                                  prompt: Text(shown.prompt))
+                            .scalarConfigurationValue()
+                            .autocorrectionDisabled()
+                            .textContentType(nil)
+                            .accessibilityLabel(spec.name)
+                            .accessibilityValue(shown.accessibilityValue)
+                            .accessibilityIdentifier("creds-field-\(field.settingID)")
+                    }
+                } label: {
+                    EngineSettingLabel(spec: spec,
+                                       value: hidesRawIdentifier ? instance.name : shown.value)
+                }
+            }
+            if hidesRawIdentifier {
+                Text("SimpleVPN keeps 1Password’s internal account identifier out of the interface. “\(instance.name)” is the name shown when you choose this account; use Rename to change it.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                validationRow(shown, field: field, instance: instance)
+            }
+        }
+    }
+
+    private var onePasswordCheck: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Button(onePasswordConnectionButtonLabel) {
+                    checkOnePassword()
+                }
+                .disabled(onePasswordPreflight.checking)
+                .buttonStyle(.glass)
+                Text(onePasswordConnectionButtonHelp)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            OnePasswordSetupCard(model: onePasswordPreflight, compact: true, asksForAccount: true,
+                                 showsCheckAgain: false,
+                                 onAccount: { checkOnePassword(account: $0) },
+                                 onCheckAgain: { checkOnePassword() })
+        }
+    }
+
+    private var onePasswordIsReconnect: Bool {
+        if OnePasswordPreflight.isVerified() { return true }
+        if case .blocked = sources.facts.rawAvailability(.onePassword) { return true }
+        switch onePasswordPreflight.state {
+        case .integrationOff, .waitingForApproval, .failed: return true
+        case .none, .notInstalled, .needsAccount, .ready: return false
+        }
+    }
+
+    private var onePasswordConnectionButtonLabel: String {
+        if onePasswordPreflight.checking {
+            return onePasswordIsReconnect ? "Reconnecting…" : "Connecting…"
+        }
+        return onePasswordIsReconnect ? "Reconnect" : "Connect"
+    }
+
+    private var onePasswordConnectionButtonHelp: String {
+        onePasswordIsReconnect
+            ? "Reconnects SimpleVPN to 1Password and records the result."
+            : "Connects SimpleVPN to 1Password for the first time and records the result."
+    }
+
+    private func checkOnePassword(account suppliedAccount: String? = nil) {
+        guard !onePasswordPreflight.checking else { return }
+        let account = suppliedAccount?.trimmingCharacters(in: .whitespaces)
+            ?? OnePasswordAccountMemory.connectionAccount(
+                chosenInstance(.onePassword)?.id, store: settings)
+        Task {
+            _ = await onePasswordPreflight.check(account: account)
+            sources.refresh()
+            await sources.deepScan(force: true)
+            sources.refresh()
+        }
     }
 
     // MARK: The KeePass database's unlock — a secret, and where it may live
@@ -899,6 +1016,7 @@ struct SignInSourcesSettings: View {
                     get: { shown.value },
                     set: { settings.setValue($0, for: field, instance: instance) }),
                           prompt: Text(shown.prompt))
+                    .scalarConfigurationValue()
                     .autocorrectionDisabled()
                     .textContentType(nil)
                     .accessibilityLabel(spec.name)

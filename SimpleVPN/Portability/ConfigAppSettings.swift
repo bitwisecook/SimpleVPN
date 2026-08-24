@@ -104,6 +104,12 @@ enum ConfigAppSettings {
                   kind: .boolean(true)),
             .init(id: VirtualizationSettings.detect.id, key: VirtualizationSettings.detectDefaultsKey,
                   name: VirtualizationSettings.detect.name, kind: .boolean(true)),
+            // An imported file must never ask macOS to grant access to another app's
+            // protected data. This stays a local, explained, user-initiated choice.
+            .init(id: VirtualizationSettings.readUTMConfigurations.id,
+                  key: VirtualizationSettings.readUTMConfigurationsDefaultsKey,
+                  name: VirtualizationSettings.readUTMConfigurations.name,
+                  kind: .boolean(false), importable: false),
             .init(id: VirtualizationSettings.warnOnConnect.id,
                   key: VirtualizationSettings.warnOnConnectDefaultsKey,
                   name: VirtualizationSettings.warnOnConnect.name, kind: .boolean(true)),

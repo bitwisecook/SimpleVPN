@@ -69,8 +69,53 @@ struct ManageVPNsView: View {
     /// here exactly as `SettingRevealScrollState` latches the reveal's own.
     @State private var routedGeneration = 0
     @State private var editingComposition: VPNComposition?
+    @State private var pendingRemoval: RemovalTarget?
+
+    /// A removal is named before it is performed.  The same target model powers
+    /// the toolbar − button, Delete, and each row's context menu so none of
+    /// those paths can silently become less careful than the others.
+    private enum RemovalTarget: Identifiable {
+        case profile(id: String, name: String)
+        case tunnel(id: String, name: String)
+        case native(id: String, name: String)
+        case composition(id: String, name: String)
+
+        var id: String {
+            switch self {
+            case let .profile(id, _): "profile:" + id
+            case let .tunnel(id, _): "tunnel:" + id
+            case let .native(id, _): "native:" + id
+            case let .composition(id, _): "composition:" + id
+            }
+        }
+
+        var name: String {
+            switch self {
+            case let .profile(_, name), let .tunnel(_, name), let .native(_, name), let .composition(_, name): name
+            }
+        }
+
+        var message: String {
+            switch self {
+            case .profile:
+                "This removes its VPN configuration and saved sign-in details from this Mac."
+            case .tunnel, .native:
+                "This removes this connection from this Mac."
+            case .composition:
+                "This removes this saved group. Its individual VPNs are unchanged."
+            }
+        }
+    }
 
     var body: some View {
+        lifecycleContent
+    }
+
+    /// The split view is deliberately one compiler boundary. SwiftUI's nested
+    /// generic return types grow with every modifier; keeping the presentation
+    /// layers below separate prevents an unrelated addition from making the whole
+    /// window exceed the type checker's complexity budget.
+    private var splitViewContent: some View {
         NavigationSplitView {
             sidebarList
             .navigationSplitViewColumnWidth(min: 200, ideal: 240)
@@ -138,7 +183,11 @@ struct ManageVPNsView: View {
                 }
             }
         } detail: {
-            detailPane
+            // Every editor gets the same split-view width contract. Some editors
+            // already happened to declare a minimum frame; the F5/OpenConnect
+            // editor did not, so its multiline notices could still be measured at
+            // a zero-width proposal and pull both panes off screen.
+            detailPane.editorPaneWidthFloor()
         }
         .frame(minWidth: 760, minHeight: 560)
         // Note for anyone looking for this window by title (tests, scripting):
@@ -147,6 +196,10 @@ struct ManageVPNsView: View {
         // right for the user, useless as a handle. The scene id ("manage") is
         // the stable handle; AppKit publishes it as the window's AX identifier.
         .navigationTitle("Manage VPNs")
+    }
+
+    private var documentPresentationContent: some View {
+        splitViewContent
         .fileImporter(isPresented: $showImporter,
                       allowedContentTypes: Self.importTypes,
                       allowsMultipleSelection: true) { result in
@@ -159,14 +212,17 @@ struct ManageVPNsView: View {
                 ToastCenter.shared.post(exportOmission, symbol: "key.slash", tint: .indigo, seconds: 10)
             }
         }
+    }
+
+    private var confirmationContent: some View {
+        documentPresentationContent
         // THE CONSENT PATH, UNWEAKENED by the move off the editor pane. The confirming
         // button carries `.destructive`, and NOTHING carries
         // `.keyboardShortcut(.defaultAction)`: Return and Escape both cancel, so the
         // leaky outcome is unreachable without reading and aiming at it. The title and
         // message name exactly which secrets this VPN would put in the file.
         .confirmationDialog(wgConsentTarget?.exportConsentTitle ?? "",
-                            isPresented: Binding(get: { wgKeyExportTarget != nil },
-                                                 set: { if !$0 { wgKeyExportTarget = nil } }),
+                            isPresented: wireGuardConsentPresented,
                             titleVisibility: .visible) {
             if let id = wgKeyExportTarget, let c = wgConsentTarget {
                 Button(c.exportConsentConfirmTitle, role: .destructive) {
@@ -178,8 +234,19 @@ struct ManageVPNsView: View {
         } message: {
             Text(wgConsentTarget?.exportConsentMessage ?? "")
         }
-        .alert("Config Imported", isPresented: Binding(
-            get: { ciscoNote != nil }, set: { if !$0 { ciscoNote = nil } })) {
+        .confirmationDialog("Remove \(pendingRemoval?.name ?? "VPN")?",
+                            isPresented: removalConfirmationPresented,
+                            titleVisibility: .visible) {
+            Button("Remove", role: .destructive) { confirmRemoval() }
+            Button("Cancel", role: .cancel) { pendingRemoval = nil }
+        } message: {
+            Text(pendingRemoval?.message ?? "")
+        }
+    }
+
+    private var importPresentationContent: some View {
+        confirmationContent
+        .alert("Config Imported", isPresented: ciscoNotePresented) {
             Button("OK", role: .cancel) { ciscoNote = nil }
         } message: { Text(ciscoNote ?? "") }
         .fileDropTarget { urls in importFiles(urls) }
@@ -189,6 +256,10 @@ struct ManageVPNsView: View {
         // on a VPN adds servers while one dropped anywhere else still imports.
         .serverConfigurationImport(vpn: vpn, request: $serverFilesRequest)
         .importOutcomeAlert(vpn: vpn)
+    }
+
+    private var sheetPresentationContent: some View {
+        importPresentationContent
         .sheet(isPresented: $showDiscover) {
             DiscoverEndpointView { candidate in createFromDiscovery(candidate) }
         }
@@ -196,11 +267,11 @@ struct ManageVPNsView: View {
             CompositionEditor(vpn: vpn, store: compositions, draft: comp) {}
         }
         .sheet(isPresented: $showFindSetting) { GlobalSettingsSearchView() }
-        .sheet(item: $addingServersFrom) { provider in
-            if let id = selection, let profile = vpn.profiles.first(where: { $0.id == id }) {
-                AddServersFromProviderSheet(vpn: vpn, profile: profile, provider: provider)
-            }
-        }
+        .sheet(item: $addingServersFrom, content: addServersSheet)
+    }
+
+    private var lifecycleContent: some View {
+        sheetPresentationContent
         .onChange(of: settingsRouter?.findGeneration ?? 0) { showFindSetting = true }
         // A route arriving from a related-settings link in another editor, or from
         // the global search: this window owns profile SELECTION, so it resolves
@@ -208,26 +279,77 @@ struct ManageVPNsView: View {
         // editor (SettingsEditorShell).
         .onChange(of: settingsRouter?.generation ?? 0) { selectProfileForRoute() }
         // AND ON APPEAR, for the route that arrives from ANOTHER WINDOW. The connect
-        // list's "Fix This…" banner opens this window and then routes, so by the time
+        // list's "Fix This…" banner routes before opening this window, so by the time
         // this view exists the generation has already changed and the `onChange`
         // above never fires for it — the same shape of miss `SettingsRevealScroll`
         // documents for a cross-tab reveal. `selectProfileForRoute` acts at most once
         // per generation, so having two callers is free.
         .onAppear { selectProfileForRoute() }
-        .alert("No VPN for that setting", isPresented: Binding(
-            get: { settingsRouter?.unroutableMessage != nil },
-            set: { if !$0 { settingsRouter?.unroutableMessage = nil } })) {
+        .alert("No VPN for that setting", isPresented: unroutableAlertPresented) {
             Button("OK", role: .cancel) { settingsRouter?.unroutableMessage = nil }
         } message: { Text(settingsRouter?.unroutableMessage ?? "") }
-        .task {
-            await vpn.loadAll()
-            compositions.prune(existingProfileIDs: Set(vpn.profiles.map(\.id)))
-            // Open on the VPN the user was looking at in the main window.
-            if !seeded {
-                seeded = true
-                selection = vpn.selectedID ?? vpn.profiles.first?.id
-                sidebarFocused = true
-            }
+        .task { await loadInitialState() }
+    }
+
+    private var wireGuardConsentPresented: Binding<Bool> {
+        Binding(
+            get: { wgKeyExportTarget != nil },
+            set: { if !$0 { wgKeyExportTarget = nil } })
+    }
+
+    private var removalConfirmationPresented: Binding<Bool> {
+        Binding(
+            get: { pendingRemoval != nil },
+            set: { if !$0 { pendingRemoval = nil } })
+    }
+
+    private var ciscoNotePresented: Binding<Bool> {
+        Binding(
+            get: { ciscoNote != nil },
+            set: { if !$0 { ciscoNote = nil } })
+    }
+
+    private var unroutableAlertPresented: Binding<Bool> {
+        Binding(
+            get: { settingsRouter?.unroutableMessage != nil },
+            set: { presented in
+                if !presented { settingsRouter?.unroutableMessage = nil }
+            })
+    }
+
+    private func loadInitialState() async {
+        await vpn.loadAll()
+        compositions.prune(existingProfileIDs: Set(vpn.profiles.map(\.id)))
+        // Open on the VPN the user was looking at in the main window.
+        guard !seeded else { return }
+        seeded = true
+        // A route has stronger intent than the ordinary initial selection.
+        // `onAppear` can select its tunnel row before this async load returns;
+        // unconditionally applying the main-window selection here then quietly
+        // replaced it, leaving Fix This on the wrong VPN (and preventing the
+        // editor shell from ever seeing its requested row). Resolve the sticky
+        // destination against the now-loaded stores, or use the normal default
+        // only when nobody asked to go somewhere specific.
+        if let wanted = settingsRouter?.route?.profileID,
+           let tag = sidebarTag(for: wanted) {
+            selection = tag
+        } else {
+            selection = vpn.selectedID ?? vpn.profiles.first?.id
+        }
+        sidebarFocused = true
+    }
+
+    /// Keeping the selection lookup out of the already-large modifier chain also
+    /// gives Swift's type checker a small, concrete expression to solve.
+    private var selectedProfile: VPNController.Profile? {
+        guard let selection else { return nil }
+        return vpn.profiles.first { $0.id == selection }
+    }
+
+    @ViewBuilder
+    private func addServersSheet(_ provider: VPNServiceProvider) -> some View {
+        if let profile = selectedProfile {
+            AddServersFromProviderSheet(vpn: vpn, profile: profile, provider: provider)
         }
     }
 
@@ -269,6 +391,10 @@ struct ManageVPNsView: View {
                         }
                     }
                 }
+                // A selected row follows the standard macOS list contract:
+                // Delete removes it. Without this, AppKit can send the key through
+                // the reorderable List and move the focused row instead.
+                .onDeleteCommand(perform: removeSelection)
     }
 
     /// One heading and everything under it, from all three stores. Row layouts are
@@ -360,7 +486,7 @@ struct ManageVPNsView: View {
                     }
                 }
                 exportItems(for: p)
-                Button("Remove", role: .destructive) { Task { try? await vpn.remove(id: p.id) } }
+                Button("Remove", role: .destructive) { requestRemoval(.profile(id: p.id, name: p.name)) }
             }
     }
 
@@ -413,7 +539,7 @@ struct ManageVPNsView: View {
             ReorderMenuItems(commands: order.commands(for: Self.tunnelTag + t.id))
             Divider()
             Button("Remove", role: .destructive) {
-                tunnelManager.disconnect(t.id); tunnels.remove(t.id)
+                requestRemoval(.tunnel(id: t.id, name: t.name))
             }
         }
     }
@@ -433,7 +559,7 @@ struct ManageVPNsView: View {
         .contextMenu {
             ReorderMenuItems(commands: order.commands(for: Self.nativeTag + c.id))
             Divider()
-            Button("Remove", role: .destructive) { nativeVPN.remove(c.id) }
+            Button("Remove", role: .destructive) { requestRemoval(.native(id: c.id, name: c.name)) }
         }
     }
 
@@ -489,7 +615,7 @@ struct ManageVPNsView: View {
             // keyboard can't open — this menu is the Tab-reachable path.
             Menu {
                 Button("Edit…") { editingComposition = comp }
-                Button("Remove", role: .destructive) { compositions.remove(comp.id) }
+                Button("Remove", role: .destructive) { requestRemoval(.composition(id: comp.id, name: comp.name)) }
             } label: {
                 Image(systemName: "ellipsis.circle").frame(width: 28, height: 22).contentShape(Rectangle())
             }
@@ -503,7 +629,7 @@ struct ManageVPNsView: View {
                 if active { vpn.disconnectComposition(comp) } else { Task { await vpn.connectComposition(comp) } }
             }
             Button("Edit…") { editingComposition = comp }
-            Button("Remove", role: .destructive) { compositions.remove(comp.id) }
+            Button("Remove", role: .destructive) { requestRemoval(.composition(id: comp.id, name: comp.name)) }
         }
     }
 
@@ -605,14 +731,42 @@ struct ManageVPNsView: View {
     }
 
     private func removeSelection() {
-        guard let sel = selection else { return }
-        if sel.hasPrefix(Self.tunnelTag) {
-            let id = String(sel.dropFirst(Self.tunnelTag.count))
+        guard let target = removalTarget(for: selection) else { return }
+        pendingRemoval = target
+    }
+
+    private func removalTarget(for selection: String?) -> RemovalTarget? {
+        guard let selection else { return nil }
+        if selection.hasPrefix(Self.tunnelTag) {
+            let id = String(selection.dropFirst(Self.tunnelTag.count))
+            return tunnels.tunnels.first(where: { $0.id == id }).map { .tunnel(id: $0.id, name: $0.name) }
+        }
+        if selection.hasPrefix(Self.nativeTag) {
+            let id = String(selection.dropFirst(Self.nativeTag.count))
+            return nativeVPN.configs.first(where: { $0.id == id }).map { .native(id: $0.id, name: $0.name) }
+        }
+        return vpn.profiles.first(where: { $0.id == selection }).map { .profile(id: $0.id, name: $0.name) }
+    }
+
+    private func requestRemoval(_ target: RemovalTarget) {
+        pendingRemoval = target
+    }
+
+    private func confirmRemoval() {
+        guard let target = pendingRemoval else { return }
+        pendingRemoval = nil
+        // Drop the disappearing identity before touching its owning store. This
+        // prevents List from reusing the focused row for a reorder animation.
+        selection = nil
+        switch target {
+        case let .tunnel(id, _):
             tunnelManager.disconnect(id); tunnels.remove(id)
-        } else if sel.hasPrefix(Self.nativeTag) {
-            nativeVPN.remove(String(sel.dropFirst(Self.nativeTag.count)))
-        } else {
-            Task { try? await vpn.remove(id: sel) }
+        case let .native(id, _):
+            nativeVPN.remove(id)
+        case let .profile(id, _):
+            Task { try? await vpn.remove(id: id) }
+        case let .composition(id, _):
+            compositions.remove(id)
         }
     }
 

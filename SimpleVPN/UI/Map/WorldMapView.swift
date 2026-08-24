@@ -9,10 +9,9 @@
 //
 //  A live tunnel's gateway address is often useless for placing it (a corporate
 //  VPN hands out RFC1918 space), so this view also feeds the model what the app
-//  ALREADY knows about the configured concentrator: the country the user set on
-//  that endpoint, and what its hostname has resolved to — on this network or on
-//  another one this Mac remembers. All of it is cached or user-authored: drawing
-//  the map never asks the network anything.
+//  already knows about the connected endpoint. Configuration is a last-resort
+//  locator only while the transport has not reported its active address. All of
+//  it is cached or user-authored: drawing the map never asks the network anything.
 //
 
 import SwiftUI
@@ -34,23 +33,36 @@ struct WorldMapView: View {
         return (c.latitude, c.longitude, location.ssid.map { "On \u{201C}\($0)\u{201D}" })
     }
 
-    /// What we know about each connected VPN's configured concentrator, keyed by
-    /// profile id. Only already-cached/derived data — no lookups start here.
+    /// What we know about each connected VPN's endpoint, keyed by profile id.
+    /// The transport-reported address wins; configured data exists only as an
+    /// honest fallback before a tunnel has published its first live sample.
+    /// Only already-cached/derived data — no lookups start here.
     private func hints(for stats: [String: TunnelStats]) -> [String: WorldMapModel.GatewayHint] {
         var out: [String: WorldMapModel.GatewayHint] = [:]
-        for id in stats.keys {
+        for (id, sample) in stats {
             guard let profile = vpn.profiles.first(where: { $0.id == id }) else { continue }
-            // The endpoint a connect would ACTUALLY dial — the same precedence the
-            // Probe command uses, so the map can't disagree with it.
+            // The configured target is useful only until the transport reports
+            // where this session landed. Once it has, the globe must follow the
+            // connected endpoint rather than the selected server row.
             let target = VPNProbeTarget.resolve(profile: profile, vpn: vpn, evaluator: evaluator)
-            guard !target.host.isEmpty else { continue }
-            var hint = WorldMapModel.GatewayHint(host: target.host)
+            let activeHost = sample.activeServerAddress
+            let host = activeHost.isEmpty ? target.host : activeHost
+            guard !host.isEmpty else { continue }
+            var hint = WorldMapModel.GatewayHint(host: host)
             let endpoints = vpn.endpoints(for: id)
-            hint.countryOverride = (endpoints.first { $0.host == target.host && $0.port == target.port }
-                                    ?? endpoints.first { $0.host == target.host })?.country
+            let activePort = sample.serverPort.flatMap(Int.init)
+            // A user-authored country only applies when it describes the live
+            // endpoint. Do not transplant it to a fail-over server merely because
+            // that server was selected before the tunnel connected.
+            hint.countryOverride = (endpoints.first { endpoint in
+                endpoint.host.caseInsensitiveCompare(host) == .orderedSame
+                    && (activePort.map { endpoint.port == $0 } ?? true)
+            } ?? endpoints.first { endpoint in
+                endpoint.host.caseInsensitiveCompare(host) == .orderedSame
+            })?.country
             if let locator {
-                let everywhere = locator.cachedEverywhere(host: target.host)
-                let here = locator.cached(host: target.host)
+                let everywhere = locator.cachedEverywhere(host: host)
+                let here = locator.cached(host: host)
                 hint.resolvedCountryHere = here?.countryCode
                 hint.resolvedCountryElsewhere = everywhere
                     .first { $0.countryCode != nil && $0 != here }?.countryCode
@@ -96,10 +108,9 @@ struct WorldMapView: View {
         let hasHops = m.pins.contains { if case .endpoint = $0.kind { return true }; return false }
         if hasHops {
             VStack(alignment: .leading, spacing: 6) {
-                // Fill the container width (the leading VStack + the map's own
-                // aspect-ratio would otherwise let it size to a narrower ideal);
-                // height then follows the 2:1 ratio.
-                MercatorMapView(pins: m.pins, connections: m.connections)
+                // A draggable Metal globe keeps the route on a real sphere rather
+                // than flattening a great-circle into a Mercator approximation.
+                MetalGlobeMapView(pins: m.pins, connections: m.connections)
                     .frame(maxWidth: .infinity)
                 Text(caption(m))
                     .font(.caption).foregroundStyle(.secondary)

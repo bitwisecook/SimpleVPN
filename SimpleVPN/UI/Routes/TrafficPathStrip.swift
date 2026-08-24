@@ -32,6 +32,7 @@ import SwiftUI
 struct TrafficPathStrip: View {
     @Bindable var vpn: VPNController
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.liveVisualPolicy) private var liveVisuals
 
     /// Non-nil only during a switch — gates the TimelineView so idle costs nothing.
     @State private var animatingSince: Date?
@@ -43,8 +44,9 @@ struct TrafficPathStrip: View {
         let owner = vpn.routes.effectiveGatewayOwner
         let ownerName = vpn.routes.name(for: owner)
 
-        TimelineView(.animation(minimumInterval: 1 / 30,
-                                paused: reduceMotion || animatingSince == nil)) { context in
+        TimelineView(.animation(minimumInterval: liveVisuals.frameInterval(normalFramesPerSecond: 30),
+                                paused: !liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion)
+                                    || animatingSince == nil)) { context in
             let phase = animatingSince == nil ? 0 : context.date.timeIntervalSinceReferenceDate
             Canvas { ctx, size in
                 draw(ctx: ctx, size: size, ownerName: ownerName, phase: phase)
@@ -66,7 +68,7 @@ struct TrafficPathStrip: View {
     }
 
     private func trigger() {
-        guard !reduceMotion else { return }   // reduce motion ⇒ snap, no beam
+        guard liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion) else { return }   // motion preference ⇒ snap, no beam
         settle?.cancel()
         animatingSince = Date()
         settle = Task {

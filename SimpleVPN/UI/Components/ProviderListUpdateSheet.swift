@@ -103,7 +103,7 @@ struct ProviderListUpdateSheet: View {
             buttons
         }
         .padding(18)
-        .frame(width: 540, height: 560)
+        .resizablePanel(idealWidth: 540, idealHeight: 560)
         .task {
             // A held update is the answer to something the user pressed, so it is
             // announced immediately rather than through the debounced path.

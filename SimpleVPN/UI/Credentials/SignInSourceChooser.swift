@@ -426,12 +426,20 @@ extension View {
                               profile: VPNController.Profile,
                               allowsPasswordSave: Bool,
                               sources: SignInSourceAvailability) -> some View {
-        popover(isPresented: isPresented, arrowEdge: .bottom) {
+        // The control that opens this is normally at the trailing edge of a
+        // connection banner. A trailing arrow keeps the bounded chooser beside
+        // that control instead of making a tall popover cover the connection.
+        popover(isPresented: isPresented, arrowEdge: .trailing) {
             SignInChooserPopover(vpn: vpn, profile: profile,
                                  allowsPasswordSave: allowsPasswordSave, sources: sources,
                                  isPresented: isPresented)
         }
     }
+}
+
+private enum SignInChooserPopoverMetrics {
+    static let width: CGFloat = 420
+    static let maximumHeight: CGFloat = 520
 }
 
 /// The popover's contents. A view of its own so it can own the probe refresh and
@@ -459,7 +467,7 @@ struct SignInChooserPopover: View {
 
     private var selectedID: SignInSourceID? {
         switch source.kind {
-        case .manual: auth.rememberCredentials ? .saveInSimpleVPN : .typeEachTime
+        case .manual: vpn.remembersPassword(for: profile.id) ? .saveInSimpleVPN : .typeEachTime
         case .applePasswords: .applePasswords
         default: LocalVaultRegistry.adapter(for: source.kind).map { .vault($0.vendor) }
         }
@@ -467,34 +475,40 @@ struct SignInChooserPopover: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            SignInSourceChooser(
-                options: SignInSourceCatalog.options(facts),
-                selection: selectedID,
-                onChoose: { choose($0) },
-                onOpenApp: { open($0) },
-                onConfigure: { configure($0) },
-                // Same "Check Again" as the first-connect card: somebody who has just
-                // switched something on in the vendor's own settings wants a straight
-                // answer here too, not a row that may update while they look away.
-                onRecheck: { _ in Task { await sources.deepScan(force: true); sources.refresh() } })
-            // STEP TWO OF THE SAME QUESTION. Picking "KeePass database file" is not
-            // an answer on its own: which database, and which entry in it, is what
-            // makes it work — and asking that here, in order, is what keeps the
-            // chooser from being a flat list that leaves the real choice somewhere
-            // else. Only for a vendor that can genuinely have several: the singular
-            // ones have nothing to choose between.
-            if let vendor = chosenMultiInstanceVendor {
-                Divider()
-                SignInInstanceEntryPicker(
-                    vendor: vendor,
-                    instance: Binding(get: { draftInstance },
-                                      set: { draftInstance = $0; commitSelection() }),
-                    entry: $draftEntry,
-                    account: $draftAccount,
-                    entryPrompt: entryPrompt(for: vendor),
-                    accountLabel: "Username (optional)",
-                    onConfigure: { configure(vendor) })
-                    .onSubmit { commitSelection() }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    // The chooser is rich enough to be a scrollable popover. Its
+                    // compact row form keeps untested-source explanations as
+                    // badges here; the full explanations remain in Settings.
+                    SignInSourceChooser(
+                        options: SignInSourceCatalog.options(facts),
+                        selection: selectedID,
+                        onChoose: { choose($0) },
+                        onOpenApp: { open($0) },
+                        onConfigure: { configure($0) },
+                        onRecheck: { _ in Task { await sources.deepScan(force: true); sources.refresh() } },
+                        compact: true)
+                    // STEP TWO OF THE SAME QUESTION. Picking "KeePass database file" is not
+                    // an answer on its own: which database, and which entry in it, is what
+                    // makes it work — and asking that here, in order, is what keeps the
+                    // chooser from being a flat list that leaves the real choice somewhere
+                    // else. Only for a vendor that can genuinely have several: the singular
+                    // ones have nothing to choose between.
+                    if let vendor = chosenMultiInstanceVendor {
+                        Divider()
+                        SignInInstanceEntryPicker(
+                            vendor: vendor,
+                            instance: Binding(get: { draftInstance },
+                                              set: { draftInstance = $0; commitSelection() }),
+                            entry: $draftEntry,
+                            account: $draftAccount,
+                            entryPrompt: entryPrompt(for: vendor),
+                            accountLabel: "Username (optional)",
+                            onConfigure: { configure(vendor) })
+                            .onSubmit { commitSelection() }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             HStack {
                 Spacer()
@@ -503,7 +517,8 @@ struct SignInChooserPopover: View {
             }
         }
         .padding(14)
-        .frame(width: 420)
+        .frame(width: SignInChooserPopoverMetrics.width,
+               height: SignInChooserPopoverMetrics.maximumHeight)
         .onAppear { sources.refresh(); seedDraft() }
         .onDisappear { commitSelection() }
         // Choosing a different source rewrites what step two is asking about, so the
@@ -650,9 +665,7 @@ struct SignInSourceRecoveryNotice: View {
             }
             .controlSize(.small)
         }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+        .bannerSurface(tint: .orange, opacity: 0.10)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(headline) \(SignInFlow.recoveryLine)")
     }

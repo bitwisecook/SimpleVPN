@@ -177,6 +177,19 @@ struct OnePasswordPreflightTests {
         #expect(!OnePasswordPreflight.isVerified(in: store))
     }
 
+    @Test func aSuccessfulCredentialReadSupersedesAnOlderIntegrationOffResult() {
+        let store = scratchDefaults()
+        OnePasswordPreflight.remember(.integrationOff, in: store)
+        #expect(OnePasswordPreflight.isIntegrationKnownOff(in: store))
+
+        // `authPlan` calls this after 1Password has released the selected
+        // credentials; it must restore the returning-user launch state.
+        OnePasswordPreflight.markVerified(in: store)
+
+        #expect(OnePasswordPreflight.isVerified(in: store))
+        #expect(!OnePasswordPreflight.isIntegrationKnownOff(in: store))
+    }
+
     /// Same rule from a REAL call (a connect, a browse) — the other way the app
     /// learns the setting was turned back off.
     @Test func aFailedRealCallReArmsTheWalkthrough() {

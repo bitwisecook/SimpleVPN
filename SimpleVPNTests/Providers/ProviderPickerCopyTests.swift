@@ -22,6 +22,7 @@ struct ProviderPickerCopyTests {
     static var allCopy: [String] {
         var out = [ProviderPickerCopy.sectionTitle,
                    ProviderPickerCopy.sectionDetail,
+                   ProviderPickerCopy.firstRunSectionTitle,
                    ProviderPickerCopy.firstRunDetail,
                    ProviderPickerCopy.nothingMatches,
                    ProviderPickerCopy.applyTitle(count: 1),
@@ -34,7 +35,17 @@ struct ProviderPickerCopyTests {
                     ProviderPickerCopy.consentConfirm(p),
                     ProviderPickerCopy.consentMessage(p, throughTunnel: true),
                     ProviderPickerCopy.consentMessage(p, throughTunnel: false),
+                    ProviderPickerCopy.firstRunTitle(p),
+                    ProviderPickerCopy.firstRunActionTitle(p),
+                    ProviderPickerCopy.firstRunSummary(p),
+                    ProviderPickerCopy.firstRunImportTitle(p),
+                    ProviderPickerCopy.firstRunVendorLinkTitle(p),
+                    ProviderPickerCopy.firstRunServerStatus(p),
                     ProviderPickerCopy.applied(count: 3, provider: p, vpn: "Work")]
+            for step in ProviderPickerCopy.firstRunSteps(p) {
+                out.append(step.text)
+                if let note = step.note { out.append(note) }
+            }
             if let size = ProviderPickerCopy.downloadSize(p) { out.append(size) }
         }
         return out
@@ -253,13 +264,45 @@ struct ProviderPickerCopyTests {
                                                   throughTunnel: true).contains("MB"))
     }
 
-    /// The first-run page's wording carries the extra caveat that page needs: with no
-    /// VPNs at all, somebody could reasonably read four company names as a way to GET
-    /// a VPN. It is not.
-    @Test("the first-run wording says this is not a way to buy or sign in to a VPN")
+    /// The first-run page is deliberately only the question and the four names. Its
+    /// short introduction still says the important limit before a choice is made;
+    /// every provider-specific caveat belongs on the page that choice opens.
+    @Test("the first-run picker is a concise provider choice")
     func firstRunSaysWhatThisIsNot() {
         let text = ProviderPickerCopy.firstRunDetail.lowercased()
-        #expect(text.contains("not a way to buy"))
+        #expect(ProviderPickerCopy.firstRunSectionTitle == "Choose your VPN provider")
+        #expect(text.contains("does not sell"))
         #expect(text.contains("account"))
+        #expect(text.split(separator: " ").count < 25)
+    }
+
+    /// Clicking any of the four names now has an answer, including Proton. Each
+    /// destination names the provider, tells the user which configuration to get,
+    /// offers the importer, and explains what happens to the server list.
+    @Test("every provider has a complete second-page setup guide")
+    func everyProviderHasSetupGuide() {
+        for p in VPNServiceProviderCatalog.all {
+            let steps = ProviderPickerCopy.firstRunSteps(p)
+            let combined = ([ProviderPickerCopy.firstRunTitle(p),
+                             ProviderPickerCopy.firstRunSummary(p),
+                             ProviderPickerCopy.firstRunImportTitle(p),
+                             ProviderPickerCopy.firstRunServerStatus(p)]
+                            + steps.flatMap { [$0.text, $0.note ?? ""] })
+                .joined(separator: " ")
+            #expect(steps.count == 4, "\(p.displayName) does not have a four-step guide")
+            #expect(combined.contains(p.displayName))
+            #expect(combined.contains(ProviderPickerCopy.configurationKind(p)))
+            #expect(combined.lowercased().contains("configuration"))
+            #expect(combined.lowercased().contains("server"))
+        }
+    }
+
+    @Test("every provider setup page has a named first-party configuration destination")
+    func everyProviderHasAConfigurationPage() {
+        for p in VPNServiceProviderCatalog.all {
+            #expect(p.setupURL.scheme == "https", "\(p.displayName) setup link must use HTTPS")
+            #expect(p.setupURL.host() != nil, "\(p.displayName) setup link has no host")
+            #expect(ProviderPickerCopy.firstRunVendorLinkTitle(p).contains(p.displayName))
+        }
     }
 }

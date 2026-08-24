@@ -39,8 +39,11 @@ settings:
     SWIFT_VERSION: "6.0"                       # Swift 6 language mode = complete/strict concurrency
     SWIFT_APPROACHABLE_CONCURRENCY: YES
     SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
-    MARKETING_VERSION: "0.3"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "0.4"
+    # Kept in lockstep with the committed BUILDNUMBER by
+    # Tools/bump-build-number.sh. This is the Debug/Xcode default; release
+    # builds pass the same committed value explicitly.
+    CURRENT_PROJECT_VERSION: "186"
     # Xcode "recommended settings" we accept (signing stays Developer ID, ARCHS stays arm64 by design).
     DEAD_CODE_STRIPPING: YES
     ENABLE_USER_SCRIPT_SANDBOXING: YES
@@ -321,6 +324,43 @@ targets:
           - "-framework"
           - "Security"
         SKIP_INSTALL: YES
+
+  # A deliberately tiny executable for proving password-app drag boundaries
+  # without starting SimpleVPN's VPN stores, extension doctor, Keychain reads or
+  # Metal UI. It compiles the production 1Password client and embeds the production
+  # helper, so its drop-then-fetch result is evidence about the real integration.
+  OnePasswordProbe:
+    type: application
+    platform: macOS
+    sources:
+      - Tools/OnePasswordProbe
+      - path: SimpleVPN/Credentials/ChromiumWebCustomData.swift
+      - path: SimpleVPN/Credentials/OnePasswordNative.swift
+      - path: SimpleVPN/Credentials/OnePasswordDropItem.swift
+      - path: SimpleVPN/Diagnostics/SecretScrubber.swift
+      - path: SimpleVPN/UI/Credentials/ApplePasswordsPicker.swift
+    settings:
+      base:
+        PRODUCT_NAME: OnePasswordProbe
+        PRODUCT_BUNDLE_IDENTIFIER: com.bragi0.SimpleVPN.OnePasswordProbe
+        INFOPLIST_KEY_CFBundleDisplayName: "Credential Drop Probe"
+        GENERATE_INFOPLIST_FILE: YES
+        ENABLE_APP_SANDBOX: NO
+        PROVISIONING_PROFILE_SPECIFIER: ""
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) ONEPASSWORD_PROBE"
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GCC_TREAT_WARNINGS_AS_ERRORS: YES
+    postBuildScripts:
+      - name: Embed opnative-helper
+        script: |
+          cp -f "${BUILT_PRODUCTS_DIR}/opnative-helper" "${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/opnative-helper"
+        inputFiles:
+          - "$(BUILT_PRODUCTS_DIR)/opnative-helper"
+        outputFiles:
+          - "$(TARGET_BUILD_DIR)/$(EXECUTABLE_FOLDER_PATH)/opnative-helper"
+    dependencies:
+      - target: OPNativeHelper
+        embed: false
 
   # ---- OpenConnect sign-in helper (conversational SSO over stdin/stdout,
   # retiring the user-context `openconnect --external-browser` subprocess; see

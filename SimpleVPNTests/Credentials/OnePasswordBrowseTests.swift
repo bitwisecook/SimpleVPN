@@ -18,6 +18,7 @@
 //      simply foreign, it must yield nothing rather than crash.
 //
 
+import AppKit
 import Foundation
 import Testing
 @testable import SimpleVPN
@@ -42,6 +43,7 @@ struct OnePasswordBrowseTests {
     /// in the account and the list would stop meaning anything.
     @Test func lettersMustAppearInOrder() {
         #expect(FuzzyMatch.matches("grvpn", in: "GR Lab VPN"))
+        #expect(FuzzyMatch.matches("grb", in: "Grlab"))
         #expect(!FuzzyMatch.matches("npvrg", in: "GR Lab VPN"))
     }
 
@@ -72,6 +74,21 @@ struct OnePasswordBrowseTests {
         let ranked = FuzzyMatch.rank(rows, query: "work") { [$0.title, $0.vault] }
         #expect(ranked.first?.title == "Work VPN")
         #expect(ranked.count == 2)
+    }
+
+    @Test func realOnePasswordBrowserSearchesTitlesAndNeverOpaqueMetadata() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("SimpleVPN/UI/Credentials/OnePasswordBrowsePopover.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        #expect(source.contains("FuzzyMatch.rank(rows, query: query) { [$0.title] }"))
+        #expect(!source.contains("FuzzyMatch.rank(rows, query: query) { [$0.title, $0.subtitle] }"),
+                "vault/category labels must not make an item match a query its visible title does not")
+        #expect(!source.contains("FuzzyMatch.rank(rows, query: query) { [$0.id] }"),
+                "opaque ids are coordinates, never user-facing search keys")
     }
 
     // MARK: - Remembered account
@@ -130,10 +147,10 @@ struct OnePasswordBrowseTests {
 
     @Test func vaultIDBecomesTheNameShownInOnePassword() {
         let vaults = [
-            OnePasswordNative.OPVaultOverview(id: "k3owyg7dnj4yhnvhmh2gkjq4ie", title: "Private"),
+            OnePasswordNative.OPVaultOverview(id: "aaaaaaaaaaaaaaaaaaaaaaaaaa", title: "Private"),
             OnePasswordNative.OPVaultOverview(id: "v2", title: "Shared"),
         ]
-        #expect(OnePasswordNative.vaultTitle(forID: "k3owyg7dnj4yhnvhmh2gkjq4ie", in: vaults) == "Private")
+        #expect(OnePasswordNative.vaultTitle(forID: "aaaaaaaaaaaaaaaaaaaaaaaaaa", in: vaults) == "Private")
         // Callers hold whichever of id/title 1Password gave them.
         #expect(OnePasswordNative.vaultTitle(forID: "shared", in: vaults) == "Shared")
         #expect(OnePasswordNative.vaultTitle(forID: "unknown", in: vaults) == nil)
@@ -184,9 +201,9 @@ struct OnePasswordBrowseTests {
     /// The real thing, byte for byte: one entry, 21 UTF-16 units of type name,
     /// 194 of JSON — which is where the observed 448-byte blob comes from.
     @Test func oneDraggedItemDecodesToItsCoordinates() throws {
-        let json = dragJSON([("4V26ZNTCZZDNBEE3IYEEG6Y5AA",
-                              "k3owyg7dnj4yhnvhmh2gkjq4ie",
-                              "esfn3iokhykkgoab4xk2pqtopq")])
+        let json = dragJSON([("A2C4E6G8J2L4N6P8R2T4V6X8Z2",
+                              "aaaaaaaaaaaaaaaaaaaaaaaaaa",
+                              "b2b4b6b8b2b4b6b8b2b4b6b8b2")])
         let blob = webCustomData([("application/1password", json)])
         let entries = ChromiumWebCustomData.entries(from: blob)
         #expect(entries.count == 1)
@@ -194,9 +211,9 @@ struct OnePasswordBrowseTests {
 
         let coordinates = OnePasswordDragPayload.coordinates(in: entries)
         #expect(coordinates.count == 1)
-        #expect(coordinates.first?.itemUUID == "esfn3iokhykkgoab4xk2pqtopq")
-        #expect(coordinates.first?.vaultUUID == "k3owyg7dnj4yhnvhmh2gkjq4ie")
-        #expect(coordinates.first?.accountUUID == "4V26ZNTCZZDNBEE3IYEEG6Y5AA")
+        #expect(coordinates.first?.itemUUID == "b2b4b6b8b2b4b6b8b2b4b6b8b2")
+        #expect(coordinates.first?.vaultUUID == "aaaaaaaaaaaaaaaaaaaaaaaaaa")
+        #expect(coordinates.first?.accountUUID == "A2C4E6G8J2L4N6P8R2T4V6X8Z2")
     }
 
     /// A multi-selection drag carries one entry per item, in selection order,
@@ -378,6 +395,71 @@ struct OnePasswordBrowseTests {
         #expect(drop.title == "Grlab")
     }
 
+    /// The first-connect well uses an AppKit destination because SwiftUI can
+    /// discard Chromium's private representation before its drop closure runs.
+    /// Pin the native pasteboard route that keeps the account/vault/item tuple.
+    @Test func nativeDragPasteboardYieldsFullCoordinates() throws {
+        let blob = webCustomData([("application/1password",
+                                   dragJSON([("ACCT", "VAULT", "ITEM")]))])
+        let pasteboard = NSPasteboard.withUniqueName()
+        pasteboard.declareTypes([
+            NSPasteboard.PasteboardType(ChromiumWebCustomData.typeIdentifier),
+            .string,
+        ], owner: nil)
+        #expect(pasteboard.setData(
+            blob,
+            forType: NSPasteboard.PasteboardType(ChromiumWebCustomData.typeIdentifier)))
+        #expect(pasteboard.setString("Grlab", forType: .string))
+
+        #expect(OnePasswordDropItem.canAccept(pasteboard))
+        let reading = OnePasswordDropItem.read(from: pasteboard)
+        let drop = try #require(reading.drops.first)
+        #expect(reading.fromPayload)
+        #expect(reading.sawWebCustomData)
+        #expect(reading.fromDragPasteboard)
+        #expect(drop.reference == "ITEM")
+        #expect(drop.vault == "VAULT")
+        #expect(drop.account == "ACCT")
+        #expect(drop.title == "Grlab")
+    }
+
+    /// Chromium is allowed to advertise a drag flavour before vending its
+    /// promised bytes. Hover negotiation must accept that type; decoding is
+    /// deliberately deferred until AppKit commits the drop.
+    @Test func nativePromisedPayloadIsAcceptedBeforeBytesArrive() {
+        let pasteboard = NSPasteboard.withUniqueName()
+        pasteboard.declareTypes([
+            NSPasteboard.PasteboardType(ChromiumWebCustomData.typeIdentifier),
+        ], owner: nil)
+
+        #expect(OnePasswordDropItem.canAccept(pasteboard))
+        #expect(OnePasswordDropItem.read(from: pasteboard).isEmpty)
+    }
+
+    /// SwiftUI owns delivery; its callback snapshots Chromium's private data
+    /// before awaiting the public item providers. Pin that snapshot surviving
+    /// the collector even when providers contribute nothing.
+    @Test func swiftUIDropCollectorKeepsTheActiveDragSnapshot() async throws {
+        let blob = webCustomData([("application/1password",
+                                   dragJSON([("ACCT", "VAULT", "ITEM")]))])
+        let pasteboard = NSPasteboard.withUniqueName()
+        pasteboard.declareTypes([
+            NSPasteboard.PasteboardType(ChromiumWebCustomData.typeIdentifier),
+            .string,
+        ], owner: nil)
+        #expect(pasteboard.setData(
+            blob,
+            forType: NSPasteboard.PasteboardType(ChromiumWebCustomData.typeIdentifier)))
+        #expect(pasteboard.setString("GR Lab", forType: .string))
+
+        let snapshot = OnePasswordDropItem.read(from: pasteboard)
+        let collector = OnePasswordDropCollector(coalesce: .zero)
+        let drops = try #require(await collector.collect([], dragSnapshot: snapshot))
+        let drop = try #require(drops.first)
+        #expect(drop.reference == "ITEM")
+        #expect(drop.title == "GR Lab")
+    }
+
     /// If a multi-selection ever arrives as one provider per item, all of them
     /// have to survive — silently keeping the first would choose a VPN's
     /// sign-in on the user's behalf.
@@ -408,8 +490,8 @@ struct OnePasswordBrowseTests {
     /// UUIDs are exact but unreadable, so the UI needs to know when it is
     /// holding one rather than something a person would recognise.
     @Test func onePasswordIDsAreRecognisedAsUnreadable() {
-        #expect(OnePasswordDrop.looksLikeItemID("esfn3iokhykkgoab4xk2pqtopq"))
-        #expect(OnePasswordDrop.looksLikeItemID("4V26ZNTCZZDNBEE3IYEEG6Y5AA"))
+        #expect(OnePasswordDrop.looksLikeItemID("b2b4b6b8b2b4b6b8b2b4b6b8b2"))
+        #expect(OnePasswordDrop.looksLikeItemID("A2C4E6G8J2L4N6P8R2T4V6X8Z2"))
         #expect(!OnePasswordDrop.looksLikeItemID("GR Lab VPN"))
         #expect(!OnePasswordDrop.looksLikeItemID(""))
     }
@@ -496,11 +578,11 @@ struct OnePasswordBrowseTests {
     /// makes Browse fail before it can succeed.
     @Test func aDraggedItemAnswersWhichAccount() {
         let store = scratchDefaults()
-        #expect(OnePasswordAccountMemory.seed("4V26ZNTCZZDNBEE3IYEEG6Y5AA", in: store))
-        #expect(OnePasswordAccountMemory.remembered(in: store) == "4V26ZNTCZZDNBEE3IYEEG6Y5AA")
+        #expect(OnePasswordAccountMemory.seed("A2C4E6G8J2L4N6P8R2T4V6X8Z2", in: store))
+        #expect(OnePasswordAccountMemory.remembered(in: store) == "A2C4E6G8J2L4N6P8R2T4V6X8Z2")
         // A name that has actually worked is more use than a UUID: never replaced.
         OnePasswordAccountMemory.remember("Secure Vault", in: store)
-        #expect(!OnePasswordAccountMemory.seed("SOMEOTHERACCOUNTUUID000000", in: store))
+        #expect(!OnePasswordAccountMemory.seed("B3D5F7H9K3M5Q7S9U3W5Y7A9C3", in: store))
         #expect(OnePasswordAccountMemory.remembered(in: store) == "Secure Vault")
         // Nothing to learn from an empty one.
         #expect(!OnePasswordAccountMemory.seed("  ", in: scratchDefaults("empty")))

@@ -47,8 +47,8 @@ should go. Leaving it in the group is what stops the removal reading as an overs
 
 Two sources deliberately have no doc of their own, because they have no vendor to
 describe: **typing it each time** and **Save in SimpleVPN** (the Apple keychain). Apple
-Passwords is covered below rather than separately — it is an AutoFill row, and the reason
-is the first of the three findings.
+Passwords is covered below rather than separately — macOS owns its authorization picker
+and exposes no catalogue API to SimpleVPN.
 
 ## The rule that shapes all of it
 
@@ -179,7 +179,7 @@ appear.
 |---|---|---|---|---|
 | Type it each time | — | everything you type | — | The floor. Always available. |
 | Save in SimpleVPN | OS keychain | username, password, TOTP | single | Apple keychain, protected by macOS. Touch ID optional. |
-| Apple Passwords | OS AutoFill | username, password | single | **Fill, not fetch** — see below. |
+| Apple Passwords | system authorization picker | username, password | single | One user-selected result; no catalogue access. |
 | 1Password | signed IPC to the app | username, password, TOTP | single | The app does the unlocking; its password never reaches us. |
 | KeePassXC | app socket | username, password, TOTP | single | Its browser protocol, reimplemented. |
 | Keeper | local daemon → CLI | username, password | single | Commander. Its session lives in the OS keychain. |
@@ -193,16 +193,14 @@ appear.
 
 ### Three findings that changed a design
 
-**Apple Passwords is read-mostly, and we cannot write to it at all.** Verified against the
-macOS 26.6 SDK: `SecAddSharedWebCredential` is the only public path that lands an entry
-there, it needs associated-domains *plus* the VPN server operator serving an
-app-site-association file naming us, and it is deprecated at macOS 26.2 with a
-macOS-unavailable replacement. Our own `SecItem` query also cannot see anything Safari or
-Passwords manages — those live under an access group our entitlement does not hold. So
-that row is an **AutoFill** row, and no UI anywhere implies saving into Apple Passwords.
-What we do offer instead: the keychain on this Mac, optional iCloud Keychain sync *within
-our own access group* ("your other Macs"), and a user-initiated `otpauth://` hand-off for
-verification codes.
+**Apple Passwords offers one authorized selection, not a catalogue.**
+`ASAuthorizationPasswordProvider` presents macOS's searchable chooser and returns the one
+username/password pair the person authorizes. It cannot enumerate items, cannot accept the
+opaque identifier carried by a Passwords drag, and returns no verification code. Live drag
+testing showed `public.data` JSON containing display title, username, protection-space and
+passkey metadata but no password. We also cannot write into Apple Passwords: the legacy
+associated-domain API is deprecated and its replacement is unavailable on macOS. The
+alternative saving row therefore remains SimpleVPN's own Apple-keychain item.
 
 **The Bitwarden CLI cannot read a vault without a session key.** Its unlocked user key is
 stored encrypted with `BW_SESSION`, so a `bw status` *we* run reports `locked` even for a

@@ -247,7 +247,7 @@ struct AddServersFromFilesSheet: View {
             buttons
         }
         .padding(18)
-        .frame(width: 520, height: 520)
+        .resizablePanel(idealWidth: 520, idealHeight: 520)
         .task { await load() }
     }
 

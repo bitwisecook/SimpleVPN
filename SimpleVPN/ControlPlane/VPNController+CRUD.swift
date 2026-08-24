@@ -29,6 +29,9 @@ extension VPNController {
     @discardableResult
     func importProfile(name: String, ovpn: String, server: String,
                        id: String = UUID().uuidString) async throws -> String {
+        // An import is a deliberate new profile, even if a caller happens to
+        // reuse an identifier from a profile removed earlier in this launch.
+        locallyRemovedProfileIDs.remove(id)
         let split = OVPNSecretMaterial.split(ovpn)
         var storedOVPN = ovpn
         if !split.secrets.isEmpty {
@@ -111,14 +114,35 @@ extension VPNController {
     }
 
     func remove(id: String) async throws {
-        guard let mgr = managers[id] else { return }
+        guard !locallyRemovedProfileIDs.contains(id), let mgr = managers[id] else { return }
+        // NetworkExtension removes preferences asynchronously.  Hide this
+        // profile before awaiting it so an unrelated refresh cannot put the
+        // old manager back in the UI, then keep its tombstone until our own
+        // confirming refresh has completed.
+        locallyRemovedProfileIDs.insert(id)
+        hideProfileWhileRemoving(id: id)
+        managers.removeValue(forKey: id)
+        authConfigs.removeValue(forKey: id)
+        credentialSources.removeValue(forKey: id)
+        overridesCache.removeValue(forKey: id)
+        customRoutingCache.removeValue(forKey: id)
+        uiPrefsCache.removeValue(forKey: id)
+
         // A Tailscale node key is this Mac's identity on that network and lives
         // in the extension's root-owned tree, which the app cannot touch — ask
         // the extension to shred it while there is still a session to ask.
         if profiles.first(where: { $0.id == id })?.kind == .tailscale {
             _ = await sendMessageData("tsforget", to: id, timeout: 4)
         }
-        try await mgr.removeFromPreferences()
+        do {
+            try await mgr.removeFromPreferences()
+        } catch {
+            // The preference removal did not stick, so allow the next refresh
+            // to restore the real profile rather than leaving a phantom delete.
+            locallyRemovedProfileIDs.remove(id)
+            await loadAll()
+            throw error
+        }
         KeychainCredentialStore.deleteCredentials(profile: id)
         KeychainCredentialStore.deleteProfileSecrets(profile: id)
         KeychainCredentialStore.deleteOVPNInlineSecrets(profile: id)
@@ -126,6 +150,8 @@ extension VPNController {
         KeychainCredentialStore.deleteCredentials(profile: Self.tailscaleKeyProfile(id))
         KeychainCredentialStore.deleteCredentials(profile: Self.wireGuardKeyProfile(id))
         BiometricCredentialStore.delete(profile: id)
+        FirstSuccessfulConnectionStore.clear(profile: id)
+        ConnectionBaselineStore.clear(profile: id)
         wireGuardConfigs[id] = nil
         wireGuardStatuses[id] = nil
         tailscaleConfigs[id] = nil
@@ -141,6 +167,8 @@ extension VPNController {
         ovpnTextCache[id] = nil
         inlineSecretMigrationFailures[id] = nil
         endpointsCache[id] = nil
+        // Keep the tombstone through this refresh: NetworkExtension can briefly
+        // hand back the just-removed manager to another request in flight.
         await loadAll()
     }
 

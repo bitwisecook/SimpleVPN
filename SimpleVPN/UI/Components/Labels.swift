@@ -124,7 +124,15 @@ final class LabelStore {
     }
 }
 
-/// A pastel pill for a label.
+/// The compact-label policy shared by sidebars and the menu bar. User-created
+/// names are unbounded, but a row is not: showing a bounded prefix plus a count
+/// keeps the connection name and its state usable at every column width.
+nonisolated enum LabelPillMetrics {
+    static let maximumTextWidth: CGFloat = 92
+    static let maximumVisibleLabels = 2
+}
+
+/// A pastel pill for one label.
 struct LabelPill: View {
     let label: LabelDef
     @Environment(\.colorSchemeContrast) private var contrast
@@ -134,6 +142,9 @@ struct LabelPill: View {
             // but nothing stops a navy "Prod" — so the text picks black/white by
             // the pill's own luminance instead of assuming a light background.
             .font(.caption2).fontWeight(.medium)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .frame(maxWidth: LabelPillMetrics.maximumTextWidth, alignment: .leading)
             .foregroundStyle(textColor)
             .padding(.horizontal, 7).padding(.vertical, 2)
             .background(label.color, in: Capsule())
@@ -144,6 +155,9 @@ struct LabelPill: View {
                     Capsule().strokeBorder(textColor.opacity(0.6), lineWidth: 1)
                 }
             }
+            // The visual text may be shortened; assistive technology always gets
+            // the user-provided name in full.
+            .accessibilityLabel(label.name)
     }
 
     private var textColor: Color {
@@ -152,5 +166,38 @@ struct LabelPill: View {
         let l = 0.2126 * lin(label.r) + 0.7152 * lin(label.g) + 0.0722 * lin(label.b)
         return l > 0.4 ? .black.opacity(contrast == .increased ? 1 : 0.78)
                        : .white.opacity(contrast == .increased ? 1 : 0.92)
+    }
+}
+
+/// A bounded run of user labels for space-constrained connection rows.
+///
+/// Showing every label made a long catalog consume the name, state and action of
+/// the connection it was meant to organise. Two readable labels and an explicit
+/// count preserve the useful context without pretending the omitted labels do
+/// not exist; the complete set remains in the combined accessibility sentence.
+struct LabelPills: View {
+    let labels: [LabelDef]
+
+    private var shown: [LabelDef] {
+        Array(labels.prefix(LabelPillMetrics.maximumVisibleLabels))
+    }
+
+    private var hiddenCount: Int { max(0, labels.count - shown.count) }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(shown) { LabelPill(label: $0) }
+            if hiddenCount > 0 {
+                Text("+\(hiddenCount)")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(.quaternary.opacity(0.6), in: .capsule)
+                    .fixedSize()
+                    .accessibilityLabel("\(hiddenCount) more labels")
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(labels.map(\.name).formatted(.list(type: .and)))
     }
 }

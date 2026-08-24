@@ -532,10 +532,11 @@ uses the word for its own thing, in a `code` span or quotes (ONTOLOGY rule 2).
 
 Two more copy rules that are really design rules:
 
-- **The picker row states the gap before the fetch, not after.** Mullvad's row reads, in substance:
-  *"567 WireGuard servers. You will still need a Mullvad account and a configuration downloaded from
-  mullvad.net — SimpleVPN cannot sign you in."* If that sentence cannot be written truthfully for a
-  provider, the provider does not get a row that does anything.
+- **The provider page states the gap before the fetch, not after.** On first run the picker itself is
+  deliberately only four company names; choosing one opens its instructions, where Mullvad's page
+  reads, in substance: *"You will still need a Mullvad account and a configuration downloaded from
+  mullvad.net — SimpleVPN cannot sign you in."* The denser existing-VPN picker keeps that detail in
+  its row. If the sentence cannot be written truthfully for a provider, it does not get a fetch action.
 - **Proton's row exists and is disabled**, saying that Proton's server list needs an account
   SimpleVPN does not ask for, and pointing at "download your configuration from Proton and import
   it" — which works today. An absent row is indistinguishable from a bug.
@@ -622,9 +623,14 @@ this section; the list below marks each piece.
   already exist do all the sorting the request asked for, without a second list or a parallel
   picker. Facts win and opinions survive: a refresh replaces a stale peer key and never a name or a
   position, and a hand-typed server is never restamped as the provider's.
-- **The two entry points** — `ProviderPickerSection` on the no-VPNs page (below the import actions,
-  because for three of the four providers importing is the prerequisite) and a submenu in the Manage
-  VPNs `+`. `ProviderPickerCopy` holds every string and is test-enforced against ONTOLOGY §7.
+- **The two entry points** — a four-column Liquid Glass tile grid of provider names on the no-VPNs
+  page, leading to the provider-specific `ProviderFirstRunView`, and a submenu in the Manage VPNs
+  `+` for an existing VPN.
+  The provider page repeats the landing page's Liquid Glass drop target; both are one window-wide
+  `URL` drop destination and therefore feed the same import pipeline as the native file panel.
+  `ProviderPickerCopy` holds every string and is test-enforced against ONTOLOGY §7. The empty-state
+  page and every provider page are scrollable, so their content can never become the main window's
+  minimum height and push it beyond the display.
 
 ### The first batch ✅, in `SimpleVPN/Providers/`:
 

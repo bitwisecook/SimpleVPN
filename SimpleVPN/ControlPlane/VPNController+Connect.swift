@@ -66,7 +66,7 @@ extension VPNController {
 
     private func persistIfRemembered(id: String) {
         let c = transientCredentials(for: id)
-        guard authConfig(for: id).rememberCredentials,
+        guard remembersPassword(for: id),
               allowsPasswordSave(id: id),
               !c.username.isEmpty, !c.password.isEmpty else { return }
         // Typing an OTP also lands here — don't rewrite an unchanged
@@ -81,6 +81,16 @@ extension VPNController {
     }
 
     // MARK: Credential source (manual / 1Password / Apple Passwords / KeePassXC)
+
+    /// The one user-facing answer to “will this password be kept?”  Old
+    /// profiles predate the explicit opt-in field, but a password already in
+    /// the keychain is durable evidence of that earlier decision.  New profiles
+    /// have neither and start false.
+    func remembersPassword(for id: String) -> Bool {
+        if authConfig(for: id).rememberCredentials { return true }
+        guard credentialSource(for: id).kind == .manual else { return false }
+        return savedCredentials(id: id)?.password.isEmpty == false
+    }
 
 
     func credentialSource(for id: String) -> CredentialSource {
@@ -114,8 +124,9 @@ extension VPNController {
     /// Every vendor-backed source resolves through `LocalVaultRegistry`, so a new
     /// password app is one adapter rather than another case here (that switch is
     /// exactly what had to be unpicked when Keeper turned out to have a local
-    /// path after all). Apple Passwords stays inline: it is macOS's own keychain,
-    /// not a vendor channel with an app to detect.
+    /// path after all). Apple Passwords is deliberately a transient delivery here:
+    /// AuthenticationServices returns the one authorized selection into the visible
+    /// fields; SimpleVPN cannot enumerate or fetch its private catalogue.
     func managerProvider(for id: String) -> CredentialProvider? {
         guard !typedSignInOnce.contains(id) else { return nil }
         let source = credentialSource(for: id)
@@ -130,8 +141,10 @@ extension VPNController {
             }
             return nil
         case .applePasswords:
-            guard !source.reference.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
-            return ApplePasswordsProvider(server: source.reference, account: source.account)
+            // The stored kind remembers the person's chosen workflow, while a
+            // nil provider keeps the actual values in the ordinary transient
+            // fields and makes Connect consume those exact in-memory values.
+            return nil
         case .onePassword, .keePassXC, .keeper, .bitwarden, .dashlane,
              .keePassFile, .passwordStore, .lastPass, .protonPass, .passbolt:
             // The adapter owns the vendor's quirks (1Password's account
@@ -211,6 +224,11 @@ extension VPNController {
                 username: username, password: password, totpSecret: totpSecret))
             // The plain-keychain copy would defeat the point of the gate.
             KeychainCredentialStore.deleteCredentials(profile: id)
+            // Touch ID is a stronger form of remembering this sign-in, not an
+            // exception to the user's "Save password" choice. Keeping these
+            // facts together means every surface can truthfully show Save
+            // password as on while its protected variant is selected.
+            auth.rememberCredentials = true
             auth.protectWithBiometrics = true
             try await setAuthConfig(auth, for: id)
             Self.log.log("biometric protection ON for \(id, privacy: .public)")
@@ -222,7 +240,10 @@ extension VPNController {
             }
             let provider = BiometricCredentialProvider(reason: "move the sign-in for \(name) out of Touch ID protection")
             let raw = try await provider.resolve(profile: id, fields: [.username, .password])
-            if auth.rememberCredentials, allowsPasswordSave(id: id) {
+            // A protected credential was necessarily saved. Preserve that
+            // choice when moving it back to the ordinary keychain.
+            auth.rememberCredentials = true
+            if allowsPasswordSave(id: id) {
                 try? KeychainCredentialStore.saveCredentials(profile: id, .init(
                     username: raw.username ?? "", password: raw.password ?? ""))
             }
@@ -464,7 +485,7 @@ extension VPNController {
         let auth = effectiveAuthConfig(for: id)
         let provider = ManualCredentialProvider(username: c.username, password: c.password, otp: c.otp)
         try await connect(id: id, using: provider, request: auth.request,
-                          remember: auth.rememberCredentials && allowsPasswordSave(id: id))
+                          remember: remembersPassword(for: id) && allowsPasswordSave(id: id))
         transientCreds[id]?.otp = ""
         // A typed connect that worked retires the "type it this time" escape:
         // the next connect goes back to the source the user actually chose, and
@@ -656,7 +677,6 @@ extension VPNController {
         if isProxyTunnel(id) { try await connectProxyTunnel(id: id); return }
         if isWireGuard(id) { try await connectWireGuard(id: id); return }
         if isSSHNetworkTunnel(id) { try await connectSSHNetworkTunnel(id: id); return }
-        let auth = effectiveAuthConfig(for: id)
         guard managerProvider(for: id) != nil else {
             try await connectWithTransientCredentials(id: id)
             return
@@ -665,7 +685,12 @@ extension VPNController {
         // the result in a `ManualCredentialProvider`, and let `connect` resolve the
         // wrapper — see `VPNController+Auth.swift`'s header.
         let plan = try await authPlan(for: id, typedOTP: typedOTP)
-        try await connect(id: id, plan: plan, request: auth.request, remember: false)
+        // A first Connect to a newly dragged 1Password item may learn from that
+        // one approved response that the item carries a verification code. Read
+        // the now-settled shape after planning so those same returned values are
+        // assembled correctly; never make a second password-manager request.
+        let request = effectiveAuthConfig(for: id).request
+        try await connect(id: id, plan: plan, request: request, remember: false)
     }
 
     // MARK: Compositions (multiple VPNs connected together)
@@ -859,7 +884,13 @@ extension VPNController {
         if isAutologin(id) { return true }   // the certificate is the sign-in
         let auth = effectiveAuthConfig(for: id)
         if managerProvider(for: id) != nil {
-            // 1Password/KeePassXC can serve an OTP itself; Apple Passwords can't.
+            // 1Password owns an interactive approval / Touch ID prompt.  Its
+            // credentials are available to an explicit Connect click, never to
+            // a repair, resume, or launch-time reconnect.  Otherwise reopening
+            // SimpleVPN can make 1Password ask before the person has decided to
+            // connect anything.
+            if credentialSource(for: id).kind == .onePassword { return false }
+            // KeePassXC can serve an OTP itself; Apple Passwords can't.
             return !auth.requiresOTP || credentialSource(for: id).kind.suppliesOTP
         }
         if auth.requiresOTP { return false }   // a one-time code can't be reused

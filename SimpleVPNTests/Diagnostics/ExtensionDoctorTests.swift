@@ -166,6 +166,13 @@ struct ExtensionDoctorTests {
         #expect(step.needsConsent)
     }
 
+    @Test func onlyDirectUserActionsMayPresentRepairConsent() {
+        #expect(!ExtensionDoctor.Trigger.launch.allowsConsentPrompt)
+        #expect(!ExtensionDoctor.Trigger.statsTimeout.allowsConsentPrompt)
+        #expect(ExtensionDoctor.Trigger.connectGate.allowsConsentPrompt)
+        #expect(ExtensionDoctor.Trigger.doctorCard.allowsConsentPrompt)
+    }
+
     // MARK: - The policy, swept
 
     /// Every snapshot shape with something engaged: a remedy that could drop a

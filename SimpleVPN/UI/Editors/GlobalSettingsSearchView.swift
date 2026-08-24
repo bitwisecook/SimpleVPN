@@ -51,7 +51,7 @@ struct GlobalSettingsSearchView: View {
             }
             .padding(12)
         }
-        .frame(width: 460, height: 340)
+        .resizablePanel(idealWidth: 460, idealHeight: 340)
         .navigationTitle("Find a Setting")
     }
 

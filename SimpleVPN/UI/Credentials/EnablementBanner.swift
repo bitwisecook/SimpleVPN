@@ -66,9 +66,7 @@ struct EnablementBanner: View {
             .accessibilityLabel("\(guidance.doc.title), the vendor\u{2019}s own documentation")
             .accessibilityHint("Opens \(guidance.doc.url.absoluteString) in your browser.")
         }
-        .padding(8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+        .bannerSurface(tint: .quaternary, opacity: 0.5)
         // A container (it holds buttons and a link), with the whole banner as one
         // spoken sentence so nothing in it is reachable only by eye.
         .accessibilityElement(children: .contain)

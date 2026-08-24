@@ -46,6 +46,15 @@ nonisolated enum SettingValueMetrics {
     /// How wide a value may get before it stops growing. Matches the OpenVPN
     /// options form, which had this number inline and was the only form that did.
     static let maxWidth: CGFloat = 260
+
+    /// Configuration values are scalar values, not notes.  Keep pasted text on
+    /// one visual and stored line; the few places that intentionally accept many
+    /// lines use their own explicit editors (`TextEditor` / `linesRow`).
+    static func singleLine(_ value: String) -> String {
+        value.components(separatedBy: .newlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
 }
 
 extension View {
@@ -54,8 +63,20 @@ extension View {
     func settingValue(maxWidth: CGFloat = SettingValueMetrics.maxWidth) -> some View {
         self
             .multilineTextAlignment(.trailing)
-            .frame(maxWidth: maxWidth, alignment: .trailing)
+            // `minWidth: 0` is as important as the cap: AppKit otherwise lets a
+            // long unbroken paste advertise its intrinsic width and widen the
+            // whole Form rather than keeping the editor in the value column.
+            .frame(minWidth: 0, maxWidth: maxWidth, alignment: .trailing)
             .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    /// A scalar configuration input in the trailing value column.  This keeps
+    /// the hand-written credential and protocol fields (which cannot use
+    /// `SettingValueField` because they have special bindings or validation) on
+    /// the same width, alignment and one-line contract as catalog-backed fields.
+    func scalarConfigurationValue() -> some View {
+        lineLimit(1)
+            .settingValue()
     }
 }
 
@@ -355,6 +376,16 @@ struct SettingValueField: View {
     /// caption. It rides the VALUE rather than a hint because that is where
     /// `Docs/Accessibility.md` puts state.
     var extraSpoken: String?
+    /// Web-gateway fields accept a complete URL as well as a hostname.  This is
+    /// a keyboard/input hint only: the binding preserves exactly what was pasted.
+    var acceptsURL = false
+
+    /// The scalar binding used by the common text field.  This is deliberately
+    /// here, not at each call site, so a pasted HTML fragment or copied paragraph
+    /// cannot turn one of the app's ordinary settings into a multi-line control.
+    private var singleLineText: Binding<String> {
+        Binding(get: { text }, set: { text = SettingValueMetrics.singleLine($0) })
+    }
 
     var body: some View {
         LabeledContent {
@@ -374,9 +405,17 @@ struct SettingValueField: View {
         if secure {
             // A secret's own value must never be read back out loud, so the
             // accessibility value carries only the problem.
-            SecureField("", text: $text, prompt: Text(prompt))
+            SecureField("", text: singleLineText, prompt: Text(prompt))
+                .lineLimit(1)
         } else {
-            TextField("", text: $text, prompt: Text(prompt))
+            if acceptsURL {
+                TextField("", text: singleLineText, prompt: Text(prompt))
+                    .textContentType(.URL)
+                    .lineLimit(1)
+            } else {
+                TextField("", text: singleLineText, prompt: Text(prompt))
+                    .lineLimit(1)
+            }
         }
     }
 

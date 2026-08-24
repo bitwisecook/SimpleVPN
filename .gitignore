@@ -3,6 +3,11 @@ DerivedData/
 *.xcuserstate
 xcuserdata/
 
+# Loose compiler products must never be written to the repository root.
+*.o
+*.d
+*.dia
+
 # XcodeGen output — project.yml is the source of truth (run `xcodegen generate`)
 SimpleVPN.xcodeproj/
 

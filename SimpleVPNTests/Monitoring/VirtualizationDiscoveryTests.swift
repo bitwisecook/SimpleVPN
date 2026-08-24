@@ -342,6 +342,31 @@ struct VirtualizationSnapshotTests {
         #expect(!snapshot.isEmpty)
     }
 
+    /// UTM's app bundle is ordinary local installation evidence, but its saved VM
+    /// bundles live in another app's protected container.  A normal scan must be
+    /// able to say "UTM is installed" without reading that container; only the
+    /// explicitly enabled path may name or classify its machines.
+    @Test func UTMConfigurationsRequireTheExplicitProtectedDataOption() {
+        var mac = FakeMac()
+        let root = "/Users/fixture/Library/Containers/com.utmapp.UTM/Data/Documents"
+        mac.present = ["/Applications/UTM.app"]
+        mac.directories[root] = ["Lab.utm"]
+        mac.networks[root + "/Lab.utm/config.plist"] =
+            UTMNetworkConfig(mode: "Shared", bridgeInterface: nil)
+
+        let ordinary = VirtualizationDiscovery.snapshot(
+            interfaces: [], detectionEnabled: true, env: mac.environment)
+        #expect(ordinary.installed.map(\.productID) == ["utm"])
+        #expect(ordinary.utmGuests.isEmpty)
+        #expect(ordinary.placedGuests.isEmpty)
+
+        let explicit = VirtualizationDiscovery.snapshot(
+            interfaces: [], detectionEnabled: true, includeProtectedAppData: true,
+            env: mac.environment)
+        #expect(explicit.utmGuests.map(\.name) == ["Lab"])
+        #expect(explicit.placedGuests.map(\.guest.displayName) == ["Lab"])
+    }
+
     @Test func duplicateSubnetsAreOfferedOnce() {
         let interfaces = [
             interface("bridge100", kind: .bridge,
@@ -720,17 +745,42 @@ struct VirtualizationSettingsTests {
                                                  store: store) == false)
     }
 
+    /// UI tests keep the real feature preference intact while suppressing the one
+    /// protected-file integration that could otherwise raise a macOS consent sheet.
+    @Test func uiTestsCanSuppressTheProtectedFileScanForTheirProcess() throws {
+        let suite = "vm.tests.\(UUID().uuidString)"
+        let store = try #require(UserDefaults(suiteName: suite))
+        defer { store.removePersistentDomain(forName: suite) }
+
+        #expect(VirtualizationSettings.effectiveDetectionEnabled(
+            environment: [VirtualizationSettings.suppressProtectedFileScanEnvironmentKey: "1"],
+            store: store))
+        #expect(!VirtualizationSettings.protectedUTMConfigurationAccessEnabled(
+            environment: [VirtualizationSettings.suppressProtectedFileScanEnvironmentKey: "1"],
+            store: store))
+        #expect(VirtualizationSettings.effectiveDetectionEnabled(
+            environment: [:], store: store))
+        #expect(!VirtualizationSettings.protectedUTMConfigurationAccessEnabled(
+            environment: [:], store: store))
+        store.set(true, forKey: VirtualizationSettings.readUTMConfigurationsDefaultsKey)
+        #expect(VirtualizationSettings.protectedUTMConfigurationAccessEnabled(
+            environment: [:], store: store))
+    }
+
     /// The defaults keys and the setting ids must be the same strings: the id is the
     /// CLI/MDM/manual-anchor contract, and a second spelling is a setting the CLI
     /// cannot address.
     @Test func theDefaultsKeysAreTheSettingIDs() {
         #expect(VirtualizationSettings.detectDefaultsKey == VirtualizationSettings.detect.id)
+        #expect(VirtualizationSettings.readUTMConfigurationsDefaultsKey
+                == VirtualizationSettings.readUTMConfigurations.id)
         #expect(VirtualizationSettings.warnOnConnectDefaultsKey
                 == VirtualizationSettings.warnOnConnect.id)
     }
 
     @Test func theSurfaceOwnsItsNamespace() {
         #expect(SettingSurface.owning("vm.detect") == .virtualization)
+        #expect(SettingSurface.owning("vm.read-utm-configurations") == .virtualization)
         #expect(SettingSurface.owning("vm.warn-on-connect") == .virtualization)
         #expect(SettingSurface.virtualization.isAppLevel)
         // App-level, so it belongs to no VPN kind — that is what stops a global search

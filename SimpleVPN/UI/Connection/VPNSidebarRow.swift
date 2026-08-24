@@ -71,9 +71,7 @@ struct VPNSidebarRow: View {
                 // position in a sidebar that also drew it beside the name and on the
                 // trailing edge. It is trailing now, like every other row's.)
                 if !labelDefs.isEmpty {
-                    HStack(spacing: 4) {
-                        ForEach(labelDefs) { LabelPill(label: $0) }
-                    }
+                    LabelPills(labels: labelDefs)
                     .accessibilityHidden(true)
                 }
             }

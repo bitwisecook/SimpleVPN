@@ -156,11 +156,12 @@ nonisolated enum GuestInventory {
     /// `VirtualizationDiscovery.snapshotOffMain`, never from the main actor.
     /// `installed` gates each reader so a product nobody has is not searched for.
     static func guests(env: VirtualizationEnvironment,
-                       installed: [InstalledVirtualization]) -> [NamedGuest] {
+                       installed: [InstalledVirtualization],
+                       includeProtectedAppData: Bool = false) -> [NamedGuest] {
         let have = Set(installed.map(\.productID))
         var out: [NamedGuest] = []
         if have.contains("apple-container") { out += appleContainerGuests(env: env) }
-        if have.contains("utm") { out += utmNamedGuests(env: env) }
+        if includeProtectedAppData, have.contains("utm") { out += utmNamedGuests(env: env) }
         if have.contains("parallels") { out += parallelsGuests(env: env) }
         if have.contains("vmware-fusion") { out += vmwareGuests(env: env) }
         if have.contains("virtualbox") { out += virtualBoxGuests(env: env) }

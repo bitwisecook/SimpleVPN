@@ -16,10 +16,20 @@ final class ExtensionController {
     private(set) var status = "Not activated"
     private(set) var isActivated = false
     private(set) var needsApproval = false
+    private(set) var needsApplicationsInstallation = false
+    private(set) var isRemoving = false
 
     var bundledVersion: String { SystemExtensionManager.bundledExtensionVersion }
 
     func activate() async {
+        guard SystemExtensionManager.isEligibleForActivation else {
+            isActivated = false
+            needsApproval = false
+            needsApplicationsInstallation = true
+            status = "Open the copy of SimpleVPN in Applications before enabling VPN connections."
+            return
+        }
+        needsApplicationsInstallation = false
         manager.onNeedsApproval = { [weak self] in
             Task { @MainActor in
                 self?.needsApproval = true
@@ -34,6 +44,24 @@ final class ExtensionController {
         } catch {
             isActivated = false
             status = "Failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Explicit user-requested removal.  This never deletes VPN configurations
+    /// or credentials; it only asks macOS to deactivate SimpleVPN's own engine.
+    /// macOS may require confirmation or a restart to finish the removal.
+    func removeVPNEngine() async {
+        guard !isRemoving else { return }
+        isRemoving = true
+        defer { isRemoving = false }
+        status = "Removing VPN engine…"
+        do {
+            try await SystemExtensionManager.deactivate()
+            isActivated = false
+            needsApproval = false
+            status = "VPN engine removal requested. macOS may finish it after a restart."
+        } catch {
+            status = "Couldn't remove the VPN engine: \(error.localizedDescription)"
         }
     }
 }

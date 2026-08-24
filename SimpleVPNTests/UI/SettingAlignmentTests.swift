@@ -187,4 +187,53 @@ struct SettingAlignmentTests {
             \(offenders.sorted().joined(separator: ", "))
             """)
     }
+
+    /// A normal configuration value is scalar.  Pasting a document into a server
+    /// field must neither make it multi-line nor let its intrinsic width stretch the
+    /// split view; explicit multi-line controls have their own implementations.
+    @Test func theSharedValueFieldIsSingleLineAndBounded() throws {
+        let shared = try String(contentsOf: Self.repoRoot
+            .appendingPathComponent("SimpleVPN/UI/Components/SettingValueRow.swift"), encoding: .utf8)
+        #expect(shared.contains("static func singleLine"))
+        #expect(shared.contains(".lineLimit(1)"))
+        #expect(shared.contains(".frame(minWidth: 0, maxWidth: maxWidth"))
+    }
+
+    /// Some protocol fields need special bindings (numbers, Keychain-backed
+    /// secrets, validation) and therefore cannot be constructed by
+    /// `SettingValueField`. They still need its value-column contract rather than
+    /// quietly becoming the next left-aligned exception.
+    @Test func handBuiltConfigurationInputsUseTheSharedScalarValueTreatment() throws {
+        let required = [
+            "NativeVPNView.swift", "SubprocessTunnelView.swift",
+            "SSHNetworkTunnelView.swift", "WireGuardView.swift",
+            "OpenVPNOptionsForm.swift", "CustomRoutingTabView.swift",
+        ]
+        let editors = try Self.editorSources()
+        for name in required {
+            let source = try #require(editors[name])
+            #expect(source.contains(".scalarConfigurationValue()"),
+                    "\(name) has hand-built inputs that bypass the shared trailing scalar value treatment")
+        }
+    }
+
+    /// Blank first-connect credentials are not a configuration error.  The two
+    /// editor families use the same banner so that distinction cannot drift
+    /// between native VPNs and OpenConnect/SSH tunnels.
+    @Test func firstConnectCredentialsUseTheSharedInformationalBanner() throws {
+        let banner = try String(contentsOf: Self.repoRoot
+            .appendingPathComponent("SimpleVPN/UI/Components/BannerSurface.swift"), encoding: .utf8)
+        #expect(banner.contains("struct FirstConnectSignInBanner"))
+        #expect(banner.contains("Sign-in details are empty. You can fill them in when connecting for the first time."))
+        #expect(banner.contains(".bannerSurface(tint: Color.accentColor)"))
+
+        let editors = try Self.editorSources()
+        for name in ["SubprocessTunnelView.swift", "NativeVPNView.swift"] {
+            let source = try #require(editors[name])
+            #expect(source.contains("FirstConnectSignInBanner(need: need)"),
+                    "\(name) must use the shared first-connect sign-in banner")
+            #expect(source.contains("!need.isDeferredUntilConnect"),
+                    "\(name) must not mark first-connect credentials as a field error")
+        }
+    }
 }

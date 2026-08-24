@@ -26,6 +26,187 @@ struct OnePasswordListTests {
 
     private func reply(_ json: String) -> Data { Data(json.utf8) }
 
+    // MARK: - First-connect field inference
+
+    /// A 1Password Login entry tells us the roles of its fields.  Linking that
+    /// exact entry must carry the one-time-code field through to the common
+    /// first-connect controls; otherwise an OpenVPN gateway sees only a
+    /// username/password pair and rejects a perfectly good sign-in.
+    @Test func inferredFieldMapIncludesTheVerificationCodeWhenPresent() {
+        let map = OnePasswordProvider.inferredFieldMap(from: [
+            .init(id: "user-id", label: "Username", purpose: "USERNAME", type: "STRING"),
+            .init(id: "password-id", label: "Password", purpose: "PASSWORD", type: "CONCEALED"),
+            .init(id: "code-id", label: "Verification code", purpose: "", type: "OTP"),
+        ])
+        #expect(map[AuthKind.username.rawValue] == "user-id")
+        #expect(map[AuthKind.password.rawValue] == "password-id")
+        #expect(map[AuthKind.otp.rawValue] == "code-id")
+    }
+
+    @Test func inferredFieldMapLeavesVerificationCodeOptionalWhenAbsent() {
+        let map = OnePasswordProvider.inferredFieldMap(from: [
+            .init(id: "user-id", label: "Username", purpose: "USERNAME", type: "STRING"),
+            .init(id: "password-id", label: "Password", purpose: "PASSWORD", type: "CONCEALED"),
+        ])
+        #expect(map[AuthKind.username.rawValue] == "user-id")
+        #expect(map[AuthKind.password.rawValue] == "password-id")
+        #expect(map[AuthKind.otp.rawValue] == nil)
+    }
+
+    @Test func oneFullItemResponseBothLearnsFieldsAndSuppliesFirstConnect() {
+        let prepared = OnePasswordProvider.preparedEntry(from: .init(
+            title: "GR Lab",
+            vaultID: "test-vault",
+            itemID: "test-item",
+            fields: [
+                .init(id: "user-field", label: "username", purpose: "USERNAME",
+                      type: "STRING", value: "james", otp: nil),
+                .init(id: "password-field", label: "password", purpose: "PASSWORD",
+                      type: "CONCEALED", value: "not-persisted", otp: nil),
+                .init(id: "code-field", label: "one-time password", purpose: "",
+                      type: "OTP", value: "", otp: "123456"),
+            ]))
+
+        #expect(prepared.inspection.vaultID == "test-vault")
+        #expect(prepared.inspection.fieldMap[AuthKind.username.rawValue] == "user-field")
+        #expect(prepared.inspection.fieldMap[AuthKind.password.rawValue] == "password-field")
+        #expect(prepared.inspection.fieldMap[AuthKind.otp.rawValue] == "code-field")
+        #expect(prepared.inspection.hasVerificationCode)
+        #expect(prepared.credentials.username == "james")
+        #expect(prepared.credentials.password == "not-persisted")
+        #expect(prepared.credentials.otp == "123456")
+    }
+
+    @Test func aLinkedEntryInspectionMakesOnePasswordVerified() {
+        let suite = "OnePasswordListTests.linkedEntryInspection"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        #expect(!OnePasswordPreflight.isVerified(in: defaults))
+        OnePasswordPreflight.markVerified(in: defaults)
+        #expect(OnePasswordPreflight.isVerified(in: defaults),
+                "the approved item inspection is sufficient proof; setup must not make a second vault-list request")
+    }
+
+    @Test func firstConnectPersistsAnInspectionAsOneSourceUpdate() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("SimpleVPN/UI/Connection/FirstConnectSetupCard.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        #expect(source.contains("Persist everything learned from this one inspection together"))
+        #expect(!source.contains("updated.fieldMap = item.fieldMap\n                    try? await vpn.setCredentialSource(updated"),
+                "the map and vault must not be saved from separate stale source copies")
+    }
+
+    @Test func returningConnectionNeverMountsOnePasswordSetupBeforeReadingSuccess() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let detail = try String(contentsOf: root
+            .appendingPathComponent("SimpleVPN/UI/Connection/ConnectionDetailView.swift"), encoding: .utf8)
+        let setup = try String(contentsOf: root
+            .appendingPathComponent("SimpleVPN/UI/Connection/FirstConnectSetupCard.swift"), encoding: .utf8)
+
+        #expect(detail.contains("State(initialValue:\n            !FirstSuccessfulConnectionStore.hasSucceeded(profile: profile.id))"),
+                "returning profiles must know their first-connect state before SwiftUI mounts the setup card")
+        #expect(!detail.contains(".task(id: profile.id) {\n            neverConnected = !FirstSuccessfulConnectionStore"),
+                "a second asynchronous success read must not replace the settled launch state")
+        #expect(!setup.contains(".task { await sources.deepScan() }"),
+                "opening the setup card must not start a password-manager helper or its approval prompt")
+        #expect(!setup.contains(".task(id: \"\\(source.kind.rawValue)|\\(source.reference)"),
+                "linking or reopening a dropped item must not read 1Password before Connect")
+    }
+
+    @Test func firstConnectUsesOneApprovedItemResponseWithoutResolvingAgain() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let auth = try String(contentsOf: root
+            .appendingPathComponent("SimpleVPN/ControlPlane/VPNController+Auth.swift"), encoding: .utf8)
+        let connect = try String(contentsOf: root
+            .appendingPathComponent("SimpleVPN/ControlPlane/VPNController+Connect.swift"), encoding: .utf8)
+
+        #expect(auth.contains("let prepared = try await OnePasswordProvider.prepareEntry"))
+        #expect(auth.contains("raw = prepared.credentials"))
+        #expect(connect.contains("let request = effectiveAuthConfig(for: id).request"),
+                "the request must be recomputed after the one item read discovers a verification code")
+    }
+
+    @Test func aDropNeedsNeitherPreconnectionNorAnItemRead() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let auth = try String(contentsOf: root
+            .appendingPathComponent("SimpleVPN/ControlPlane/VPNController+Auth.swift"), encoding: .utf8)
+        let setup = try String(contentsOf: root
+            .appendingPathComponent("SimpleVPN/UI/Connection/FirstConnectSetupCard.swift"), encoding: .utf8)
+
+        let linkStart = try #require(auth.range(of: "func linkOnePasswordEntry"))
+        let linkEnd = try #require(auth.range(of: "// MARK: - Can it serve", range: linkStart.upperBound..<auth.endIndex))
+        let linkBody = String(auth[linkStart.lowerBound..<linkEnd.lowerBound])
+        #expect(!linkBody.contains("OnePasswordNative"))
+        #expect(!linkBody.contains("prepareEntry"))
+        #expect(!linkBody.contains("inspectEntry"))
+        #expect(setup.contains("The well is available before authorization and before an account"))
+    }
+
+    @Test func explicitFirstConnectCanOverrideOnlyTheCachedOnePasswordGate() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let auth = try String(contentsOf: root
+            .appendingPathComponent("SimpleVPN/ControlPlane/VPNController+Auth.swift"), encoding: .utf8)
+
+        #expect(auth.contains("let hasDroppedOnePasswordItem = source.kind == .onePassword"))
+        #expect(auth.contains("if case .broken(let locus, let block) = satisfaction,\n           !hasDroppedOnePasswordItem"))
+        #expect(auth.contains("Automatic reconnect never reaches this path"))
+    }
+
+    @Test func onePasswordCannotBeUsedForAnUnattendedReconnect() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let connect = try String(contentsOf: root
+            .appendingPathComponent("SimpleVPN/ControlPlane/VPNController+Connect.swift"), encoding: .utf8)
+
+        #expect(connect.contains("if credentialSource(for: id).kind == .onePassword { return false }"),
+                "1Password's Touch ID approval is only allowed after an explicit Connect action")
+    }
+
+    @Test func aReturningOnePasswordProfileDoesNotLetCachedPreflightOverrideIt() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let auth = try String(contentsOf: root
+            .appendingPathComponent("SimpleVPN/ControlPlane/VPNController+Auth.swift"), encoding: .utf8)
+
+        #expect(auth.contains("FirstSuccessfulConnectionStore.hasSucceeded(profile: id)"),
+                "a successful linked 1Password profile must be allowed to reach its next explicit Connect")
+        #expect(auth.contains("this never creates an unexplained Touch ID prompt"),
+                "the returning-profile exception must remain paired with the no-auto-reconnect rule")
+    }
+
+    /// Custom fields do not have Login-item purposes.  The same conservative
+    /// inference used by the actual resolver must still make a normal custom
+    /// username/password entry usable without a manual mapping detour.
+    @Test func inferredFieldMapRecognisesCommonCustomSignInLabels() {
+        let map = OnePasswordProvider.inferredFieldMap(from: [
+            .init(id: "email-id", label: "Email", purpose: "", type: "STRING"),
+            .init(id: "secret-id", label: "Account secret", purpose: "", type: "CONCEALED"),
+        ])
+        #expect(map[AuthKind.username.rawValue] == "email-id")
+        #expect(map[AuthKind.password.rawValue] == "secret-id")
+    }
+
     // MARK: - Vault lists
 
     @Test func vaultListDecodes() throws {

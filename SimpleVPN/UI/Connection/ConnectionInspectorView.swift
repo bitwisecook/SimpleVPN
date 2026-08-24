@@ -3,7 +3,7 @@
 //
 //  ConnectionInspectorView.swift
 //  The main window's inspector (third) column: everything that's alive while
-//  connected — the throughput graph, the world map, the connection details —
+//  connected — the throughput graph and connection details —
 //  and a friendly placeholder when the VPN isn't. Split out of
 //  ConnectionView.swift, whose split view still decides when it shows.
 //
@@ -13,9 +13,8 @@ import SwiftUI
 // MARK: - Inspector column (live telemetry)
 
 /// The third column: everything that's alive while connected — the up/down graph,
-/// the world map with great-circle arcs to the endpoint, the railroad diagram and
-/// the full connection details. Its own 1 Hz poller so it's independent of the
-/// controls column. Shows a friendly placeholder when the VPN isn't connected.
+/// railroad diagram and full connection details. The endpoint globe belongs to the
+/// main connection pane, where it remains useful before a connection exists.
 struct ConnectionInspectorView: View {   // was private — internal for the file split
     @Bindable var vpn: VPNController
     let profile: VPNController.Profile
@@ -44,7 +43,6 @@ struct ConnectionInspectorView: View {   // was private — internal for the fil
                     // interface chart is the general case (it plots this VPN by default
                     // and can add any other connection), so it's the one that stays.
                     InterfaceTrafficView()
-                    WorldMapView(vpn: vpn)
                     Divider()
                     ConnectionInfoPanel(stats: reach?.stats(for: profile.id), clientLabel: profile.server,
                                         publicIP: publicIP,
@@ -56,7 +54,7 @@ struct ConnectionInspectorView: View {   // was private — internal for the fil
             } else {
                 ContentUnavailableView("Live Details",
                     systemImage: "chart.line.uptrend.xyaxis",
-                    description: Text("Connect \(profile.name) to see live traffic, the map and connection details."))
+                    description: Text("Connect \(profile.name) to see live traffic and connection details."))
                     .padding(.top, 60)
             }
         }

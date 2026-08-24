@@ -268,12 +268,14 @@ jobs:
           # NOTARY_KEY / NOTARY_KEYID / NOTARY_ISSUER were exported into
           # $GITHUB_ENV by import-signing.sh and are already in scope here.
           # Build number comes from the committed BUILDNUMBER (the dev loop's
-          # counter), so the released app reports the same "v0.2 (104)" the
-          # local build did. It only ever increments, which is exactly what
-          # Sparkle's version comparison needs (and 104 > every run_number a
-          # past release ever shipped).
+          # counter), so the released app reports the same version and build
+          # the local build did. It only ever increments, which is exactly what
+          # Sparkle's version comparison needs.
           CURRENT_PROJECT_VERSION="$(cat BUILDNUMBER)"
           export CURRENT_PROJECT_VERSION
+          PROJECT_BUILD="$(awk -F'"' '/CURRENT_PROJECT_VERSION:/ {print $2; exit}' project.yml)"
+          test "$PROJECT_BUILD" = "$CURRENT_PROJECT_VERSION" \
+            || { echo "BUILDNUMBER ($CURRENT_PROJECT_VERSION) and project.yml ($PROJECT_BUILD) differ"; exit 1; }
           echo "buildno=$CURRENT_PROJECT_VERSION" >> "$GITHUB_OUTPUT"
           VERSION="${GITHUB_REF_NAME#v}"
           Tools/build-release-dmg.sh "$VERSION"

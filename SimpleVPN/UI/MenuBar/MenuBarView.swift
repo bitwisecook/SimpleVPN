@@ -79,12 +79,15 @@ struct MenuBarLabel: View {
     @State private var pulse = false          // transient, ~0.5s after a state change
     @State private var pulseTask: Task<Void, Never>?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.liveVisualPolicy) private var liveVisuals
 
     /// An ongoing problem worth continuous attention.
     private var activeIssue: Bool {
         switch labelState { case .degraded, .captivePortal: return true; default: return false }
     }
-    private var iconAnimating: Bool { !reduceMotion && (activeIssue || pulse) }
+    private var iconAnimating: Bool {
+        liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion) && (activeIssue || pulse)
+    }
 
     // The lock icon stays still; only the status DOT animates on top of it, in a
     // liquid, friendly way. Colour + motion together name the state:
@@ -173,7 +176,7 @@ struct MenuBarLabel: View {
         // Any state change → a brief one-shot pulse (then settle), unless it's an
         // active issue, which animates continuously via `activeIssue` below.
         .onChange(of: labelState) { _, _ in
-            guard !reduceMotion else { return }
+            guard liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion) else { return }
             pulseTask?.cancel()
             pulse = true
             pulseTask = Task {
@@ -202,7 +205,10 @@ struct MenuBarLabel: View {
         // 90ms/tick rather than 70 because each tick now costs an ImageRenderer
         // pass; the phase step is scaled to match so the rhythm is unchanged.
         .task(id: iconAnimating) {
-            guard iconAnimating else { return }
+            guard iconAnimating else {
+                phase = 0
+                return
+            }
             phase = 0
             while !Task.isCancelled {
                 phase += 0.41
@@ -523,7 +529,8 @@ struct MenuBarView: View {
                 else { StatusDot(state: dotState, size: 8) }
                 Text(p.name).lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 6)
-                ForEach(labels.labels(for: p.id)) { LabelPill(label: $0) }
+                let assignedLabels = labels.labels(for: p.id)
+                if !assignedLabels.isEmpty { LabelPills(labels: assignedLabels) }
                 // Same chip as the two window lists, for the same reason: a kind
                 // nobody has proven must not look like one that has been.
                 if let notice = p.kind.maturityNotice { MaturityBadge(notice: notice) }
@@ -543,6 +550,8 @@ struct MenuBarView: View {
     /// about a row and the most permanent.
     private func rowAccessibilityLabel(_ p: VPNController.Profile, dotState: DotState) -> String {
         var bits = [p.name, dotState.accessibilityDescription]
+        let assignedLabels = labels.labels(for: p.id).map(\.name)
+        if !assignedLabels.isEmpty { bits.append(assignedLabels.formatted(.list(type: .and))) }
         if let notice = p.kind.maturityNotice { bits.append(notice.spokenValue) }
         return bits.joined(separator: ", ")
     }
@@ -654,7 +663,7 @@ struct MenuBarView: View {
         .padding(.horizontal, 14).padding(.vertical, 3)
     }
 
-    // MARK: Live panel (throughput · IPs · map · railroad)
+    // MARK: Live panel (throughput · IPs · railroad)
 
     @ViewBuilder private func livePanel(_ p: VPNController.Profile) -> some View {
         let stats = reachability?.stats(for: p.id)
@@ -667,10 +676,6 @@ struct MenuBarView: View {
                             scaleMax: reachability?.scaleMax(for: p.id) ?? 1_024, compact: true)
 
             ipRows(stats)
-
-            // Live topology: home → connected VPN(s) → egress. Full panel width.
-            WorldMapView(vpn: vpn)
-                .frame(maxWidth: .infinity)
 
             if let topo {
                 RailroadView(topology: topo.topology,

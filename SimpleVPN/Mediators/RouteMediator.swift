@@ -201,7 +201,9 @@ final class RouteMediator {
         didSet { if oldValue != gatewayUserChoseDirect { onOwnerChange?(effectiveGatewayOwner) } }
     }
 
-    private static let gatewayDefaults = UserDefaults(suiteName: "group.com.bragi0.SimpleVPN")
+    /// This is app-only policy; sharing it with the packet-tunnel extension is both
+    /// unnecessary and can trigger macOS's protected app-data consent prompt.
+    private static let gatewayDefaults = UserDefaults.standard
     private static let gatewayOwnerKey = "gateway.ownerProfileID"
     private static let gatewayDirectKey = "gateway.userChoseDirect"
 
@@ -231,17 +233,17 @@ final class RouteMediator {
 
     /// Load the persisted gateway pick. Called from the host's `loadAll`.
     func loadPreference() {
-        defaultGatewayProfileID = Self.gatewayDefaults?.string(forKey: Self.gatewayOwnerKey)
-        gatewayUserChoseDirect = Self.gatewayDefaults?.bool(forKey: Self.gatewayDirectKey) ?? false
+        defaultGatewayProfileID = Self.gatewayDefaults.string(forKey: Self.gatewayOwnerKey)
+        gatewayUserChoseDirect = Self.gatewayDefaults.bool(forKey: Self.gatewayDirectKey)
     }
 
     private func persistPreference() {
         if let id = defaultGatewayProfileID {
-            Self.gatewayDefaults?.set(id, forKey: Self.gatewayOwnerKey)
+            Self.gatewayDefaults.set(id, forKey: Self.gatewayOwnerKey)
         } else {
-            Self.gatewayDefaults?.removeObject(forKey: Self.gatewayOwnerKey)
+            Self.gatewayDefaults.removeObject(forKey: Self.gatewayOwnerKey)
         }
-        Self.gatewayDefaults?.set(gatewayUserChoseDirect, forKey: Self.gatewayDirectKey)
+        Self.gatewayDefaults.set(gatewayUserChoseDirect, forKey: Self.gatewayDirectKey)
     }
 
     // MARK: - VPN-kind participation (classify every kind cleanly)

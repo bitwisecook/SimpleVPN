@@ -49,6 +49,29 @@ enum ConnectionBaselineStore {
     }
 }
 
+/// The one durable fact the sign-in experience needs after a connection works.
+/// This is deliberately separate from the diagnostic baseline: diagnostics wait
+/// a few seconds for extension telemetry, whereas onboarding must disappear the
+/// instant the tunnel reaches `.connected` and must survive an immediate quit.
+enum FirstSuccessfulConnectionStore {
+    private static func key(_ profile: String) -> String { "connection.hasSucceeded.\(profile)" }
+
+    static func hasSucceeded(profile: String) -> Bool {
+        // A baseline from an earlier build is already evidence of a successful
+        // connection, so existing users never get sent back through onboarding.
+        UserDefaults.standard.bool(forKey: key(profile))
+            || ConnectionBaselineStore.load(profile: profile) != nil
+    }
+
+    static func markSucceeded(profile: String) {
+        UserDefaults.standard.set(true, forKey: key(profile))
+    }
+
+    static func clear(profile: String) {
+        UserDefaults.standard.removeObject(forKey: key(profile))
+    }
+}
+
 // MARK: - Report
 
 struct DiagnosticsReport: Sendable, Equatable {

@@ -146,8 +146,7 @@ struct EditVPNView: View {
     /// newly chosen here (or Check Again is clicked) — never on open, which for
     /// an already-configured VPN would be an unasked-for lookup.
     @State private var opPreflight = OnePasswordPreflightModel()
-    /// Collapses the several deliveries macOS makes of one drag into one apply.
-    @State private var opDrops = OnePasswordDropCollector()
+    @State private var signInSettings = SignInSourceSettingsStore.shared
     /// Whether KeePassXC's browser-integration socket is there to talk to
     /// (prompt-free stat, no connection). Same optimistic start as
     /// `opAvailable`, and for the same reason.
@@ -192,6 +191,7 @@ struct EditVPNView: View {
     @State private var showItemBrowser = false
     @State private var showVaultBrowser = false
     @State private var dropTargeted = false
+    @State private var onePasswordDrops = OnePasswordDropCollector()
     /// A multi-selection drag: several items arrived and a VPN uses one, so the
     /// choice is offered rather than guessed. Empty = nothing pending.
     @State private var droppedChoices: [OnePasswordDrop] = []
@@ -557,7 +557,7 @@ struct EditVPNView: View {
                                           text: $password)
                         }
                         if evaluation?.allowPasswordSave ?? true {
-                            Toggle("Remember password", isOn: $remember)
+                            PasswordSavingToggle(isOn: $remember)
                         } else {
                             Label("This VPN's administrator doesn't allow saving the password.",
                                   systemImage: "key.slash")
@@ -787,6 +787,7 @@ struct EditVPNView: View {
             .onChange(of: credentialKind) { _, kind in
                 sourceTest = .idle
                 prefillRememberedAccount()
+                if kind == .applePasswords { remember = false }
                 // Choosing 1Password is the first genuine need for a 1Password
                 // lookup — the one moment this app is allowed to raise its
                 // approval prompt. Skipped once the integration has been proven.
@@ -801,14 +802,9 @@ struct EditVPNView: View {
             case .onePassword:
                 onePasswordSource
             case .applePasswords:
-                TextField("Website or server", text: $sourceReference,
-                          prompt: Text(verbatim: evaluation?.remoteHost ?? "vpn.example.com"))
-                    .autocorrectionDisabled()
-                TextField("Account (optional)", text: $sourceAccount)
-                    .autocorrectionDisabled()
-                Text("SimpleVPN reads the saved username and password for this server from Apple Passwords. macOS asks your permission the first time. Verification codes aren't read — enter those below if required.")
+                ApplePasswordsPickerButton(onPick: useApplePassword)
+                Text("macOS owns the searchable chooser and its authorization. SimpleVPN keeps only the selected username and password in memory for this connection. Verification codes aren\u{2019}t returned.")
                     .font(.callout).foregroundStyle(.secondary)
-                sourceTestRow
             case .keePassXC:
                 TextField("Website or server", text: $sourceReference,
                           prompt: Text(verbatim: evaluation?.remoteHost ?? "vpn.example.com"))
@@ -1012,8 +1008,17 @@ struct EditVPNView: View {
         // button that fixes it — the old static warning said all of them at
         // once, whether or not any of it was true. The account state is left to
         // the nudge beside the Account field below: one ask, in one place.
-        OnePasswordSetupCard(model: opPreflight,
+        OnePasswordSetupCard(model: opPreflight, showsCheckAgain: false,
                              onCheckAgain: { runOnePasswordPreflight(force: true) })
+        if !onePasswordConnected {
+            Button(onePasswordConnectionActionLabel) {
+                runOnePasswordPreflight(force: true)
+            }
+            .buttonStyle(.glassProminent)
+            .disabled(opPreflight.checking || !hasOnePasswordAccount)
+            Text("Connect before browsing or dropping an item. 1Password may ask you to approve SimpleVPN.")
+                .font(.callout).foregroundStyle(.secondary)
+        }
         // Typing stays the base: the pickers need 1Password running, approved
         // and reachable, and none of that is true offline or before the first
         // approval — so a typed item/vault must always be enough on its own.
@@ -1022,7 +1027,7 @@ struct EditVPNView: View {
                 .autocorrectionDisabled()
             opItemBrowseButton
         }
-        // A dragged item is linked by its 1Password id, which is exact but says
+        // A browsed or dragged item is linked by its 1Password id, which is exact but says
         // nothing to a human — so the readable name is stated beside it.
         if !opItemTitle.isEmpty, opItemTitle != sourceReference.trimmingCharacters(in: .whitespaces) {
             Text("This is \u{201C}\(opItemTitle)\u{201D} \u{2014} linked by its 1Password id, so renaming it won\u{2019}t break this VPN.")
@@ -1034,22 +1039,27 @@ struct EditVPNView: View {
                 .autocorrectionDisabled()
             opVaultBrowseButton
         }
-        TextField("Account (optional \u{2014} only needed if you have more than one)",
-                  text: $sourceAccount)
-            .autocorrectionDisabled()
-            // Enter re-runs the lookup that was waiting on this name, so filling
-            // it in finishes the job instead of just sitting there.
-            .onSubmit {
-                guard opNeedsAccount else { return }
-                Task { await loadOPFieldsAndShowSheet() }
+        if onePasswordAccounts.isEmpty {
+            Button("Set Up 1Password Accounts…") {
+                openSignInSourceSettings(for: .onePassword)
             }
-        Text("The name at the top of 1Password\u{2019}s sidebar. SimpleVPN remembers it for your other VPNs.")
-            .font(.callout).foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
+            .buttonStyle(.bordered)
+        } else {
+            Picker("1Password account", selection: Binding(
+                get: { selectedOnePasswordAccountID },
+                set: { chooseOnePasswordAccount($0) })) {
+                    ForEach(onePasswordAccounts) { account in
+                        Text(account.name).tag(Optional(account.id))
+                    }
+                }
+                .accessibilityHint("Chooses a friendly account name. 1Password’s internal account identifier is kept out of the interface.")
+        }
         opBrowseStatus
 
         // Drop well — drag an item from the 1Password app onto here.
-        onePasswordDropWell
+        if onePasswordConnected && hasOnePasswordAccount {
+            onePasswordDropWell
+        }
 
         // Field-role mapping summary + editor. THE one place the mapping is stated:
         // the Verification Code section below used to restate the code's own line
@@ -1192,6 +1202,53 @@ struct EditVPNView: View {
 
     private var accountNudgeText: String { OnePasswordPreflight.accountNudge }
 
+    private var onePasswordAccounts: [SourceInstance] {
+        signInSettings.instances(for: .onePassword)
+    }
+
+    private var selectedOnePasswordAccountID: SourceInstanceID? {
+        if let sourceInstance { return sourceInstance }
+        let legacy = sourceAccount.trimmingCharacters(in: .whitespaces)
+        if !legacy.isEmpty {
+            return onePasswordAccounts.first { account in
+                OnePasswordAccountMemory.connectionAccount(account.id, store: signInSettings)
+                    .localizedCaseInsensitiveCompare(legacy) == .orderedSame
+            }?.id
+        }
+        return onePasswordAccounts.first?.id
+    }
+
+    private var effectiveOnePasswordAccount: String {
+        OnePasswordAccountMemory.effective(
+            profile: sourceAccount,
+            connection: OnePasswordAccountMemory.connectionAccount(
+                selectedOnePasswordAccountID, store: signInSettings),
+            remembered: OnePasswordAccountMemory.remembered())
+    }
+
+    private var hasOnePasswordAccount: Bool {
+        !effectiveOnePasswordAccount.isEmpty
+    }
+
+    private var onePasswordConnected: Bool {
+        OnePasswordPreflight.isVerified() || opPreflight.state?.isReady == true
+    }
+
+    private var onePasswordConnectionActionLabel: String {
+        if opPreflight.checking {
+            return OnePasswordPreflight.isVerified() ? "Reconnecting…" : "Connecting…"
+        }
+        return OnePasswordPreflight.isVerified() ? "Reconnect to 1Password"
+                                                 : "Connect to 1Password"
+    }
+
+    private func chooseOnePasswordAccount(_ id: SourceInstanceID?) {
+        sourceInstance = id
+        // A named account owns the vendor identifier. Do not let a hidden UUID
+        // on the VPN override the friendly picker.
+        sourceAccount = ""
+    }
+
     /// The setup check, from the two actions allowed to start one: choosing
     /// 1Password as this VPN's source, and clicking Check Again. `force` is the
     /// button — it re-checks even when the integration is already verified,
@@ -1199,8 +1256,8 @@ struct EditVPNView: View {
     private func runOnePasswordPreflight(force: Bool) {
         Task {
             let state = force
-                ? await opPreflight.check(account: sourceAccount)
-                : await opPreflight.checkIfNeeded(account: sourceAccount)
+                ? await opPreflight.check(account: effectiveOnePasswordAccount)
+                : await opPreflight.checkIfNeeded(account: effectiveOnePasswordAccount)
             switch state {
             case .ready(let vaults):
                 // The check already paid for this list; the vault picker would
@@ -1222,8 +1279,9 @@ struct EditVPNView: View {
     /// ever fills a blank — a name typed here is an explicit choice and wins.
     private func prefillRememberedAccount() {
         guard credentialKind == .onePassword,
-              sourceAccount.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        sourceAccount = OnePasswordAccountMemory.remembered()
+              sourceAccount.trimmingCharacters(in: .whitespaces).isEmpty,
+              sourceInstance == nil else { return }
+        sourceInstance = onePasswordAccounts.first?.id
     }
 
     /// Run a 1Password lookup on the account this VPN names, and — when the only
@@ -1233,7 +1291,7 @@ struct EditVPNView: View {
     /// commonest failure ("which account?" on every new VPN) into a non-event.
     /// A name that works is remembered for every other VPN.
     private func withAccountFallback<T>(_ body: (String) async throws -> T) async throws -> T {
-        let typed = sourceAccount.trimmingCharacters(in: .whitespaces)
+        let typed = effectiveOnePasswordAccount
         do {
             let result = try await body(typed)
             OnePasswordAccountMemory.remember(typed)
@@ -1243,7 +1301,15 @@ struct EditVPNView: View {
                 throw error
             }
             let result = try await body(fallback)
-            sourceAccount = fallback
+            if let match = onePasswordAccounts.first(where: {
+                OnePasswordAccountMemory.connectionAccount($0.id, store: signInSettings)
+                    .localizedCaseInsensitiveCompare(fallback) == .orderedSame
+            }) {
+                sourceInstance = match.id
+                sourceAccount = ""
+            } else {
+                sourceAccount = fallback
+            }
             return result
         }
     }
@@ -1358,38 +1424,51 @@ struct EditVPNView: View {
     }
 
     @ViewBuilder private var onePasswordDropWell: some View {
-        RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [5]))
-            .foregroundStyle(dropTargeted ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
-            .frame(height: 52)
-            .overlay {
-                Label(opItemTitle.isEmpty ? "Drag a 1Password item here" : "Item: \(opItemTitle)",
-                      systemImage: "square.and.arrow.down")
-                    .font(.callout).foregroundStyle(.secondary)
+        VStack(spacing: 8) {
+            Image(systemName: dropTargeted ? "arrow.down.circle.fill" : "arrow.down.circle")
+                .font(.system(size: 28))
+            Text(dropTargeted
+                 ? "Release to use this 1Password item"
+                 : opItemTitle.isEmpty ? "Or drag a 1Password item here" : "Item: \(opItemTitle)")
+                .font(.headline)
+        }
+            .foregroundStyle(dropTargeted ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+            .frame(maxWidth: .infinity, minHeight: 96)
+            .contentShape(Rectangle())
+            .background {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(dropTargeted
+                          ? Color.accentColor.opacity(0.16)
+                          : Color.secondary.opacity(0.08))
             }
-            // Four flavours, read by NSItemProvider rather than Transferable:
-            // the one that matters (1Password's own payload) travels under
-            // Chromium's private type identifier, which isn't a UTType on a Mac
-            // and so can only be asked for by name. See OnePasswordDropItem.
-            .onDrop(of: OnePasswordDropItem.acceptedContentTypes, isTargeted: $dropTargeted) {
-                providers, _ in
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(dropTargeted ? Color.accentColor : Color.secondary,
+                                  style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
+                    .allowsHitTesting(false)
+            }
+            .onDrop(of: OnePasswordDropItem.acceptedContentTypes,
+                    isTargeted: $dropTargeted) { providers, _ in
                 guard OnePasswordDropItem.canAccept(providers) else { return false }
-                // Through the collector: macOS delivers one drag more than
-                // once, and applying each delivery turned a single dropped item
-                // into a "which one?" chooser.
-                Task { if let drops = await opDrops.collect(providers) { applyDrops(drops) } }
+                let snapshot = OnePasswordDropItem.activeDragSnapshot()
+                Task {
+                    guard let drops = await onePasswordDrops.collect(
+                        providers, dragSnapshot: snapshot
+                    ) else { return }
+                    applyDrops(drops)
+                }
                 return true
             }
-            .contentShape(Rectangle())
+            .onChange(of: dropTargeted) { _, targeted in
+                OnePasswordDropItem.logTargeting(targeted)
+            }
             // The CertDropWell rule: a drop area names itself, states its value
             // and names its keyboard alternative.
-            .accessibilityLabel("1Password item drop area, \(opItemTitle.isEmpty ? "empty" : "item: \(opItemTitle)"). Use the Browse buttons or type a reference as an alternative.")
+            .accessibilityLabel("1Password item drop area, \(opItemTitle.isEmpty ? "empty" : "item: \(opItemTitle)"). Use Browse or type a reference as an alternative.")
             .popover(isPresented: $showDropChooser) {
                 dropChooser
             }
-        // Says what a drag really does — the old well implied it did everything,
-        // and for a FIELD drag (op://, no account) it doesn't.
-        Text("Dragging an item straight from 1Password fills in everything. Dragging one of its fields fills in less \u{2014} Browse, or type your account name once, covers the rest.")
+        Text("Drag the item row from 1Password, or use Browse to select it without dragging.")
             .font(.callout).foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -1435,11 +1514,16 @@ struct EditVPNView: View {
         // account, and the account already there may be the right one.
         if !dropped.vault.isEmpty { sourceVault = dropped.vault }
         if !dropped.account.isEmpty {
-            sourceAccount = dropped.account
-            // A dragged item names the account it came from, and the SDK takes
-            // that UUID as readily as the sidebar name — so one drag answers
-            // "which account?" for every other VPN too.
             OnePasswordAccountMemory.seed(dropped.account)
+            if let connection = OnePasswordAccountMemory.connectionForDroppedAccount(
+                dropped.account, preferred: sourceInstance, store: signInSettings) {
+                sourceInstance = connection
+                sourceAccount = ""
+            } else {
+                // Kept only as a compatibility fallback until the settings
+                // store has materialised the dragged account as a named entry.
+                sourceAccount = dropped.account
+            }
         }
         opItemTitle = dropped.title.isEmpty ? dropped.reference : dropped.title
         droppedChoices = []
@@ -1448,39 +1532,6 @@ struct EditVPNView: View {
         opItemsLoaded = false
         sourceTest = .idle
         Task { await loadOPFieldsAndShowSheet() }
-    }
-
-    /// Pure string parsing, no view state — `nonisolated` so the drop pipeline
-    /// (which deliberately runs off the main actor) can call it directly.
-    nonisolated static func parseOnePasswordDrop(_ raw: String)
-        -> (reference: String, vault: String, account: String)? {
-        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !s.isEmpty else { return nil }
-        if s.hasPrefix("op://") {
-            // op://<vault>/<item>[/<section>/<field>] — keep vault + item. A
-            // secret reference never names the account.
-            let parts = s.dropFirst("op://".count).split(separator: "/").map(String.init)
-            if parts.count >= 2 { return (parts[1], parts[0], "") }
-            if parts.count == 1 { return (parts[0], "", "") }
-            return nil
-        }
-        // Deep link and share link carry the same query: a=<account UUID>,
-        // v=<vault UUID>, i=<item UUID>. The account UUID is as good as the
-        // sidebar name to the SDK, and it's the one thing users can't guess.
-        if s.hasPrefix("onepassword://")
-            || (s.hasPrefix("https://") && s.contains("1password.com/open")),
-           let comps = URLComponents(string: s) {
-            let q = comps.queryItems ?? []
-            func param(_ names: Set<String>) -> String {
-                q.first { names.contains($0.name) }?.value ?? ""
-            }
-            let item = param(["i", "item"])
-            guard !item.isEmpty else { return nil }
-            return (item, param(["v", "vault"]), param(["a", "account"]))
-        }
-        // Plain text: the item's name or UUID. First line only.
-        let firstLine = s.split(whereSeparator: \.isNewline).first.map(String.init) ?? s
-        return (firstLine, "", "")
     }
 
     /// The auth roles this VPN uses — the sheet renders exactly these.
@@ -1701,6 +1752,19 @@ struct EditVPNView: View {
         .formStyle(.grouped)
     }
 
+    private func useApplePassword(_ selection: ApplePasswordSelection) {
+        username = selection.username
+        password = selection.password
+        remember = false
+        sourceReference = evaluation?.remoteHost ?? ""
+        sourceAccount = ""
+        var live = vpn.transientCredentials(for: profileID)
+        live.username = selection.username
+        live.password = selection.password
+        vpn.setTransientCredentials(live, for: profileID)
+        Task { await saveCredentialSource() }
+    }
+
     /// Why Save can't be pressed — surfaced in a tooltip, because a dead button with
     /// no explanation is indistinguishable from a broken app (and the config banner at
     /// the bottom is easy to miss).
@@ -1780,7 +1844,7 @@ struct EditVPNView: View {
         passwordTemplate = auth.passwordTemplate
         yubiKey = auth.yubiKey
         rescanSecurityKeys()
-        remember = auth.rememberCredentials
+        remember = vpn.remembersPassword(for: profileID)
         let source = vpn.credentialSource(for: profileID)
         credentialKind = source.kind
         sourceReference = source.reference
@@ -1942,8 +2006,7 @@ struct PendingSettingsNotice: View {
             .disabled(reconnecting)
         }
         .font(.callout)
-        .padding(10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .bannerSurface(tint: .regularMaterial, opacity: 1)
         .padding([.horizontal, .bottom], 12)
     }
 }
@@ -1960,8 +2023,7 @@ struct EvaluationErrorBanner: View {
             Spacer(minLength: 0)
         }
         .font(.callout)
-        .padding(10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .bannerSurface(tint: .regularMaterial, opacity: 1)
         .padding([.horizontal, .bottom], 12)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Configuration error: \(message)")

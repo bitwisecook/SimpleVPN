@@ -5,7 +5,7 @@
 //  A source of credentials. FIVE providers ship, all behind this one protocol:
 //  manual entry (`ManualCredentialProvider`), the Touch ID-gated keychain
 //  (`BiometricCredentialProvider`), 1Password (`OnePasswordProvider`, via
-//  opnative-helper), Apple Passwords (`ApplePasswordsProvider`) and KeePassXC
+//  opnative-helper), Apple Passwords (`ApplePasswordsPicker`) and KeePassXC
 //  (`KeePassXCProvider`) — selected in `VPNController+Connect`. The connect flow
 //  depends only on `CredentialProvider` + `CredentialRequest` (see
 //  Credentials.swift), which is what makes adding a sixth cheap.
@@ -220,7 +220,7 @@ struct BiometricCredentialProvider: CredentialProvider {
 //   over KeePassXC's unix socket (KeePassXCProtocol/KeePassXCCrypto); pairing
 //   lives in the keychain, per-database.
 //
-// Apple Passwords (shipped): `ApplePasswordsProvider`
+// Apple Passwords (shipped): `ApplePasswordsPicker`
 //   - username/password/otp are best sourced via native AutoFill on the text fields
 //     (textContentType .username/.password/.oneTimeCode + associated-domains), so this
 //     provider mostly configures the UI rather than fetching.

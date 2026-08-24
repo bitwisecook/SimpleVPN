@@ -53,6 +53,7 @@ struct RouteGraphView: View {
     @Environment(ReachabilityMonitor.self) var reach: ReachabilityMonitor?   // was private — internal for the file split
     @Bindable var vpn: VPNController
     @Environment(\.accessibilityReduceMotion) var reduceMotion   // was private — internal for the file split
+    @Environment(\.liveVisualPolicy) var liveVisuals   // shared Low Power Mode policy for graph drawing
     @Environment(\.accessibilityDifferentiateWithoutColor) var differentiateWithoutColor   // read by the edge Canvas (RouteGraphNodes)
     @FocusState private var searchFocused: Bool
     @Environment(\.openURL) var openURL   // was private — internal for the file split

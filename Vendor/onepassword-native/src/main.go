@@ -869,7 +869,7 @@ func lookupOnce(ctx context.Context, req lookupRequest) ([]itemMatch, *shimError
 			if o.State != "" && o.State != onepassword.ItemStateActive {
 				continue
 			}
-			score, ok := titleScore(query, o.Title, o.ID)
+			score, ok := titleScore(query, o.Title)
 			if !ok {
 				continue
 			}
@@ -897,13 +897,11 @@ func lookupOnce(ctx context.Context, req lookupRequest) ([]itemMatch, *shimError
 // titleScore ranks a candidate title against the query the same way the app's
 // FuzzyMatch does (0 exact · 1 prefix · 2 substring · 3 letters in order), so
 // a lookup and a locally filtered list can't disagree about which row is
-// first. An exact ID hit scores 0 — a UUID typed in full is not a guess. An
+// first. Search is deliberately TITLE-ONLY: item ids are internal coordinates,
+// not something a person should ever have to see or know to search for. An
 // empty query matches everything at 0 (the browse case).
-func titleScore(query, title, id string) (int, bool) {
+func titleScore(query, title string) (int, bool) {
 	if query == "" {
-		return 0, true
-	}
-	if id == query {
 		return 0, true
 	}
 	q, t := strings.ToLower(query), strings.ToLower(title)

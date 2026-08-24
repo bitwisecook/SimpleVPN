@@ -34,7 +34,7 @@ enum OpenConnectSettings {
         // AGENTS.md, "Adding a new engine's options", rule 5: every user-facing
         // control gets a spec, including the ones that look like plumbing.
         .init(id: "oc.server", name: "Server Address",
-              summary: "The VPN gateway to connect to — the name or address your administrator gave you.",
+              summary: "The VPN gateway — enter its name (vpn.example.com) or full http(s) URL, including a login path such as /my.policy.",
               group: .connection, default: ""),
         .init(id: "oc.reconnect-timeout", name: "Reconnect Timeout",
               summary: "How long (0–86400 seconds) to keep retrying a dropped tunnel before giving up.",

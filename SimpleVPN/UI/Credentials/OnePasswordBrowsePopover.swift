@@ -44,7 +44,11 @@ struct OnePasswordBrowsePopover: View {
     @FocusState private var searchFocused: Bool
 
     private var visible: [OnePasswordBrowseRow] {
-        FuzzyMatch.rank(rows, query: query) { [$0.title, $0.subtitle] }
+        // Search the name the person can see and chose — never an opaque id,
+        // and never a vault/category side label that happens to contain the
+        // same letters. FuzzyMatch includes ordered subsequences, so `grb`
+        // finds `Grlab` as expected.
+        FuzzyMatch.rank(rows, query: query) { [$0.title] }
     }
 
     var body: some View {

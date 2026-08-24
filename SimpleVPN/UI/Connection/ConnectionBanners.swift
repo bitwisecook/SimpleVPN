@@ -11,6 +11,51 @@
 
 import SwiftUI
 
+/// A 1Password source that used to work may lose its app approval, account, or
+/// item mapping.  This stays next to the VPN's sign-in controls so fixing it is
+/// a single, reversible step — never a generic error sheet over the whole app.
+struct OnePasswordRepairBanner: View {
+    let error: UserFacingError
+    let fixSignIn: () -> Void
+    let retry: () -> Void
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "key.fill")
+                .font(.title3)
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(error.title).font(.callout.weight(.semibold))
+                Text(error.explanation)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 6) {
+                Button("Fix Sign-In…", action: fixSignIn)
+                    .buttonStyle(.glassProminent)
+                    .tint(.orange)
+                    .help("Show this VPN's 1Password source and linked item")
+                HStack(spacing: 8) {
+                    Button("Open 1Password", action: UserFacingErrorSheet.openOnePassword)
+                        .buttonStyle(.glass)
+                    if error.canRetry {
+                        Button("Try Again", action: retry)
+                            .buttonStyle(.glass)
+                    }
+                    Button("Dismiss", action: dismiss)
+                        .buttonStyle(.glass)
+                }
+            }
+        }
+        .bannerSurface(tint: .orange)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("1Password needs attention for this VPN. \(error.title). \(error.explanation)")
+    }
+}
+
 /// The state, in words: a green "you are connected" banner above the map, for
 /// everyone who doesn't speak dot-and-stop-button. Makes no claims about WHICH
 /// traffic is protected — that's the tunnel-mode toggle's story.
@@ -41,8 +86,7 @@ struct ConnectedBanner: View {   // was private — internal for the file split
             }
             Spacer(minLength: 0)
         }
-        .padding(12)
-        .background(.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+        .bannerSurface(tint: .green)
         .accessibilityElement(children: .combine)
     }
 }
@@ -103,8 +147,7 @@ struct CaptivePortalBanner: View {   // was private — internal for the file sp
                 .help("Re-check whether the sign-in page is still in the way")
             }
         }
-        .padding(12)
-        .background(.indigo.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+        .bannerSurface(tint: .indigo)
         // `.contain`, not `.combine`: this banner holds TWO buttons, and a banner-wide
         // combine swallows both — the wave-3 bug class in Docs/Accessibility.md rule 4,
         // and here it hid the only way out of a captive portal. The container sentence
@@ -141,8 +184,7 @@ struct UnreachableHereBanner: View {   // was private — internal for the file 
                 .help("Stop warning about this network")
                 .accessibilityLabel("Forget that \(vpnName) couldn\u{2019}t be reached from \(networkLabel)")
         }
-        .padding(12)
-        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+        .bannerSurface(tint: .orange)
         // `.contain`: the Forget button must stay reachable (rule 4).
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(vpnName) couldn\u{2019}t be reached from this network before. Last time you tried on \(networkLabel), it never answered. You can still try to connect — if it succeeds, this warning clears itself.")
@@ -168,8 +210,7 @@ struct TailscaleSignInBanner: View {   // was private — internal for the file 
             Button("Open Sign-In Page", action: reopen)
                 .buttonStyle(.glassProminent).tint(.orange)
         }
-        .padding(12)
-        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+        .bannerSurface(tint: .orange)
         // `.contain`: the sign-in button is the only way forward and must stay
         // reachable — a combine here made this banner a dead end (rule 4).
         .accessibilityElement(children: .contain)
@@ -199,8 +240,7 @@ struct StuckConnectingBanner: View {   // was private — internal for the file 
             Button("Cancel", action: cancel).buttonStyle(.glass)
                 .accessibilityLabel("Stop trying to reach \(vpnName)")
         }
-        .padding(12)
-        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+        .bannerSurface(tint: .orange)
         // `.contain`: Cancel is the way out of an endless connect and must stay
         // reachable (rule 4).
         .accessibilityElement(children: .contain)
@@ -263,8 +303,7 @@ struct GuestNetworkCaptureBanner: View {
                     .help("Leave routing alone \u{2014} ask again next time you connect")
             }
         }
-        .padding(12)
-        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+        .bannerSurface(tint: .orange)
         // `.contain`, not `.combine`: this banner HOLDS BUTTONS, and a banner-wide
         // combine swallows them (Docs/Accessibility.md rule 4). The container
         // sentence carries everything the three Texts say, in the same order.
@@ -299,8 +338,7 @@ struct PausedBanner: View {   // was private — internal for the file split
                 .foregroundStyle(.red)
                 .accessibilityLabel("Resume — put traffic back through the VPN")
         }
-        .padding(12)
-        .background(Color.red, in: RoundedRectangle(cornerRadius: 10))
+        .bannerSurface(tint: .red, opacity: 1)
         // `.contain`: this is the app's loudest safety warning AND the only place the
         // Resume button lives. A combine hid the fix inside the warning (rule 4).
         .accessibilityElement(children: .contain)

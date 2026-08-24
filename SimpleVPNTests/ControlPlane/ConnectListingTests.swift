@@ -128,6 +128,17 @@ struct ConnectListingTests {
         #expect(!ConnectListing.isEmpty(profiles: [], tunnels: [], native: [freshNative(.ikev2)]))
     }
 
+    /// The main window may collapse its sidebar for one connection, but it must
+    /// select that connection through its tagged identity. An F5 APM is the
+    /// regression case: it has no NE profile id, so `vpn.profiles.count` cannot
+    /// decide either visibility or selection for it.
+    @Test func aSoleF5APMHasASelectableMainWindowTag() {
+        let f5 = freshTunnel(.f5apm)
+        let tag = ConnectListing.tag(forTunnel: f5.id)
+        #expect(ConnectListing.soleTag(profiles: [], tunnels: [f5], native: []) == tag)
+        #expect(ConnectListing.soleTag(profiles: [onePlainProfile], tunnels: [f5], native: []) == nil)
+    }
+
     /// Tags are unique per row across all three stores — the sidebar selects by tag,
     /// and a collision would make two VPNs one row.
     @Test func tagsAreUniqueAndReversible() {
@@ -918,5 +929,46 @@ struct ConnectListingTests {
         #expect(SubprocessTunnelConfig.sshPinnedHostKeyProblem("SHA256:" + String(repeating: "9", count: 64)) == nil)
         #expect(SubprocessTunnelConfig.sshPinnedHostKeyProblem("SHA256:nope") != nil)
         #expect(SubprocessTunnelConfig.sshPinnedHostKeyProblem(String(repeating: "z", count: 64)) != nil)
+    }
+
+    /// A one-time code is an input for THIS connection, not another saved secret.
+    /// The common readiness rule must therefore ask for it even when the password
+    /// was deliberately saved, and become ready as soon as the main/editor form has
+    /// the current code in hand.
+    @Test func confirmedPasswordVPNWithOneTimeCodeNeedsOnlyTheFreshCode() {
+        var c = freshTunnel(.f5apm)
+        c.server = "vpn.example.com"
+        c.username = "alex"
+        c.requiresOTP = true
+        c.otpRequirementLocked = true
+
+        let waiting = SubprocessTunnelReadiness.need(
+            for: c, facts: .init(installedTools: allTools, hasPassword: true))
+        #expect(waiting?.readiness == .needsCode)
+        #expect(waiting?.sentence.contains("never saved") == true)
+
+        #expect(SubprocessTunnelReadiness.need(
+            for: c, facts: .init(installedTools: allTools, hasPassword: true,
+                                hasOneTimeCode: true)) == nil)
+
+        c.otpRequirementLocked = nil
+        #expect(SubprocessTunnelReadiness.need(
+            for: c, facts: .init(installedTools: allTools, hasPassword: true)) == nil,
+                "a pre-success OTP choice stays adjustable rather than dead-buttoning Connect")
+    }
+
+    /// Credentials are supplied at connect time, so a configuration editor must not
+    /// represent the absence of a saved password (or a one-time code) as an invalid
+    /// VPN configuration.  The main window owns those first-connect prompts.
+    @Test func signInPromptsAreDeferredRatherThanConfigurationFaults() {
+        let signIn = ConnectNeed(.needsSignIn, locus: .entry,
+                                 "Enter credentials for this session.", setting: "oc.password")
+        let code = ConnectNeed(.needsCode, locus: .entry,
+                               "Enter a current verification code.", setting: "oc.password")
+        let server = ConnectNeed(.blocked, locus: .instance,
+                                 "Enter a server address.", setting: "oc.server")
+        #expect(signIn.isDeferredUntilConnect)
+        #expect(code.isDeferredUntilConnect)
+        #expect(!server.isDeferredUntilConnect)
     }
 }

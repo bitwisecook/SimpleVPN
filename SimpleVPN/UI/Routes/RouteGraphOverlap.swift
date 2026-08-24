@@ -88,7 +88,7 @@ extension RouteGraphView {
                 "\(cidr) overlaps \(victims.formatted(.list(type: .and)))")
         }
         // Reduce Motion: no reveal to run — the layer draws the finished arrow.
-        guard !reduceMotion else { overlapRevealStart = nil; return }
+        guard liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion) else { overlapRevealStart = nil; return }
         overlapRevealStart = Date()
         overlapSettle = Task {
             // Trim runs 0→1 over 0.3 s; the extra slack means the pause can never
@@ -107,8 +107,9 @@ extension RouteGraphView {
         if let focus = overlapFocus,
            let (dest, frame) = overlapFocusTarget(focus, in: layout) {
             let cidr = String(focus.dropFirst(dest.id.count + 1))
-            TimelineView(.animation(minimumInterval: 1 / 60,
-                                    paused: overlapRevealStart == nil)) { context in
+            TimelineView(.animation(minimumInterval: liveVisuals.frameInterval(normalFramesPerSecond: 60),
+                                    paused: !liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion)
+                                        || overlapRevealStart == nil)) { context in
                 Canvas { ctx, _ in
                     drawOverlapArrows(ctx: ctx, dest: dest, frame: frame, cidr: cidr,
                                       progress: overlapProgress(at: context.date))

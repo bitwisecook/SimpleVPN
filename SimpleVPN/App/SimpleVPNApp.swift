@@ -126,15 +126,14 @@ struct SimpleVPNApp: App {
                 .environment(linkState)
                 .environment(ext)
                 .environment(extDoctor)
-                // THE STORES THE CONNECT LIST IS A LIST OF. Their absence here is the
-                // reason an F5 BIG-IP APM was reported missing from the main window
-                // three times and "fixed" twice: ConnectionView reads them as
-                // OPTIONAL, so a scene that never injected them silently produced an
-                // empty list rather than a crash, and every fix landed on the
-                // filtering downstream of data that was never arriving. Manage VPNs
-                // declares the same two non-optionally, which is why it always worked
-                // and why the two windows disagreed.
+                // THE STORES AND LIVE MANAGER THE CONNECT LIST READS. All three are
+                // non-optional in ConnectionView: a missing dependency now fails at
+                // the scene boundary instead of silently hiding an F5 row or leaving
+                // its Connect button unable to act. Manage VPNs receives these same
+                // instances, so both windows necessarily show and control the same
+                // connection set.
                 .environment(tunnels)
+                .environment(tunnelManager)
                 .environment(nativeVPN)
                 .onChange(of: appDelegate.openBuffer.generation) {
                     // Finder double-click / Dock drop → the shared import pipeline.
@@ -189,6 +188,7 @@ struct SimpleVPNApp: App {
                         await VirtualizationDiscovery.snapshotOffMain(
                             interfaces: TopologyMonitor.liveInterfaces(),
                             detectionEnabled: VirtualizationSettings.detectionEnabled,
+                            includeProtectedAppData: VirtualizationSettings.protectedUTMConfigurationAccessEnabled,
                             env: .live())
                     }
                     // The shared import pipeline (main-window drop/Import, Finder
@@ -247,6 +247,11 @@ struct SimpleVPNApp: App {
                 }
                 .task { GeoIP.warm() }                 // parse the ~10 MB DB off-main
         }
+        // `main` is a stable scene identity, so macOS restores a person's chosen
+        // size and screen position on later launches. This is only the first-run
+        // shape: it comfortably holds the connection flow (including its compact
+        // globe) and the onboarding flow without starting either below the fold.
+        .defaultSize(width: 1_160, height: 900)
         .commands {
             CommandGroup(replacing: .newItem) {}   // no document "New"
             // SimpleVPN ▸ Install CLI… — links the bundled `simplevpn` tool onto
@@ -457,8 +462,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// disconnected), false = the user cancelled.
     var quitHandler: ((@escaping (Bool) -> Void) -> Void)?
 
-    /// True when THIS process is a second copy of an already-running SimpleVPN —
-    /// it exits immediately and must never run the quit handler (the tunnels
+    /// True when THIS process is a second launch of this exact app installation
+    /// — it exits immediately and must never run the quit handler (the tunnels
     /// belong to the first copy).
     private var isDuplicateInstance = false
 
@@ -519,19 +524,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         Task { @MainActor in SSOAuthModel.shared.request(target) }
     }
 
+    /// A build launched from Xcode has the production bundle identifier, but it
+    /// is a distinct installation from `/Applications/SimpleVPN.app`. Treating
+    /// those builds as duplicates makes the installed app quit immediately
+    /// during development (and can foreground an invisible test-host copy).
+    static func isSameInstallation(ourBundleURL: URL?, otherBundleURL: URL?) -> Bool {
+        guard let ourBundleURL, let otherBundleURL else { return false }
+        return ourBundleURL.resolvingSymlinksInPath().standardizedFileURL
+            == otherBundleURL.resolvingSymlinksInPath().standardizedFileURL
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // ONE copy of the app, ever: a second launch (open -n, a stray copy)
-        // must not fight the first over the tunnels. Hand focus to the running
-        // copy — its reopen handler brings the window back — and bow out
-        // without touching anything. EXCEPT as a unit-test host: the runner
-        // launches us with the same bundle id, and self-terminating because
-        // the real app happens to be open kills the whole test session.
+        // One running copy of this *installation*: a second `open -n` must not
+        // fight the first over the tunnels. A developer/XCTest build has the
+        // same bundle id, but is not the installed app and must not prevent the
+        // installed app from launching. The test-host exception remains for a
+        // test runner that happens to have launched the same installation.
         let isTestHost = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
             || ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil
         let ourPID = ProcessInfo.processInfo.processIdentifier
         if !isTestHost, let bundleID = Bundle.main.bundleIdentifier,
            let other = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
-               .first(where: { $0.processIdentifier != ourPID }) {
+               .first(where: {
+                   $0.processIdentifier != ourPID
+                       && Self.isSameInstallation(
+                           ourBundleURL: Bundle.main.bundleURL,
+                           otherBundleURL: $0.bundleURL)
+               }) {
             isDuplicateInstance = true
             other.activate()
             NSApp.terminate(nil)

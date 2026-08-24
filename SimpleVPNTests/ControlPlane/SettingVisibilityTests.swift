@@ -342,6 +342,41 @@ struct SettingRenderingTests {
         #expect(!picker.contains("\"Step 2"), "step numbering belongs to SignInSourceSteps")
     }
 
+    @Test func directCredentialsExposeTheirSourceAndOptionalOTP() throws {
+        let sources = try Self.uiSources()
+        let controls = try #require(sources["AuthenticationControls.swift"])
+        let detail = try #require(sources["ConnectionDetailView.swift"])
+        let firstConnect = try #require(sources["FirstConnectSetupCard.swift"])
+
+        #expect(controls.contains("struct SignInSourcePicker"))
+        #expect(controls.contains("Username + Password"))
+        #expect(controls.contains(".labelsHidden()"),
+                "the form grid supplies the visible source label, so Picker must not repeat it")
+        #expect(controls.contains("private var visibleSelection"),
+                "an unavailable saved source must never become an untagged AppKit menu selection")
+        #expect(firstConnect.contains("SignInSourcePicker("),
+                "the source menu belongs in the first-connect setup directly above the fields")
+        #expect(detail.contains("selectedManagerNeedsSetup"),
+                "choosing an unlinked password app must reveal its setup instead of falling back silently to manual fields")
+        #expect(detail.contains("pendingSignInSource = option.id"),
+                "a source popup should acknowledge a selection before its preference write completes")
+        #expect(detail.contains("Couldn’t change the sign-in source"),
+                "a failed source change must be visible rather than behaving like a no-op")
+        #expect(controls.contains("struct VerificationCodeConfiguration"),
+                "every sign-in source must use one verification-code configuration surface")
+        #expect(controls.contains("Toggle(\"Verification code required\""))
+        #expect(controls.contains("DisclosureGroup(\"Advanced Verification Code Settings\""))
+        #expect(controls.contains("TextField(\"Password template\""))
+        #expect(firstConnect.contains("VerificationCodeConfiguration("),
+                "first connection keeps verification-code settings visible and editable")
+        #expect(detail.contains("VerificationCodeConfiguration("),
+                "the ordinary manual sign-in form reuses the same configuration")
+        #expect(firstConnect.contains("onePasswordEntryPreview"),
+                "a linked entry should preview detected fields instead of leading with a mapper")
+        #expect(firstConnect.contains("OnePasswordVerificationCountdown"),
+                "a detected verification code should show its short-lived countdown")
+    }
+
     /// THE LANDMINE, checked in the source. `TextField("some example", text:)` passes
     /// the example as the field's TITLE — which `LabeledContent` renders as visible
     /// content and VoiceOver reads as the field's NAME. Twenty-six sites shipped that

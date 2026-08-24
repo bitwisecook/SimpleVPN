@@ -61,6 +61,11 @@ nonisolated enum OnePasswordPreflight {
 
     static func markVerified(in store: UserDefaults = .standard) {
         store.set(true, forKey: verifiedKey)
+        // A successful credential read is stronger evidence than an earlier
+        // preflight failure.  Leaving this behind made a working 1Password
+        // source look as though its integration had been switched off again
+        // after the app was relaunched.
+        store.removeObject(forKey: integrationOffKey)
     }
 
     static func clearVerified(in store: UserDefaults = .standard) {

@@ -386,6 +386,7 @@
   <h2>Virtual Machines &amp; Containers</h2>
   <a href="#vm-what-is-it">What This Is</a>
   <a href="#vm-detect">Look for Virtual Machines on This Mac</a>
+  <a href="#vm-read-utm-configurations">Read UTM Virtual-Machine Configurations</a>
   <a href="#vm-warn-on-connect">Warn Before a VPN Captures Them</a>
   <a href="#vm-on-the-route-graph">Seeing Your Guests on the Routes Map</a>
   <a href="#vm-guest-names">Which Guests, By Name</a>
@@ -1862,12 +1863,17 @@ who wants them.</p>
 
 <h2 id="vm-detect">Look for Virtual Machines on This Mac</h2>
 <p class="default">Default: on.</p>
-<p>Lets SimpleVPN find the virtualization products installed on this Mac, the guest networks that are live right now, and <strong>the names of the virtual machines and containers themselves</strong> &mdash; so it can show them on the Routes map and warn you before a VPN captures them.</p>
-<p><strong>It only ever reads, and it only ever reads this Mac.</strong> Three things: files where a product&rsquo;s own installer puts them; the settings files your virtualization apps write for each virtual machine, which is where a name lives; and the list of network interfaces that any program on this Mac may read. Nothing is executed &mdash; not <code>docker</code>, not <code>container</code>, not <code>ifconfig</code>, not even a <code>--version</code>. No virtualization daemon is started or woken, no virtual machine is launched, nothing is sent anywhere, and nothing of yours is written or changed. No macOS permission is involved.</p>
-<p><strong>Names stay on this Mac.</strong> A subnet like <code>192.168.64.0/24</code> says nothing about anybody; a virtual machine called <em>client&#8209;acme&#8209;prod</em> can say who you work for. So names are shown to you in the app and are <strong>deliberately left out of a problem report</strong>, which is a thing you send &mdash; the report carries how many guests were found and how they were wired, which is what is actually needed to diagnose routing.</p>
+<p>Lets SimpleVPN find the virtualization products installed on this Mac and the guest networks that are live right now, so it can show them on the Routes map and warn you before a VPN captures them.</p>
+<p><strong>It never opens another app&rsquo;s protected data.</strong> It reads ordinary local files and the list of network interfaces that any program on this Mac may read. Nothing is executed &mdash; not <code>docker</code>, not <code>container</code>, not <code>ifconfig</code>, not even a <code>--version</code>. No virtualization daemon is started or woken, no virtual machine is launched, nothing is sent anywhere, and nothing of yours is written or changed.</p>
 <p><strong>Docker&rsquo;s and Podman&rsquo;s containers cannot be named here, and that is on purpose.</strong> Their names live inside a running daemon rather than in a file, and reaching them would mean asking that daemon a question &mdash; a different thing entirely from reading a settings file your own tools wrote, and one this app does not do. You will see the guest network, not the container names.</p>
 <p><strong>&ldquo;Installed&rdquo; and &ldquo;running on a subnet right now&rdquo; are different questions</strong>, and SimpleVPN answers them separately rather than blurring them. A guest subnet only comes into existence when a guest boots, so with nothing running there is no network to name &mdash; not even from the product&rsquo;s own saved settings, which record that it uses NAT without saying which addresses it will use. A machine with three virtualization products installed and none of them running therefore has no guest networks, and that is the honest answer rather than a gap.</p>
 <p>Off means SimpleVPN never looks and never warns. Nothing else changes: your virtual machines and containers carry on exactly as before, and a VPN connects exactly as before &mdash; you simply find out the hard way when a tunnel swallows a guest network. Turning it off also empties this part of a problem report you choose to send.</p>
+
+<h2 id="vm-read-utm-configurations">Read UTM Virtual-Machine Configurations</h2>
+<p class="default">Default: off.</p>
+<p>UTM stores virtual-machine bundles inside its protected app-data folder. Turn this on only if you want SimpleVPN to show UTM machine names and their saved networking mode, such as <em>Shared</em>, <em>Bridged</em> or <em>Emulated</em>. That makes the advice about whether a VPN can affect that guest more exact.</p>
+<p>SimpleVPN explains this first. Only after you choose <strong>Continue</strong> does macOS ask for access. macOS remembers the choice, so connecting a VPN never becomes the surprise that asks. SimpleVPN reads the name and network mode only; it does not alter UTM, start a virtual machine, or send the data anywhere. Names are left out of problem reports.</p>
+<p>Turn it off whenever you prefer. SimpleVPN then stops opening UTM&rsquo;s protected data; any permission macOS has already recorded remains managed by macOS in its Privacy &amp; Security settings.</p>
 
 <h2 id="vm-warn-on-connect">Warn Before a VPN Captures Them</h2>
 <p class="default">Default: on.</p>

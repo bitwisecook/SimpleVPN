@@ -15,10 +15,10 @@
 #     `git describe --tags --exact-match` with a leading "v" stripped, then the
 #     MARKETING_VERSION literal in project.yml (so a plain local run still
 #     produces a sensibly-named DMG instead of erroring out).
-#   BUILDNO resolves from $CURRENT_PROJECT_VERSION env, else the same local
-#     build/buildnumber.txt monotonic counter build-notarize-install.sh uses.
-#     CI must set CURRENT_PROJECT_VERSION (release.yml passes the committed BUILDNUMBER)
-#     because an ephemeral runner's own counter would always read back as 1.
+#   BUILDNO resolves from $CURRENT_PROJECT_VERSION env, else the committed
+#     BUILDNUMBER. CI passes that same value explicitly. There is deliberately
+#     no machine-local fallback: a second counter made two artifacts impossible
+#     to compare from their About/diagnostic reports.
 #
 # Notarization credentials: set NOTARY_KEY/NOTARY_KEYID/NOTARY_ISSUER (CI path)
 # or leave unset to fall back to the local ~/.asc credential store — see
@@ -51,16 +51,12 @@ if [ -z "$VERSION" ]; then
   exit 1
 fi
 
-if [ -n "${CURRENT_PROJECT_VERSION:-}" ]; then
-  BUILDNO="$CURRENT_PROJECT_VERSION"
-else
-  # Local runs bump the same counter build-notarize-install.sh uses, so two
-  # hand-built DMGs of one version aren't both build 1 (which the notary and
-  # Gatekeeper tolerate, but which makes crash reports ambiguous).
-  mkdir -p "$REPO/build"
-  BUILDNO_FILE="$REPO/build/buildnumber.txt"
-  BUILDNO=$(( $(cat "$BUILDNO_FILE" 2>/dev/null || echo 0) + 1 ))
-  echo "$BUILDNO" > "$BUILDNO_FILE"
+BUILDNO="${CURRENT_PROJECT_VERSION:-$(tr -d '[:space:]' < "$REPO/BUILDNUMBER")}"
+case "$BUILDNO" in
+  ''|*[!0-9]*) echo "FATAL: build number must be a positive integer: $BUILDNO"; exit 1 ;;
+esac
+if [ "$BUILDNO" -lt 1 ]; then
+  echo "FATAL: build number must be greater than zero: $BUILDNO"; exit 1
 fi
 
 echo "==> SimpleVPN release build: version=$VERSION build=$BUILDNO"

@@ -25,7 +25,10 @@ struct VPNAuthConfig: Codable, Sendable, Equatable {
 
     /// One remember preference shared by every surface (main window, menu bar,
     /// edit sheet). Ignored — treated as false — when the profile forbids saving.
-    var rememberCredentials = true
+    /// New connections start with no promise to retain a password.  This is an
+    /// explicit opt-in: the presence of a password field must never imply that
+    /// the user wants it copied into the keychain.
+    var rememberCredentials = false
 
     /// Credentials live in a Touch ID-gated keychain item instead of the plain
     /// keychain: connecting asks for a fingerprint (or Watch / account password)

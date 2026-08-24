@@ -108,11 +108,11 @@ struct OpenVPNOptionsForm: View {
                     } label: { SettingLabel(id: "openvpn.server", draft: draft) }
                 } else {
                     LabeledContent {
-                        TextField(evaluation?.remoteHostOrNil ?? "server address",
-                                  text: emptyAsNil(\.server))
+                        TextField("", text: emptyAsNil(\.server),
+                                  prompt: Text(evaluation?.remoteHostOrNil ?? "server address"))
                             .autocorrectionDisabled()
                             .multilineTextAlignment(.trailing)
-                            .frame(maxWidth: 260).frame(maxWidth: .infinity, alignment: .trailing)
+                            .scalarConfigurationValue()
                     } label: { SettingLabel(id: "openvpn.server", draft: draft) }
                 }
             }
@@ -446,7 +446,7 @@ struct OpenVPNOptionsForm: View {
                         TextField("", text: emptyAsNil(\.proxyHost), prompt: Text("proxy.example.com"))
                             .autocorrectionDisabled()
                             .multilineTextAlignment(.trailing)
-                            .frame(maxWidth: 260).frame(maxWidth: .infinity, alignment: .trailing)
+                            .scalarConfigurationValue()
                     } label: { SettingLabel(id: "openvpn.proxy-host", draft: draft) }
                 } caveat: {
                     // The other half of the Protocol row's caveat: a proxy is set
@@ -470,7 +470,7 @@ struct OpenVPNOptionsForm: View {
                         TextField("", text: emptyAsNil(\.proxyUsername), prompt: Text("optional"))
                             .autocorrectionDisabled()
                             .multilineTextAlignment(.trailing)
-                            .frame(maxWidth: 260).frame(maxWidth: .infinity, alignment: .trailing)
+                            .scalarConfigurationValue()
                     } label: { SettingLabel(id: "openvpn.proxy-username", draft: draft) }
                 }
                 // The descriptor carries the "enter a username first" rule now, so
@@ -480,7 +480,7 @@ struct OpenVPNOptionsForm: View {
                     LabeledContent {
                         SecureField("", text: $proxyPassword, prompt: Text("optional"))
                             .multilineTextAlignment(.trailing)
-                            .frame(maxWidth: 260).frame(maxWidth: .infinity, alignment: .trailing)
+                            .scalarConfigurationValue()
                     } label: {
                         SettingLabel(id: "openvpn.proxy-password", draft: draft)
                     }
@@ -637,6 +637,7 @@ struct OpenVPNOptionsForm: View {
                 .font(.callout.monospaced())
                 .autocorrectionDisabled()
                 .multilineTextAlignment(.trailing)
+                .scalarConfigurationValue()
         } label: { SettingLabel(id: id, draft: draft) }
     }
 
@@ -695,7 +696,7 @@ struct OpenVPNSignInOverrides: View {
             SettingRow(id: "openvpn.private-key-password", draft: $draft, context: context) {
                 LabeledContent {
                     SecureField("", text: $privateKeyPassword, prompt: Text("required"))
-                        .settingValue()
+                        .scalarConfigurationValue()
                 } label: {
                     SettingLabel(id: "openvpn.private-key-password", draft: draft)
                 }

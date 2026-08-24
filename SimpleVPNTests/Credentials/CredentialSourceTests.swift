@@ -127,7 +127,7 @@ struct CredentialSourceTests {
     // MARK: - Drop links
 
     @Test func secretReferenceDropCarriesVaultOnly() throws {
-        let dropped = try #require(EditVPNView.parseOnePasswordDrop("op://Private/GR Lab VPN/password"))
+        let dropped = try #require(OnePasswordDropItem.parseRaw("op://Private/GR Lab VPN/password"))
         #expect(dropped.reference == "GR Lab VPN")
         #expect(dropped.vault == "Private")
         #expect(dropped.account.isEmpty)   // a secret reference never names one
@@ -139,21 +139,21 @@ struct CredentialSourceTests {
         "https://start.1password.com/open/i?a=ACCOUNTUUID&v=VAULTUUID&i=ITEMUUID&h=example.1password.com",
     ])
     func linkDropCapturesAccountAndVault(_ raw: String) throws {
-        let dropped = try #require(EditVPNView.parseOnePasswordDrop(raw))
+        let dropped = try #require(OnePasswordDropItem.parseRaw(raw))
         #expect(dropped.reference == "ITEMUUID")
         #expect(dropped.vault == "VAULTUUID")
         #expect(dropped.account == "ACCOUNTUUID")
     }
 
     @Test func plainTextDropIsJustTheItemName() throws {
-        let dropped = try #require(EditVPNView.parseOnePasswordDrop("GR Lab VPN\nsecond line"))
+        let dropped = try #require(OnePasswordDropItem.parseRaw("GR Lab VPN\nsecond line"))
         #expect(dropped.reference == "GR Lab VPN")
         #expect(dropped.vault.isEmpty)
         #expect(dropped.account.isEmpty)
     }
 
     @Test func emptyDropIsRejected() {
-        #expect(EditVPNView.parseOnePasswordDrop("   \n ") == nil)
+        #expect(OnePasswordDropItem.parseRaw("   \n ") == nil)
     }
 }
 
@@ -330,6 +330,13 @@ struct ConnectReadinessTests {
         var i = ConnectInputs(); i.kind = .openVPN
         i.biometricProtected = true; i.biometricStored = true
         #expect(i.readiness == .ready)
+    }
+
+    @Test func authenticationFailuresKeepTheirActionableSentenceAcrossErrorBoundaries() {
+        let error: Error = AuthFailure(locus: .entry, cause: .notFound,
+                                       detail: "No matching sign-in was found.")
+        #expect(error.localizedDescription ==
+            "No matching sign-in was found. Fix it in this VPN’s own sign-in settings, where you pick the entry.")
     }
 
     // MARK: - Plain typed credentials

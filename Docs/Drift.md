@@ -276,6 +276,30 @@ default value**, so a new call site cannot silently inherit a policy — it has 
 visibly, in the diff. A compile error is the strongest structural guard available and is
 always preferable to a source scan when the shape allows it.
 
+## 13. Compact notices and user labels ✅ COLLAPSED
+
+**The concepts:** an in-context notice that must survive a split view's minimum-size pass,
+and a run of user-defined labels that must not consume its row.
+
+**Was:** every banner repeated its own padding, rounded background and multiline layout.
+The F5 maturity notice was measured at effectively zero width and expanded to 4,627 points;
+the split view centred that height, leaving both panes apparently empty and unable to scroll
+back. User labels also had no width or count policy: a long label, or enough ordinary labels,
+could crowd out the connection name, state and action in a sidebar or the menu bar.
+
+**Now:** `BannerSurface` is the common chrome and, crucially, owns the 320-point readable
+minimum width seen by the split-view measurement. `EditorPaneMetrics` provides the matching
+520-point floor at Manage VPNs' one detail host, so an editor cannot bypass the banner's
+contract through its own `TabView` or form. It is used by informational, warning, recovery and
+editor notices; richer diagnostic and setup cards remain cards because their interaction structure
+is intentionally different. `LabelPill` owns one shortened visual label while retaining its full
+accessibility name; `LabelPills` owns a row's bounded two-label prefix and its explicit `+N`
+remainder. The three compact connection surfaces use it.
+
+**Verdict: COLLAPSE — done.** `BannerAndLabelLayoutTests` measures zero-width banner layout,
+long labels and many-label runs; `EditorPaneHeightTests` measures the actual F5 editor as well as
+the banner. A future visual copy cannot quietly bring this failure class back.
+
 ---
 
 ## Adding to this file

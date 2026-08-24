@@ -46,15 +46,13 @@
 //   2. LOCAL. No network, nothing written, no daemon woken. It is therefore on by
 //      default (`vm.detect`) — a detection feature that defaults to not detecting is
 //      inert.
-//   3. NOT ENTIRELY SILENT, and the earlier claim that it was has been corrected here
-//      because it was wrong. `utmGuests` enumerates
+//   3. PROTECTED DATA IS EXPLICIT. `utmGuests` would enumerate
 //      `~/Library/Containers/com.utmapp.UTM/Data/Documents` — ANOTHER APPLICATION'S
-//      SANDBOX CONTAINER — and macOS gates that behind a consent check. Measured
-//      consequence: with the check unanswered, `open` does not fail, it BLOCKS
-//      indefinitely, and the first time this feature was actually wired the whole app
-//      froze on it. Hence `snapshotOffMain`: off the main thread AND on a deadline, with
-//      the guest-network half (`getifaddrs` only, which is what the connect-time warning
-//      needs) computed before any filesystem call so it survives the timeout.
+//      SANDBOX CONTAINER — and macOS gates that behind consent. That path is OFF by
+//      default and is reached only from the UTM option in Settings, after the person
+//      has read why. A connect click and a diagnostic report never become the first
+//      access to another app's data. The bounded off-main scan remains important for
+//      ordinary filesystem latency; its interface-only half is calculated first.
 //
 //  WHAT IS NOT KNOWABLE WHILE NOTHING IS RUNNING, and it is not a gap to paper
 //  over: a guest subnet is assigned when a guest BOOTS. With no VM running there
@@ -642,6 +640,19 @@ nonisolated struct VirtualizationEnvironment: Sendable {
     var listDirectory: @Sendable (String) -> [String] = {
         (try? FileManager.default.contentsOfDirectory(atPath: $0)) ?? []
     }
+    /// A distinct probe for the one user-authorised UTM access action.  `[]` is a
+    /// perfectly valid directory listing, so `listDirectory` cannot distinguish an
+    /// empty UTM Documents folder from a TCC refusal.  This does, without looking at
+    /// or retaining any names: a successful empty listing is `true`, while a denied
+    /// or unavailable folder is `false`.
+    var canReadDirectory: @Sendable (String) -> Bool = { path in
+        do {
+            _ = try FileManager.default.contentsOfDirectory(atPath: path)
+            return true
+        } catch {
+            return false
+        }
+    }
     /// A UTM virtual machine's first network interface, read from its own
     /// `config.plist`.
     ///
@@ -749,8 +760,10 @@ nonisolated struct VirtualizationEnvironment: Sendable {
 
 nonisolated enum VirtualizationDiscovery {
 
-    /// Which products are installed. Filesystem and Launch Services only.
-    static func installed(env: VirtualizationEnvironment) -> [InstalledVirtualization] {
+    /// Which products are installed. UTM's sandboxed Documents location is excluded
+    /// unless Settings' explicit protected-data option is on.
+    static func installed(env: VirtualizationEnvironment,
+                          includeProtectedAppData: Bool = false) -> [InstalledVirtualization] {
         VirtualizationCatalog.all.compactMap { product in
             var evidence: [String] = []
             for name in product.appBundleNames {
@@ -763,6 +776,7 @@ nonisolated enum VirtualizationDiscovery {
                 evidence.append(path)
             }
             for relative in product.homeRelativePaths {
+                guard includeProtectedAppData || product.id != "utm" else { continue }
                 let path = env.home.appendingPathComponent(relative).path
                 if env.fileExists(path) { evidence.append(path) }
             }
@@ -960,14 +974,11 @@ nonisolated enum VirtualizationDiscovery {
     /// The whole answer, TAKEN OFF THE MAIN THREAD — which is the only way any caller
     /// in the app should ask for it.
     ///
-    /// MEASURED, NOT PRECAUTIONARY. The synchronous `snapshot(...)` below is ~40 `stat`s,
-    /// a directory enumeration of UTM's container and a plist read per virtual machine.
-    /// Called on the main actor it wedged the app outright: `contentsOfDirectory` on
-    /// `~/Library/Containers/com.utmapp.UTM/Data/Documents` blocked in `open` and never
-    /// returned, and the whole UI went with it — caught by the Report a Problem
-    /// accessibility audit, whose "wait for the app to idle" never came back. A
-    /// filesystem call another process can stall must never be on the main thread, and
-    /// "it is only forty stats" is exactly the reasoning that put it there.
+    /// MEASURED, NOT PRECAUTIONARY. The synchronous `snapshot(...)` below is ~40 `stat`s
+    /// plus the ordinary installed-product records. If the person separately enables
+    /// UTM detail it also reads UTM's protected Documents container and a plist per
+    /// virtual machine. None of that belongs on the main actor: an external process can
+    /// stall a filesystem call, and one such call previously wedged the whole UI.
     ///
     /// `nonisolated` + `async` rather than a cache: the answer is only true for the
     /// instant it is taken (a guest's subnet exists only while the guest runs), so a
@@ -985,6 +996,7 @@ nonisolated enum VirtualizationDiscovery {
     nonisolated static func snapshotOffMain(
         interfaces: [NetInterface],
         detectionEnabled: Bool,
+        includeProtectedAppData: Bool = false,
         env: VirtualizationEnvironment,
         neighbours: [String: Set<MACAddress>] = [:]) async -> VirtualizationSnapshot {
 
@@ -1004,14 +1016,13 @@ nonisolated enum VirtualizationDiscovery {
         // it in those words.
         let networksWithoutAttribution = guestNetworks(interfaces: interfaces, installed: [])
 
-        // AND THE FILESYSTEM HALF ON A DEADLINE, because one of its reads can block for
-        // ever. MEASURED: `utmGuests` enumerates `~/Library/Containers/com.utmapp.UTM/
-        // Data/Documents` — ANOTHER APPLICATION'S SANDBOX CONTAINER — and macOS gates
-        // that behind a consent check. With the check unanswered, `open` does not fail,
-        // it BLOCKS, and it blocked for as long as it was left to. Waiting on that from
-        // a connect or from the report is not acceptable at any duration, so the answer
-        // is bounded and the missing half is simply absent.
-        let filesystem = await answer(within: scanBudget) { readEverything(env: env) }
+        // AND THE FILESYSTEM HALF ON A DEADLINE. UTM's protected app data is included
+        // only after Settings has gained explicit consent; it is never the surprise
+        // first read on a connect or diagnostic path. A slow filesystem still must not
+        // delay those paths, so the answer is bounded and any missing half is absent.
+        let filesystem = await answer(within: scanBudget) {
+            readEverything(env: env, includeProtectedAppData: includeProtectedAppData)
+        }
         guard let scan = filesystem else {
             return VirtualizationSnapshot(
                 guestNetworks: networksWithoutAttribution,
@@ -1037,13 +1048,15 @@ nonisolated enum VirtualizationDiscovery {
 
     /// The whole filesystem half. Ordered so `installed` comes first — every other
     /// reader is gated on it, and a product nobody has is never searched for.
-    static func readEverything(env: VirtualizationEnvironment) -> FilesystemScan {
-        let found = installed(env: env)
+    static func readEverything(env: VirtualizationEnvironment,
+                               includeProtectedAppData: Bool = false) -> FilesystemScan {
+        let found = installed(env: env, includeProtectedAppData: includeProtectedAppData)
         return FilesystemScan(
             installed: found,
-            utmGuests: utmGuests(env: env),
+            utmGuests: includeProtectedAppData ? utmGuests(env: env) : [],
             appleContainerModes: env.appleContainerNetworkModes(env.home),
-            named: GuestInventory.guests(env: env, installed: found))
+            named: GuestInventory.guests(env: env, installed: found,
+                                         includeProtectedAppData: includeProtectedAppData))
     }
 
     /// The filesystem half plus the live half, combined. Shared by the async and the
@@ -1111,10 +1124,25 @@ nonisolated enum VirtualizationDiscovery {
     /// `snapshotOffMain`. Never from the main actor — see above.
     static func snapshot(interfaces: [NetInterface],
                          detectionEnabled: Bool,
+                         includeProtectedAppData: Bool = false,
                          env: VirtualizationEnvironment,
                          neighbours: [String: Set<MACAddress>] = [:]) -> VirtualizationSnapshot {
         guard detectionEnabled else { return VirtualizationSnapshot(detectionEnabled: false) }
-        return assemble(interfaces: interfaces, scan: readEverything(env: env),
+        return assemble(interfaces: interfaces,
+                        scan: readEverything(env: env, includeProtectedAppData: includeProtectedAppData),
                         neighbours: neighbours)
+    }
+
+    /// This is the only path allowed to provoke macOS's protected-app-data alert.
+    /// It runs after the person turned on the UTM detail option and saw our reason;
+    /// connect and diagnostic scans never make this request on their own.
+    nonisolated static func requestUTMConfigurationAccess(
+        env: VirtualizationEnvironment = .live()
+    ) async -> Bool {
+        let root = env.home
+            .appendingPathComponent("Library/Containers/com.utmapp.UTM/Data/Documents").path
+        return await Task.detached(priority: .userInitiated) {
+            env.canReadDirectory(root)
+        }.value
     }
 }

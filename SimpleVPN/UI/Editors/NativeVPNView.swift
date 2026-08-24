@@ -62,10 +62,8 @@ struct NativeVPNView: View {
     /// app no way to connect one at all) and a build whose signing profile has no
     /// Personal VPN capability.
     private var missingFieldCaption: String? {
-        NativeVPNReadiness.need(for: draft, facts: .init(
-            hasSecret: !secret.isEmpty,
-            hasGroupPSK: !sharedSecret.isEmpty,
-            hasPersonalVPNCapability: !manager.needsEntitlement))?.sentence
+        guard let need = readinessNeed, !need.isDeferredUntilConnect else { return nil }
+        return need.sentence
     }
 
     /// The OTHER native config currently occupying macOS's single personal-VPN
@@ -129,6 +127,7 @@ struct NativeVPNView: View {
                     LabeledContent {
                         TextField("", text: $draft.server, prompt: Text("vpn.example.com"))
                             .multilineTextAlignment(.trailing)
+                            .scalarConfigurationValue()
                             .autocorrectionDisabled()
                             // The title is an EXAMPLE — the spec name is the name.
                             .accessibilityLabel(Self.specs["native.server"].name)
@@ -148,6 +147,7 @@ struct NativeVPNView: View {
                         LabeledContent {
                             TextField("", text: $draft.groupOrRealm, prompt: Text("optional"))
                                 .multilineTextAlignment(.trailing)
+                                .scalarConfigurationValue()
                                 .autocorrectionDisabled()
                                 .accessibilityLabel(Self.specs["native.group"].name)
                         } label: {
@@ -246,19 +246,29 @@ struct NativeVPNView: View {
     /// present, or a user who has just filled a password in would be told it is
     /// missing until focus left the field.
     private var needs: SettingNeeds {
-        let facts = NativeVPNReadiness.Facts(
-            hasSecret: !secret.isEmpty,
-            hasGroupPSK: !sharedSecret.isEmpty,
-            // Not a per-VPN question, and never the field a person can fix — asserted
-            // true so a build without the capability doesn't redden an unrelated row.
-            hasPersonalVPNCapability: true)
-        guard let need = NativeVPNReadiness.need(for: draft, facts: facts),
+        guard let need = readinessNeed,
+              !need.isDeferredUntilConnect,
               let id = need.settingID else { return SettingNeeds() }
         return SettingNeeds(byID: [id: need.sentence])
     }
 
+    private var readinessNeed: ConnectNeed? {
+        NativeVPNReadiness.need(for: draft, facts: .init(
+            hasSecret: !secret.isEmpty,
+            hasGroupPSK: !sharedSecret.isEmpty,
+            hasPersonalVPNCapability: !manager.needsEntitlement))
+    }
+
+    private var deferredSignInNeed: ConnectNeed? {
+        guard let need = readinessNeed, need.isDeferredUntilConnect else { return nil }
+        return need
+    }
+
     @ViewBuilder private var authSection: some View {
         Section {
+            if let need = deferredSignInNeed {
+                FirstConnectSignInBanner(need: need)
+            }
             if draft.kind == .ipsec {
                 // No certificate/identity path exists (no picker, no import),
                 // so IPsec always authenticates with a shared secret — the
@@ -268,6 +278,7 @@ struct NativeVPNView: View {
                     LabeledContent {
                         SecureField("", text: $sharedSecret, prompt: Text("group PSK"))
                             .multilineTextAlignment(.trailing)
+                            .scalarConfigurationValue()
                             .accessibilityLabel(Self.specs["native.shared-secret"].name)
                     } label: {
                         EngineSettingLabel(spec: Self.specs["native.shared-secret"], value: sharedSecret)
@@ -287,6 +298,7 @@ struct NativeVPNView: View {
                     LabeledContent {
                         TextField("", text: $draft.username, prompt: Text("username")).textContentType(.username)
                             .multilineTextAlignment(.trailing)
+                            .scalarConfigurationValue()
                             .accessibilityLabel("XAuth username")
                     } label: {
                         EngineSettingLabel(spec: Self.specs["native.username"], value: draft.username)
@@ -297,6 +309,7 @@ struct NativeVPNView: View {
                     LabeledContent {
                         SecureField("", text: $secret, prompt: Text("password"))
                             .multilineTextAlignment(.trailing)
+                            .scalarConfigurationValue()
                             .accessibilityLabel("XAuth password")
                     } label: {
                         EngineSettingLabel(spec: Self.specs["native.xauth-password"], value: secret)
@@ -314,6 +327,7 @@ struct NativeVPNView: View {
                         LabeledContent {
                             TextField("", text: $draft.username, prompt: Text("username")).textContentType(.username)
                                 .multilineTextAlignment(.trailing)
+                                .scalarConfigurationValue()
                                 .accessibilityLabel(Self.specs["native.username"].name)
                         } label: {
                             EngineSettingLabel(spec: Self.specs["native.username"], value: draft.username)
@@ -326,8 +340,10 @@ struct NativeVPNView: View {
                 let secretSpec = Self.specs[draft.usesSharedSecret ? "native.shared-secret" : "native.password"]
                 EngineSettingRow(spec: secretSpec, value: secret) {
                     LabeledContent {
-                        SecureField(draft.usesSharedSecret ? "shared secret" : "password", text: $secret)
+                        SecureField("", text: $secret,
+                                    prompt: Text(draft.usesSharedSecret ? "shared secret" : "password"))
                             .multilineTextAlignment(.trailing)
+                            .scalarConfigurationValue()
                             .accessibilityLabel(secretSpec.name)
                     } label: {
                         EngineSettingLabel(spec: secretSpec, value: secret)
@@ -386,6 +402,7 @@ struct NativeVPNView: View {
                     LabeledContent {
                         TextField("", text: $draft.remoteID, prompt: Text("defaults to the server address"))
                             .multilineTextAlignment(.trailing)
+                            .scalarConfigurationValue()
                             .autocorrectionDisabled()
                             .accessibilityLabel(Self.specs["native.remote-id"].name)
                     } label: {
@@ -501,7 +518,7 @@ struct NativeVPNView: View {
                         Task { await manager.connect(draft, secret: secret, sharedSecret: sharedSecret, proxy: proxy) }
                     }
                         .buttonStyle(.glassProminent)   // primary "go" — consistent with OpenVPN Connect
-                        .disabled(missingFieldCaption != nil)
+                        .disabled(readinessNeed != nil)
                         // macOS keeps ONE app-managed personal VPN, so connecting
                         // here tears down whichever native VPN is up. The footer
                         // said so generically; the button names the casualty.
@@ -544,6 +561,7 @@ struct NativeVPNView: View {
                 LabeledContent {
                     TextField("", text: $draft.username, prompt: Text("username")).textContentType(.username)
                         .multilineTextAlignment(.trailing)
+                        .scalarConfigurationValue()
                         .accessibilityLabel(Self.specs["native.username"].name)
                 } label: {
                     EngineSettingLabel(spec: Self.specs["native.username"], value: draft.username)
@@ -556,6 +574,7 @@ struct NativeVPNView: View {
                 LabeledContent {
                     SecureField("", text: $pppPassword, prompt: Text("password"))
                         .multilineTextAlignment(.trailing)
+                        .scalarConfigurationValue()
                         .accessibilityLabel("L2TP password")
                 } label: {
                     EngineSettingLabel(spec: Self.specs["native.password"], value: pppPassword)
@@ -568,6 +587,7 @@ struct NativeVPNView: View {
                 LabeledContent {
                     SecureField("", text: $secret, prompt: Text("shared secret"))
                         .multilineTextAlignment(.trailing)
+                        .scalarConfigurationValue()
                         .accessibilityLabel("L2TP shared secret")
                 } label: {
                     EngineSettingLabel(spec: Self.specs["native.shared-secret"], value: secret)

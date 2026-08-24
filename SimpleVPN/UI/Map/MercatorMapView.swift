@@ -56,19 +56,21 @@ struct MapPin: Identifiable, Equatable {
     var isTethered: Bool { tetheredTo != nil }
 }
 
-/// A great-circle link between two pins (by id) for the live-topology map.
+/// A great-circle link between two pins (by id).
 struct MapConnection: Equatable {
-    /// How the link should read. `tunnel` = traffic is going through the VPN
-    /// (solid accent, plus a slow travelling highlight so a live tunnel looks
-    /// live); `bypass` = traffic reaches the internet outside every tunnel
-    /// (thin and dashed). The dash means *only* bypass — it is the leak /
-    /// split-tunnel signal and must never be what a working tunnel looks like.
-    enum Kind: Equatable { case tunnel, bypass }
+    /// How the link should read. `tunnel` is a verified live VPN route (solid
+    /// accent, with a slow travelling highlight); `pending` is the selected
+    /// route before a connection exists (solid neutral grey); `bypass` is traffic
+    /// reaching the internet outside every tunnel (thin and dashed). A dash is
+    /// reserved for bypass, never for a working or merely pending VPN route.
+    enum Kind: Equatable { case tunnel, pending, bypass }
     let from: String
     let to: String
     var kind: Kind = .tunnel
 
     var isTunnel: Bool { kind == .tunnel }
+    var isPending: Bool { kind == .pending }
+    var isBypass: Bool { kind == .bypass }
     /// Stable identity for per-link animation state.
     var key: String { "\(from)\u{2192}\(to)" }
 }
@@ -84,6 +86,7 @@ struct MercatorMapView: View {
     var onSelect: (String) -> Void = { _ in }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.liveVisualPolicy) private var liveVisuals
     @State private var camera = MapCamera()
     /// When each link first appeared, so a newly-connected tunnel draws itself in
     /// from home instead of popping into existence. Kept in step with `connections`.
@@ -234,11 +237,13 @@ struct MercatorMapView: View {
 
     /// Only spend frames when there is something live to animate.
     private var flowAnimates: Bool {
-        !reduceMotion && connections.contains { $0.isTunnel }
+        liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion)
+            && connections.contains { $0.isTunnel }
     }
 
     private func connectionsLayer(size: CGSize) -> some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !flowAnimates)) { timeline in
+        TimelineView(.animation(minimumInterval: liveVisuals.frameInterval(normalFramesPerSecond: 30),
+                                paused: !flowAnimates)) { timeline in
             Canvas { context, canvasSize in
                 drawConnections(&context, size: canvasSize, now: timeline.date)
             }
@@ -274,8 +279,9 @@ struct MercatorMapView: View {
         // Explicit topology links (home → VPN(s) → egress), when provided.
         if !connections.isEmpty {
             func pin(_ id: String) -> MapPin? { pins.first { $0.id == id } }
-            // Bypass underneath, so a live tunnel always draws over it.
-            for c in connections.sorted(by: { !$0.isTunnel && $1.isTunnel }) {
+            // Bypass underneath, then a selected-but-not-live route, then a
+            // verified tunnel. This makes link state legible when maps overlap.
+            for c in connections.sorted(by: { drawOrder($0) < drawOrder($1) }) {
                 guard let a = pin(c.from), let b = pin(c.to) else { continue }
                 let progress = drawInProgress(c, now: now)
                 guard progress > 0 else { continue }
@@ -284,9 +290,14 @@ struct MercatorMapView: View {
                                        transform: transform,
                                        offsetA: a.screenOffset, offsetB: b.screenOffset,
                                        progress: progress)
-                guard c.isTunnel else {
+                if c.isBypass {
                     context.stroke(path, with: .color(Color.secondary.opacity(0.5)),
                                    style: StrokeStyle(lineWidth: 1, lineCap: .round, dash: [3, 4]))
+                    continue
+                }
+                if c.isPending {
+                    context.stroke(path, with: .color(Color.secondary.opacity(0.65)),
+                                   style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
                     continue
                 }
                 context.stroke(path, with: .color(Color.accentColor),
@@ -321,6 +332,14 @@ struct MercatorMapView: View {
                 with: .color(selected ? Color.accentColor : Color.secondary.opacity(0.45)),
                 style: StrokeStyle(lineWidth: selected ? 2 : 1, lineCap: .round,
                                    dash: selected ? [] : [3, 4]))
+        }
+    }
+
+    private func drawOrder(_ connection: MapConnection) -> Int {
+        switch connection.kind {
+        case .bypass: 0
+        case .pending: 1
+        case .tunnel: 2
         }
     }
 
@@ -365,33 +384,11 @@ struct MercatorMapView: View {
 
     private static func greatCirclePoints(from a: (Double, Double), to b: (Double, Double),
                                           samples: Int = 72) -> [(Double, Double)] {
-        let φ1 = a.0 * .pi / 180, λ1 = a.1 * .pi / 180
-        let φ2 = b.0 * .pi / 180, λ2 = b.1 * .pi / 180
-        let v1 = SIMD3(cos(φ1) * cos(λ1), cos(φ1) * sin(λ1), sin(φ1))
-        let v2 = SIMD3(cos(φ2) * cos(λ2), cos(φ2) * sin(λ2), sin(φ2))
-        let dotp = max(-1.0, min(1.0, simd_dot(v1, v2)))
-        let omega = acos(dotp)
-        // Coincident endpoints: still emit the full sample count. The two pins may
-        // share a coordinate but differ by a screen offset (an unplaceable gateway
-        // pinned beside home), and that short link has to draw in like any other.
-        guard omega > 1e-6 else { return Array(repeating: a, count: samples + 1) }
-        let sinOmega = sin(omega)
-        // Near-antipodal (omega → π): sinOmega → 0, so the slerp weights below blow
-        // up to NaN. The path is geometrically ambiguous anyway — fall back to the
-        // endpoints rather than feed NaN lat/lon into the projection.
-        guard sinOmega > 1e-6 else { return [a, b] }
-        var out: [(Double, Double)] = []
-        out.reserveCapacity(samples + 1)
-        for i in 0...samples {
-            let t = Double(i) / Double(samples)
-            let s1 = sin((1 - t) * omega) / sinOmega
-            let s2 = sin(t * omega) / sinOmega
-            let v = s1 * v1 + s2 * v2
-            let lat = atan2(v.z, (v.x * v.x + v.y * v.y).squareRoot()) * 180 / .pi
-            let lon = atan2(v.y, v.x) * 180 / .pi
-            out.append((lat, lon))
+        GreatCircle.points(from: a, to: b, samples: samples).map { point in
+            let latitude = atan2(point.y, (point.x * point.x + point.z * point.z).squareRoot()) * 180 / .pi
+            let longitude = atan2(point.z, point.x) * 180 / .pi
+            return (latitude, longitude)
         }
-        return out
     }
 
     // MARK: Pins
@@ -404,7 +401,7 @@ struct MercatorMapView: View {
         ZStack {
             ForEach(pins) { pin in
                 let point = camera.project(lat: pin.lat, lon: pin.lon, viewSize: size)
-                PinView(pin: pin, anchorsTether: pins.contains { $0.tetheredTo == pin.id }) {
+                MapPinView(pin: pin, anchorsTether: pins.contains { $0.tetheredTo == pin.id }) {
                     if case .endpoint = pin.kind { onSelect(pin.id) }
                 }
                 .position(x: point.x + pin.screenOffset.width,
@@ -534,7 +531,7 @@ private struct MapCamera: Equatable {
 
 // MARK: - Pin views
 
-private struct PinView: View {
+struct MapPinView: View {
     let pin: MapPin
     /// Another pin is parked beside this one (a gateway that shares its spot on
     /// the globe). The marker grows a second ring so the pair reads as "you, and
@@ -643,17 +640,26 @@ final class WorldGeometry {
     @MainActor static let shared: WorldGeometry? = WorldGeometry()
 
     let path: CGPath
+    /// The same Natural Earth coastline rings in spherical coordinates, shared
+    /// with the globe so the two map presentations never disagree about land.
+    let globePolygons: [[SIMD3<Double>]]
 
     private init?() {
         guard let url = Bundle.main.url(forResource: "land-110m", withExtension: "bin"),
               let data = try? Data(contentsOf: url) else { return nil }
         guard let parsed = Self.parse(data) else { return nil }
-        path = parsed
+        path = parsed.path
+        globePolygons = parsed.globePolygons
     }
 
     /// Format: "SVMAP1" magic · uint32 LE polygon count · per polygon:
     /// uint32 LE point count then (float32 lon, float32 lat) pairs.
-    private static func parse(_ data: Data) -> CGPath? {
+    private struct ParsedGeometry {
+        let path: CGPath
+        let globePolygons: [[SIMD3<Double>]]
+    }
+
+    private static func parse(_ data: Data) -> ParsedGeometry? {
         let magic = Data("SVMAP1".utf8)
         guard data.count > magic.count + 4, data.prefix(magic.count) == magic else { return nil }
         var cursor = magic.count
@@ -673,17 +679,75 @@ final class WorldGeometry {
 
         guard let polygonCount = readUInt32() else { return nil }
         let path = CGMutablePath()
+        var globePolygons: [[SIMD3<Double>]] = []
+        globePolygons.reserveCapacity(Int(polygonCount))
         for _ in 0..<polygonCount {
             guard let pointCount = readUInt32(), pointCount >= 3 else { return nil }
             var first: CGPoint?
+            var globePolygon: [SIMD3<Double>] = []
+            globePolygon.reserveCapacity(Int(pointCount))
             for i in 0..<pointCount {
                 guard let lon = readFloat(), let lat = readFloat() else { return nil }
                 let p = MapCameraProjection.unit(lat: lat, lon: lon)
                 if i == 0 { path.move(to: p); first = p } else { path.addLine(to: p) }
+                globePolygon.append(GreatCircle.vector(lat: lat, lon: lon))
             }
             if first != nil { path.closeSubpath() }
+            globePolygons.append(globePolygon)
         }
-        return path
+        return ParsedGeometry(path: path, globePolygons: globePolygons)
+    }
+}
+
+/// Loads Natural Earth's Admin 0 land boundaries separately from the coastline
+/// rings. Keeping political lines distinct lets the globe give them a quieter
+/// overlay treatment while retaining the coast as the primary geographic edge.
+final class CountryBorderGeometry {
+    @MainActor static let shared: CountryBorderGeometry? = CountryBorderGeometry()
+
+    let globeLines: [[SIMD3<Double>]]
+
+    private init?() {
+        guard let url = Bundle.main.url(forResource: "border-110m", withExtension: "bin"),
+              let data = try? Data(contentsOf: url),
+              let lines = Self.parse(data) else { return nil }
+        globeLines = lines
+    }
+
+    /// Format: "SVLINE1" magic · uint32 LE line count · per line: uint32 LE
+    /// point count then (float32 lon, float32 lat) pairs.
+    private static func parse(_ data: Data) -> [[SIMD3<Double>]]? {
+        let magic = Data("SVLINE1".utf8)
+        guard data.count > magic.count + 4, data.prefix(magic.count) == magic else { return nil }
+        var cursor = magic.count
+
+        func readUInt32() -> UInt32? {
+            guard cursor + 4 <= data.count else { return nil }
+            let value = data.subdata(in: cursor..<(cursor + 4)).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+            cursor += 4
+            return UInt32(littleEndian: value)
+        }
+        func readFloat() -> Double? {
+            guard cursor + 4 <= data.count else { return nil }
+            let bits = data.subdata(in: cursor..<(cursor + 4)).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+            cursor += 4
+            return Double(Float(bitPattern: UInt32(littleEndian: bits)))
+        }
+
+        guard let lineCount = readUInt32() else { return nil }
+        var lines: [[SIMD3<Double>]] = []
+        lines.reserveCapacity(Int(lineCount))
+        for _ in 0..<lineCount {
+            guard let pointCount = readUInt32(), pointCount >= 2 else { return nil }
+            var line: [SIMD3<Double>] = []
+            line.reserveCapacity(Int(pointCount))
+            for _ in 0..<pointCount {
+                guard let lon = readFloat(), let lat = readFloat() else { return nil }
+                line.append(GreatCircle.vector(lat: lat, lon: lon))
+            }
+            lines.append(line)
+        }
+        return lines
     }
 }
 

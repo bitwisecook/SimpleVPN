@@ -41,12 +41,11 @@ nonisolated enum ProviderPickerCopy {
         + "fill in their servers so you don\u{2019}t type them by hand. It never signs you in \u{2014} "
         + "your account stays between you and them."
 
-    /// Shown on the first-run page, where the reader has no VPNs at all and could
-    /// reasonably think this is a way to GET one. It is not, and saying so here is
-    /// cheaper than saying it after they have pressed something.
-    static let firstRunDetail = "These fill in a provider\u{2019}s servers once you have their "
-        + "configuration. They are not a way to buy or sign in to a VPN \u{2014} if you don\u{2019}t "
-        + "have an account yet, get one from the provider first, then come back."
+    /// The first page is a CHOICE, not four miniature instruction manuals. The
+    /// provider-specific explanation moves to the page opened by that choice.
+    static let firstRunSectionTitle = "Choose your VPN provider"
+    static let firstRunDetail = "Already have a provider account? Choose its name for the exact "
+        + "setup steps. SimpleVPN does not sell VPN service and never signs you in."
 
     // MARK: One row
 
@@ -85,6 +84,91 @@ nonisolated enum ProviderPickerCopy {
     static func downloadSize(_ p: VPNServiceProvider) -> String? {
         guard p.blocked == nil, p.approximateBytes > 0 else { return nil }
         return "About \(Int64(p.approximateBytes).formatted(.byteCount(style: .file))) to download."
+    }
+
+    // MARK: First run — the provider's own page
+
+    /// The file the person needs to obtain before SimpleVPN can make a VPN. Proton
+    /// has no fetchable list, but the configuration Proton provides is OpenVPN.
+    static func configurationKind(_ p: VPNServiceProvider) -> String {
+        p.kind == .wireGuard ? "WireGuard" : "OpenVPN"
+    }
+
+    static func firstRunTitle(_ p: VPNServiceProvider) -> String {
+        "Set up with \(p.displayName)"
+    }
+
+    static func firstRunActionTitle(_ p: VPNServiceProvider) -> String {
+        "Show setup steps for \(p.displayName)"
+    }
+
+    /// The provider's gap belongs HERE, after its name was chosen and before any
+    /// network request or file panel. Keeping it off the picker is what makes those
+    /// rows choices rather than inert-looking blocks of prose.
+    static func firstRunSummary(_ p: VPNServiceProvider) -> String {
+        if let blocked = p.blocked { return blocked }
+        return detail(p)
+    }
+
+    static func firstRunImportTitle(_ p: VPNServiceProvider) -> String {
+        "Choose \(configurationKind(p)) Configuration\u{2026}"
+    }
+
+    /// A named first-party destination, instead of a vague “learn more” link.
+    static func firstRunVendorLinkTitle(_ p: VPNServiceProvider) -> String {
+        "Open \(p.displayName)’s configuration page"
+    }
+
+    /// Numbered, provider-specific instructions. This is deliberately guidance to
+    /// an existing account, never an account integration or an automated sign-in.
+    static func firstRunSteps(_ p: VPNServiceProvider) -> [UserFacingError.Step] {
+        var steps = [
+            UserFacingError.Step(
+                "Open your **\(p.displayName)** account and download one "
+                    + "\(configurationKind(p)) configuration.",
+                note: "SimpleVPN needs the configuration issued for your account; a server name by itself is not enough."),
+            UserFacingError.Step(
+                "Import the downloaded configuration into SimpleVPN.",
+                note: "The file is checked and its type is worked out automatically before anything is saved.")
+        ]
+
+        if p.kind == .wireGuard {
+            steps.append(UserFacingError.Step(
+                "SimpleVPN imports the WireGuard key and tunnel address from the file.",
+                note: "WireGuard does not need a separate username and password after that."))
+        } else {
+            let note = p.id == .nordVPN
+                ? "Use the separate service username and password from your Nord dashboard, not the email and password for your Nord account."
+                : "The first-connect card lets you type the username and password, save them in the Apple keychain, or use a password app."
+            steps.append(UserFacingError.Step(
+                "After import, add the sign-in details this VPN asks for.", note: note))
+        }
+
+        steps.append(UserFacingError.Step(firstRunServerStep(p), note: firstRunServerNote(p)))
+        return steps
+    }
+
+    static func firstRunServerStatus(_ p: VPNServiceProvider) -> String {
+        if p.canFetch { return "Server list available after import" }
+        if p.blocked != nil { return "Configuration import is the supported path" }
+        return "Configuration import works; direct server-list fetching is not ready"
+    }
+
+    private static func firstRunServerStep(_ p: VPNServiceProvider) -> String {
+        if p.canFetch {
+            return "After the VPN works, open its **Servers** tab and get \(p.displayName)\u{2019}s server list."
+        }
+        return "Add more locations later from additional \(configurationKind(p)) configuration files."
+    }
+
+    private static func firstRunServerNote(_ p: VPNServiceProvider) -> String {
+        if p.canFetch {
+            return "SimpleVPN asks before contacting \(p.listURL?.host() ?? p.displayName), then lets you choose which countries to add."
+        }
+        if p.blocked != nil {
+            return "\(p.displayName) does not publish a server list SimpleVPN can read without signing in as you."
+        }
+        return "SimpleVPN will not fetch \(p.displayName)\u{2019}s list until it can verify the provider settings safely."
     }
 
     // MARK: The first fetch — naming the host before contacting it

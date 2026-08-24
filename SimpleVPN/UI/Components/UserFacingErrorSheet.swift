@@ -9,7 +9,8 @@
 //  this app is for it is noise; for the one time it matters it's selectable and
 //  copyable. Everything here is plain SwiftUI: no NSTextView, no spinner (see
 //  the layout-loop rule — platform-backed views must not sit inside an animated
-//  container, and a DisclosureGroup animates).
+//  container). The details header is a full-width Button, so mouse and keyboard
+//  users activate exactly the same native control.
 //
 
 import SwiftUI
@@ -107,7 +108,27 @@ struct UserFacingErrorSheet: View {
     }
 
     private var details: some View {
-        DisclosureGroup("Details for support", isExpanded: $showDetail) {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                showDetail.toggle()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: showDetail ? "chevron.down" : "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .frame(width: 12)
+                        .accessibilityHidden(true)
+                    Text("Details for support")
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Details for support")
+            .accessibilityValue(showDetail ? "Expanded" : "Collapsed")
+            .accessibilityHint("Shows or hides technical details that you can copy for support.")
+
+            if showDetail {
             VStack(alignment: .leading, spacing: 6) {
                 ScrollView {
                     Text(error.technicalDetail)
@@ -127,6 +148,7 @@ struct UserFacingErrorSheet: View {
                 }
             }
             .padding(.top, 6)
+            }
         }
         .font(.callout)
     }

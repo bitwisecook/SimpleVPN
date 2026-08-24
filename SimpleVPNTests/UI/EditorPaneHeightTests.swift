@@ -104,6 +104,24 @@ struct EditorPaneHeightTests {
         }
     }
 
+    /// The regression was reported through this actual editor, not through a
+    /// standalone banner. Hold the full F5 editor to the same bound so a future
+    /// wrapper, TabView, or form change cannot reintroduce an unbounded detail pane.
+    @Test func theActualF5EditorFitsTheManageWindow() {
+        var f5 = SubprocessTunnelConfig()
+        f5.id = "f5-layout-probe"
+        f5.name = "F5 layout probe"
+        f5.kind = .f5apm
+        let editor = SubprocessTunnelView(
+            vpn: VPNController(), store: SubprocessTunnelStore(),
+            manager: SubprocessTunnelManager(), draft: f5)
+            .editorPaneWidthFloor()
+        let size = NSHostingController(rootView: editor).sizeThatFits(in: .zero)
+
+        #expect(size.width >= EditorPaneMetrics.minimumReadableWidth)
+        #expect(size.height <= Self.shortestPane, "F5 editor minimum height is \(size.height)pt")
+    }
+
     /// THE PARAGRAPH IS THE PART THAT BREAKS, and it breaks by being measured at a
     /// width nobody will ever draw it at. Stated on its own so that a future edit
     /// reintroducing a bare `.fixedSize(horizontal: false, vertical: true)` on a long

@@ -193,7 +193,8 @@ private struct ImportConfirmationSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 640, height: 540)
+        .resizablePanel(idealWidth: 640, idealHeight: 540,
+                        minWidth: 480, minHeight: 360)
     }
 
     private func header(_ pending: PendingConfigImport) -> some View {

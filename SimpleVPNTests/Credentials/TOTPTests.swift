@@ -236,4 +236,34 @@ struct TOTPTests {
              == cfg.code(at: Date(timeIntervalSince1970: 59)))
         #expect(cfg.secondsRemaining(at: Date(timeIntervalSince1970: 10)) == 50)
     }
+
+    @Test func onePasswordCountdownRingUsesTheContinuousTOTPClock() {
+        // The arc is intentionally fractional rather than stepped at a
+        // one-second cadence: 15.25 seconds through a 30 second period means
+        // 14.75 seconds / 49.17% of the code lifetime remains.
+        let quarterPastHalfway = Date(timeIntervalSince1970: 15.25)
+        #expect(abs(OnePasswordTOTPClock.remainingFraction(at: quarterPastHalfway)
+                    - (14.75 / 30.0)) < 0.000_001)
+        #expect(OnePasswordTOTPClock.displaySecondsRemaining(at: quarterPastHalfway) == 15)
+
+        // The visual countdown resets at precisely the same Unix-time edge at
+        // which an RFC 6238 TOTP code changes.
+        #expect(OnePasswordTOTPClock.remainingFraction(at: Date(timeIntervalSince1970: 29.999)) < 0.000_1)
+        #expect(OnePasswordTOTPClock.remainingFraction(at: Date(timeIntervalSince1970: 30)) == 1)
+        #expect(OnePasswordTOTPClock.displaySecondsRemaining(at: Date(timeIntervalSince1970: 30)) == 30)
+    }
+}
+
+struct LiveVisualCadenceTests {
+
+    @Test func lowPowerCapsHighFrequencyVisualsAtTwentyFramesPerSecond() {
+        #expect(LiveVisualCadence.framesPerSecond(normal: 60, lowPower: true) == 20)
+        #expect(LiveVisualCadence.frameInterval(normal: 60, lowPower: true) == 0.05)
+    }
+
+    @Test func lowPowerNeverIncreasesAnAlreadySlowVisualCadence() {
+        #expect(LiveVisualCadence.framesPerSecond(normal: 15, lowPower: true) == 15)
+        #expect(LiveVisualCadence.globeFramesPerSecond(lowPower: false) == 30)
+        #expect(LiveVisualCadence.globeFramesPerSecond(lowPower: true) == 15)
+    }
 }

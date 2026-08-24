@@ -80,13 +80,27 @@ nonisolated struct OnePasswordDropItem: Sendable, Equatable {
 
     private static let log = Logger(subsystem: "com.bragi0.SimpleVPN", category: "1password")
 
+    /// Public flavours used to register the SwiftUI destination. A 1Password
+    /// row drag always includes UTF-8 text alongside Chromium's private payload;
+    /// once SwiftUI admits the drag, `read(from:)` asks the provider for that
+    /// private representation by its exact identifier.
+    static var acceptedContentTypes: [UTType] {
+        [.utf8PlainText, .plainText, .text, .url]
+    }
+
     // MARK: Reading a real drag
 
-    /// The flavours a well accepts. The custom-data type isn't a registered
-    /// UTType on a Mac (it's Chromium's private one), so acceptance hangs off
-    /// the plain text every such drag also carries — the custom data is then
-    /// read by identifier, which NSItemProvider allows for any string.
-    static var acceptedContentTypes: [UTType] { [.utf8PlainText, .plainText, .text, .url] }
+    static func logTargeting(_ targeted: Bool) {
+        log.log("1Password SwiftUI drop target entered=\(targeted, privacy: .public)")
+    }
+
+    static func logTypedDrop(stringCount: Int, snapshot: Reading) {
+        log.log("1Password SwiftUI typed drop strings=\(stringCount, privacy: .public) snapshotPayload=\(snapshot.fromPayload, privacy: .public)")
+    }
+
+    static func logDropSession(phase: String, items: Int) {
+        log.log("1Password SwiftUI drop session phase=\(phase, privacy: .public) items=\(items, privacy: .public)")
+    }
 
     /// Whether this drag is worth accepting, decided from the flavour list
     /// alone — `onDrop` must answer before anything can be loaded. A dragged
@@ -101,6 +115,24 @@ nonisolated struct OnePasswordDropItem: Sendable, Equatable {
             return provider.hasItemConformingToTypeIdentifier(UTType.utf8PlainText.identifier)
                 || provider.hasItemConformingToTypeIdentifier(UTType.url.identifier)
         }
+    }
+
+    /// Pasteboard-side acceptance used by the SwiftUI adapter's decoding tests.
+    /// A real 1Password drag is an Electron drag, so its useful coordinates
+    /// live in Chromium's private representation.
+    @MainActor
+    static func canAccept(_ pasteboard: NSPasteboard) -> Bool {
+        let types = Set(pasteboard.types ?? [])
+        if types.contains(NSPasteboard.PasteboardType(ChromiumWebCustomData.typeIdentifier)) {
+            return true
+        }
+        // Never turn a configuration-file drop into a password-manager item.
+        if types.contains(NSPasteboard.PasteboardType(UTType.fileURL.identifier)) {
+            return false
+        }
+        return types.contains(.string)
+            || types.contains(.URL)
+            || types.contains(NSPasteboard.PasteboardType(UTType.utf8PlainText.identifier))
     }
 
     /// What ONE delivery of a drag added up to. A value rather than a plain
@@ -246,6 +278,41 @@ nonisolated struct OnePasswordDropItem: Sendable, Equatable {
         return reading
     }
 
+    /// Read one native AppKit dragging pasteboard synchronously.  Dragging data
+    /// is valid only for the current gesture, which makes this the reliable
+    /// place to fetch 1Password's Chromium payload.  It intentionally mirrors
+    /// the final classification in the provider path above, so both routes use
+    /// exactly the same account/vault/item parser.
+    @MainActor
+    static func read(from pasteboard: NSPasteboard) -> Reading {
+        let custom = pasteboard.data(
+            forType: NSPasteboard.PasteboardType(ChromiumWebCustomData.typeIdentifier))
+        let plainText = pasteboard.string(forType: .string)
+            ?? pasteboard.string(forType: NSPasteboard.PasteboardType(UTType.utf8PlainText.identifier))
+        let urlText = pasteboard.string(forType: .URL)
+        let parsed = classify(webCustomData: custom, plainText: plainText, urlText: urlText)
+        return Reading(drops: deduped(parsed.drops),
+                       fromPayload: parsed.fromPayload,
+                       providers: 1,
+                       sawWebCustomData: custom != nil,
+                       sawString: plainText != nil,
+                       sawURL: urlText != nil,
+                       fromDragPasteboard: custom != nil)
+    }
+
+    /// Turn SwiftUI's typed String transfer into the same domain reading as the
+    /// richer Chromium snapshot. This is also the fallback for older 1Password
+    /// builds that expose only a title or an `op://` reference.
+    static func read(plainTexts: [String]) -> Reading {
+        let drops = plainTexts.flatMap {
+            classify(webCustomData: nil, plainText: $0, urlText: $0).drops
+        }
+        return Reading(drops: deduped(drops),
+                       providers: plainTexts.count,
+                       sawString: !plainTexts.isEmpty,
+                       sawURL: plainTexts.contains { $0.hasPrefix("op://") })
+    }
+
     /// 1Password's payload for the drag in progress, straight off the drag
     /// pasteboard. Read-only, and only ever consulted while a drop is being
     /// handled — the pasteboard belongs to the gesture the user just made.
@@ -253,6 +320,14 @@ nonisolated struct OnePasswordDropItem: Sendable, Equatable {
     static func dragPasteboardPayload() -> Data? {
         NSPasteboard(name: .drag)
             .data(forType: NSPasteboard.PasteboardType(ChromiumWebCustomData.typeIdentifier))
+    }
+
+    /// SwiftUI-facing snapshot of the gesture that triggered a typed drop
+    /// closure. The view never needs to know that 1Password's extra coordinates
+    /// come from an AppKit pasteboard rather than an `NSItemProvider`.
+    @MainActor
+    static func activeDragSnapshot() -> Reading {
+        read(from: NSPasteboard(name: .drag))
     }
 
     /// NSItemProvider's completion-handler load, by raw identifier so the
@@ -311,7 +386,7 @@ nonisolated struct OnePasswordDropItem: Sendable, Equatable {
         }
         let parsed = usable.compactMap { item -> (item: OnePasswordDropItem,
                                                   parsed: (reference: String, vault: String, account: String))? in
-            guard let p = EditVPNView.parseOnePasswordDrop(item.raw) else { return nil }
+            guard let p = parseRaw(item.raw) else { return nil }
             return (item, p)
         }
         // A link that names the account outranks everything: it's the only
@@ -327,6 +402,39 @@ nonisolated struct OnePasswordDropItem: Sendable, Equatable {
             // Only the text flavour's reference is something to show a person;
             // a link's is a UUID, which the first successful lookup replaces.
             title: chosen.item.flavor == .text ? chosen.parsed.reference : "")
+    }
+
+    /// Pure string parsing at the credential boundary. Keeping this out of an
+    /// editor view lets every SwiftUI surface (including the isolated probe)
+    /// consume exactly the same 1Password drag representations.
+    static func parseRaw(_ raw: String)
+        -> (reference: String, vault: String, account: String)? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return nil }
+        if s.hasPrefix("op://") {
+            // op://<vault>/<item>[/<section>/<field>] — keep vault + item. A
+            // secret reference never names the account.
+            let parts = s.dropFirst("op://".count).split(separator: "/").map(String.init)
+            if parts.count >= 2 { return (parts[1], parts[0], "") }
+            if parts.count == 1 { return (parts[0], "", "") }
+            return nil
+        }
+        // Deep links carry account + vault + item coordinates. They stay
+        // internal: the UI resolves them to titles before showing anything.
+        if s.hasPrefix("onepassword://")
+            || (s.hasPrefix("https://") && s.contains("1password.com/open")),
+           let comps = URLComponents(string: s) {
+            let q = comps.queryItems ?? []
+            func param(_ names: Set<String>) -> String {
+                q.first { names.contains($0.name) }?.value ?? ""
+            }
+            let item = param(["i", "item"])
+            guard !item.isEmpty else { return nil }
+            return (item, param(["v", "vault"]), param(["a", "account"]))
+        }
+        // Plain text: an item title. First line only.
+        let firstLine = s.split(whereSeparator: \.isNewline).first.map(String.init) ?? s
+        return (firstLine, "", "")
     }
 }
 
@@ -352,8 +460,17 @@ nonisolated struct OnePasswordDropItem: Sendable, Equatable {
     /// The items this drag resolved to, or nil when another delivery of the same
     /// drag superseded this one (that one applies the merged result) or when
     /// nothing usable arrived.
-    func collect(_ providers: [NSItemProvider]) async -> [OnePasswordDrop]? {
-        pending = pending.merging(await OnePasswordDropItem.read(from: providers))
+    func collect(_ providers: [NSItemProvider],
+                 dragSnapshot: OnePasswordDropItem.Reading = .init()) async -> [OnePasswordDrop]? {
+        // The SwiftUI closure captured `dragSnapshot` synchronously while the
+        // drag pasteboard was alive, before this method began loading providers;
+        // keep that value beside whichever asynchronous flavours arrive.
+        let delivery = await OnePasswordDropItem.read(from: providers)
+        // Read `pending` only after the suspension above. Main-actor methods are
+        // re-entrant: another delivery can finish while this one is loading its
+        // providers, and capturing the old value before `await` would overwrite
+        // that delivery (usually losing the title-only flavour).
+        pending = pending.merging(dragSnapshot).merging(delivery)
         generation += 1
         let mine = generation
         try? await Task.sleep(for: coalesce)

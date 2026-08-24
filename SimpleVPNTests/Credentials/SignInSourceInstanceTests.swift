@@ -790,6 +790,43 @@ struct SecondVPNReusesConnectionTests {
             for: second, store: store, in: defaults) == "work.1password.com")
     }
 
+    /// A whole-row drag carries the account UUID even though the public SDK
+    /// cannot enumerate account names. That must be enough to create the
+    /// selectable connection without ever rendering the UUID as its label.
+    @Test func aDraggedAccountCreatesANamedConnectionWithoutShowingItsUUID() throws {
+        let (store, _) = settings()
+        let uuid = "A2C4E6G8J2L4N6P8R2T4V6X8Z2"
+
+        let selected = try #require(
+            OnePasswordAccountMemory.connectionForDroppedAccount(uuid, store: store))
+        let instance = try #require(store.instances(for: .onePassword)
+            .first { $0.id == selected })
+
+        #expect(instance.name == "1Password")
+        #expect(instance.name != uuid)
+        #expect(OnePasswordAccountMemory.connectionAccount(selected, store: store) == uuid)
+    }
+
+    /// If setup has already created the friendly row, the drop completes that
+    /// row rather than adding a duplicate or asking the user to type the
+    /// account coordinate as well.
+    @Test func aDraggedAccountCompletesTheSelectedBlankConnection() throws {
+        let (store, _) = settings()
+        let friendly = try #require(
+            store.instanceStore.add(named: "Secure Vault", for: .onePassword))
+        let uuid = "A2C4E6G8J2L4N6P8R2T4V6X8Z2"
+
+        let selected = OnePasswordAccountMemory.connectionForDroppedAccount(
+            uuid, preferred: friendly.id, store: store)
+
+        #expect(selected == friendly.id)
+        #expect(store.instances(for: .onePassword).map(\.name) == ["Secure Vault"])
+        #expect(OnePasswordAccountMemory.connectionAccount(friendly.id, store: store) == uuid)
+        #expect(OnePasswordAccountMemory.connectionForDroppedAccount(uuid, store: store)
+                == friendly.id)
+        #expect(store.instances(for: .onePassword).count == 1)
+    }
+
     /// Adding a SECOND connection must not disturb the first, and must not silently
     /// repoint the VPNs already using it. The default stays the default: migration's
     /// connection is always first in the list, which is what keeps every existing

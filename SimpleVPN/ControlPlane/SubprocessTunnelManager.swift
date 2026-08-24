@@ -35,6 +35,15 @@ import Observation
 import os
 import SystemConfiguration
 
+/// The helper's first form is a reply on a separate task. Keeping it in an actor
+/// lets a discovery run cancel cleanly after the gateway has told us what it asks
+/// for, without sharing mutable state across the helper callback.
+private actor OpenConnectFormCapture {
+    private var value: OCAuthFormSpec?
+    func set(_ form: OCAuthFormSpec) { value = form }
+    func get() -> OCAuthFormSpec? { value }
+}
+
 @MainActor
 @Observable
 final class SubprocessTunnelManager {
@@ -95,7 +104,8 @@ final class SubprocessTunnelManager {
     /// Prefer the linked in-process engine where we have one; otherwise the
     /// subprocess path. SSH SOCKS runs on libssh (no /usr/bin/ssh); if it can't
     /// start, we fall back to the subprocess so nothing regresses.
-    func connect(_ config: SubprocessTunnelConfig, password: String?) {
+    func connect(_ config: SubprocessTunnelConfig, password: String?,
+                 oneTimeCode: String? = nil) {
         guard tasks[config.id] == nil, sshEngines[config.id] == nil,
               !inProcessNE.contains(config.id), authTasks[config.id] == nil else { return }
         // A password embedded in the server or proxy address would be persisted
@@ -166,10 +176,11 @@ final class SubprocessTunnelManager {
         // `PacketTunnelProvider.startTunnel` dispatches on `VPNKind.openconnectProtocol`,
         // which is non-nil for all seven.
         if config.authMode != "sso", Self.willRunInProcess(config) {
-            connectInProcessOpenConnect(config, password: password)
+            connectInProcessOpenConnect(config, password: password, oneTimeCode: oneTimeCode)
             return
         }
-        connectSubprocess(config, password: password)
+        connectSubprocess(config, password: passwordForSubprocess(config, password: password,
+                                                                    oneTimeCode: oneTimeCode))
     }
 
     /// The in-process OpenConnect bridge only carries server + realm + pinned
@@ -292,7 +303,7 @@ final class SubprocessTunnelManager {
                                    // hands this to `openconnect_parse_url`, which
                                    // takes `host:port` (and `openconnect_get_port`
                                    // reads it back). There is no separate setter.
-                                   "server": serverURL(c)]
+                                   "server": serverURL(for: c)]
         func put(_ key: String, _ value: String) {
             let t = value.trimmingCharacters(in: .whitespacesAndNewlines)
             if !t.isEmpty { conf[key] = t }
@@ -379,13 +390,26 @@ final class SubprocessTunnelManager {
         }
     }
 
-    private func connectInProcessOpenConnect(_ config: SubprocessTunnelConfig, password: String?) {
+    /// The bundled engine can answer password and token form fields separately.
+    /// The legacy command-line fallback only has one stdin secret; if a code was
+    /// supplied it receives the conventional combined value. F5's distinct fields
+    /// therefore stay distinct on the normal in-process path.
+    private func passwordForSubprocess(_ config: SubprocessTunnelConfig,
+                                       password: String?, oneTimeCode: String?) -> String? {
+        guard let password, let oneTimeCode,
+              !oneTimeCode.isEmpty else { return password }
+        return password + oneTimeCode
+    }
+
+    private func connectInProcessOpenConnect(_ config: SubprocessTunnelConfig, password: String?,
+                                             oneTimeCode: String?) {
         inProcessNE.insert(config.id)
         live[config.id] = Live(status: .connecting)
         Task { [weak self] in
             // `true` means "started", not "connected" — real progress (connecting /
             // connected / auth failure) arrives via NEVPNStatusDidChange events.
-            let ok = await OpenConnectProfileStore.start(config, password: password) { [weak self] event in
+            let ok = await OpenConnectProfileStore.start(config, password: password,
+                                                          oneTimeCode: oneTimeCode) { [weak self] event in
                 self?.handleInProcessEvent(config.id, event)
             }
             guard let self else { return }
@@ -403,7 +427,8 @@ final class SubprocessTunnelManager {
                     return
                 }
                 Self.log.error("in-process OpenConnect failed, falling back to subprocess")
-                self.connectSubprocess(config, password: password)
+                self.connectSubprocess(config, password: self.passwordForSubprocess(
+                    config, password: password, oneTimeCode: oneTimeCode))
             }
         }
     }
@@ -482,6 +507,35 @@ final class SubprocessTunnelManager {
         authTasks[config.id] = task
     }
 
+    /// Fetch the gateway's first real authentication form without attempting a
+    /// sign-in. `ocauth-helper` drives libopenconnect through the same HTTPS and
+    /// certificate checks as a connection, stops once it receives `oc_auth_form`,
+    /// and returns its labels/types to the main-window sign-in card. This is how an
+    /// F5 APM profile learns whether it has a separate token field instead of
+    /// relying on a remembered checkbox.
+    func discoverSignInForm(for config: SubprocessTunnelConfig) async throws -> OCAuthFormSpec {
+        guard config.kind.isSSLVPN else { throw OpenConnectAuthError.badReply }
+        let capture = OpenConnectFormCapture()
+        let handlers = OpenConnectAuthClient.Handlers(
+            answerForm: { form in
+                await capture.set(form)
+                return .cancel(unanswered: form.fields.map(\.label))
+            },
+            openURL: { _ in },
+            progress: { [weak self] line in
+                Task { @MainActor [weak self] in self?.appendLog(config.id, line) }
+            })
+        do {
+            _ = try await OpenConnectAuthClient.authenticate(
+                start: Self.authStart(for: config), handlers: handlers)
+        } catch {
+            if let form = await capture.get() { return form }
+            throw error
+        }
+        guard let form = await capture.get() else { throw OpenConnectAuthError.badReply }
+        return form
+    }
+
     private func appendLog(_ id: String, _ line: String) {
         guard var l = live[id] else { return }
         l.log.append(line)
@@ -513,7 +567,7 @@ final class SubprocessTunnelManager {
             set(\.keyPassword,
                 KeychainCredentialStore.loadCredentials(profile: "tunnel.\(c.id).privateKey")?.password ?? "")
         }
-        return OCAuthStart(server: serverURL(c),
+        return OCAuthStart(server: serverURL(for: c),
                            vpnProtocol: c.kind.openconnectProtocol ?? "anyconnect",
                            params: p)
     }
@@ -1470,7 +1524,7 @@ final class SubprocessTunnelManager {
             a += ["--script-tun", "--script", "\(ocproxy) -D \(c.socksPort)"]
         }
         a += c.extraArgs
-        a.append(serverURL(c))
+        a.append(serverURL(for: c))
         return a
     }
 
@@ -1503,7 +1557,7 @@ final class SubprocessTunnelManager {
             a += ["--script-tun", "--script", "\(ocproxy) -D \(c.socksPort)"]
         }
         a += c.extraArgs
-        a.append(auth.connectURL.isEmpty ? serverURL(c) : auth.connectURL)
+        a.append(auth.connectURL.isEmpty ? serverURL(for: c) : auth.connectURL)
         return (oc, a, Data((auth.cookie + "\n").utf8))
     }
 
@@ -1683,9 +1737,31 @@ final class SubprocessTunnelManager {
     private static func sshTarget(_ c: SubprocessTunnelConfig) -> String {
         c.username.isEmpty ? c.server : "\(c.username)@\(c.server)"
     }
-    private static func serverURL(_ c: SubprocessTunnelConfig) -> String {
-        if let p = c.port { return "\(c.server):\(p)" }
-        return c.server
+    /// The exact web gateway address handed to libopenconnect.  Keep a policy path
+    /// in a pasted URL intact, and put an explicitly selected port in the URL's
+    /// authority (not after `/my.policy`).  The same answer feeds the helper, the
+    /// in-process bridge and the CLI, so the three transports cannot disagree.
+    static func serverURL(for c: SubprocessTunnelConfig) -> String {
+        let raw = c.server.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let port = c.port else { return raw }
+
+        if var parts = URLComponents(string: raw), parts.scheme != nil, parts.host != nil {
+            parts.port = port
+            return parts.string ?? raw
+        }
+
+        // Existing bare host:port profiles remain accepted.  When the dedicated
+        // Port row is set, it is the explicit choice and replaces that legacy port.
+        if var parts = URLComponents(string: "https://\(raw)"),
+           parts.host != nil, parts.path.isEmpty {
+            parts.port = port
+            guard var authority = parts.string else { return raw }
+            authority.removeFirst("https://".count)
+            return authority
+        }
+        // Invalid input is held and explained by the readiness gate; preserve it
+        // verbatim here rather than silently clearing an editor field.
+        return raw
     }
 
     // MARK: System SOCKS proxy (needs admin — networksetup will prompt)

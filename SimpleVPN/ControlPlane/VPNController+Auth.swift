@@ -39,6 +39,34 @@ import os
 
 extension VPNController {
 
+    // MARK: - Linking a 1Password entry
+
+    /// Link a 1Password entry without reading it. Linking records only the exact
+    /// coordinates the drag supplied. The ordinary Connect action performs the
+    /// first approved read and learns the fields while consuming those same
+    /// returned values; dropping an item must never summon an approval prompt.
+    func linkOnePasswordEntry(_ dropped: OnePasswordDrop, for id: String) async throws {
+        var source = credentialSource(for: id)
+        source.kind = .onePassword
+        source.reference = dropped.reference
+        source.fieldMap = [:] // field IDs belong to the entry, never its predecessor.
+        if !dropped.vault.isEmpty { source.vault = dropped.vault }
+        if !dropped.account.isEmpty {
+            let settings = SignInSourceSettingsStore.shared
+            if let connection = OnePasswordAccountMemory.connectionForDroppedAccount(
+                dropped.account, preferred: source.selection.instance, store: settings) {
+                source.instanceID = connection.rawValue
+                source.account = ""
+            } else {
+                // Compatibility fallback for a profile created before named
+                // accounts have been materialised by the settings store.
+                OnePasswordAccountMemory.seed(dropped.account)
+                source.account = dropped.account
+            }
+        }
+        try await setCredentialSource(source, for: id)
+    }
+
     // MARK: - Can it serve, and where is it broken?
 
     /// THE ONE QUESTION. Every readiness gate, the connect form's warning, the
@@ -81,6 +109,19 @@ extension VPNController {
             // that is exactly what it is for — so it is paid here rather than guessed at.
             if !availability.scanned { availability.refresh() }
             base = availability.satisfaction(for: source)
+        }
+
+        // A prior successful tunnel is per-profile proof that this linked
+        // 1Password item has worked.  A global preflight result is only a
+        // cache: it may be left over from an earlier approval attempt, and it
+        // must not turn app launch into a recovery screen or prevent the next
+        // explicit Connect from asking 1Password.  Automatic reconnects are
+        // separately refused for 1Password in `canReconnectUnattended`, so
+        // this never creates an unexplained Touch ID prompt.
+        if source.kind == .onePassword,
+           !source.reference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           FirstSuccessfulConnectionStore.hasSucceeded(profile: id) {
+            return .ready
         }
 
         // THE PROFILE'S OWN HALF. Two things only the profile knows, and both of them
@@ -138,17 +179,29 @@ extension VPNController {
     /// BEFORE anything is started.
     func authPlan(for id: String, typedOTP: String = "") async throws -> AuthPlan {
         let auth = effectiveAuthConfig(for: id)
+        let source = credentialSource(for: id)
         let satisfaction = authSatisfaction(for: id)
+        let hasDroppedOnePasswordItem = source.kind == .onePassword
+            && !source.reference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
-        if case .broken(let locus, let block) = satisfaction {
+        if case .broken(let locus, let block) = satisfaction,
+           !hasDroppedOnePasswordItem {
             // Refused without spawning. The locus tells the caller which screen to
             // offer; the block carries the vendor's own sentence.
             throw AuthFailure(locus: locus, cause: .sourceUnavailable,
                               detail: LocalVaultRegistry
-                                  .adapter(for: credentialSource(for: id).kind)
+                                  .adapter(for: source.kind)
                                   .map { LocalVaultCopyBook.copy(for: $0.vendor)
                                       .headline(for: block) })
         }
+
+        // A remembered preflight failure is not authoritative for an explicit
+        // Connect after a drop. The drag has already supplied exact coordinates,
+        // and this is the first user-authorised opportunity to ask 1Password for
+        // them. Let that native request report the live result instead of refusing
+        // it from stale cached state. Automatic reconnect never reaches this path
+        // for 1Password (`canReconnectUnattended` refuses it), so this cannot create
+        // an unexplained approval prompt.
 
         guard let provider = managerProvider(for: id) else {
             // The typed / remembered fields, which are already a `.value`: there is no
@@ -162,13 +215,52 @@ extension VPNController {
 
         var raw: RawCredentials
         do {
-            raw = try await provider.resolve(profile: id, fields: auth.request.fields)
+            if source.kind == .onePassword,
+               source.fieldMap.isEmpty,
+               !source.reference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // A drag deliberately records coordinates without opening
+                // 1Password. The first explicit Connect pays for one full-item
+                // read, derives the field roles, and uses the values from that
+                // very response. There is no inspect-then-resolve round trip.
+                let account = OnePasswordAccountMemory.effectiveAccount(for: source)
+                let prepared = try await OnePasswordProvider.prepareEntry(
+                    itemReference: source.reference, vault: source.vault, account: account)
+
+                var learnedSource = source
+                learnedSource.fieldMap = prepared.inspection.fieldMap
+                if learnedSource.vault.trimmingCharacters(in: .whitespaces).isEmpty,
+                   !prepared.inspection.vaultID.trimmingCharacters(in: .whitespaces).isEmpty {
+                    learnedSource.vault = prepared.inspection.vaultID
+                }
+                if learnedSource != source {
+                    try await setCredentialSource(learnedSource, for: id)
+                }
+
+                if prepared.inspection.hasVerificationCode, !hasStaticChallenge(id) {
+                    var learnedAuth = authConfig(for: id)
+                    if !learnedAuth.requiresOTP {
+                        learnedAuth.requiresOTP = true
+                        try await setAuthConfig(learnedAuth, for: id)
+                    }
+                }
+                raw = prepared.credentials
+            } else {
+                raw = try await provider.resolve(profile: id, fields: auth.request.fields)
+            }
         } catch {
             // ONE translation, at the seam, instead of every caller re-recognising
             // `CancellationError` and every vendor's own error enum. `.entry` because a
             // fetch that got as far as running failed at the item, not at the tool —
             // level 1 and level 2 were already established above.
             throw AuthFailure.from(error, locus: .entry)
+        }
+        // The person explicitly pressed Connect and 1Password released this
+        // profile's credentials.  That is definitive evidence that its SDK
+        // integration is working, and it supersedes an older remembered
+        // "integration off" result.  Do not perform an additional preflight:
+        // it would prompt a second time for the same user action.
+        if credentialSource(for: id).kind == .onePassword {
+            OnePasswordPreflight.markVerified()
         }
         // The typed code fills in only what the source could not supply. A source that
         // DID supply one wins, because it is the one that knows.

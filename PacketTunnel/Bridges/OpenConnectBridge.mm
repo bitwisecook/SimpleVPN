@@ -310,8 +310,10 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
                 if (_cfg.username.length) openconnect_set_option_value(opt, _cfg.username.UTF8String);
                 break;
             case OC_FORM_OPT_PASSWORD:
-            case OC_FORM_OPT_TOKEN:
                 if (_cfg.password.length) openconnect_set_option_value(opt, _cfg.password.UTF8String);
+                break;
+            case OC_FORM_OPT_TOKEN:
+                if (_cfg.oneTimeCode.length) openconnect_set_option_value(opt, _cfg.oneTimeCode.UTF8String);
                 break;
             default: break;
         }
@@ -399,10 +401,27 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
         _haveConfig = YES;
     }
 
+    // libopenconnect records the actual host chosen after its authentication
+    // flow (including DNS/load-balancer selection). `gateway_addr` below is an
+    // IN-TUNNEL next hop, not the Internet endpoint: exposing it as the server
+    // made the live globe follow a private 10/8 address instead of the gateway
+    // this session is actually connected to.
+    const char *connectedHost = openconnect_get_hostname(_vpninfo);
+    NSString *serverIP = connectedHost ? @(connectedHost) : @"";
+    if ([serverIP hasPrefix:@"["] && [serverIP hasSuffix:@"]"] && serverIP.length > 2) {
+        serverIP = [serverIP substringWithRange:NSMakeRange(1, serverIP.length - 2)];
+    }
+    int serverPort = openconnect_get_port(_vpninfo);
+
     @synchronized (self) {
         if (ip->addr) _info[@"tunnelIP"] = @(ip->addr);
         if (ip->addr6) _info[@"tunnelIPv6"] = @(ip->addr6);
-        if (ip->gateway_addr) _info[@"server"] = @(ip->gateway_addr);
+        if (ip->gateway_addr) _info[@"gateway4"] = @(ip->gateway_addr);
+        if (serverIP.length) {
+            _info[@"server"] = serverIP;
+            _info[@"serverIP"] = serverIP;
+        }
+        if (serverPort > 0) _info[@"serverPort"] = [NSString stringWithFormat:@"%d", serverPort];
         if (ip->mtu > 0) _info[@"mtu"] = @(ip->mtu);
         if (dns.count) _info[@"dns"] = [dns copy];
     }

@@ -432,6 +432,7 @@ struct DiagnosticReportHost: ViewModifier {
                 await VirtualizationDiscovery.snapshotOffMain(
                     interfaces: TopologyMonitor.liveInterfaces(),
                     detectionEnabled: VirtualizationSettings.detectionEnabled,
+                    includeProtectedAppData: VirtualizationSettings.protectedUTMConfigurationAccessEnabled,
                     env: .live())
             }
             DiagnosticReportCoordinator.shared.context = context

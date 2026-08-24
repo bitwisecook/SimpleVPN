@@ -443,11 +443,11 @@ nonisolated extension UserFacingError {
     private static func opGeneric(detail: String, occurred: Date) -> UserFacingError {
         UserFacingError(
             title: "1Password couldn\u{2019}t give SimpleVPN the sign-in",
-            explanation: "Something went wrong between the two apps. These three things fix nearly all of it.",
+            explanation: "The 1Password connection is already set up, but this request did not return the linked sign-in.",
             steps: [
-                .init("Open **1Password** and unlock it."),
-                .init("Check **1Password \u{25B8} Settings \u{25B8} Developer** and tick **\(sdkIntegrationSetting)**."),
                 .init("Click **Connect** again, and approve the 1Password prompt if one appears."),
+                .init("If it happens again, open **1Password** and make sure the linked item still has its username and password fields."),
+                .init("Use **Change** for this VPN to link the item again if it was moved or replaced."),
             ],
             action: .openOnePassword, canRetry: true, category: .onePassword,
             symbol: "key.fill", technicalDetail: detail, occurred: occurred)

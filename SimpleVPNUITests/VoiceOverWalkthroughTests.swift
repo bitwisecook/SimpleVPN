@@ -854,7 +854,7 @@ final class VoiceOverWalkthroughTests: XCTestCase {
                 These run wherever UI tests run for real.
                 """)
         }
-        let app = XCUIApplication()
+        let app = makeSimpleVPNTestApplication()
         app.launch()
         guard app.wait(for: .runningForeground, timeout: 15),
               app.windows.firstMatch.waitForExistence(timeout: 15) else {

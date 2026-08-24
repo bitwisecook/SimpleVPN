@@ -1180,6 +1180,7 @@ struct CustomRoutingTabView: View {
                             set: { profile.proxy.manualURL = $0.isEmpty ? nil : $0 }),
                                   prompt: Text("http(s)://host:port or socks5://host:port"))
                             .multilineTextAlignment(.trailing)
+                            .scalarConfigurationValue()
                             .autocorrectionDisabled()
                             .accessibilityLabel(Self.specs["cr.proxy-manual-url"].name)
                     } label: {
@@ -1204,6 +1205,7 @@ struct CustomRoutingTabView: View {
                             set: { profile.proxy.pacURL = $0.isEmpty ? nil : $0 }),
                                   prompt: Text("https://example.com/proxy.pac"))
                             .multilineTextAlignment(.trailing)
+                            .scalarConfigurationValue()
                             .autocorrectionDisabled()
                             .accessibilityLabel(Self.specs["cr.proxy-pac-url"].name)
                     } label: {
@@ -1250,16 +1252,18 @@ struct CustomRoutingTabView: View {
         let set = !proxyAuthUsername.isEmpty || !proxyAuthPassword.isEmpty
         crHeader(Self.specs["cr.proxy-auth"], changed: set)
         LabeledContent("Username") {
-            TextField("optional", text: $proxyAuthUsername)
+            TextField("", text: $proxyAuthUsername, prompt: Text("optional"))
                 .multilineTextAlignment(.trailing)
+                .scalarConfigurationValue()
                 .textContentType(.username)
                 .autocorrectionDisabled()
                 // Host editors show several credential pairs — say whose this is.
                 .accessibilityLabel("Proxy username (optional)")
         }
         LabeledContent("Password") {
-            SecureField("optional", text: $proxyAuthPassword)
+            SecureField("", text: $proxyAuthPassword, prompt: Text("optional"))
                 .multilineTextAlignment(.trailing)
+                .scalarConfigurationValue()
                 .accessibilityLabel("Proxy password (optional)")
         }
         Label(caption, systemImage: "lock")

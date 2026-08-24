@@ -37,6 +37,21 @@ final class VPNController {
 
     private(set) var profiles: [Profile] = []
     var selectedID: Profile.ID?
+    /// Profiles being removed are hidden immediately and must stay hidden while
+    /// NetworkExtension finishes its asynchronous preferences write.  A stale
+    /// concurrent `loadAll()` may still see the old manager for a moment; this
+    /// process-local tombstone stops that old snapshot resurrecting a deleted
+    /// row (and, consequently, any of its sign-in UI).
+    @ObservationIgnored var locallyRemovedProfileIDs: Set<String> = []
+
+    /// Apply the visible half of a deletion before NetworkExtension's preference
+    /// removal returns.  Kept beside `profiles` because its setter is private:
+    /// CRUD code can request the transition without gaining general write access.
+    func hideProfileWhileRemoving(id: String) {
+        profiles.removeAll { $0.id == id }
+        if selectedID == id { selectedID = profiles.first?.id }
+        controlEventSink?(.profilesChanged)
+    }
 
     /// The current failure, already turned into something a person can act on
     /// (see UserFacingError). Every path that reports a problem lands here.
@@ -76,12 +91,33 @@ final class VPNController {
         failureProfileID = nil
     }
 
+    /// A sign-in source that has previously worked should not silently become
+    /// "unavailable" after the person presses Connect.  Keep its repair on the
+    /// VPN page, where the source and its linked item can be fixed, instead of
+    /// making them decipher a generic error sheet.
+    func signInRepair(for profileID: String) -> UserFacingError? {
+        guard failureProfileID == profileID,
+              let failure,
+              credentialSource(for: profileID).kind == .onePassword
+        else { return nil }
+        switch failure.category {
+        case .onePassword, .approval, .credentials:
+            return failure
+        case .keePassXC, .network, .configuration, .generic:
+            return nil
+        }
+    }
+
     /// The failure worth putting a sheet up for. A tunnel failure that already
     /// has an incident card (with its own diagram, advice and Try Again) must
     /// not be reported twice — but only while the two are the same event, so a
     /// stale incident can never swallow a later problem.
     var presentedFailure: UserFacingError? {
         guard let failure else { return nil }
+        // The inline source-repair banner has the source-specific actions and
+        // keeps the person in context.  Never stack its old generic sheet over
+        // it — that was the "Change…"-style nested-dialog failure mode.
+        if let id = failureProfileID, signInRepair(for: id) != nil { return nil }
         // Only the failures the incident card actually explains (the tunnel and
         // the network) can be withheld — a 1Password or credential problem is
         // invisible to the extension, so a coincident incident must never
@@ -351,6 +387,10 @@ final class VPNController {
                 let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol
                 let id = (proto?.providerConfiguration?["profile"] as? String)
                     ?? mgr.localizedDescription ?? UUID().uuidString
+                // Check before reading any profile-owned state.  In particular,
+                // removing a profile must not wake its credential source merely
+                // because NetworkExtension returned a slightly stale snapshot.
+                guard !locallyRemovedProfileIDs.contains(id) else { continue }
                 managers[id] = mgr
                 authConfigs[id] = VPNAuthConfig.decode(from: proto?.providerConfiguration?["auth"] as? Data)
                 overridesCache[id] = OpenVPNOverrides.decode(from: proto?.providerConfiguration?["overrides"] as? Data)
@@ -420,7 +460,7 @@ final class VPNController {
 
     // MARK: Last-seen pushed intent (durable per-profile snapshot)
 
-    /// App Group backed store for the raw pre-filter pushed intent (survives disconnect +
+    /// App-owned store for the raw pre-filter pushed intent (survives disconnect +
     /// relaunch). Kept off the observation graph — the observable mirror is the cache.
     @ObservationIgnored private let pushedIntentStore = PushedIntentStore()
     /// Observable mirror of the durable pushed-intent snapshots.
@@ -798,6 +838,13 @@ final class VPNController {
             self.cancelConnectWatchdog(id: id)
         }
         if s == .connected {
+            // This is user-facing state, not diagnostics.  Persist it before
+            // any delayed telemetry work, so a successful connection followed
+            // by an immediate quit never makes first-connect onboarding return.
+            FirstSuccessfulConnectionStore.markSucceeded(profile: id)
+            // A fresh successful connection proves a retry/repair worked; don't
+            // leave the previous sign-in warning over the healthy session.
+            if failureProfileID == id { clearFailure() }
             // Back up for real, so the resume watch has nothing to report.
             cancelResumeWatchdog(id: id)
             // It works here after all — clear any "unreachable on this

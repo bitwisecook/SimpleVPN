@@ -68,6 +68,9 @@ struct OnePasswordSetupCard: View {
     /// Ask for the account name here. False where the surface already has an
     /// Account field a couple of rows away — one ask, in one place.
     var asksForAccount = false
+    /// Some hosts put the connection action beside their own live status. Keep
+    /// the walkthrough, but do not render a second button onto the same check.
+    var showsCheckAgain = true
     var onAccount: (String) -> Void = { _ in }
     let onCheckAgain: () -> Void
 
@@ -164,11 +167,22 @@ struct OnePasswordSetupCard: View {
             case .needsAccount, .ready:
                 EmptyView()
             }
-            Button("Check Again", action: onCheckAgain)
+            if showsCheckAgain {
+                Button(retryLabel(for: state), action: onCheckAgain)
+            }
             Spacer(minLength: 0)
         }
         .controlSize(.small)
         .padding(.top, 2)
+    }
+
+    private func retryLabel(for state: OnePasswordPreflight.State) -> String {
+        switch state {
+        case .integrationOff, .waitingForApproval, .failed:
+            "Reconnect"
+        case .notInstalled, .needsAccount, .ready:
+            "Check Again"
+        }
     }
 }
 

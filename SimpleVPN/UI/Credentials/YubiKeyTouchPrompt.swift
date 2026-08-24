@@ -95,6 +95,7 @@ struct YubiKeyTouchPrompt: View {
     let arm: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.liveVisualPolicy) private var liveVisuals
     /// Re-read on a timer only while armed, so the countdown moves.
     @State private var now = Date()
     @State private var pulsing = false
@@ -117,6 +118,8 @@ struct YubiKeyTouchPrompt: View {
         .accessibilityIdentifier("security-key-touch-prompt")
         .task(id: capture.state) { await runCountdown() }
         .onChange(of: capture.state) { _, new in announce(new) }
+        .onChange(of: liveVisuals.isLowPowerModeEnabled) { _, _ in updatePulse() }
+        .onChange(of: reduceMotion) { _, _ in updatePulse() }
     }
 
     // MARK: The four states, on screen
@@ -194,16 +197,21 @@ struct YubiKeyTouchPrompt: View {
             Image(systemName: "hand.point.up.left.fill")
                 .foregroundStyle(.blue)
                 .scaleEffect(reduceMotion ? 1 : (pulsing ? 1.12 : 1))
-                .onAppear {
-                    guard !reduceMotion else { return }
-                    withAnimation(.easeInOut(duration: 0.7).repeatForever()) { pulsing = true }
-                }
+                .onAppear { updatePulse() }
                 .onDisappear { pulsing = false }
                 .accessibilityHidden(true)
         } else {
             DrawnSpinner()
                 .accessibilityHidden(true)
         }
+    }
+
+    private func updatePulse() {
+        guard liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion) else {
+            pulsing = false
+            return
+        }
+        withAnimation(.easeInOut(duration: 0.7).repeatForever()) { pulsing = true }
     }
 
     private var readyRow: some View {

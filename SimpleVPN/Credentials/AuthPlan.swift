@@ -310,21 +310,9 @@ nonisolated enum AuthSourceCatalog {
         supplies: [.username, .password, .otp],
         delivery: .value)
 
-    /// APPLE PASSWORDS — the row that exists to be honest.
-    ///
-    /// `supplies` is empty and `withholds` is not, and that is the whole finding:
-    /// SimpleVPN cannot read what Safari and the Passwords app manage (those items are
-    /// in the data-protection keychain under an access group this app's entitlement
-    /// does not contain — unreachable by construction, not merely missing), and it
-    /// cannot write there either (`SecAddSharedWebCredential` needs the VPN
-    /// operator's own web server to name us, and is deprecated at macOS 26.2 with a
-    /// macOS-unavailable replacement). What works is AUTOFILL: macOS fills our fields
-    /// when the user clicks the key.
-    ///
-    /// `ApplePasswordsProvider` does still exist and does still read the FILE keychain
-    /// for an `.internetPassword` matching the server, which is why `.username` and
-    /// `.password` appear in `supplies` for that narrow path — but never `.otp`, which
-    /// Apple exposes to nobody.
+    /// APPLE PASSWORDS — macOS returns one user-selected username/password pair.
+    /// The app cannot enumerate the catalogue or resolve Passwords' drag identifier,
+    /// and the authorization result contains no verification code.
     static let applePasswords = AuthSourceDescriptor(
         id: .systemAutoFill, transports: [.osAutoFill],
         supplies: [.username, .password],

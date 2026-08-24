@@ -18,6 +18,19 @@ final class SystemExtensionManager: NSObject, OSSystemExtensionRequestDelegate, 
     static let extensionIdentifier = "com.bragi0.SimpleVPN.PacketTunnel"
     private static let log = Logger(subsystem: "com.bragi0.SimpleVPN", category: "sysext")
 
+    /// macOS deliberately accepts system-extension activation only from the
+    /// system Applications folder.  Keeping this check here means every caller
+    /// gives the same useful answer instead of sending a developer build to a
+    /// System Settings switch that cannot possibly work.
+    static func isEligibleForActivation(bundleURL: URL) -> Bool {
+        let path = bundleURL.resolvingSymlinksInPath().standardizedFileURL.path
+        return path == "/Applications" || path.hasPrefix("/Applications/")
+    }
+
+    static var isEligibleForActivation: Bool {
+        isEligibleForActivation(bundleURL: Bundle.main.bundleURL)
+    }
+
     /// Version of the .systemextension bundled inside this app (what activation installs).
     /// nonisolated so both the app (MainActor) and this manager can read it.
     static var bundledExtensionVersion: String {

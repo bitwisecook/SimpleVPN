@@ -43,7 +43,8 @@ extension RouteGraphView {
 
     @ViewBuilder func edgeLayer(_ edges: [GraphEdge], chain: Set<String>) -> some View {   // was private — internal for the file split
         let anyActive = edges.contains { $0.active }
-        TimelineView(.animation(minimumInterval: 1 / 30, paused: reduceMotion || !anyActive)) { context in
+        TimelineView(.animation(minimumInterval: liveVisuals.frameInterval(normalFramesPerSecond: 30),
+                                paused: !liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion) || !anyActive)) { context in
             let t = context.date.timeIntervalSinceReferenceDate
             Canvas { ctx, _ in
                 for e in edges {

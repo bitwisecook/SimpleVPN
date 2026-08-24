@@ -14,22 +14,23 @@ import "testing"
 // first — and Return picks the first row.
 func TestTitleScore(t *testing.T) {
 	cases := []struct {
-		query, title, id string
-		want             int
-		match            bool
+		query, title string
+		want         int
+		match        bool
 	}{
-		{"", "anything", "i1", 0, true},             // browse: everything, unranked
-		{"i1", "anything", "i1", 0, true},           // a full UUID is not a guess
-		{"gr lab vpn", "GR Lab VPN", "i1", 0, true}, // exact, case-folded
-		{"gr", "GR Lab VPN", "i1", 1, true},         // prefix
-		{"lab", "GR Lab VPN", "i1", 2, true},        // substring
-		{"grv", "GR Lab VPN", "i1", 3, true},        // letters in order
-		{"wrk", "Work Router", "i1", 3, true},       // the documented example
-		{"zzz", "GR Lab VPN", "i1", 0, false},       // no match at all
-		{"vpnn", "GR Lab VPN", "i1", 0, false},      // subsequence must run out
+		{"", "anything", 0, true},               // browse: everything, unranked
+		{"gr lab vpn", "GR Lab VPN", 0, true},   // exact, case-folded
+		{"gr", "GR Lab VPN", 1, true},           // prefix
+		{"lab", "GR Lab VPN", 2, true},          // substring
+		{"grv", "GR Lab VPN", 3, true},          // letters in order
+		{"grb", "Grlab", 3, true},               // gaps are allowed
+		{"wrk", "Work Router", 3, true},         // the documented example
+		{"internal-id", "GR Lab VPN", 0, false}, // ids are never search terms
+		{"zzz", "GR Lab VPN", 0, false},         // no match at all
+		{"vpnn", "GR Lab VPN", 0, false},        // subsequence must run out
 	}
 	for _, c := range cases {
-		score, ok := titleScore(c.query, c.title, c.id)
+		score, ok := titleScore(c.query, c.title)
 		if ok != c.match {
 			t.Errorf("titleScore(%q, %q): match = %v, want %v", c.query, c.title, ok, c.match)
 			continue

@@ -32,7 +32,15 @@ final class SignInSourceAvailability {
 
     /// App-wide: every surface asking "what can this Mac do?" gets one answer,
     /// and one set of probes.
-    static let shared = SignInSourceAvailability()
+    static let shared: SignInSourceAvailability = {
+        let availability = SignInSourceAvailability()
+        // This is deliberately the prompt-free pass only.  Seeding the facts
+        // before SwiftUI's first body prevents an empty snapshot from briefly
+        // rendering a recovery state, while keeping every real 1Password call
+        // behind an explicit user action.
+        availability.refresh()
+        return availability
+    }()
 
     private static let log = Logger(subsystem: "com.bragi0.SimpleVPN", category: "sign-in-sources")
 
