@@ -158,6 +158,9 @@ echo "==> final verification"
 spctl -a -vvv --type exec "$APP"
 spctl -a -vvv -t open --context context:primary-signature "$DMG"
 xcrun stapler validate "$DMG"
-shasum -a 256 "$DMG" | tee "$DMG.sha256"
+(
+  cd "$(dirname "$DMG")"
+  shasum -a 256 "$(basename "$DMG")"
+) | tee "$DMG.sha256"
 
 echo "==> done: $DMG"
