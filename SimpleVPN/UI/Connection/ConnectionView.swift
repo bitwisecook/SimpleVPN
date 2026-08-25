@@ -78,6 +78,23 @@ struct ConnectionView: View {
     /// looked empty during launch and could receive the wrong default geometry.
     @State private var hasCompletedInitialConfigurationLoad = false
 
+    /// A small finite state machine for window geometry. It intentionally ignores
+    /// banners, selections, disclosures and connection status: only structural
+    /// changes earn an automatic resize, and the window bridge stops forever after
+    /// the person's first manual resize.
+    private var windowLayoutMode: MainWindowLayoutMode {
+        guard hasCompletedInitialConfigurationLoad else { return .loading }
+        let sidebar = columnVisibility != .detailOnly
+        let onboarding = (ext.needsApproval || ext.needsApplicationsInstallation) && !ext.isActivated
+            || hasNothingConfigured
+            || vpn.selected.map { !FirstSuccessfulConnectionStore.hasSucceeded(profile: $0.id) } == true
+        if onboarding { return sidebar ? .onboardingWithSidebar : .onboarding }
+        if sidebar && showInspector { return .sidebarAndInspector }
+        if sidebar { return .sidebar }
+        if showInspector { return .inspector }
+        return .compact
+    }
+
     /// Sidebar dot — from the ONE shared derivation, so it can never disagree with
     /// the header pill, the menu bar or the route graph (they all used to compute
     /// their own, with two different captive-portal predicates).
@@ -417,10 +434,16 @@ struct ConnectionView: View {
 
     var body: some View {
         content
+            .adaptiveMainWindowSizing(windowLayoutMode)
             .toasts()
             .navigationTitle("SimpleVPN")
             .task {
                 await vpn.loadAll()
+                // Resolve the first stable window shape before publishing the
+                // loaded state, avoiding an automatic→detail-only intermediate
+                // resize for the overwhelmingly common one-VPN case.
+                showInspector = inspectorOpenByDefault
+                selectSoleConnectionIfNeeded()
                 hasCompletedInitialConfigurationLoad = true
                 // Deliberately NOT ext.activate() here: activating raises a macOS
                 // approval dialog, and a first launch should show the app, not a security
@@ -626,7 +649,10 @@ struct ConnectionView: View {
                 connectSection(.wholeMac)
                 connectSection(.localPort)
             }
-            .navigationSplitViewColumnWidth(min: 220, ideal: 260)
+            // This is navigation, not an icon rail. Keep enough width for an ordinary
+            // VPN name plus its status and trailing action without replacing the name
+            // with an ellipsis. The route globe belongs to the trailing inspector.
+            .navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 440)
             // Tab moves column by column — the whole sidebar is one focus
             // section, so Tab from the list lands in the detail pane instead of
             // walking every row.
@@ -683,7 +709,6 @@ struct ConnectionView: View {
             // selected first. `vpn.profiles.count` only saw NE profiles, which
             // hid a lone F5 APM in detail-only mode and showed an empty detail pane.
             // The complete tagged listing owns both answers.
-            showInspector = inspectorOpenByDefault
             selectSoleConnectionIfNeeded()
         }
         .onChange(of: connectionTags, initial: true) { _, _ in

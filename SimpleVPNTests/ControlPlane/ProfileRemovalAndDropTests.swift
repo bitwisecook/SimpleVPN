@@ -35,7 +35,7 @@ struct ProfileRemovalAndDropTests {
                 "only a failed preference removal may clear the tombstone")
     }
 
-    @Test func onePasswordWellOwnsItsDropDestinationWithoutAWindowWideAncestor() throws {
+    @Test func credentialWellOwnsItsSourceDetectingDestinationWithoutAWindowWideAncestor() throws {
         let ui = try source("SimpleVPN/UI/Editors/ImportUI.swift")
         let firstConnect = try source("SimpleVPN/UI/Connection/FirstConnectSetupCard.swift")
         let connectionView = try source("SimpleVPN/UI/Connection/ConnectionView.swift")
@@ -44,19 +44,28 @@ struct ProfileRemovalAndDropTests {
         #expect(!ui.contains("OVPNDropTarget"))
         #expect(!connectionView.contains(".ovpnDropTarget"),
                 "a window-wide destination competes with the credential well before either handler can filter its payload")
-        #expect(firstConnect.contains("Release to use this 1Password item"))
+        #expect(firstConnect.contains("Release to use this password item"))
+        #expect(firstConnect.contains("regardless of which method is selected above"))
         #expect(firstConnect.contains("Browse 1Password"))
-        #expect(firstConnect.contains(".onDrop(of: OnePasswordDropItem.acceptedContentTypes"))
-        #expect(firstConnect.contains("perform: acceptOnePasswordDrop"),
+        #expect(firstConnect.contains(".onDrop(of: CredentialItemDrop.acceptedContentTypes"))
+        #expect(firstConnect.contains("perform: acceptCredentialDrop"),
                 "the visible well must directly own the same small handler proven by OnePasswordProbe")
-        #expect(firstConnect.contains("OnePasswordDropItem.canAccept(providers)"))
+        #expect(firstConnect.contains("CredentialItemDrop.canAccept(providers)"))
+        #expect(firstConnect.contains("CredentialItemDrop.source(from: providers)"),
+                "the drag payload, not the selected auth button, must choose the provider")
+        #expect(firstConnect.contains("updated.kind = .applePasswords"))
         #expect(firstConnect.contains("OnePasswordDropItem.activeDragSnapshot()"))
-        let dropModel = try source("SimpleVPN/Credentials/OnePasswordDropItem.swift")
-        #expect(dropModel.contains("[.utf8PlainText, .plainText, .text, .url]"),
-                "the target must negotiate through the public flavours 1Password exports")
+        let dropModel = try source("SimpleVPN/Credentials/CredentialItemDrop.swift")
+        #expect(dropModel.contains(".utf8PlainText, .plainText, .text, .url, .data"),
+                "the target must negotiate through the public flavours exported by 1Password and Apple Passwords")
         #expect(!connectionView.contains("MainWindowOnboardingSizer"),
                 "a full-window AppKit background prevents nested SwiftUI drop negotiation")
-        #expect(endpointSection.contains("usesMetalSurface: false"),
-                "the connection screen must not embed an MTKView alongside its external drop targets")
+        let globe = try source("SimpleVPN/UI/Map/MetalGlobeView.swift")
+        #expect(!endpointSection.contains("usesMetalSurface"))
+        #expect(!globe.contains("NSViewRepresentable"))
+        #expect(!globe.contains("MTKView"),
+                "the textured globe must remain a SwiftUI shader so it cannot block nested external drop targets")
+        #expect(globe.contains("ShaderLibrary.globeDay"))
+        #expect(globe.contains("ShaderLibrary.globeNightLights"))
     }
 }

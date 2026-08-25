@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // MetalGlobeView.swift
-// A lightweight Metal globe for the live network topology. The GPU owns the
-// sphere, atmosphere, lighting and graticule. SwiftUI projects the bundled
+// A lightweight SwiftUI-shader globe for the live network topology. The GPU owns
+// the sphere, atmosphere, lighting and graticule without embedding a MetalKit view.
+// SwiftUI projects the bundled
 // Natural Earth coastlines, routes and accessible pins over that one shared
 // camera. That split gives the custom drawing the native hover/button behaviour
-// a Mac user expects without asking Metal to impersonate an accessibility tree.
+// a Mac user expects, keeps external drag-and-drop native, and does not ask Metal
+// to impersonate an accessibility tree.
 
-import AppKit
-@preconcurrency import MetalKit
+import ImageIO
 import SwiftUI
 import simd
 
@@ -97,7 +98,15 @@ struct GlobeCamera: Equatable {
     mutating func orient(from start: MapPin, to end: MapPin) {
         let route = GreatCircle.points(from: (start.lat, start.lon), to: (end.lat, end.lon), samples: 2)
         let midpoint = route[route.count / 2]
-        forward = simd_normalize(midpoint)
+        orient(on: midpoint)
+    }
+
+    mutating func orient(on pin: MapPin) {
+        orient(on: GreatCircle.vector(lat: pin.lat, lon: pin.lon))
+    }
+
+    private mutating func orient(on point: SIMD3<Double>) {
+        forward = simd_normalize(point)
 
         // Project geographic north onto the tangent plane. Near a pole, choose a
         // stable alternate reference rather than let a zero vector poison the view.
@@ -170,17 +179,15 @@ struct MetalGlobeMapView: View {
     /// Maximum diameter of the rendered globe, not the enclosing 2:1 surface.
     /// Nil keeps the full-width presentation used by dedicated map surfaces.
     var maximumGlobeDiameter: CGFloat? = nil
-    /// The compact connection screen must remain a wholly SwiftUI hierarchy so
-    /// native external-drop negotiation reaches its nested destinations. Full
-    /// map surfaces can still opt into the Metal-backed renderer.
-    var usesMetalSurface = true
+    /// Dedicated maps use a wide 2:1 surface; the connection sidebar uses a
+    /// square surface so the sphere fills the narrow column without wasted space.
+    var surfaceAspectRatio: CGFloat = 2
     var onSelect: (String) -> Void = { _ in }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.liveVisualPolicy) private var liveVisuals
     @State private var camera = GlobeCamera()
     @State private var dragOrigin: GlobeCamera?
-    @State private var trackpadPanOrigin: GlobeCamera?
     @State private var rotationOrigin: GlobeCamera?
     @State private var orientedRoute = ""
 
@@ -204,15 +211,21 @@ struct MetalGlobeMapView: View {
     }
 
     private var routeKey: String {
-        guard let route = primaryRoute else { return "" }
-        return "\(route.0.id):\(route.0.lat):\(route.0.lon)→\(route.1.id):\(route.1.lat):\(route.1.lon)"
+        if let route = primaryRoute {
+            return "\(route.0.id):\(route.0.lat):\(route.0.lon)→\(route.1.id):\(route.1.lat):\(route.1.lon)"
+        }
+        guard let pin = pins.first(where: {
+            if case .endpoint = $0.kind { return true }
+            return false
+        }) ?? pins.first else { return "earth" }
+        return "\(pin.id):\(pin.lat):\(pin.lon)"
     }
 
-    /// The globe itself occupies 90% of the shortest surface axis; the surface
-    /// is 2:1. Convert the person-facing diameter to the width proposal the
-    /// layout needs without using a GeometryReader or feeding resize state back.
+    /// The globe occupies 90% of the surface height. Convert the person-facing
+    /// diameter to the width proposal for either the wide map or square sidebar
+    /// without feeding measured geometry back into layout state.
     private var maximumSurfaceWidth: CGFloat? {
-        maximumGlobeDiameter.map { $0 / 0.45 }
+        maximumGlobeDiameter.map { $0 * surfaceAspectRatio / 0.9 }
     }
 
     var body: some View {
@@ -221,16 +234,10 @@ struct MetalGlobeMapView: View {
         // never feeds geometry back into state during a resize.
         TimelineView(.periodic(from: .now, by: liveVisuals.isLowPowerModeEnabled ? 300 : 60)) { timeline in
             let sun = SolarPosition(date: timeline.date)
-            HeightFromWidth(ratio: 2) {
+            HeightFromWidth(ratio: surfaceAspectRatio) {
                 GeometryReader { geometry in
                     ZStack {
-                        if usesMetalSurface, MTLCreateSystemDefaultDevice() != nil {
-                            MetalGlobeSurface(camera: camera, sun: sun.vector,
-                                               lowPowerMode: liveVisuals.isLowPowerModeEnabled,
-                                               onTrackpadPan: handleTrackpadPan)
-                        } else {
-                            GlobeFallbackSurface(camera: camera)
-                        }
+                        GlobeShaderSurface(camera: camera, sun: sun.vector)
                         coastlineOverlay(in: geometry.size)
                         countryBorderOverlay(in: geometry.size)
                         routeOverlay(in: geometry.size)
@@ -255,8 +262,17 @@ struct MetalGlobeMapView: View {
     }
 
     private func orientIfNeeded(force: Bool) {
-        guard !routeKey.isEmpty, (force || orientedRoute != routeKey), let route = primaryRoute else { return }
-        camera.orient(from: route.0, to: route.1)
+        guard force || orientedRoute != routeKey else { return }
+        if let route = primaryRoute {
+            camera.orient(from: route.0, to: route.1)
+        } else if let pin = pins.first(where: {
+            if case .endpoint = $0.kind { return true }
+            return false
+        }) ?? pins.first {
+            camera.orient(on: pin)
+        } else {
+            camera = GlobeCamera()
+        }
         orientedRoute = routeKey
     }
 
@@ -282,21 +298,6 @@ struct MetalGlobeMapView: View {
                 camera.roll(angle: value.rotation.radians, from: origin)
             }
             .onEnded { _ in rotationOrigin = nil }
-    }
-
-    /// NSPanGestureRecognizer supplies the native two-finger trackpad pan that
-    /// DragGesture deliberately reserves for click-and-drag on macOS.
-    private func handleTrackpadPan(_ phase: NSGestureRecognizer.State, _ translation: CGSize) {
-        switch phase {
-        case .began, .changed:
-            let origin = trackpadPanOrigin ?? camera
-            if trackpadPanOrigin == nil { trackpadPanOrigin = origin }
-            camera.orbit(translation: translation, from: origin)
-        case .ended, .cancelled, .failed:
-            trackpadPanOrigin = nil
-        default:
-            break
-        }
     }
 
     private func routeOverlay(in size: CGSize) -> some View {
@@ -456,216 +457,62 @@ struct MetalGlobeMapView: View {
 
     private var accessibilitySummary: String {
         let visible = pins.filter { camera.visibility(of: GreatCircle.vector(lat: $0.lat, lon: $0.lon)) > 0.015 }
-        return "Drag or use a two-finger trackpad pan to rotate. Twist two fingers to roll the globe. The active route is centred. \(visible.count) of \(pins.count) locations are visible."
+        return "Drag to rotate. Twist two fingers to roll the globe. The active route is centred. \(visible.count) of \(pins.count) locations are visible."
     }
 }
 
-private struct GlobeFallbackSurface: View {
-    let camera: GlobeCamera
-
-    var body: some View {
-        Canvas { context, size in
-            context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(nsColor: .underPageBackgroundColor)))
-            let radius = min(size.width, size.height) * 0.45
-            let frame = CGRect(x: size.width / 2 - radius, y: size.height / 2 - radius,
-                               width: radius * 2, height: radius * 2)
-            context.fill(Path(ellipseIn: frame), with: .color(Color.accentColor.opacity(0.13)))
-            context.stroke(Path(ellipseIn: frame), with: .color(Color.accentColor.opacity(0.5)), lineWidth: 1)
-        }
-        .accessibilityHidden(true)
-    }
-}
-
-// MARK: - Metal surface
-
-private struct GlobeUniforms {
-    var right: SIMD4<Float>
-    var up: SIMD4<Float>
-    var forward: SIMD4<Float>
-    var sun: SIMD4<Float>
-    var viewport: SIMD4<Float>
-}
-
-private struct MetalGlobeSurface: NSViewRepresentable {
+/// A pair of SwiftUI shape shaders keeps the complete day and night imagery on
+/// the GPU without inserting an AppKit view into the connection screen. SwiftUI
+/// currently permits one image argument per Shader, so the opaque day/atmosphere
+/// pass and transparent city-light pass are deliberately separate.
+private struct GlobeShaderSurface: View {
     let camera: GlobeCamera
     let sun: SIMD3<Double>
-    let lowPowerMode: Bool
-    let onTrackpadPan: (NSGestureRecognizer.State, CGSize) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
-
-    func makeNSView(context: Context) -> GlobeMetalView {
-        let view = GlobeMetalView(frame: .zero, device: MTLCreateSystemDefaultDevice())
-        view.colorPixelFormat = .bgra8Unorm
-        view.framebufferOnly = true
-        // This view lives in the connection detail's ScrollView.  Asking
-        // AppKit for a synchronous redraw from `updateNSView` while an
-        // NSSplitView divider is being tracked can recursively invalidate the
-        // hosting view's constraints (and macOS aborts after detecting that
-        // loop).  Let MTKView's display link draw the latest renderer state
-        // instead. The shared policy reduces this to 15 fps in Low Power Mode;
-        // the globe remains directly manipulable, but its static imagery never
-        // deserves an unrestricted display-link render loop.
-        view.enableSetNeedsDisplay = false
-        view.isPaused = false
-        view.preferredFramesPerSecond = LiveVisualCadence.globeFramesPerSecond(lowPower: lowPowerMode)
-        view.clearColor = MTLClearColor(red: 0.055, green: 0.07, blue: 0.105, alpha: 1)
-        context.coordinator.attach(to: view)
-        return view
-    }
-
-    func updateNSView(_ view: GlobeMetalView, context: Context) {
-        context.coordinator.renderer?.camera = camera
-        context.coordinator.renderer?.sun = sun
-        context.coordinator.onTrackpadPan = onTrackpadPan
-        view.preferredFramesPerSecond = LiveVisualCadence.globeFramesPerSecond(lowPower: lowPowerMode)
-    }
-
-    final class Coordinator {
-        var renderer: GlobeMetalRenderer?
-        var onTrackpadPan: ((NSGestureRecognizer.State, CGSize) -> Void)?
-        private var trackpadTranslation = CGSize.zero
-
-        /// Scroll-wheel events are AppKit's supported representation of a
-        /// two-finger trackpad pan. Gesture recognizers intentionally support
-        /// direct touches only on macOS; attempting to opt one into indirect
-        /// touches was the launch crash reported from build 147.
-        func handleTrackpadScroll(_ event: NSEvent) -> Bool {
-            guard event.hasPreciseScrollingDeltas, event.phase != [] else { return false }
-            if event.phase.contains(.began) { trackpadTranslation = .zero }
-
-            // Event deltas may be inverted to honour the user's scrolling
-            // preference. A globe is direct manipulation, so compensate and
-            // use the physical finger direction instead.
-            let preferenceSign: CGFloat = event.isDirectionInvertedFromDevice ? -1 : 1
-            trackpadTranslation.width -= event.scrollingDeltaX * preferenceSign
-            trackpadTranslation.height -= event.scrollingDeltaY * preferenceSign
-
-            let state: NSGestureRecognizer.State
-            if event.phase.contains(.began) { state = .began }
-            else if event.phase.contains(.ended) { state = .ended }
-            else if event.phase.contains(.cancelled) { state = .cancelled }
-            else { state = .changed }
-            onTrackpadPan?(state, trackpadTranslation)
-            if state == .ended || state == .cancelled { trackpadTranslation = .zero }
-            return true
-        }
-
-        func attach(to view: GlobeMetalView) {
-            guard let device = view.device else { return }
-            renderer = GlobeMetalRenderer(device: device, pixelFormat: view.colorPixelFormat)
-            view.delegate = renderer
-            view.onTrackpadScroll = { [weak self] event in self?.handleTrackpadScroll(event) ?? false }
+    @ViewBuilder
+    var body: some View {
+        if let day = GlobeTextureImages.day, let night = GlobeTextureImages.night {
+            ZStack {
+                Rectangle().fill(ShaderLibrary.globeDay(
+                    .boundingRect,
+                    .float3(camera.right.x, camera.right.y, camera.right.z),
+                    .float3(camera.up.x, camera.up.y, camera.up.z),
+                    .float3(camera.forward.x, camera.forward.y, camera.forward.z),
+                    .float3(sun.x, sun.y, sun.z),
+                    .image(day)
+                ))
+                Rectangle().fill(ShaderLibrary.globeNightLights(
+                    .boundingRect,
+                    .float3(camera.right.x, camera.right.y, camera.right.z),
+                    .float3(camera.up.x, camera.up.y, camera.up.z),
+                    .float3(camera.forward.x, camera.forward.y, camera.forward.z),
+                    .float3(sun.x, sun.y, sun.z),
+                    .image(night)
+                ))
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        } else {
+            Color(red: 0.055, green: 0.070, blue: 0.105)
+                .accessibilityHidden(true)
         }
     }
 }
 
-/// MTKView does not expose scroll-wheel handling as a closure. This tiny
-/// AppKit bridge keeps that macOS-specific input at the rendering boundary and
-/// leaves the SwiftUI scene responsible for camera state and accessibility.
-private final class GlobeMetalView: MTKView {
-    var onTrackpadScroll: ((NSEvent) -> Bool)?
+/// The map imagery ships as raw JPEG resources rather than asset-catalog
+/// entries. Constructing `Image` by name only asks the asset catalog and causes
+/// SwiftUI to omit the shader texture argument when it cannot resolve the name.
+/// ImageIO gives the shader an explicit image while keeping this boundary free
+/// of AppKit and MetalKit views.
+private enum GlobeTextureImages {
+    static let day = load("blue-marble-2004-5400")
+    static let night = load("black-marble-2016-01deg")
 
-    // SwiftUI supplies the size through the representable host.  Reporting no
-    // intrinsic size prevents this AppKit view from competing with the scroll
-    // view and split-view constraint systems during a live divider drag.
-    override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
-    }
-
-    override func scrollWheel(with event: NSEvent) {
-        if onTrackpadScroll?(event) == true { return }
-        super.scrollWheel(with: event)
-    }
-}
-
-private final class GlobeMetalRenderer: NSObject, MTKViewDelegate {
-    var camera = GlobeCamera()
-    var sun = SolarPosition(date: .now).vector
-    private let queue: MTLCommandQueue
-    private let pipeline: MTLRenderPipelineState
-    private let dayEarth: MTLTexture
-    private let nightLights: MTLTexture
-
-    init?(device: MTLDevice, pixelFormat: MTLPixelFormat) {
-        guard let queue = device.makeCommandQueue(),
-              let library = device.makeDefaultLibrary(),
-              let vertex = library.makeFunction(name: "globeVertex"),
-              let fragment = library.makeFunction(name: "globeFragment"),
-              let dayEarth = GlobeDayEarth.makeTexture(device: device),
-              let nightLights = GlobeNightLights.makeTexture(device: device)
+    private static func load(_ name: String) -> Image? {
+        guard let url = Bundle.main.url(forResource: name, withExtension: "jpg"),
+              let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
         else { return nil }
-        let descriptor = MTLRenderPipelineDescriptor()
-        descriptor.vertexFunction = vertex
-        descriptor.fragmentFunction = fragment
-        descriptor.colorAttachments[0].pixelFormat = pixelFormat
-        do { pipeline = try device.makeRenderPipelineState(descriptor: descriptor) }
-        catch { return nil }
-        self.queue = queue
-        self.dayEarth = dayEarth
-        self.nightLights = nightLights
-    }
-
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        // The fragment shader derives its aspect ratio from the live drawable;
-        // there are no cached size-dependent textures to rebuild.
-    }
-
-    func draw(in view: MTKView) {
-        guard let drawable = view.currentDrawable,
-              let pass = view.currentRenderPassDescriptor,
-              let commandBuffer = queue.makeCommandBuffer(),
-              let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass)
-        else { return }
-        let right = camera.right
-        var uniforms = GlobeUniforms(
-            right: SIMD4(Float(right.x), Float(right.y), Float(right.z), 0),
-            up: SIMD4(Float(camera.up.x), Float(camera.up.y), Float(camera.up.z), 0),
-            forward: SIMD4(Float(camera.forward.x), Float(camera.forward.y), Float(camera.forward.z), 0),
-            sun: SIMD4(Float(sun.x), Float(sun.y), Float(sun.z), 0),
-            viewport: SIMD4(Float(view.drawableSize.width), Float(view.drawableSize.height), 0, 0))
-        encoder.setRenderPipelineState(pipeline)
-        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<GlobeUniforms>.stride, index: 0)
-        encoder.setFragmentTexture(dayEarth, index: 0)
-        encoder.setFragmentTexture(nightLights, index: 1)
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        encoder.endEncoding()
-        commandBuffer.present(drawable)
-        commandBuffer.commit()
-    }
-}
-
-/// NASA's Blue Marble Next Generation map is a conventional equirectangular
-/// daytime Earth. The shader pairs it with Black Marble at the live terminator.
-@MainActor
-private enum GlobeDayEarth {
-    static func makeTexture(device: MTLDevice) -> MTLTexture? {
-        guard let url = Bundle.main.url(forResource: "blue-marble-2004-5400", withExtension: "jpg") else {
-            return nil
-        }
-        let options: [MTKTextureLoader.Option: Any] = [
-            .origin: MTKTextureLoader.Origin.topLeft,
-            .SRGB: false,
-            .generateMipmaps: true
-        ]
-        return try? MTKTextureLoader(device: device).newTexture(URL: url, options: options)
-    }
-}
-
-/// NASA's bundled 2016 VIIRS Black Marble map is intentionally static imagery;
-/// the shader reveals it only where this exact UTC moment is on Earth's night
-/// side, below the matching Blue Marble daytime texture.
-@MainActor
-private enum GlobeNightLights {
-    static func makeTexture(device: MTLDevice) -> MTLTexture? {
-        guard let url = Bundle.main.url(forResource: "black-marble-2016-01deg", withExtension: "jpg") else {
-            return nil
-        }
-        let options: [MTKTextureLoader.Option: Any] = [
-            .origin: MTKTextureLoader.Origin.topLeft,
-            .SRGB: false,
-            .generateMipmaps: true
-        ]
-        return try? MTKTextureLoader(device: device).newTexture(URL: url, options: options)
+        return Image(decorative: image, scale: 1)
     }
 }

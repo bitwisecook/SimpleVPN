@@ -157,10 +157,11 @@ type itemField struct {
 }
 
 type itemPayload struct {
-	Title   string      `json:"title"`
-	VaultID string      `json:"vaultID"`
-	ItemID  string      `json:"itemID"`
-	Fields  []itemField `json:"fields"`
+	Title      string      `json:"title"`
+	VaultID    string      `json:"vaultID"`
+	VaultTitle string      `json:"vaultTitle"`
+	ItemID     string      `json:"itemID"`
+	Fields     []itemField `json:"fields"`
 }
 
 type itemResponse struct {
@@ -636,10 +637,11 @@ func getItemOnce(ctx context.Context, req itemRequest) (*itemPayload, *shimError
 	}
 
 	payload := &itemPayload{
-		Title:   full.Title,
-		VaultID: full.VaultID,
-		ItemID:  full.ID,
-		Fields:  make([]itemField, 0, len(full.Fields)),
+		Title:      full.Title,
+		VaultID:    full.VaultID,
+		VaultTitle: chosen.vaultTitle,
+		ItemID:     full.ID,
+		Fields:     make([]itemField, 0, len(full.Fields)),
 	}
 	for _, f := range full.Fields {
 		out := itemField{ID: f.ID, Label: f.Title, Value: f.Value}

@@ -67,6 +67,19 @@ enum OnePasswordNativeError: LocalizedError, Sendable, Equatable {
     case helperRefusedToStart(String)
     case other(String)
 
+    /// The desktop SDK occasionally fails while creating its short-lived local
+    /// delegated session even though the account, item and integration are all
+    /// valid.  The same request succeeds immediately afterwards.  Keep this
+    /// deliberately narrow: account/item failures and dismissed approval prompts
+    /// must still reach the person instead of being retried behind their back.
+    var isTransientDelegatedSessionTransportFailure: Bool {
+        guard case .other(let message) = self else { return false }
+        let text = message.lowercased()
+        return text.contains("failed to create delegated session")
+            && (text.contains("failed to delegate a session")
+                || text.contains("error sending request for url"))
+    }
+
     init(kind: String, message: String) {
         switch kind {
         case "appNotInstalled": self = .appNotInstalled
@@ -296,6 +309,9 @@ enum OnePasswordNative {
     nonisolated struct OPItem: Decodable, Sendable {
         var title: String
         var vaultID: String
+        /// Added by newer helpers. Optional so an app update can still read a
+        /// reply from an older helper during the brief replacement window.
+        var vaultTitle: String? = nil
         var itemID: String
         var fields: [OPItemField]
     }

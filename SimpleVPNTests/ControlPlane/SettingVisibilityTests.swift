@@ -349,13 +349,20 @@ struct SettingRenderingTests {
         let firstConnect = try #require(sources["FirstConnectSetupCard.swift"])
 
         #expect(controls.contains("struct SignInSourcePicker"))
-        #expect(controls.contains("Username + Password"))
-        #expect(controls.contains(".labelsHidden()"),
-                "the form grid supplies the visible source label, so Picker must not repeat it")
-        #expect(controls.contains("private var visibleSelection"),
-                "an unavailable saved source must never become an untagged AppKit menu selection")
+        #expect(controls.contains("LazyVGrid"),
+                "available sign-in sources should be visible without opening a menu")
+        #expect(controls.contains("manual.title = canSave ? \"Keychain\""),
+                "the two manual catalogue modes should be one Keychain choice with a visible Save checkbox")
+        #expect(!controls.contains(".pickerStyle(.menu)"),
+                "the primary source chooser must not hide detected managers in a popup")
         #expect(firstConnect.contains("SignInSourcePicker("),
-                "the source menu belongs in the first-connect setup directly above the fields")
+                "the source selector belongs in first-connect setup directly above the fields")
+        #expect(firstConnect.contains("Drop a sign-in item from 1Password or Apple Passwords"),
+                "the automatic path must be visible regardless of the selected source")
+        #expect(firstConnect.contains("switches to that method"),
+                "the drag payload must override the currently selected method")
+        #expect(firstConnect.contains("Set Up 1Password Manually…"),
+                "people who prefer not to drag still need a clearly secondary manual setup path")
         #expect(detail.contains("selectedManagerNeedsSetup"),
                 "choosing an unlinked password app must reveal its setup instead of falling back silently to manual fields")
         #expect(detail.contains("pendingSignInSource = option.id"),

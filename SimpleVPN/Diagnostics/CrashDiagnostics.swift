@@ -28,7 +28,13 @@ import OSLog
 
 /// One crash worth reporting, assembled from either source.
 nonisolated struct CrashReport: Codable, Identifiable, Sendable {
-    var id: String { signature }
+    /// One concrete occurrence. The signature deliberately groups equivalent crashes;
+    /// the timestamp keeps a later recurrence distinct from the report already offered.
+    var id: String { occurrenceID }
+    var occurrenceID: String {
+        let milliseconds = Int64((when.timeIntervalSince1970 * 1_000).rounded())
+        return "\(appVersion)|\(milliseconds)|\(signature)"
+    }
     /// Stable-ish identity so the same crash isn't offered twice.
     var signature: String
     var when: Date
@@ -80,11 +86,31 @@ nonisolated enum CrashDiagnostics {
         return dir
     }
 
-    /// Reports already offered to the user, so we don't nag about the same crash within
-    /// one build. Scoped BY APP VERSION on purpose: the same crash reappearing in a newer
-    /// build means the fix didn't work, which is exactly when it must be offered again.
-    /// Without this, three occurrences of one crash produced exactly one prompt.
+    /// The original acknowledgement store. Read for migration only: ordinary defaults
+    /// are onboarding preferences, so clearing onboarding used to make an old macOS .ips
+    /// interrupt the user all over again.
     private static let seenKey = "crash.reportedSignatures.v2"
+
+    /// Crash history is operational log state, not app configuration. Keeping the tiny
+    /// acknowledgement ledger under Logs means resetting VPN/onboarding preferences does
+    /// not turn an old crash into a new prompt. Reports remain available for 72 hours.
+    private static let retention: TimeInterval = 72 * 60 * 60
+
+    private struct AcknowledgementLedger: Codable {
+        var handledAt: [String: Date] = [:]
+    }
+
+    private static var historyDirectory: URL? {
+        guard let library = FileManager.default.urls(for: .libraryDirectory,
+                                                     in: .userDomainMask).first else { return nil }
+        let dir = library.appendingPathComponent("Logs/SimpleVPN/CrashReports", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private static var ledgerURL: URL? {
+        historyDirectory?.appendingPathComponent("acknowledged.json")
+    }
 
     private static func seenKey(for report: CrashReport) -> String {
         "\(report.appVersion)|\(report.signature)"
@@ -190,27 +216,73 @@ nonisolated enum CrashDiagnostics {
 
     // MARK: Collect
 
-    /// Crashes since we last looked, newest first, excluding ones already offered.
+    /// Crashes retained for the Help menu, newest first. Acknowledged reports stay here;
+    /// they simply never interrupt the user again.
+    static func retainedReports(now: Date = Date()) -> [CrashReport] {
+        let cutoff = now.addingTimeInterval(-retention)
+        pruneOwnRecords(olderThan: cutoff)
+        let found = (ownExceptionRecords() + systemCrashReports(since: cutoff))
+            .filter { $0.when >= cutoff }
+
+        // A throw-time record and the eventual .ips can describe the same occurrence.
+        // Prefer the richer record, but don't collapse genuinely later recurrences.
+        var unique: [String: CrashReport] = [:]
+        for report in found.sorted(by: { $0.frames.count > $1.frames.count }) {
+            unique[report.occurrenceID] = unique[report.occurrenceID] ?? report
+        }
+        return unique.values.sorted { $0.when > $1.when }
+    }
+
+    /// Crashes not yet offered, newest first. An occurrence is offered once, regardless
+    /// of app preference resets; a genuinely new recurrence remains a new occurrence.
     static func pendingReports() -> [CrashReport] {
-        var found = ownExceptionRecords() + systemCrashReports()
-        let seen = Set(UserDefaults.standard.stringArray(forKey: seenKey) ?? [])
-        found = found.filter { !seen.contains(seenKey(for: $0)) }
-        return found.sorted { $0.when > $1.when }
+        let reports = retainedReports()
+        var ledger = loadLedger()
+        let legacy = Set(UserDefaults.standard.stringArray(forKey: seenKey) ?? [])
+        var migrated = false
+        for report in reports where legacy.contains(seenKey(for: report)) {
+            if ledger.handledAt[report.occurrenceID] == nil {
+                ledger.handledAt[report.occurrenceID] = Date()
+                migrated = true
+            }
+        }
+        if migrated { saveLedger(ledger) }
+        return reports.filter { ledger.handledAt[$0.occurrenceID] == nil }
     }
 
     /// Stop offering these (called once the user has reported or dismissed them).
     static func markHandled(_ reports: [CrashReport]) {
+        var ledger = loadLedger()
+        let now = Date()
+        for report in reports { ledger.handledAt[report.occurrenceID] = now }
+        saveLedger(ledger)
+
+        // Keep writing the old bounded list for downgrade compatibility. It is no
+        // longer the source of truth and can safely disappear during onboarding reset.
         var seen = UserDefaults.standard.stringArray(forKey: seenKey) ?? []
         seen.append(contentsOf: reports.map { seenKey(for: $0) })
-        // Bounded: this list only exists to avoid nagging.
         UserDefaults.standard.set(Array(seen.suffix(50)), forKey: seenKey)
-        // Our own records have served their purpose; macOS's .ips files are not ours
-        // to delete.
-        if let dir = recordsDirectory,
-           let files = try? FileManager.default.contentsOfDirectory(at: dir,
-                                                                   includingPropertiesForKeys: nil) {
-            for f in files where f.pathExtension == "json" { try? FileManager.default.removeItem(at: f) }
-        }
+    }
+
+    static func hasBeenHandled(_ report: CrashReport) -> Bool {
+        loadLedger().handledAt[report.occurrenceID] != nil
+    }
+
+    private static func loadLedger() -> AcknowledgementLedger {
+        guard let url = ledgerURL,
+              let data = try? Data(contentsOf: url),
+              var ledger = try? JSONDecoder().decode(AcknowledgementLedger.self, from: data)
+        else { return AcknowledgementLedger() }
+        let cutoff = Date().addingTimeInterval(-retention)
+        ledger.handledAt = ledger.handledAt.filter { $0.value >= cutoff }
+        return ledger
+    }
+
+    private static func saveLedger(_ ledger: AcknowledgementLedger) {
+        guard let url = ledgerURL,
+              let data = try? JSONEncoder().encode(ledger) else { return }
+        do { try data.write(to: url, options: .atomic) }
+        catch { log.error("could not save crash acknowledgement ledger: \(error.localizedDescription, privacy: .public)") }
     }
 
     private static func ownExceptionRecords() -> [CrashReport] {
@@ -223,16 +295,25 @@ nonisolated enum CrashDiagnostics {
         }
     }
 
-    /// Parse macOS's own reports. Only ours, only recent — an old crash from three
-    /// months ago isn't worth interrupting anyone about.
-    private static func systemCrashReports(within days: Int = 7) -> [CrashReport] {
+    private static func pruneOwnRecords(olderThan cutoff: Date) {
+        guard let dir = recordsDirectory,
+              let files = try? FileManager.default.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        for file in files where file.pathExtension == "json" {
+            let modified = try? file.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate
+            if let modified, modified < cutoff { try? FileManager.default.removeItem(at: file) }
+        }
+    }
+
+    /// Parse macOS's own reports. Only ours, only inside the 72-hour history window.
+    private static func systemCrashReports(since cutoff: Date) -> [CrashReport] {
         let fm = FileManager.default
         guard let logs = fm.urls(for: .libraryDirectory, in: .userDomainMask).first else { return [] }
         let dir = logs.appendingPathComponent("Logs/DiagnosticReports", isDirectory: true)
         guard let files = try? fm.contentsOfDirectory(at: dir,
                                                      includingPropertiesForKeys: [.contentModificationDateKey])
         else { return [] }
-        let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
         return files.compactMap { url -> CrashReport? in
             guard url.lastPathComponent.hasPrefix("SimpleVPN"),
                   ["ips", "crash"].contains(url.pathExtension),

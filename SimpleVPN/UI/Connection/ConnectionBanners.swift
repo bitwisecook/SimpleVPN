@@ -34,14 +34,25 @@ struct OnePasswordRepairBanner: View {
             }
             Spacer(minLength: 8)
             VStack(alignment: .trailing, spacing: 6) {
-                Button("Fix Sign-In…", action: fixSignIn)
-                    .buttonStyle(.glassProminent)
-                    .tint(.orange)
-                    .help("Show this VPN's 1Password source and linked item")
+                if error.category == .credentials {
+                    Button("Fix Sign-In…", action: fixSignIn)
+                        .buttonStyle(.glassProminent)
+                        .tint(.orange)
+                        .help("Show this VPN's 1Password source and linked item")
+                } else if error.canRetry {
+                    Button("Try Again", action: retry)
+                        .buttonStyle(.glassProminent)
+                        .tint(.orange)
+                }
                 HStack(spacing: 8) {
+                    if error.category != .credentials {
+                        Button("Fix Sign-In…", action: fixSignIn)
+                            .buttonStyle(.glass)
+                            .help("Show this VPN's 1Password source and linked item")
+                    }
                     Button("Open 1Password", action: UserFacingErrorSheet.openOnePassword)
                         .buttonStyle(.glass)
-                    if error.canRetry {
+                    if error.canRetry && error.category == .credentials {
                         Button("Try Again", action: retry)
                             .buttonStyle(.glass)
                     }

@@ -119,12 +119,16 @@ struct EditVPNView: View {
     // Credential source (manual / 1Password / Apple Passwords)
     @State private var credentialKind: CredentialSourceKind = .manual
     @State private var sourceReference = ""
+    @State private var sourceReferenceTitle = ""
     /// 1Password: which account to ask. Apple Passwords: which saved login.
     @State private var sourceAccount = ""
+    @State private var sourceAccountReference = ""
+    @State private var sourceAccountTitle = ""
     /// 1Password only — a vault is a drawer inside an account, so it gets its
     /// own field; sharing one with `sourceAccount` is what left every 1Password
     /// fetch asking for an account nobody had ever been able to enter.
     @State private var sourceVault = ""
+    @State private var sourceVaultTitle = ""
     /// WHICH configured vault this VPN reads — level 2's id, chosen here at level 3
     /// (SignInSourceInstances.swift). nil means the one SimpleVPN set up, which is
     /// what every profile written before instances existed means.
@@ -1219,7 +1223,9 @@ struct EditVPNView: View {
     }
 
     private var effectiveOnePasswordAccount: String {
-        OnePasswordAccountMemory.effective(
+        let dropped = sourceAccountReference.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !dropped.isEmpty { return dropped }
+        return OnePasswordAccountMemory.effective(
             profile: sourceAccount,
             connection: OnePasswordAccountMemory.connectionAccount(
                 selectedOnePasswordAccountID, store: signInSettings),
@@ -1247,6 +1253,10 @@ struct EditVPNView: View {
         // A named account owns the vendor identifier. Do not let a hidden UUID
         // on the VPN override the friendly picker.
         sourceAccount = ""
+        sourceAccountReference = ""
+        sourceAccountTitle = id.flatMap { wanted in
+            onePasswordAccounts.first { $0.id == wanted }?.name
+        } ?? ""
     }
 
     /// The setup check, from the two actions allowed to start one: choosing
@@ -1382,6 +1392,7 @@ struct EditVPNView: View {
         // The TITLE, not the UUID: it's what the user reads in 1Password, and
         // the helper accepts either.
         sourceVault = vault.title
+        sourceVaultTitle = vault.title
         // Items belong to the vault they were listed from.
         opItems = []
         opItemsLoaded = false
@@ -1392,10 +1403,14 @@ struct EditVPNView: View {
 
     private func chooseOPItem(_ item: OnePasswordNative.OPItemInVault) {
         sourceReference = item.title
+        sourceReferenceTitle = item.title
         opItemTitle = item.title
         // Picking from the everything list also answers "which vault?" — it was
         // listed from one, so there's nothing to guess.
-        if itemBrowseScope.isEmpty, !item.vaultTitle.isEmpty { sourceVault = item.vaultTitle }
+        if itemBrowseScope.isEmpty, !item.vaultTitle.isEmpty {
+            sourceVault = item.vaultTitle
+            sourceVaultTitle = item.vaultTitle
+        }
         opBrowseError = nil
         sourceTest = .idle
         // Straight on to "which field is which" — the pick is explicit, the
@@ -1510,19 +1525,24 @@ struct EditVPNView: View {
 
     private func apply(_ dropped: OnePasswordDrop) {
         sourceReference = dropped.reference
+        sourceReferenceTitle = dropped.title
         // Never clear a typed value with an absent one — a field drag names no
         // account, and the account already there may be the right one.
-        if !dropped.vault.isEmpty { sourceVault = dropped.vault }
+        if !dropped.vault.isEmpty {
+            sourceVault = dropped.vault
+            sourceVaultTitle = dropped.vaultTitle
+        }
         if !dropped.account.isEmpty {
+            sourceAccountReference = dropped.account
+            sourceAccountTitle = dropped.accountTitle
             OnePasswordAccountMemory.seed(dropped.account)
             if let connection = OnePasswordAccountMemory.connectionForDroppedAccount(
                 dropped.account, preferred: sourceInstance, store: signInSettings) {
                 sourceInstance = connection
                 sourceAccount = ""
             } else {
-                // Kept only as a compatibility fallback until the settings
-                // store has materialised the dragged account as a named entry.
-                sourceAccount = dropped.account
+                // The exact coordinate is retained separately and never shown.
+                sourceAccount = ""
             }
         }
         opItemTitle = dropped.title.isEmpty ? dropped.reference : dropped.title
@@ -1545,11 +1565,13 @@ struct EditVPNView: View {
         loadingOPFields = true
         defer { loadingOPFields = false }
         do {
-            let (title, vaultID, fields) = try await withAccountFallback { account in
+            let (title, vaultID, vaultTitle, fields) = try await withAccountFallback { account in
                 try await OnePasswordProvider.listFields(
                     itemReference: sourceReference, vault: sourceVault, account: account)
             }
             opItemTitle = title
+            sourceReferenceTitle = title
+            if !vaultTitle.isEmpty { sourceVaultTitle = vaultTitle }
             opFields = fields
             opNeedsAccount = false
             await backfillVault(from: vaultID)
@@ -1589,6 +1611,7 @@ struct EditVPNView: View {
         }
         if let title = OnePasswordNative.vaultTitle(forID: vaultID, in: opVaults) {
             sourceVault = title
+            sourceVaultTitle = title
         }
     }
 
@@ -1711,10 +1734,17 @@ struct EditVPNView: View {
         var source = CredentialSource()
         source.kind = credentialKind
         source.reference = sourceReference.trimmingCharacters(in: .whitespaces)
+        source.referenceTitle = sourceReferenceTitle.trimmingCharacters(in: .whitespaces)
         source.account = sourceAccount.trimmingCharacters(in: .whitespaces)
+        source.accountReference = credentialKind == .onePassword
+            ? sourceAccountReference.trimmingCharacters(in: .whitespaces) : ""
+        source.accountTitle = credentialKind == .onePassword
+            ? sourceAccountTitle.trimmingCharacters(in: .whitespaces) : ""
         // Vault and field mapping only apply to 1Password; drop them otherwise.
         source.vault = credentialKind == .onePassword
             ? sourceVault.trimmingCharacters(in: .whitespaces) : ""
+        source.vaultTitle = credentialKind == .onePassword
+            ? sourceVaultTitle.trimmingCharacters(in: .whitespaces) : ""
         source.fieldMap = credentialKind == .onePassword ? fieldMap : [:]
         // WHICH vault, written explicitly — and only for a vendor that can have
         // several. Saving an id against a singular vendor would be storing an answer
@@ -1848,8 +1878,13 @@ struct EditVPNView: View {
         let source = vpn.credentialSource(for: profileID)
         credentialKind = source.kind
         sourceReference = source.reference
+        sourceReferenceTitle = source.referenceTitle
+        opItemTitle = source.referenceTitle
         sourceAccount = source.account
+        sourceAccountReference = source.accountReference
+        sourceAccountTitle = source.accountTitle
         sourceVault = source.vault
+        sourceVaultTitle = source.vaultTitle
         sourceInstance = source.selection.instance
         prefillRememberedAccount()
         fieldMap = source.fieldMap

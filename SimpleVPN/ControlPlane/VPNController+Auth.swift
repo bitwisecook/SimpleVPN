@@ -35,6 +35,34 @@
 //
 
 import Foundation
+
+/// A post-drop approval may be reused by exactly one immediate Connect. It is
+/// process memory only, keyed to the exact linked coordinates, and deliberately
+/// expires just before 1Password's current 30-second TOTP window rolls over.
+struct PreparedOnePasswordSignIn: Sendable {
+    let reference: String
+    let account: String
+    let vault: String
+    let credentials: RawCredentials
+    let expiresAt: Date
+
+    static func expiry(now: Date = Date(), hasVerificationCode: Bool) -> Date {
+        guard hasVerificationCode else { return now.addingTimeInterval(30) }
+        let window: TimeInterval = 30
+        let nextBoundary = (floor(now.timeIntervalSince1970 / window) + 1) * window
+        // Do not send a code in the final two seconds of its window: it can roll
+        // over between assembling the request and the gateway checking it.
+        return Date(timeIntervalSince1970: nextBoundary - 2)
+    }
+
+    func matches(_ source: CredentialSource, account resolvedAccount: String,
+                 now: Date = Date()) -> Bool {
+        now < expiresAt
+            && reference == source.reference
+            && account == resolvedAccount
+            && vault == source.vault
+    }
+}
 import os
 
 extension VPNController {
@@ -47,24 +75,101 @@ extension VPNController {
     /// returned values; dropping an item must never summon an approval prompt.
     func linkOnePasswordEntry(_ dropped: OnePasswordDrop, for id: String) async throws {
         var source = credentialSource(for: id)
+        let droppedAccount = dropped.account.trimmingCharacters(in: .whitespacesAndNewlines)
+        let existingAccount = OnePasswordAccountMemory.effectiveAccount(for: source)
+        guard !droppedAccount.isEmpty || !existingAccount.isEmpty else {
+            throw OnePasswordLinkError.missingAccountCoordinate
+        }
         source.kind = .onePassword
         source.reference = dropped.reference
+        source.referenceTitle = dropped.title
         source.fieldMap = [:] // field IDs belong to the entry, never its predecessor.
-        if !dropped.vault.isEmpty { source.vault = dropped.vault }
-        if !dropped.account.isEmpty {
+        if !dropped.vault.isEmpty {
+            source.vault = dropped.vault
+            source.vaultTitle = dropped.vaultTitle
+        }
+        if !droppedAccount.isEmpty {
+            // The profile owns the exact coordinate as a durable fallback. The
+            // account row below is for a readable name and future selection; a
+            // missing or reset app-level list must not orphan an already-linked
+            // VPN or send the user back to a typing prompt.
+            source.accountReference = droppedAccount
+            source.accountTitle = dropped.accountTitle
             let settings = SignInSourceSettingsStore.shared
             if let connection = OnePasswordAccountMemory.connectionForDroppedAccount(
-                dropped.account, preferred: source.selection.instance, store: settings) {
+                droppedAccount, preferred: source.selection.instance, store: settings) {
                 source.instanceID = connection.rawValue
                 source.account = ""
+                if source.accountTitle.isEmpty {
+                    source.accountTitle = settings.instances(for: .onePassword)
+                        .first { $0.id == connection }?.name ?? ""
+                }
             } else {
-                // Compatibility fallback for a profile created before named
-                // accounts have been materialised by the settings store.
-                OnePasswordAccountMemory.seed(dropped.account)
-                source.account = dropped.account
+                // Policy can forbid creating a row. The per-VPN coordinate above
+                // is still sufficient for the SDK and remains hidden from the UI.
+                OnePasswordAccountMemory.seed(droppedAccount)
+                source.account = ""
             }
         }
         try await setCredentialSource(source, for: id)
+    }
+
+    /// Read the item once, persist only its non-secret description/mapping, and
+    /// optionally keep the returned bytes for one immediate Connect. This is the
+    /// post-drop fingerprint path: item/vault names become durable UI, while the
+    /// password and current code remain short-lived process memory.
+    @discardableResult
+    func prepareLinkedOnePasswordEntry(
+        for id: String, cacheForImmediateConnect: Bool
+    ) async throws -> OnePasswordProvider.PreparedEntry {
+        let source = credentialSource(for: id)
+        let account = OnePasswordAccountMemory.effectiveAccount(for: source)
+        let prepared = try await OnePasswordProvider.prepareEntry(
+            itemReference: source.reference, vault: source.vault, account: account)
+
+        var learnedSource = source
+        learnedSource.fieldMap = prepared.inspection.fieldMap
+        learnedSource.referenceTitle = prepared.inspection.title
+        if learnedSource.vault.trimmingCharacters(in: .whitespaces).isEmpty,
+           !prepared.inspection.vaultID.trimmingCharacters(in: .whitespaces).isEmpty {
+            learnedSource.vault = prepared.inspection.vaultID
+        }
+        if !prepared.inspection.vaultTitle.isEmpty {
+            learnedSource.vaultTitle = prepared.inspection.vaultTitle
+        }
+        if learnedSource != source {
+            try await setCredentialSource(learnedSource, for: id)
+        }
+
+        if prepared.inspection.hasVerificationCode, !hasStaticChallenge(id) {
+            var learnedAuth = authConfig(for: id)
+            if !learnedAuth.requiresOTP {
+                learnedAuth.requiresOTP = true
+                try await setAuthConfig(learnedAuth, for: id)
+            }
+        }
+
+        OnePasswordPreflight.markVerified()
+        if cacheForImmediateConnect {
+            let finalSource = credentialSource(for: id)
+            let finalAccount = OnePasswordAccountMemory.effectiveAccount(for: finalSource)
+            preparedOnePasswordSignIns[id] = PreparedOnePasswordSignIn(
+                reference: finalSource.reference,
+                account: finalAccount,
+                vault: finalSource.vault,
+                credentials: prepared.credentials,
+                expiresAt: PreparedOnePasswordSignIn.expiry(
+                    hasVerificationCode: prepared.inspection.hasVerificationCode))
+        }
+        return prepared
+    }
+
+    private func takePreparedOnePasswordSignIn(
+        for id: String, source: CredentialSource
+    ) -> RawCredentials? {
+        guard let cached = preparedOnePasswordSignIns.removeValue(forKey: id) else { return nil }
+        let account = OnePasswordAccountMemory.effectiveAccount(for: source)
+        return cached.matches(source, account: account) ? cached.credentials : nil
     }
 
     // MARK: - Can it serve, and where is it broken?
@@ -216,33 +321,17 @@ extension VPNController {
         var raw: RawCredentials
         do {
             if source.kind == .onePassword,
+               let prepared = takePreparedOnePasswordSignIn(for: id, source: source) {
+                raw = prepared
+            } else if source.kind == .onePassword,
                source.fieldMap.isEmpty,
                !source.reference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 // A drag deliberately records coordinates without opening
                 // 1Password. The first explicit Connect pays for one full-item
                 // read, derives the field roles, and uses the values from that
                 // very response. There is no inspect-then-resolve round trip.
-                let account = OnePasswordAccountMemory.effectiveAccount(for: source)
-                let prepared = try await OnePasswordProvider.prepareEntry(
-                    itemReference: source.reference, vault: source.vault, account: account)
-
-                var learnedSource = source
-                learnedSource.fieldMap = prepared.inspection.fieldMap
-                if learnedSource.vault.trimmingCharacters(in: .whitespaces).isEmpty,
-                   !prepared.inspection.vaultID.trimmingCharacters(in: .whitespaces).isEmpty {
-                    learnedSource.vault = prepared.inspection.vaultID
-                }
-                if learnedSource != source {
-                    try await setCredentialSource(learnedSource, for: id)
-                }
-
-                if prepared.inspection.hasVerificationCode, !hasStaticChallenge(id) {
-                    var learnedAuth = authConfig(for: id)
-                    if !learnedAuth.requiresOTP {
-                        learnedAuth.requiresOTP = true
-                        try await setAuthConfig(learnedAuth, for: id)
-                    }
-                }
+                let prepared = try await prepareLinkedOnePasswordEntry(
+                    for: id, cacheForImmediateConnect: false)
                 raw = prepared.credentials
             } else {
                 raw = try await provider.resolve(profile: id, fields: auth.request.fields)
@@ -268,5 +357,16 @@ extension VPNController {
             raw.otp = typedOTP
         }
         return .value(raw)
+    }
+}
+
+private enum OnePasswordLinkError: LocalizedError {
+    case missingAccountCoordinate
+
+    var errorDescription: String? {
+        switch self {
+        case .missingAccountCoordinate:
+            "That drag named the item but not its 1Password account. Drag the whole item row from 1Password, or set up an account first."
+        }
     }
 }

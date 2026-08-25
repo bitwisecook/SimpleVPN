@@ -172,16 +172,30 @@ struct CredentialSource: Codable, Sendable, Equatable {
     /// KeePassXC matches it against each entry's URL field). Keeper: the
     /// record's UID or its folder path ("Work/VPN/GR Lab"). Unused for manual.
     var reference = ""
+    /// A readable snapshot of the linked entry's name. The reference remains the
+    /// stable lookup coordinate; this is only what the person sees after a drag
+    /// or approved read, and is never sent back to the password app.
+    var referenceTitle = ""
     /// 1Password: WHICH ACCOUNT to ask — the name shown at the top of
     /// 1Password's sidebar, or its UUID. Not cosmetic: the SDK's desktop-app
     /// integration refuses to build a client without it ("Account not found")
     /// whenever it can't pick one on its own. Apple Passwords and KeePassXC:
     /// the account (username) when a server has several saved logins.
     var account = ""
+    /// 1Password's exact account coordinate from a whole-row drag. Kept apart
+    /// from `account`, which is the legacy typed/sidebar-name field, so an
+    /// opaque UUID can make authorization reliable without ever appearing in a
+    /// text field or picker.
+    var accountReference = ""
+    /// Readable snapshots for the two containers around a 1Password item. These
+    /// may be blank until 1Password has supplied a name; raw IDs are never used
+    /// as substitutes in the interface.
+    var accountTitle = ""
     /// 1Password only: which vault holds the item ("" = search them all).
     /// Separate from `account` — a vault names a drawer inside an account, and
     /// conflating the two is what made every 1Password fetch fail.
     var vault = ""
+    var vaultTitle = ""
 
     /// WHICH CONFIGURED SOURCE INSTANCE this VPN reads — level 2's id, stored at
     /// level 3 (see SignInSourceInstances.swift). "" means "the one SimpleVPN set
@@ -201,7 +215,9 @@ struct CredentialSource: Codable, Sendable, Equatable {
     var fieldMap: [String: String] = [:]
 
     var isDefault: Bool {
-        kind == .manual && reference.isEmpty && account.isEmpty && vault.isEmpty
+        kind == .manual && reference.isEmpty && referenceTitle.isEmpty
+            && account.isEmpty && accountReference.isEmpty && accountTitle.isEmpty
+            && vault.isEmpty && vaultTitle.isEmpty
             && instanceID.isEmpty && fieldMap.isEmpty
     }
 
@@ -219,7 +235,10 @@ struct CredentialSource: Codable, Sendable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         kind = try c.decodeIfPresent(CredentialSourceKind.self, forKey: .kind) ?? .manual
         reference = try c.decodeIfPresent(String.self, forKey: .reference) ?? ""
+        referenceTitle = try c.decodeIfPresent(String.self, forKey: .referenceTitle) ?? ""
         account = try c.decodeIfPresent(String.self, forKey: .account) ?? ""
+        accountReference = try c.decodeIfPresent(String.self, forKey: .accountReference) ?? ""
+        accountTitle = try c.decodeIfPresent(String.self, forKey: .accountTitle) ?? ""
         // Absent in every blob written before instances existed — and absent means
         // "the one SimpleVPN set up", which is exactly what makes those profiles
         // keep reading the database they always read.
@@ -230,6 +249,7 @@ struct CredentialSource: Codable, Sendable, Equatable {
         } else {
             vault = kind == .onePassword ? account : ""
         }
+        vaultTitle = try c.decodeIfPresent(String.self, forKey: .vaultTitle) ?? ""
     }
 
     func encodedBlob() -> Data? {
@@ -286,6 +306,10 @@ nonisolated struct ConnectInputs: Equatable, Sendable {
 
     // Credential collection (OpenVPN and the other typed-credential kinds).
     var managerKind: CredentialSourceKind = .manual
+    /// The selected password app has enough non-secret coordinates to make an
+    /// authorization request. False is setup, not missing typed input, so the
+    /// shared Connect controls block and guide the person back to the setup card.
+    var managerSourceConfigured = true
     var requiresOTP = false
     var biometricProtected = false
     var biometricStored = false
@@ -335,6 +359,7 @@ nonisolated struct ConnectInputs: Equatable, Sendable {
         // it cannot provide (Apple Passwords can't; 1Password and KeePassXC
         // can) still blocks.
         if managerKind != .manual {
+            if !managerSourceConfigured { return .blocked }
             let needsTypedCode = requiresOTP && !managerKind.suppliesOTP && !typedOTP
             return needsTypedCode ? .needsCode : .ready
         }

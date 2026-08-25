@@ -12,9 +12,8 @@ import SwiftUI
 
 // MARK: - Inspector column (live telemetry)
 
-/// The third column: everything that's alive while connected — the up/down graph,
-/// railroad diagram and full connection details. The endpoint globe belongs to the
-/// main connection pane, where it remains useful before a connection exists.
+/// The trailing inspector: the selected route is useful before connecting, followed
+/// by everything that's alive while connected — the up/down graph and full details.
 struct ConnectionInspectorView: View {   // was private — internal for the file split
     @Bindable var vpn: VPNController
     let profile: VPNController.Profile
@@ -27,8 +26,11 @@ struct ConnectionInspectorView: View {   // was private — internal for the fil
 
     var body: some View {
         ScrollView {
-            if live {
-                VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 16) {
+                EndpointSection(vpn: vpn, profile: profile, presentation: .globe)
+                    .frame(maxWidth: .infinity)
+                Divider()
+                if live {
                     HStack {
                         // Shared, app-wide throughput store → the graph keeps its
                         // history and never restarts empty on reopen.
@@ -48,15 +50,16 @@ struct ConnectionInspectorView: View {   // was private — internal for the fil
                                         publicIP: publicIP,
                                         paused: isPaused,
                                         bypassing: isPaused)
+                } else {
+                    ContentUnavailableView("Live Details",
+                        systemImage: "chart.line.uptrend.xyaxis",
+                        description: Text("Connect \(profile.name) to see live traffic and connection details."))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 24)
                 }
-                .padding(20)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                ContentUnavailableView("Live Details",
-                    systemImage: "chart.line.uptrend.xyaxis",
-                    description: Text("Connect \(profile.name) to see live traffic and connection details."))
-                    .padding(.top, 60)
             }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .navigationTitle("")
         .sheet(isPresented: $showTrafficLog) {

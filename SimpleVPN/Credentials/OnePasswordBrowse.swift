@@ -157,7 +157,10 @@ nonisolated enum OnePasswordAccountMemory {
     static func effectiveAccount(for source: CredentialSource,
                                  store settings: SignInSourceSettingsStore = .shared,
                                  in store: UserDefaults = .standard) -> String {
-        effective(profile: source.account,
+        let droppedCoordinate = source.accountReference
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !droppedCoordinate.isEmpty { return droppedCoordinate }
+        return effective(profile: source.account,
                   connection: connectionAccount(source.selection.instance, store: settings),
                   remembered: remembered(in: store))
     }

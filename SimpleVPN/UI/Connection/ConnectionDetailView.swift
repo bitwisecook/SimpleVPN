@@ -565,9 +565,8 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                         .matchedGeometryEffect(id: "connectedChip", in: connectedBannerNS)
                         .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
                 }
-                // The endpoint picker and its compact globe live HERE, always. The
-                // globe previews the selected route before connecting and turns blue
-                // only when telemetry confirms the endpoint in use.
+                // Endpoint choice stays beside Connect. Its route globe belongs only
+                // to the sidebar, where opening the navigation context reveals it.
                 EndpointSection(vpn: vpn, profile: profile)
                 if UI.isActive(profile.status) || vpn.isReconfiguring(profile.id) {
                     Divider()
@@ -647,6 +646,11 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
             if new == .connected {
                 FirstSuccessfulConnectionStore.markSucceeded(profile: profile.id)
                 neverConnected = false
+                // A successful sign-in is the completion of this walkthrough,
+                // including when a repair banner explicitly opened it. Leaving
+                // the entire setup form expanded afterwards made a working VPN
+                // continue to look unfinished.
+                showInlineSignInConfiguration = false
             }
         }
         // The big "Connected" banner shows for 5s on connect, then shrinks to

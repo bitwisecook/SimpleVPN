@@ -247,11 +247,10 @@ struct SimpleVPNApp: App {
                 }
                 .task { GeoIP.warm() }                 // parse the ~10 MB DB off-main
         }
-        // `main` is a stable scene identity, so macOS restores a person's chosen
-        // size and screen position on later launches. This is only the first-run
-        // shape: it comfortably holds the connection flow (including its compact
-        // globe) and the onboarding flow without starting either below the fold.
-        .defaultSize(width: 1_160, height: 900)
+        // `main` is a stable scene identity, so macOS restores position and any
+        // manually chosen size. Until the first live resize, ConnectionView makes
+        // a few content-state suggestions through its narrow SwiftUI window wrapper.
+        .defaultSize(width: 900, height: 660)
         .commands {
             CommandGroup(replacing: .newItem) {}   // no document "New"
             // SimpleVPN ▸ Install CLI… — links the bundled `simplevpn` tool onto
@@ -337,6 +336,14 @@ struct SimpleVPNApp: App {
                 .environment(manualRouter)
         }
         .defaultSize(width: 720, height: 640)
+        .commandsRemoved()
+
+        Window("Crash Reports", id: "crash-reports") {
+            CrashReportHistoryView(
+                facts: IssueReport.gather(vpn: vpn, tunnels: tunnels,
+                                          nativeVPN: nativeVPN, wireguard: wireguard))
+        }
+        .defaultSize(width: 820, height: 560)
         .commandsRemoved()
 
         Settings {

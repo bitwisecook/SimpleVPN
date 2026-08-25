@@ -252,9 +252,10 @@ extension ConnectionDetailView {
                 .help("macOS needs your permission before SimpleVPN can make VPN connections")
             )
         }
-        // NOT `.disabled(!canConnect)`: a dead button teaches nothing. It LOOKS
-        // disabled while input is missing, but a click walks the user to the fix —
-        // focus lands on the first empty required field and it gets a little shake.
+        // A control that cannot connect is disabled truthfully. The setup card and
+        // recovery notice immediately below it own the explanation and repair; an
+        // optimistic-looking Connect button must never be the first place somebody
+        // discovers that a linked password-app item is unusable.
         // Two-phase when an official Tailscale client is already running, both phases
         // yellow: "Connect Anyway" → "I Understand". The first press does NOT connect —
         // it arms, and bumps the warning below (a small double pulse) so the eye lands
@@ -264,7 +265,7 @@ extension ConnectionDetailView {
         let label = armed ? "I Understand" : (tailscaleConflict ? "Connect Anyway" : "Connect")
         return AnyView(
             Button(label) {
-                guard canConnect else { nudgeMissingInput(); return }
+                guard canConnect else { return }
                 if tailscaleConflict && !tailscaleConflictArmed {
                     withAnimation(reduceMotion ? nil : .snappy(duration: 0.2)) {
                         tailscaleConflictArmed = true
@@ -275,6 +276,7 @@ extension ConnectionDetailView {
                 connectTask = Task { await connect() }
             }
                 .buttonStyle(.glassProminent).controlSize(.large)
+                .disabled(!canConnect)
                 // Return connects from anywhere in the window that isn't a text
                 // field (the fields' own onSubmit already routes to the same
                 // attempt) — the visibly prominent button IS the default action.

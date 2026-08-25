@@ -36,6 +36,8 @@ nonisolated struct OnePasswordDrop: Sendable, Equatable, Identifiable, Hashable 
     var vault: String = ""
     var account: String = ""
     var title: String = ""
+    var vaultTitle: String = ""
+    var accountTitle: String = ""
     var id: String { "\(vault)/\(reference)" }
 
     /// What to show in a list: the real title when the drag gave one, otherwise
@@ -58,6 +60,8 @@ nonisolated struct OnePasswordDrop: Sendable, Equatable, Identifiable, Hashable 
         if title.isEmpty { title = other.title }
         if vault.isEmpty { vault = other.vault }
         if account.isEmpty { account = other.account }
+        if vaultTitle.isEmpty { vaultTitle = other.vaultTitle }
+        if accountTitle.isEmpty { accountTitle = other.accountTitle }
     }
 
     /// Does this reference look like one of 1Password's own ids (26 letters and

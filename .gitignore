@@ -7,6 +7,24 @@ xcuserdata/
 *.o
 *.d
 *.dia
+*.swiftconstvalues
+*.swiftdeps
+*.swiftmodule
+*.swiftdoc
+*.swiftsourceinfo
+*.pcm
+*.pch
+*.bc
+*.profraw
+*.gcda
+*.gcno
+*.a
+*.dylib
+*.so
+*.dSYM/
+*.xcresult/
+*.xcactivitylog
+.DS_Store
 
 # XcodeGen output — project.yml is the source of truth (run `xcodegen generate`)
 SimpleVPN.xcodeproj/

@@ -60,6 +60,7 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
     @State private var preflight = OnePasswordPreflightModel()
     @State private var isOnePasswordDropTargeted = false
     @State private var onePasswordDropError: String?
+    @State private var credentialDropMessage: String?
     @State private var onePasswordItems: [OnePasswordNative.OPItemInVault] = []
     @State private var loadingOnePasswordItems = false
     @State private var showOnePasswordBrowser = false
@@ -80,6 +81,7 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
     @State private var sources = SignInSourceAvailability.shared
     @State private var signInSettings = SignInSourceSettingsStore.shared
     @Environment(SettingsRouter.self) private var settingsRouter: SettingsRouter?
+    @Environment(\.openSettings) private var openSettings
 
     private var auth: VPNAuthConfig { vpn.authConfig(for: profile.id) }
     private var source: CredentialSource { vpn.credentialSource(for: profile.id) }
@@ -115,18 +117,43 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
-                GridRow {
-                    Text("Where your sign-in comes from")
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Where your sign-in comes from")
+                    .font(.callout.weight(.medium))
+                SignInSourcePicker(
+                    options: SignInSourceCatalog.options(facts),
+                    selection: selectedID,
+                    onChoose: choose)
+            }
+            .frame(maxWidth: 780, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Automatic setup", systemImage: "wand.and.stars")
+                    .font(.callout.weight(.semibold))
+                Text("Drop a sign-in item from 1Password or Apple Passwords. SimpleVPN detects where it came from, switches to that method, and runs its setup — regardless of which method is selected above.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                onePasswordWell
+                if source.kind == .onePassword, let linkedLocationDescription {
+                    Text(linkedLocationDescription)
+                        .font(.caption)
                         .foregroundStyle(.secondary)
-                        .gridColumnAlignment(.trailing)
-                    SignInSourcePicker(
-                        options: SignInSourceCatalog.options(facts),
-                        selection: selectedID,
-                        onChoose: choose)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
+                if let credentialDropMessage {
+                    Text(credentialDropMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let onePasswordDropError {
+                    Text(onePasswordDropError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .frame(maxWidth: 520, alignment: .leading)
 
             switch source.kind {
             case .manual:
@@ -373,7 +400,10 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
         // manager's deep check can launch its helper and therefore show that
         // manager's approval UI; it belongs to an explicit recheck, not to
         // merely opening the VPN window.
-        .onAppear { sources.refresh() }
+        .onAppear {
+            sources.refresh()
+            if opItemTitle.isEmpty { opItemTitle = source.referenceTitle }
+        }
         // Deliberately no task keyed on the linked 1Password item. A drop only
         // records coordinates; the ordinary Connect action is the first read,
         // so it is also the only Touch ID approval needed to get online.
@@ -530,6 +560,14 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                 // Connect guess field names and issue another 1Password request.
                 var updated = selection
                 var sourceChanged = false
+                if updated.referenceTitle != item.title {
+                    updated.referenceTitle = item.title
+                    sourceChanged = true
+                }
+                if !item.vaultTitle.isEmpty, updated.vaultTitle != item.vaultTitle {
+                    updated.vaultTitle = item.vaultTitle
+                    sourceChanged = true
+                }
                 if updated.fieldMap.isEmpty, !item.fieldMap.isEmpty {
                     updated.fieldMap = item.fieldMap
                     sourceChanged = true
@@ -569,6 +607,7 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
         let configured = OnePasswordAccountMemory.connectionAccount(
             selectedOnePasswordAccountID, store: signInSettings)
         return !configured.isEmpty
+            || !source.accountReference.trimmingCharacters(in: .whitespaces).isEmpty
             || !source.account.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
@@ -592,9 +631,12 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                                  onCheckAgain: { recheckOnePassword() })
 
             if onePasswordAccounts.isEmpty {
-                Button("Set Up 1Password Accounts…") { openOnePasswordAccountSettings() }
+                Divider().padding(.vertical, 2)
+                Text("Prefer to set it up manually?")
+                    .font(.callout.weight(.semibold))
+                Button("Set Up 1Password Manually…") { openOnePasswordAccountSettings() }
                     .buttonStyle(.glass)
-                Text("Drop an item below to set up its account automatically, or add a named account to browse 1Password first.")
+                Text("Add a friendly account name first, then connect and fuzzy-search your 1Password items inside SimpleVPN.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -609,15 +651,12 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                     .frame(maxWidth: 360, alignment: .leading)
                     .accessibilityHint("Chooses which named 1Password account this VPN uses. Internal account identifiers are not shown.")
             }
-
-            // The well is available before authorization and before an account
-            // has been named. A 1Password row drag already carries the account,
-            // vault and item coordinates needed to finish this non-secret link.
-            onePasswordWell
-            if let onePasswordDropError {
-                Text(onePasswordDropError)
+            if !source.reference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               !hasSelectedOnePasswordAccount {
+                Text("Drag \(linkedName) from 1Password again to restore its account link, or set up a named 1Password account above.")
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if !source.reference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 onePasswordEntryPreview
@@ -667,19 +706,23 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
         // The named connection owns the internal account identifier. Keeping a
         // second copy on the VPN would let a hidden UUID override the picker.
         updated.account = ""
+        updated.accountReference = ""
+        updated.accountTitle = id.flatMap { wanted in
+            onePasswordAccounts.first { $0.id == wanted }?.name
+        } ?? ""
         Task { try? await vpn.setCredentialSource(updated, for: profile.id) }
     }
 
     private func openOnePasswordAccountSettings() {
         settingsRouter?.go(to: SignInSourceSettings.instanceListSettingID(.onePassword))
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        openSettings()
         AccessibilityAnnouncer.sayNow("Opening 1Password account settings.")
     }
 
     /// The drag-in target: deliberately quiet at rest, with one animated down
     /// arrow to make the next action obvious without a bright, permanent callout.
     private var onePasswordWell: some View {
-        let linked = !source.reference.isEmpty
+        let linked = source.kind == .onePassword && !source.reference.isEmpty
         return VStack(spacing: 10) {
             Image(systemName: linked ? "checkmark.circle.fill"
                                      : isOnePasswordDropTargeted
@@ -687,8 +730,8 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
                 .font(.system(size: 30))
             Text(linked ? "Linked to \(linkedName) — drag another item to change"
                         : isOnePasswordDropTargeted
-                            ? "Release to use this 1Password item"
-                            : "Or drag the item from 1Password here")
+                            ? "Release to use this password item"
+                            : "Drag a password-manager item here — source detected automatically")
                 .font(.headline)
         }
             .foregroundStyle((linked || isOnePasswordDropTargeted)
@@ -711,16 +754,16 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
             // one destination. Do not hoist this onto the conditional setup
             // container, where controls, transitions and unrelated drop
             // destinations complicate AppKit's target negotiation.
-            .onDrop(of: OnePasswordDropItem.acceptedContentTypes,
+            .onDrop(of: CredentialItemDrop.acceptedContentTypes,
                     isTargeted: $isOnePasswordDropTargeted,
-                    perform: acceptOnePasswordDrop)
+                    perform: acceptCredentialDrop)
             .onChange(of: isOnePasswordDropTargeted) { _, targeted in
                 OnePasswordDropItem.logTargeting(targeted)
             }
             // One element with the well's own words; the drag itself has no
             // keyboard path, so say where the keyboard-operable one lives.
             .accessibilityElement(children: .combine)
-            .accessibilityHint("Drag the item from 1Password, or use Browse 1Password to select it without dragging.")
+            .accessibilityHint("Drop an item from 1Password or Apple Passwords. SimpleVPN detects its source even when another method is selected.")
             .popover(isPresented: Binding(get: { !choices.isEmpty },
                                           set: { if !$0 { choices = [] } })) {
                 VStack(alignment: .leading, spacing: 8) {
@@ -735,16 +778,25 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
             }
     }
 
-    /// The same small SwiftUI boundary used by OnePasswordProbe. Everything
-    /// after acceptance is domain work and must not influence hit testing.
-    private func acceptOnePasswordDrop(_ providers: [NSItemProvider]) -> Bool {
-        guard OnePasswordDropItem.canAccept(providers) else { return false }
+    /// One destination, independent of the selected source. The payload decides
+    /// what happens next; the source buttons are only the manual path.
+    private func acceptCredentialDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard CredentialItemDrop.canAccept(providers) else { return false }
         let snapshot = OnePasswordDropItem.activeDragSnapshot()
         Task {
-            guard let drops = await onePasswordDrops.collect(
-                providers, dragSnapshot: snapshot
-            ) else { return }
-            receiveOnePasswordDrops(drops)
+            onePasswordDropError = nil
+            credentialDropMessage = nil
+            switch await CredentialItemDrop.source(from: providers) {
+            case .onePassword:
+                guard let drops = await onePasswordDrops.collect(
+                    providers, dragSnapshot: snapshot
+                ) else { return }
+                receiveOnePasswordDrops(drops)
+            case let .applePasswords(hint):
+                await receiveApplePasswordsDrop(hint)
+            case nil:
+                onePasswordDropError = "SimpleVPN couldn’t identify that password manager’s drag format. Select its method above to set it up manually."
+            }
         }
         return true
     }
@@ -759,6 +811,34 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
             choices = drops
         } else {
             link(first)
+        }
+    }
+
+    /// Apple Passwords deliberately drops only non-secret display metadata. The
+    /// explicit drag still tells us which provider was intended, so select it
+    /// and immediately continue into Apple's authorized credential chooser.
+    private func receiveApplePasswordsDrop(_ hint: ApplePasswordsDropHint) async {
+        var updated = source
+        updated.kind = .applePasswords
+        updated.reference = hint.protectionSpaces.first ?? profile.server
+        updated.referenceTitle = hint.title
+        updated.account = ""
+        updated.accountReference = ""
+        updated.accountTitle = ""
+        updated.vault = ""
+        updated.vaultTitle = ""
+        updated.fieldMap = [:]
+        try? await vpn.setCredentialSource(updated, for: profile.id)
+
+        let item = hint.title.isEmpty ? "the dropped item" : "“\(hint.title)”"
+        credentialDropMessage = "Apple Passwords recognized \(item). Authorize the matching saved password in macOS’s secure chooser."
+        do {
+            useApplePassword(try await ApplePasswordsPicker.choose())
+            credentialDropMessage = "Apple Passwords supplied the sign-in for this connection."
+        } catch is CancellationError {
+            credentialDropMessage = "Apple Passwords is selected. Use Choose from Apple Passwords when you’re ready to authorize the sign-in."
+        } catch {
+            onePasswordDropError = "Apple Passwords couldn’t supply that sign-in: \(error.localizedDescription)"
         }
     }
 
@@ -788,7 +868,11 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
         link(OnePasswordDrop(reference: item.itemID,
                              vault: item.vaultID,
                              account: account,
-                             title: item.title))
+                             title: item.title,
+                             vaultTitle: item.vaultTitle,
+                             accountTitle: selectedOnePasswordAccountID.flatMap { wanted in
+                                 onePasswordAccounts.first { $0.id == wanted }?.name
+                             } ?? ""))
     }
 
     /// Apply a chosen row. Two things are stored, not one: WHERE the sign-in
@@ -892,9 +976,24 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
     /// A dragged item is linked by its 1Password id — exact, and immune to
     /// renaming, but not something to read back at anyone.
     private var linkedName: String {
-        OnePasswordDrop.looksLikeItemID(source.reference)
+        let title = source.referenceTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty { return "\u{201C}\(title)\u{201D}" }
+        return OnePasswordDrop.looksLikeItemID(source.reference)
             ? "your 1Password item"
             : "\u{201C}\(source.reference)\u{201D}"
+    }
+
+    /// Readable context captured when the item was linked or first approved.
+    /// A raw account/vault coordinate is intentionally never used as fallback.
+    private var linkedLocationDescription: String? {
+        var parts: [String] = []
+        let account = source.accountTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let vault = source.vaultTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !account.isEmpty, account != "1Password" {
+            parts.append("Account “\(account)”")
+        }
+        if !vault.isEmpty { parts.append("Vault “\(vault)”") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     /// Point this VPN's sign-in at a dropped item. The 1Password payload carries
@@ -903,11 +1002,21 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
     /// account to ask.
     private func link(_ dropped: OnePasswordDrop) {
         choices = []
+        loadingOPFields = true
         Task {
+            defer { loadingOPFields = false }
             do {
                 try await vpn.linkOnePasswordEntry(dropped, for: profile.id)
+                let prepared = try await vpn.prepareLinkedOnePasswordEntry(
+                    for: profile.id, cacheForImmediateConnect: true)
+                opItemTitle = prepared.inspection.title
+                opFields = prepared.inspection.fields
+                opInspection = prepared.inspection
+                preflight.note(.ready(vaults: []))
             } catch {
-                vpn.lastError = "Couldn’t link the 1Password entry: \(error.localizedDescription)"
+                if !(error is CancellationError) {
+                    vpn.lastError = "Couldn’t read the linked 1Password entry: \(error.localizedDescription)"
+                }
             }
         }
     }

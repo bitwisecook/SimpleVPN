@@ -18,6 +18,22 @@
 
 import Foundation
 import Testing
+
+@Suite("Credential item drop source detection")
+struct CredentialItemDropSourceTests {
+    @Test func applePasswordsOpaqueDragMetadataIsRecognisedWithoutTreatingItAsASecret() throws {
+        let raw = #"{"id":"customTitle=grlab; user=jamesde; protectionSpaces=[https:19128959-590B-443E-88AD-8AA026D2409F]; passkey_rpid=nil; passkey_credentialID=nil; groupID=nil;"}"#
+        let hint = try #require(ApplePasswordsDropHint.parse(Data(raw.utf8)))
+        #expect(hint.title == "grlab")
+        #expect(hint.username == "jamesde")
+        #expect(hint.protectionSpaces == ["https:19128959-590B-443E-88AD-8AA026D2409F"])
+    }
+
+    @Test func arbitraryPublicDataIsNotMisidentifiedAsApplePasswords() {
+        #expect(ApplePasswordsDropHint.parse(Data("not a credential".utf8)) == nil)
+        #expect(ApplePasswordsDropHint.parse(Data(#"{"id":"ordinary"}"#.utf8)) == nil)
+    }
+}
 @testable import SimpleVPN
 
 struct CredentialSourceTests {
@@ -32,14 +48,22 @@ struct CredentialSourceTests {
         var source = CredentialSource()
         source.kind = .onePassword
         source.reference = "GR Lab VPN"
+        source.referenceTitle = "GR Lab"
         source.vault = "Private"
+        source.vaultTitle = "Private"
         source.account = "Secure Vault"
+        source.accountReference = "A2C4E6G8J2L4N6P8R2T4V6X8Z2"
+        source.accountTitle = "Secure Vault"
         source.fieldMap = ["username": "username", "otp": "one-time password"]
 
         let decoded = roundTrip(source)
         #expect(decoded == source)
         #expect(decoded.vault == "Private")
         #expect(decoded.account == "Secure Vault")
+        #expect(decoded.referenceTitle == "GR Lab")
+        #expect(decoded.accountReference == "A2C4E6G8J2L4N6P8R2T4V6X8Z2")
+        #expect(decoded.accountTitle == "Secure Vault")
+        #expect(decoded.vaultTitle == "Private")
     }
 
     @Test func defaultSourceStoresNothing() {
@@ -314,6 +338,13 @@ struct ConnectReadinessTests {
         var i = ConnectInputs(); i.kind = .openVPN
         i.managerKind = .applePasswords
         #expect(i.readiness == .ready)
+    }
+
+    @Test func passwordAppWithoutItsCoordinatesBlocksConnect() {
+        var i = ConnectInputs(); i.kind = .openVPN
+        i.managerKind = .onePassword
+        i.managerSourceConfigured = false
+        #expect(i.readiness == .blocked)
     }
 
     // MARK: - Touch ID-protected sign-in

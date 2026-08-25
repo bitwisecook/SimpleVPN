@@ -51,6 +51,7 @@ struct OnePasswordProvider: CredentialProvider {
     struct EntryInspection: Sendable, Equatable {
         let title: String
         let vaultID: String
+        let vaultTitle: String
         let fields: [OPField]
         let fieldMap: [String: String]
         let username: String?
@@ -103,6 +104,25 @@ struct OnePasswordProvider: CredentialProvider {
         return map
     }
 
+    /// A valid local 1Password connection can lose the race that creates its
+    /// delegated SDK session.  It is a transport failure before 1Password has
+    /// answered anything about the requested account or item, and live evidence
+    /// shows the identical request succeeds immediately afterwards.  Retry only
+    /// that signature, once; every semantic or user-controlled failure remains a
+    /// first-class result.
+    private static func retryingTransientDelegatedSession<T>(
+        _ operation: () async throws -> T
+    ) async throws -> T {
+        do {
+            return try await operation()
+        } catch let error as OnePasswordNativeError
+            where error.isTransientDelegatedSessionTransportFailure {
+            Self.log.notice("1Password delegated session transport failed; retrying once")
+            try await Task.sleep(for: .milliseconds(250))
+            return try await operation()
+        }
+    }
+
     /// Inspect precisely one linked entry.  This centralises the three things
     /// every UI surface needs to agree on: which fields 1Password identified,
     /// how they map to VPN roles, and which values may be acknowledged without
@@ -114,9 +134,11 @@ struct OnePasswordProvider: CredentialProvider {
         guard !r.isEmpty else { throw OPError.noReference }
         let item: OnePasswordNative.OPItem
         do {
-            item = try await OnePasswordNative.getItem(
-                reference: r, vault: vault.trimmingCharacters(in: .whitespaces),
-                account: account.trimmingCharacters(in: .whitespaces))
+            item = try await retryingTransientDelegatedSession {
+                try await OnePasswordNative.getItem(
+                    reference: r, vault: vault.trimmingCharacters(in: .whitespaces),
+                    account: account.trimmingCharacters(in: .whitespaces))
+            }
         } catch let error as OnePasswordNativeError {
             if case .userCancelled = error { throw CancellationError() }
             throw error
@@ -139,6 +161,7 @@ struct OnePasswordProvider: CredentialProvider {
         let raw = credentials(from: item, map: map)
         let inspection = EntryInspection(
             title: item.title, vaultID: item.vaultID,
+            vaultTitle: item.vaultTitle ?? "",
             fields: fields, fieldMap: map,
             username: raw.username,
             hasPassword: raw.password?.isEmpty == false,
@@ -196,9 +219,11 @@ struct OnePasswordProvider: CredentialProvider {
             let passphraseRef = fieldMap[AuthKind.privateKeyPassphrase.rawValue]
                 .flatMap { $0.isEmpty ? nil : "op://\(vault)/\(ref)/\($0)" }
             do {
-                let values = try await OnePasswordNative.resolve(
-                    refs: Array(refs.values) + (passphraseRef.map { [$0] } ?? []),
-                    account: account.trimmingCharacters(in: .whitespaces))
+                let values = try await Self.retryingTransientDelegatedSession {
+                    try await OnePasswordNative.resolve(
+                        refs: Array(refs.values) + (passphraseRef.map { [$0] } ?? []),
+                        account: account.trimmingCharacters(in: .whitespaces))
+                }
                 return RawCredentials(
                     username: refs[.username].flatMap { values[$0] },
                     password: refs[.password].flatMap { values[$0] },
@@ -229,9 +254,11 @@ struct OnePasswordProvider: CredentialProvider {
         // here — works with a bare title/UUID and no vault.
         let item: OnePasswordNative.OPItem
         do {
-            item = try await OnePasswordNative.getItem(
-                reference: ref, vault: vault,
-                account: account.trimmingCharacters(in: .whitespaces))
+            item = try await Self.retryingTransientDelegatedSession {
+                try await OnePasswordNative.getItem(
+                    reference: ref, vault: vault,
+                    account: account.trimmingCharacters(in: .whitespaces))
+            }
         } catch let e as OnePasswordNativeError {
             if case .userCancelled = e { throw CancellationError() }
             throw e
@@ -296,9 +323,9 @@ struct OnePasswordProvider: CredentialProvider {
     /// empty Vault field is quietly back-filled from.
     static func listFields(itemReference ref: String, vault: String,
                            account: String = "") async throws
-        -> (title: String, vaultID: String, fields: [OPField]) {
+        -> (title: String, vaultID: String, vaultTitle: String, fields: [OPField]) {
         let inspection = try await inspectEntry(itemReference: ref, vault: vault, account: account)
-        return (inspection.title, inspection.vaultID, inspection.fields)
+        return (inspection.title, inspection.vaultID, inspection.vaultTitle, inspection.fields)
     }
 
     // MARK: Field selection

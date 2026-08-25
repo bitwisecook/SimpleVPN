@@ -17,6 +17,18 @@ import Testing
 @MainActor
 struct CrashDiagnosticsTests {
 
+    @Test func equivalentCrashesAtDifferentTimesAreDifferentOccurrences() {
+        let first = CrashReport(signature: "same-stack", when: Date(timeIntervalSince1970: 100),
+                                appVersion: "10", kind: "SIGTRAP", reason: nil,
+                                frames: ["frame"])
+        let later = CrashReport(signature: "same-stack", when: Date(timeIntervalSince1970: 101),
+                                appVersion: "10", kind: "SIGTRAP", reason: nil,
+                                frames: ["frame"])
+
+        #expect(first.signature == later.signature)
+        #expect(first.id != later.id)
+    }
+
     @Test func appKitReportedExceptionsAreRecorded() throws {
         CrashDiagnostics.install()
 

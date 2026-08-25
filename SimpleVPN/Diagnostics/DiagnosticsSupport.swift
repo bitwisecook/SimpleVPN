@@ -86,6 +86,26 @@ struct DiagnosticsCommands: Commands {
             Button("Capture Debug Log (Scrubbed)…") { save(.scrubbed) }
             Button("Capture Debug Log (Full)…") { save(.full) }
             Divider()
+            Menu("Crash Reports") {
+                let reports = CrashDiagnostics.retainedReports()
+                if reports.isEmpty {
+                    Button("No reports from the last 72 hours") {}
+                        .disabled(true)
+                } else {
+                    ForEach(reports) { crash in
+                        Button(crashMenuTitle(crash)) {
+                            CrashReportSelection.shared.request(crash.id)
+                            openWindow(id: "crash-reports")
+                        }
+                    }
+                    Divider()
+                    Button("Show All Crash Reports…") {
+                        CrashReportSelection.shared.request(nil)
+                        openWindow(id: "crash-reports")
+                    }
+                }
+            }
+            Divider()
             // Both reports live in About, where the guided sheets (and the "what
             // will be shared" review) already are.
             // The guided report: asks what you were doing, gathers the tool
@@ -133,6 +153,10 @@ struct DiagnosticsCommands: Commands {
         ]
         capture.secrets = tunnels.tunnels.map(\.username).filter { !$0.isEmpty }
         Task { await capture.captureAndSave(variant) }
+    }
+
+    private func crashMenuTitle(_ report: CrashReport) -> String {
+        "Build \(report.appVersion) — \(report.when.formatted(date: .abbreviated, time: .shortened))"
     }
 }
 

@@ -604,6 +604,10 @@ final class VPNController {
         var otp = ""
     }
     var transientCreds: [String: TransientCredentials] = [:]
+    /// One 1Password approval performed immediately after a drag may feed the
+    /// next Connect, but never disk. The entry removes itself on first use and
+    /// expires before the current verification-code window closes.
+    @ObservationIgnored var preparedOnePasswordSignIns: [String: PreparedOnePasswordSignIn] = [:]
     var persistTask: Task<Void, Never>?   // was private — internal for the +File split
 
     var credentialSources: [String: CredentialSource] = [:]   // was private(set) — internal for the +File split

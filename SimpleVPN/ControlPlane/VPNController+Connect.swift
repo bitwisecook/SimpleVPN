@@ -101,6 +101,7 @@ extension VPNController {
 
     func setCredentialSource(_ source: CredentialSource, for id: String) async throws {
         guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
+        preparedOnePasswordSignIns.removeValue(forKey: id)
         guard let mgr = managers[id],
               let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { return }
         var conf = proto.providerConfiguration ?? [:]
@@ -574,6 +575,14 @@ extension VPNController {
 
         inputs.autologin = isAutologin(id)
         inputs.managerKind = effectiveCredentialKind(for: id)
+        if inputs.managerKind != .manual {
+            let source = credentialSource(for: id)
+            let hasEntry = !source.reference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let hasAccount = source.kind != .onePassword
+                || !OnePasswordAccountMemory.effectiveAccount(for: source)
+                    .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            inputs.managerSourceConfigured = hasEntry && hasAccount
+        }
         inputs.requiresOTP = effectiveAuthConfig(for: id).requiresOTP
         inputs.hasLockedUsername = !(profileEvaluation(for: id)?.userlockedUsername.isEmpty ?? true)
         let c = transientCredentials(for: id)

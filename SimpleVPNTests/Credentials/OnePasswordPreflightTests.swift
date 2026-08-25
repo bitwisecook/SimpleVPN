@@ -30,6 +30,10 @@ struct OnePasswordPreflightTests {
         + "Make sure Settings > Developer > Integrate with other apps is enabled, "
         + "or contact 1Password support"
 
+    private static let delegatedSessionTransportFailure =
+        "error initializing client: Internal error: Failed to create delegated session, "
+        + "inner: Failed to delegate a session, inner: IoError(error sending request for url (<redacted URL>))"
+
     private func scratchDefaults(_ name: String = #function) -> UserDefaults {
         let suite = "OnePasswordPreflightTests.\(name)"
         UserDefaults.standard.removePersistentDomain(forName: suite)
@@ -97,6 +101,17 @@ struct OnePasswordPreflightTests {
     @Test func missingAppIsItsOwnState() {
         #expect(OnePasswordPreflight.outcome(for: OnePasswordNativeError.appNotInstalled)
                 == .notInstalled)
+    }
+
+    @Test func onlyDelegatedSessionTransportFailureIsSilentlyRetryable() {
+        #expect(OnePasswordNativeError.other(Self.delegatedSessionTransportFailure)
+            .isTransientDelegatedSessionTransportFailure)
+        #expect(!OnePasswordNativeError.other("Account not found")
+            .isTransientDelegatedSessionTransportFailure)
+        #expect(!OnePasswordNativeError.userCancelled
+            .isTransientDelegatedSessionTransportFailure)
+        #expect(!OnePasswordNativeError.itemNotFound("Grlab")
+            .isTransientDelegatedSessionTransportFailure)
     }
 
     // MARK: - A refused spawn is not an answer about 1Password

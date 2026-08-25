@@ -3,7 +3,7 @@
 //
 //  EndpointSection.swift
 //  Endpoint choice for a VPN: the dropdown is the canonical control and full
-//  accessibility path. Its compact main-window globe previews the selected route
+//  accessibility path. Its inspector globe previews the selected route
 //  in grey, then turns it blue only after tunnel telemetry confirms the endpoint
 //  actually in use. Servers are grouped under region headings and offered
 //  quickest-first where we've measured them, nearest-first where we haven't.
@@ -16,18 +16,21 @@
 import SwiftUI
 
 struct EndpointSection: View {
+    enum Presentation { case picker, globe }
+
     @Bindable var vpn: VPNController
     let profile: VPNController.Profile
+    var presentation: Presentation = .picker
 
     @Environment(EndpointLocator.self) private var locator
     @Environment(PublicIPMonitor.self) private var publicIP
     @Environment(EndpointProbeStore.self) private var probes: EndpointProbeStore?
     @Environment(ReachabilityMonitor.self) private var reach: ReachabilityMonitor?
 
-    /// Eight centimetres is the maximum *drawn globe* diameter. The Metal surface
-    /// itself is wider (2:1) so the surrounding card never claims this is a
-    /// full-window map. It remains allowed to shrink with a narrow detail pane.
-    private static let previewGlobeDiameter: CGFloat = 8 / 2.54 * 72
+    /// A useful globe inside the trailing inspector. The square shader surface
+    /// avoids the empty horizontal space needed by the old detail-pane 2:1
+    /// presentation while leaving room for live connection details below it.
+    private static let inspectorGlobeDiameter: CGFloat = 220
 
     private var endpoints: [VPNEndpoint] { vpn.endpoints(for: profile.id) }
 
@@ -72,13 +75,13 @@ struct EndpointSection: View {
         let groups = groups
         if !endpoints.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
-                if endpoints.count > 1 {
+                if presentation == .picker, endpoints.count > 1 {
                     picker(groups)
                     Text(EndpointRegions.orderExplanation(groups, home: home, connected: connected))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-                routePreview
+                if presentation == .globe { routePreview }
             }
             // Opening a VPN's page is the user asking about its servers, so this
             // is a fair moment to measure them — and the only kind of moment that
@@ -97,12 +100,8 @@ struct EndpointSection: View {
 
     @ViewBuilder
     private var routePreview: some View {
-        if let home, let endpoint = previewEndpoint, let point = endpoint.point {
+        if let endpoint = previewEndpoint, let point = endpoint.point {
             let isLive = liveEndpoint?.id == endpoint.id
-            let userPin = MapPin(id: "preview.home", kind: .user,
-                                 lat: home.lat, lon: home.lon,
-                                 title: publicIP.homeCountryName ?? "Your location",
-                                 subtitle: "This Mac")
             let endpointPin = MapPin(
                 id: "preview.endpoint.\(endpoint.id)",
                 kind: .endpoint(selected: true),
@@ -110,25 +109,57 @@ struct EndpointSection: View {
                 title: endpoint.primaryLabel,
                 subtitle: isLive ? "Connected server" : "Selected server",
                 placement: endpoint.endpoint.country == nil && endpoint.geoPoint != nil ? .exact : .approximate)
-            let link = MapConnection(from: userPin.id, to: endpointPin.id,
-                                     kind: isLive ? .tunnel : .pending)
 
             VStack(alignment: .leading, spacing: 5) {
-                MetalGlobeMapView(pins: [userPin, endpointPin], connections: [link],
-                                   maximumGlobeDiameter: Self.previewGlobeDiameter,
-                                   usesMetalSurface: false) { id in
-                    guard id == endpointPin.id else { return }
-                    select(endpoint.endpoint)
+                Group {
+                    if let home {
+                        let userPin = MapPin(id: "preview.home", kind: .user,
+                                             lat: home.lat, lon: home.lon,
+                                             title: publicIP.homeCountryName ?? "Your location",
+                                             subtitle: "This Mac")
+                        let link = MapConnection(from: userPin.id, to: endpointPin.id,
+                                                 kind: isLive ? .tunnel : .pending)
+                        MetalGlobeMapView(pins: [userPin, endpointPin], connections: [link],
+                                          maximumGlobeDiameter: Self.inspectorGlobeDiameter,
+                                          surfaceAspectRatio: 1) { id in
+                            guard id == endpointPin.id else { return }
+                            select(endpoint.endpoint)
+                        }
+                    } else {
+                        // Public-location lookup is optional. The earth and known
+                        // server must not disappear merely because the route's
+                        // starting point is not available yet.
+                        MetalGlobeMapView(pins: [endpointPin],
+                                          maximumGlobeDiameter: Self.inspectorGlobeDiameter,
+                                          surfaceAspectRatio: 1) { id in
+                            guard id == endpointPin.id else { return }
+                            select(endpoint.endpoint)
+                        }
+                    }
                 }
                 .frame(maxWidth: .infinity)
-                Text(isLive
-                     ? "Connected route — blue shows the server in use."
-                     : "Selected route — grey until it connects.")
+                Text(home == nil
+                     ? "Selected server — your location is not available yet."
+                     : isLive
+                        ? "Connected route — blue shows the server in use."
+                        : "Selected route — grey until it connects.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
             }
             .accessibilityElement(children: .contain)
+        } else {
+            VStack(alignment: .leading, spacing: 5) {
+                // DNS/GeoIP can still be resolving. Keep the textured globe in
+                // its stable place rather than collapsing the entire preview.
+                MetalGlobeMapView(pins: [], maximumGlobeDiameter: Self.inspectorGlobeDiameter,
+                                  surfaceAspectRatio: 1)
+                    .frame(maxWidth: .infinity)
+                Text("Locating the selected server…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
         }
     }
 

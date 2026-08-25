@@ -807,6 +807,22 @@ struct SecondVPNReusesConnectionTests {
         #expect(OnePasswordAccountMemory.connectionAccount(selected, store: store) == uuid)
     }
 
+    /// The coordinate stored with the VPN is the durable source of truth. It
+    /// survives an app-wide account-list reset and must outrank a stale default.
+    @Test func aDroppedAccountCoordinateOutranksTheConfiguredDefault() throws {
+        let (store, defaults) = settings()
+        let configured = try #require(store.instanceStore.add(named: "Personal", for: .onePassword))
+        store.setValue("personal.1password.com", for: accountField, instance: configured)
+
+        var vpn = CredentialSource()
+        vpn.kind = .onePassword
+        vpn.reference = "ITEMUUID"
+        vpn.accountReference = "A2C4E6G8J2L4N6P8R2T4V6X8Z2"
+
+        #expect(OnePasswordAccountMemory.effectiveAccount(
+            for: vpn, store: store, in: defaults) == vpn.accountReference)
+    }
+
     /// If setup has already created the friendly row, the drop completes that
     /// row rather than adding a duplicate or asking the user to type the
     /// account coordinate as well.
