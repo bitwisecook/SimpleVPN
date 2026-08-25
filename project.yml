@@ -39,7 +39,7 @@ settings:
     SWIFT_VERSION: "6.0"                       # Swift 6 language mode = complete/strict concurrency
     SWIFT_APPROACHABLE_CONCURRENCY: YES
     SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
-    MARKETING_VERSION: "0.4"
+    MARKETING_VERSION: "0.5"
     # Kept in lockstep with the committed BUILDNUMBER by the BuildNumber
     # dependency below. Xcode resolves this default before that dependency
     # runs, so the two product targets stamp the newly allocated value into
