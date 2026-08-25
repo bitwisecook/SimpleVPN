@@ -40,10 +40,11 @@ settings:
     SWIFT_APPROACHABLE_CONCURRENCY: YES
     SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
     MARKETING_VERSION: "0.4"
-    # Kept in lockstep with the committed BUILDNUMBER by
-    # Tools/bump-build-number.sh. This is the Debug/Xcode default; release
-    # builds pass the same committed value explicitly.
-    CURRENT_PROJECT_VERSION: "186"
+    # Kept in lockstep with the committed BUILDNUMBER by the BuildNumber
+    # dependency below. Xcode resolves this default before that dependency
+    # runs, so the two product targets stamp the newly allocated value into
+    # their generated plists before signing.
+    CURRENT_PROJECT_VERSION: "191"
     # Xcode "recommended settings" we accept (signing stays Developer ID, ARCHS stays arm64 by design).
     DEAD_CODE_STRIPPING: YES
     ENABLE_USER_SCRIPT_SANDBOXING: YES
@@ -57,6 +58,21 @@ settings:
     COPY_PHASE_STRIP: NO
 
 targets:
+  # Runs exactly once before the PacketTunnel/app dependency graph for every
+  # Xcode Build action (Run, Test, Profile and Archive all build). A legacy
+  # target is intentional here: XcodeGen documents it as the dependency form
+  # that executes once even when several targets depend on it. Clean does not
+  # invoke it. The product targets stamp the allocated number into their
+  # generated Info.plists below, after Xcode has frozen its build settings.
+  BuildNumber:
+    type: ""
+    platform: macOS
+    legacy:
+      toolPath: /bin/bash
+      arguments: '"$(SRCROOT)/Tools/bump-build-number.sh"'
+      passSettings: true
+      workingDirectory: "$(SRCROOT)"
+
   # ---- Containing app (SwiftUI, macOS only) ----
   SimpleVPN:
     type: application
@@ -77,6 +93,10 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.bragi0.SimpleVPN
+        # The final build-number phase must edit Xcode's generated Info.plist
+        # in place. Xcode's script sandbox treats declared inputs as read-only,
+        # so this target-local exception is required; all paths remain explicit.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
         # Zero warnings is ENFORCED, not aspirational (see AGENTS.md). Set per OUR
         # targets rather than project-wide so the Sparkle SPM dependency is never
         # compiled under -Werror. Third-party headers reached through our bridging
@@ -149,6 +169,21 @@ targets:
           - "$(BUILT_PRODUCTS_DIR)/simplevpn"
         outputFiles:
           - "$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/simplevpn"
+      # CURRENT_PROJECT_VERSION is resolved before the BuildNumber dependency
+      # runs. Depending on the generated plist orders this after
+      # ProcessInfoPlistFile; Xcode's CodeSign task remains after build phases.
+      - name: Apply monotonic build number
+        basedOnDependencyAnalysis: false
+        inputFiles:
+          - "$(SRCROOT)/BUILDNUMBER"
+          - "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)"
+        script: |
+          IFS= read -r BUILD_NUMBER < "${SRCROOT}/BUILDNUMBER"
+          case "${BUILD_NUMBER}" in
+            ''|*[!0-9]*) echo "FATAL: invalid allocated build number: ${BUILD_NUMBER}" >&2; exit 1 ;;
+          esac
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER}" "${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
+          echo "==> stamped ${FULL_PRODUCT_NAME} build ${BUILD_NUMBER}"
     dependencies:
       - target: PacketTunnel
         embed: true
@@ -197,6 +232,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.bragi0.SimpleVPN.PacketTunnel
+        # See the app target: the final build-number phase performs the same
+        # ordered in-place edit before this system extension is signed.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
         # Zero warnings is ENFORCED, not aspirational (see AGENTS.md).
         SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
         GCC_TREAT_WARNINGS_AS_ERRORS: YES
@@ -260,7 +298,24 @@ targets:
           - "USE_OPENSSL=1"
           - "USE_TUN_BUILDER=1"
           - "FMT_HEADER_ONLY=1"
+    postBuildScripts:
+      # Keep the embedded engine on the exact same allocated build as its
+      # containing app. SystemExtensionManager uses this equality to decide
+      # whether an installed engine needs an upgrade.
+      - name: Apply monotonic build number
+        basedOnDependencyAnalysis: false
+        inputFiles:
+          - "$(SRCROOT)/BUILDNUMBER"
+          - "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)"
+        script: |
+          IFS= read -r BUILD_NUMBER < "${SRCROOT}/BUILDNUMBER"
+          case "${BUILD_NUMBER}" in
+            ''|*[!0-9]*) echo "FATAL: invalid allocated build number: ${BUILD_NUMBER}" >&2; exit 1 ;;
+          esac
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER}" "${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
+          echo "==> stamped ${FULL_PRODUCT_NAME} build ${BUILD_NUMBER}"
     dependencies:
+      - target: BuildNumber
       - sdk: NetworkExtension.framework
       - sdk: Security.framework
       - sdk: SystemConfiguration.framework

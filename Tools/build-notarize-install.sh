@@ -19,23 +19,21 @@ elif [ -n "${1:-}" ]; then
   exit 64
 fi
 
-# Monotonic build number so you can confirm the running app is this build.
-# The helper updates both the committed source of truth and Xcode's Debug
-# default; leaving one at its old value is how reports once said build 1 while
-# the release/appcast said 120.
+# Every Xcode build allocates its own monotonic build number through the
+# BuildNumber target. This wrapper deliberately does not bump separately: that
+# would consume two numbers for one build. --reuse-build performs no build and
+# therefore preserves the reused artifact's number.
 APP="$DD/Build/Products/Release/SimpleVPN.app"
 ZIP="$REPO/build/SimpleVPN.zip"
 if "$REUSE_EXISTING_BUILD"; then
-  BUILDNO="$(tr -d '\n' < "$REPO/BUILDNUMBER")"
   if [ ! -d "$APP" ]; then
     echo "ERROR: no existing Release app at $APP" >&2
     exit 1
   fi
+  BUILDNO="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")"
   echo "==> reusing build number $BUILDNO"
 else
-  BUILDNO="$("$REPO/Tools/bump-build-number.sh")"
   ( cd "$REPO" && xcodegen generate )
-  echo "==> build number $BUILDNO"
 fi
 
 # Notary credentials passed directly (keychain-profile lookups are unreliable in
@@ -55,7 +53,6 @@ build_once() {
     -destination 'generic/platform=macOS' -derivedDataPath "$DD" \
     CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
     OTHER_CODE_SIGN_FLAGS="--timestamp" \
-    CURRENT_PROJECT_VERSION="$BUILDNO" \
     clean build
 }
 n=0
@@ -64,6 +61,8 @@ until build_once; do
   if [ "$n" -ge 3 ]; then echo "ERROR: Release build failed after $n attempts"; exit 1; fi
   echo "   build failed (likely transient TSA/codesign) — retry $n in 8s…"; sleep 8
 done
+BUILDNO="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")"
+echo "==> built version $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist") (build $BUILDNO)"
 fi
 
 echo "==> re-sign Sparkle nested executables (notary requires our Developer ID + timestamp)"

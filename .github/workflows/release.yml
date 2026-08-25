@@ -267,19 +267,21 @@ jobs:
           set -euo pipefail
           # NOTARY_KEY / NOTARY_KEYID / NOTARY_ISSUER were exported into
           # $GITHUB_ENV by import-signing.sh and are already in scope here.
-          # Build number comes from the committed BUILDNUMBER (the dev loop's
-          # counter), so the released app reports the same version and build
-          # the local build did. It only ever increments, which is exactly what
-          # Sparkle's version comparison needs.
-          CURRENT_PROJECT_VERSION="$(cat BUILDNUMBER)"
-          export CURRENT_PROJECT_VERSION
-          PROJECT_BUILD="$(awk -F'"' '/CURRENT_PROJECT_VERSION:/ {print $2; exit}' project.yml)"
-          test "$PROJECT_BUILD" = "$CURRENT_PROJECT_VERSION" \
-            || { echo "BUILDNUMBER ($CURRENT_PROJECT_VERSION) and project.yml ($PROJECT_BUILD) differ"; exit 1; }
-          echo "buildno=$CURRENT_PROJECT_VERSION" >> "$GITHUB_OUTPUT"
+          # Validate the checked-in counter before Xcode allocates this build's
+          # next value. The BuildNumber dependency runs exactly once inside the
+          # build, just as it does for local Run/Test/Profile/Archive actions.
+          Tools/bump-build-number.sh --check >/dev/null
           VERSION="${GITHUB_REF_NAME#v}"
           Tools/build-release-dmg.sh "$VERSION"
           DMG="build/dist/SimpleVPN-${VERSION}-arm64.dmg"
+          BUILT_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' build/dd/Build/Products/Release/SimpleVPN.app/Contents/Info.plist)"
+          COUNTER_BUILD="$(tr -d '[:space:]' < BUILDNUMBER)"
+          PROJECT_BUILD="$(awk -F'"' '/CURRENT_PROJECT_VERSION:/ {print $2; exit}' project.yml)"
+          test "$BUILT_BUILD" = "$COUNTER_BUILD" \
+            || { echo "built app ($BUILT_BUILD) and BUILDNUMBER ($COUNTER_BUILD) differ"; exit 1; }
+          test "$PROJECT_BUILD" = "$COUNTER_BUILD" \
+            || { echo "project.yml ($PROJECT_BUILD) and BUILDNUMBER ($COUNTER_BUILD) differ"; exit 1; }
+          echo "buildno=$BUILT_BUILD" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
 
@@ -288,8 +290,8 @@ jobs:
       # always serves the newest release's copy, so each release only has to
       # describe itself). Sparkle's tools come from its own release tarball,
       # pinned by version AND sha256 — same no-floating-third-party-code policy
-      # as the SHA-pinned actions. sparkle:version is the committed BUILDNUMBER,
-      # matching the CURRENT_PROJECT_VERSION baked into this very build.
+      # as the SHA-pinned actions. sparkle:version is read back from the app
+      # produced by this build, so the feed can never lag the signed bundle.
       - name: Generate Sparkle appcast
         env:
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}

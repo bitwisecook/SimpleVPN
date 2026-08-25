@@ -15,10 +15,10 @@
 #     `git describe --tags --exact-match` with a leading "v" stripped, then the
 #     MARKETING_VERSION literal in project.yml (so a plain local run still
 #     produces a sensibly-named DMG instead of erroring out).
-#   BUILDNO resolves from $CURRENT_PROJECT_VERSION env, else the committed
-#     BUILDNUMBER. CI passes that same value explicitly. There is deliberately
-#     no machine-local fallback: a second counter made two artifacts impossible
-#     to compare from their About/diagnostic reports.
+#   BUILDNO is allocated by the Xcode BuildNumber dependency. Every actual
+#     build—local Debug/Test/Archive and CI distribution alike—advances the same
+#     committed counter once. This script reads the produced app's value after
+#     the build instead of allocating a second number itself.
 #
 # Notarization credentials: set NOTARY_KEY/NOTARY_KEYID/NOTARY_ISSUER (CI path)
 # or leave unset to fall back to the local ~/.asc credential store — see
@@ -51,15 +51,7 @@ if [ -z "$VERSION" ]; then
   exit 1
 fi
 
-BUILDNO="${CURRENT_PROJECT_VERSION:-$(tr -d '[:space:]' < "$REPO/BUILDNUMBER")}"
-case "$BUILDNO" in
-  ''|*[!0-9]*) echo "FATAL: build number must be a positive integer: $BUILDNO"; exit 1 ;;
-esac
-if [ "$BUILDNO" -lt 1 ]; then
-  echo "FATAL: build number must be greater than zero: $BUILDNO"; exit 1
-fi
-
-echo "==> SimpleVPN release build: version=$VERSION build=$BUILDNO"
+echo "==> SimpleVPN release build: version=$VERSION"
 
 DD="$REPO/build/dd"
 APP="$DD/Build/Products/Release/SimpleVPN.app"
@@ -90,7 +82,6 @@ build_once() {
     CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
     OTHER_CODE_SIGN_FLAGS="--timestamp" \
     MARKETING_VERSION="$VERSION" \
-    CURRENT_PROJECT_VERSION="$BUILDNO" \
     clean build
 }
 n=0
@@ -99,6 +90,9 @@ until build_once; do
   if [ "$n" -ge 3 ]; then echo "ERROR: Release build failed after $n attempts"; exit 1; fi
   echo "   build failed (likely transient TSA/codesign) — retry $n in 8s…"; sleep 8
 done
+
+BUILDNO="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")"
+echo "==> produced version $VERSION (build $BUILDNO)"
 
 echo "==> re-sign Sparkle nested executables (notary requires our Developer ID + timestamp)"
 "$REPO/Tools/resign-sparkle.sh" "$APP"

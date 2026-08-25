@@ -22,19 +22,39 @@ struct BuildNumberTests {
         let project = try text("project.yml")
         let match = try #require(project.firstMatch(of: /CURRENT_PROJECT_VERSION:\s*"([0-9]+)"/))
         let projectBuildNumber = try #require(Int(match.output.1))
-
         #expect(projectBuildNumber == buildNumber)
     }
 
-    @Test("release entry points use the committed build counter")
+    @Test("every Xcode app build allocates and stamps one monotonic number")
+    func xcodeBuildGraphOwnsBuildNumberAllocation() throws {
+        let project = try text("project.yml")
+
+        #expect(project.contains("BuildNumber:"))
+        #expect(project.contains("legacy:"))
+        #expect(project.contains("Tools/bump-build-number.sh"))
+        #expect(project.contains("- target: BuildNumber"))
+        #expect(project.components(separatedBy: "name: Apply monotonic build number").count - 1 == 2,
+                "the app and its system extension must stamp the same allocated number")
+        #expect(project.components(separatedBy: "Set :CFBundleVersion ${BUILD_NUMBER}").count - 1 == 2)
+        #expect(project.components(separatedBy: "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)").count - 1 == 2,
+                "each phase must depend on Xcode's processed plist so it runs afterwards")
+        #expect(project.components(separatedBy: "ENABLE_USER_SCRIPT_SANDBOXING: NO").count - 1 == 2,
+                "Xcode otherwise makes the generated plist input read-only")
+    }
+
+    @Test("distribution entry points read the number Xcode actually produced")
     func releaseEntryPointsHaveNoSecondCounter() throws {
         let releaseBuild = try text("Tools/build-release-dmg.sh")
         let localBuild = try text("Tools/build-notarize-install.sh")
         let workflow = try text(".github/workflows/release.yml")
 
-        #expect(releaseBuild.contains("$REPO/BUILDNUMBER"))
+        #expect(releaseBuild.contains("Print :CFBundleVersion"))
         #expect(!releaseBuild.contains("build/buildnumber.txt"))
-        #expect(localBuild.contains("Tools/bump-build-number.sh"))
-        #expect(workflow.contains("BUILDNUMBER ($CURRENT_PROJECT_VERSION) and project.yml"))
+        #expect(!releaseBuild.contains("Tools/bump-build-number.sh"),
+                "the Xcode dependency—not a wrapper—must allocate the number")
+        #expect(localBuild.contains("Print :CFBundleVersion"))
+        #expect(!localBuild.contains("Tools/bump-build-number.sh"))
+        #expect(workflow.contains("BUILT_BUILD="))
+        #expect(workflow.contains("buildno=$BUILT_BUILD"))
     }
 }

@@ -102,19 +102,24 @@ git push origin v0.2.0
 
 Pushing a tag matching `v*` triggers `.github/workflows/release.yml`. The
 version embedded in the app (`MARKETING_VERSION`) comes from the tag with the
-leading `v` stripped; the build number (`CURRENT_PROJECT_VERSION`) is the
-**committed `BUILDNUMBER` file at the repo root**, read verbatim by
-`release.yml` (`CURRENT_PROJECT_VERSION="$(cat BUILDNUMBER)"`). That is the
-same counter `Tools/build-notarize-install.sh` bumps on every local live-test
-build, and the sharing is deliberate: a released app reports the same
-`v<marketing version> (<build number>)` the dev loop showed, and the appcast's
-`sparkle:version` is that same number, so Sparkle's version comparison lines
-up with what users see.
-`github.run_number` is deliberately NOT used. `Tools/bump-build-number.sh` is
-the only way to advance the counter: it updates both `BUILDNUMBER` and
-`project.yml`'s Debug default, after which XcodeGen regenerates the project.
-`Tools/build-release-dmg.sh` reads that same committed counter when no explicit
-build number is supplied; it has no machine-local fallback.
+leading `v` stripped. Every Xcode Build action—Run, Test, Profile, Archive,
+local distribution and CI distribution—first builds the `BuildNumber` legacy
+dependency. It calls `Tools/bump-build-number.sh` exactly once, advancing the
+committed `BUILDNUMBER` file and `project.yml` together. Clean does not consume
+a number.
+
+Xcode freezes `CURRENT_PROJECT_VERSION` before scheme pre-actions run, so a
+normal pre-build bump would affect only the next artifact. To avoid that
+off-by-one trap, the app and packet-tunnel targets stamp the newly allocated
+number into their generated Info.plists in final build phases, before Xcode
+signs them. Each phase declares the generated plist as an input, which orders
+it after Xcode's `ProcessInfoPlistFile` task. Xcode's script sandbox must be
+disabled on those two targets because it makes declared inputs read-only;
+without that narrow exception the in-place stamp is denied. Distribution
+scripts read `CFBundleVersion` back from the produced app; the release workflow
+uses that exact value as the appcast's
+`sparkle:version`. `github.run_number` and machine-local fallback counters are
+deliberately not used.
 
 The Sparkle appcast is generated in the same job: it is written to
 `build/dist/appcast.xml`, uploaded as an artifact, and served from
