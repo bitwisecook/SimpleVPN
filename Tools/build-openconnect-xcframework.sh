@@ -22,7 +22,7 @@ PIN=v9.21                 # openconnect release tag — bump deliberately
 # against another's OpenSSL → ABI skew / corruption. Keep this constant IDENTICAL
 # across build-openvpn3 / build-openconnect / build-libssh, and bump all three
 # together. The guard below fails loudly if Homebrew drifts from the pin.
-OPENSSL_PIN="3.6.3"
+OPENSSL_PIN="3.6.4"
 MIN=26.0
 ARCH=arm64
 
@@ -35,7 +35,9 @@ echo "==> Homebrew deps"
 for f in autoconf automake libtool pkg-config openssl@3 lz4; do
   brew list "$f" >/dev/null 2>&1 || brew install "$f"
 done
-O3="$(brew --prefix openssl@3)"; LZ4="$(brew --prefix lz4)"
+# Use deployment-compatible static libraries on hosts with newer Homebrew bottles.
+O3="${OPENSSL_ROOT_DIR:-$(brew --prefix openssl@3)}"
+LZ4="${LZ4_ROOT_DIR:-$(brew --prefix lz4)}"
 SDK="$(xcrun --show-sdk-path)"   # system libxml2 headers live here
 
 # Enforce the OpenSSL pin so this build is reproducible and stays byte-aligned
@@ -52,7 +54,7 @@ fi
 # policy as OpenSSL (see build-openvpn3-xcframework.sh's BREW_PINS block): a
 # `brew upgrade` between two rebuilds must not change the shipped binary quietly.
 LZ4_PIN="1.10.0"
-have_lz4="$(brew list --versions lz4 2>/dev/null | awk '{print $2}')"
+have_lz4="$(awk '/^Version:/ {print $2; exit}' "$LZ4/lib/pkgconfig/liblz4.pc")"
 if [ "$have_lz4" != "$LZ4_PIN" ]; then
   echo "FATAL: lz4 is ${have_lz4:-not installed} but the pin is $LZ4_PIN."
   echo "       Align Homebrew or bump LZ4_PIN here and in build-openvpn3-xcframework.sh's"
@@ -75,7 +77,12 @@ export LIBXML2_LIBS="-lxml2"
 
 echo "==> configure (static, OpenSSL backend, system libxml2, CLI extras off)"
 cd "$WORK"
-[ -x ./configure ] || ./autogen.sh
+# Recreate Automake's auxiliary links too: a Homebrew tool upgrade can leave
+# configure executable while compile/install-sh/config.* point at a removed keg.
+if [ ! -x ./configure ] || [ ! -f compile ] || [ ! -f missing ] \
+   || [ ! -f install-sh ] || [ ! -f config.guess ] || [ ! -f config.sub ]; then
+  ./autogen.sh
+fi
 ./configure \
   --host="$ARCH-apple-darwin" \
   --with-openssl --without-gnutls \

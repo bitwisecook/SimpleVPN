@@ -99,7 +99,7 @@ sign-in left the process; the tunnel did not.
 **The three OpenSSL-bearing archives are `libOpenVPNEngine.a`, `libOpenConnectEngine.a` and
 `libSSHEngine.a`**, built by `Tools/build-openvpn3-xcframework.sh`,
 `Tools/build-openconnect-xcframework.sh` and `Tools/build-libssh-xcframework.sh`. All three set
-`OPENSSL_PIN="3.6.3"` and abort the build if Homebrew disagrees. `project.yml` states the mechanism
+`OPENSSL_PIN="3.6.4"` and abort the build if Homebrew disagrees. `project.yml` states the mechanism
 exactly: because the pins match, the OpenSSL object files are byte-identical and ld64's lazy archive
 loading pulls **exactly one copy**; a divergent pin surfaces as a duplicate-symbol link failure at the
 `SSHEngine.xcframework` dependency.
@@ -235,7 +235,7 @@ complexity rather than overriding them.
 
 **The coupling, exactly.** Three archives statically carry OpenSSL and all three co-link into one
 binary. `build-openvpn3-xcframework.sh:18`, `build-openconnect-xcframework.sh:25` and
-`build-libssh-xcframework.sh:33` each set `OPENSSL_PIN="3.6.3"` and hard-fail:
+`build-libssh-xcframework.sh:33` each set `OPENSSL_PIN="3.6.4"` and hard-fail:
 
 > `FATAL: openssl@3 is $have_ssl but the pin is $OPENSSL_PIN.`
 > `Align Homebrew or bump OPENSSL_PIN in ALL THREE engine scripts, then rebuild all three.`

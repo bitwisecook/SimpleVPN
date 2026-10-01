@@ -19,7 +19,7 @@ Tunnelblick replacement. The tunnel runs in a Network Extension **system extensi
 ## Building
 
 Requires Xcode 26+, [XcodeGen](https://github.com/yonaskolb/XcodeGen), Homebrew
-(`cmake`, `openssl@3`, `lz4`) for the C engine builds, and a Go toolchain for the two
+(`cmake`, `openssl@3`, `lz4`) for the C engine builds, and Go 1.27.1+ for the two
 Go static archives (1Password SDK, Tailscale/Headscale engine).
 
 ```sh
@@ -31,6 +31,16 @@ Go static archives (1Password SDK, Tailscale/Headscale engine).
 xcodegen generate                       # project.yml is the source of truth
 open SimpleVPN.xcodeproj
 ```
+
+On Xcode 27, install the Metal compiler component with
+`xcodebuild -downloadComponent MetalToolchain` before building the app.
+Native static libraries must support macOS 26. If Homebrew supplies bottles for
+a newer host OS, set `OPENSSL_ROOT_DIR`, `LZ4_ROOT_DIR`, and `LIBFIDO2_ROOT_DIR`
+to installations built for macOS 26 when running the three native engine scripts.
+Their versions must match the scripts' pins; all three engines must use the same
+OpenSSL installation. Go archives explicitly target macOS 26 regardless of the host SDK.
+See [Docs/Drift.md §14](Docs/Drift.md#14-engine-dependency-pins--coordinated-versions--keep-separate)
+for the WireGuard and gVisor compatibility constraints.
 
 `Tools/build-notarize-install.sh` produces a notarized Release build and installs it to
 `/Applications` (Developer ID signing; see `AGENTS.md` for signing conventions).

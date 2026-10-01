@@ -30,7 +30,7 @@ PIN=0.12.2                # libssh release — bump deliberately (update SHA256 
 # the build must stop rather than compile it.
 TARBALL_SHA256="49560f677d96e3706a904ac2de1116e25f3680937d51e5c92198fcba4a1c1e9f"
 # Keep IDENTICAL across all three engine scripts (see build-openconnect for why).
-OPENSSL_PIN="3.6.3"
+OPENSSL_PIN="3.6.4"
 # Homebrew formulae compiled INTO this engine — same policy as OPENSSL_PIN and
 # build-openvpn3-xcframework.sh's BREW_PINS: a `brew upgrade` between two rebuilds
 # must not change the shipped binary quietly.
@@ -54,7 +54,9 @@ CBOR_TARBALL="$REPO/build/libcbor-$CBOR_PIN.tar.gz"
 
 echo "==> Homebrew deps"
 for f in cmake openssl@3 libfido2; do brew list "$f" >/dev/null 2>&1 || brew install "$f"; done
-O3="$(brew --prefix openssl@3)"; FIDO2="$(brew --prefix libfido2)"
+# Use deployment-compatible static libraries on hosts with newer Homebrew bottles.
+O3="${OPENSSL_ROOT_DIR:-$(brew --prefix openssl@3)}"
+FIDO2="${LIBFIDO2_ROOT_DIR:-$(brew --prefix libfido2)}"
 
 have_ssl="$("$O3/bin/openssl" version 2>/dev/null | awk '{print $2}')"
 if [ "$have_ssl" != "$OPENSSL_PIN" ]; then
@@ -65,7 +67,7 @@ fi
 
 for spec in $BREW_PINS; do
   f="${spec%%=*}"; want="${spec#*=}"
-  have="$(brew list --versions "$f" 2>/dev/null | awk '{print $2}')"
+  have="$(awk '/^Version:/ {print $2; exit}' "$FIDO2/lib/pkgconfig/$f.pc")"
   if [ "$have" != "$want" ]; then
     echo "FATAL: $f is ${have:-not installed} but the pin is $want."
     echo "       Align Homebrew (brew install/switch $f) or bump BREW_PINS in this script"
