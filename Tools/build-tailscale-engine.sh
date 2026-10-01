@@ -23,10 +23,14 @@
 # and no hardware.
 set -euo pipefail
 
+# Keep cgo objects compatible with the app's deployment target on newer Xcode.
+export CGO_CFLAGS="-mmacosx-version-min=26.0 ${CGO_CFLAGS:-}"
+export CGO_LDFLAGS="-mmacosx-version-min=26.0 ${CGO_LDFLAGS:-}"
+
 # Pin exactly, never float — bump deliberately (must match go.mod). Even minor
-# versions are Tailscale's stable releases; .1 is the settled patch for 1.102.
+# versions are Tailscale's stable releases.
 TS_MODULE="tailscale.com"
-TS_VERSION="v1.102.1"
+TS_VERSION="v1.102.5"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$REPO/Vendor/tailscale-engine/src"

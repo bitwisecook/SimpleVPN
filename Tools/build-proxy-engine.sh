@@ -27,10 +27,16 @@
 # the project's STRIP_INSTALLED_PRODUCT=NO crash-report policy.
 set -euo pipefail
 
+# Match the shipping Tailscale archive and app's macOS deployment target.
+export CGO_CFLAGS="-mmacosx-version-min=26.0 ${CGO_CFLAGS:-}"
+export CGO_LDFLAGS="-mmacosx-version-min=26.0 ${CGO_LDFLAGS:-}"
+
 # Pin exactly, never float — must match go.mod (and the Tailscale engine's pin,
 # since both fold into one archive; gVisor is the shared dependency).
+# Resolve updates with gvisor.dev/gvisor@go: @latest selects the Bazel-only
+# master branch, which cannot be compiled with standard Go tooling.
 GVISOR_MODULE="gvisor.dev/gvisor"
-GVISOR_VERSION="v0.0.0-20260224225140-573d5e7127a8"
+GVISOR_VERSION="v0.0.0-20260930000514-4c7ae5e19a78"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$REPO/Vendor/proxy-engine/src"

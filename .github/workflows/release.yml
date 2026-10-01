@@ -50,14 +50,12 @@ concurrency:
 # workflow's own ${{ github.token }} via `permissions: contents: write` below.
 #
 # Third-party actions: none. Every `uses:` below is an official `actions/*`
-# action pinned to its major version tag (@v4) — GitHub's own convention for
-# these, and low-risk since they never see the signing secrets (imported via
-# our own Tools/ci/import-signing.sh, not an action). The GitHub Release
+# action pinned to a release commit SHA. Signing secrets are imported via
+# our own Tools/ci/import-signing.sh, not an action. The GitHub Release
 # itself is created with the preinstalled `gh` CLI rather than a marketplace
 # action (e.g. softprops/action-gh-release) specifically so nothing from
 # outside github/actions/* ever executes in the job that (briefly) holds the
-# Developer ID private key. If tighter supply-chain pinning is ever wanted,
-# swap the @v4 tags for the actions' current release commit SHAs.
+# Developer ID private key. Keep the release SHA pins when updating actions.
 # ---------------------------------------------------------------------------
 
 jobs:
@@ -88,7 +86,7 @@ jobs:
     outputs:
       cache-hit: ${{ steps.cache.outputs.cache-hit }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -137,7 +135,7 @@ jobs:
       # will silently miss for release.yml (and vice versa).
       - name: Restore engines cache
         id: cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             Vendor/OpenVPNEngine.xcframework
@@ -173,7 +171,7 @@ jobs:
             if [ ! -e "$p" ]; then echo "FATAL: missing $p"; exit 1; fi
           done
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: engines
           path: |
@@ -194,7 +192,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Select Xcode + verify macOS 26 SDK
         run: |
@@ -209,7 +207,7 @@ jobs:
       - name: Install xcodegen
         run: brew install xcodegen
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: engines
           path: Vendor
@@ -297,8 +295,8 @@ jobs:
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          SPARKLE_VER=2.9.4
-          SPARKLE_SHA256=ce89daf967db1e1893ed3ebd67575ed82d3902563e3191ca92aaec9164fbdef9
+          SPARKLE_VER=2.10.0
+          SPARKLE_SHA256=c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c
           curl -sL -o /tmp/sparkle.tar.xz \
             "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VER}/Sparkle-${SPARKLE_VER}.tar.xz"
           echo "${SPARKLE_SHA256}  /tmp/sparkle.tar.xz" | shasum -a 256 -c -
@@ -332,7 +330,7 @@ jobs:
       # inspect rather than losing the whole run's output.
       - name: Upload DMG artifact
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: SimpleVPN-dmg
           path: |

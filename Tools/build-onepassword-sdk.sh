@@ -14,6 +14,11 @@
 # matching the project's STRIP_INSTALLED_PRODUCT=NO crash-report policy.
 set -euo pipefail
 
+# cgo otherwise inherits the host SDK's deployment target (27 on Xcode 27),
+# producing an archive that cannot satisfy the app's macOS 26 deployment target.
+export CGO_CFLAGS="-mmacosx-version-min=26.0 ${CGO_CFLAGS:-}"
+export CGO_LDFLAGS="-mmacosx-version-min=26.0 ${CGO_LDFLAGS:-}"
+
 # Pin exactly, never float — bump deliberately (must match go.mod).
 SDK_MODULE="github.com/1password/onepassword-sdk-go"
 SDK_VERSION="v0.4.1"

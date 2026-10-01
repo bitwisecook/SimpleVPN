@@ -43,7 +43,7 @@ echo "==> engine scripts pin openssl@3 to $OPENSSL_PIN"
 
 have_ssl=""
 if brew list --versions openssl@3 >/dev/null 2>&1; then
-  have_ssl="$(brew list --versions openssl@3 | awk '{print $2}')"
+  have_ssl="$("$(brew --prefix openssl@3)/bin/openssl" version | awk '{print $2}')"
 fi
 
 if [ "$have_ssl" = "$OPENSSL_PIN" ]; then
@@ -51,24 +51,9 @@ if [ "$have_ssl" = "$OPENSSL_PIN" ]; then
 else
   echo "==> installed openssl@3 is '${have_ssl:-<none>}', pin wants $OPENSSL_PIN — installing pinned version"
 
-  # Homebrew-core commit known to carry openssl@3 == OPENSSL_PIN. This is NOT
-  # something that could be determined or verified from this sandbox (no
-  # network access to browse homebrew-core's git history), so it is left as an
-  # override with an honestly-imperfect default of "master": on the day this
-  # is first run, `brew list --versions openssl@3` on this dev box already
-  # reports 3.6.3 == OPENSSL_PIN, so master happens to work *right now*, but
-  # master will drift the moment homebrew-core bumps the formula and this
-  # script's whole reason to exist is to NOT track master. Whoever wires this
-  # workflow up for real should:
-  #   1. `git -C "$(brew --repository homebrew/core)" log -p -- Formula/o/openssl@3.rb`
-  #      (or browse github.com/Homebrew/homebrew-core history) to find the
-  #      commit whose formula version == $OPENSSL_PIN, and
-  #   2. set HOMEBREW_CORE_COMMIT_FOR_OPENSSL_PIN to that commit SHA as a repo
-  #      variable/secret, or hardcode it here with a comment recording which
-  #      OPENSSL_PIN it corresponds to.
-  # The engine scripts' own guard below (in install() and in the three
-  # engine build scripts) is what actually catches it if this is wrong.
-  HOMEBREW_CORE_COMMIT="${HOMEBREW_CORE_COMMIT_FOR_OPENSSL_PIN:-master}"
+  # Verified formula snapshot for OpenSSL 3.6.4 (Homebrew revision 1).
+  # Update this SHA alongside OPENSSL_PIN; never default to moving master.
+  HOMEBREW_CORE_COMMIT="${HOMEBREW_CORE_COMMIT_FOR_OPENSSL_PIN:-070af00fb0a104b18bb5e1a7c2be36b0177b917e}"
   FORMULA_URL="https://raw.githubusercontent.com/Homebrew/homebrew-core/${HOMEBREW_CORE_COMMIT}/Formula/o/openssl@3.rb"
 
   TAP_DIR="$(brew --repository)/Library/Taps/local/homebrew-pin"

@@ -302,6 +302,36 @@ the banner. A future visual copy cannot quietly bring this failure class back.
 
 ---
 
+## 14. Engine dependency pins — coordinated versions ✅ KEEP SEPARATE
+
+The native engine scripts each statically bundle OpenSSL, so their `OPENSSL_PIN`
+values must agree. The proxy module is folded into the Tailscale archive, so its
+gVisor requirement and `build-proxy-engine.sh` must match the version selected by
+the Tailscale module. Sparkle's package version in `project.yml` and the release
+workflow's appcast tools must agree too; both now use 2.10.0.
+
+**Compatibility boundary (2026-09-30):** Tailscale 1.102.5 requires wireguard-go
+`v0.0.0-20260715223240-2e01ba5b00f0`. The newer Tailscale-branch revision
+`45a234e5a70d` changes `tun.Device.Read` and `tun.GSOSplit`, and Tailscale's own
+`net/tstun` no longer compiles against it. Keep the release's WireGuard pin until
+a stable Tailscale release adopts that API; update them together. The comment
+beside the requirement in `Vendor/tailscale-engine/src/go.mod` points here, and
+the existing real WireGuard handshake tests run before its archive is built.
+
+gVisor updates must resolve **`@go`**, not `@latest`: upstream's default branch
+requires Bazel and lacks the source layout needed by standard Go tooling. The
+2026-09-30 Go-branch revision is pinned in both modules and the proxy build script.
+
+**Verdict: KEEP SEPARATE — each engine builds independently, with coordinated
+pins.** Verify all engine archives whenever a shared dependency changes.
+
+**App verification pending for the 2026-09-30 update:** all Go engine checks and
+archive builds passed, but the full app build stopped because Xcode 27's Metal
+compiler component is absent. Its component download stalled. After installing
+it, rerun the `AGENTS.md` macOS build command and `SimpleVPNTests` against these
+updated dependencies. Use macOS 26-compatible native libraries as described in
+`README.md` to avoid newer-host Homebrew deployment-target warnings.
+
 ## Adding to this file
 
 Two occasions, and both are cheap:
