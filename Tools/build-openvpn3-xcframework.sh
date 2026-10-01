@@ -68,7 +68,7 @@ git -C "$WORK" fetch --tags origin >/dev/null 2>&1 || true
 git -C "$WORK" checkout -q "$PIN"
 
 DEFS=(-DASIO_STANDALONE -DHAVE_LZ4 -DUSE_ASIO -DUSE_OPENSSL -DUSE_TUN_BUILDER -DFMT_HEADER_ONLY)
-INC=(-I"$WORK" -isystem "$O3/include" -isystem "$BREW_INC")
+INC=(-I"$WORK" -isystem "$O3/include" -isystem "$LZ4/include" -isystem "$BREW_INC")
 CXX=(clang++ -std=c++20 -arch "$ARCH" -mmacosx-version-min="$MIN" -fvisibility=hidden -O2 "${DEFS[@]}" "${INC[@]}")
 
 # Only two TUs of openvpn3 are non-header-only for the pinned core; the rest is
