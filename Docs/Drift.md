@@ -387,6 +387,30 @@ while an earlier asynchronous save is active, without retaining a pending latest
 these findings. Neither disabling the audit nor claiming UI state equals saved state is
 a resolution.
 
+## 18. Routing preview and execution plus virtual interface ownership ⚠️ COLLAPSE PENDING
+
+The 2026-10-05 [network architecture review](NetworkArchitectureReview.md) records two
+implementations of the routing decision: filtered `RouteIntent` → `RouteArbiter.plan`
+for inspection, and unfiltered live-profile owner resolution in `RouteMediator` for
+execution. They can disagree on Ignore-default. `RoutePlan` also has no edited-prefix
+payload for the live engine. **COLLAPSE:** one complete, versioned plan must drive both
+preview and execution. The review lists delayed/failing-ack integration tests required
+to close this finding; existing pure arbiter/filter tests do not close it.
+
+OS network settings and packet pumps are separately owned by `PacketTunnelProvider`,
+the OpenVPN/OpenConnect bridges and the Swift engine wrappers. That separation fits
+today's independent provider sessions, but the single virtual interface proposal
+cannot retain it. **KEEP SEPARATE in compatibility mode; COLLAPSE ownership in router
+mode:** one capture pump and settings writer, with engines exposing scoped packet/flow
+ports and publishing intent. Preserve OpenVPN's family prefix inside its adapter.
+
+The Go TS/WG/PX APIs and Swift static callback references are single-instance per
+process; PX is shared by Proxy Tunnel and SSH Network Tunnel. Their existing independent
+profile arrangement must not be mistaken for a registry that can host multiple engines
+inside one routing provider. Read the review's compatibility table and completion tests
+before extracting a second implementation. The architecture review adds no runtime
+router or fix for these gaps.
+
 ## Adding to this file
 
 Two occasions, and both are cheap:
