@@ -140,6 +140,10 @@ struct SimpleVPNApp: App {
                     vpn.handleImport(of: appDelegate.openBuffer.take())
                 }
                 .task {
+                    let vpn = self.vpn
+                    let evaluator = self.evaluator
+                    let tunnels = self.tunnels
+                    let nativeVPN = self.nativeVPN
                     // Home (pre-VPN) vs egress (while connected) hinges on this.
                     // "Engaged", not "connected": the tunnel owns the default
                     // route before it says it is up.

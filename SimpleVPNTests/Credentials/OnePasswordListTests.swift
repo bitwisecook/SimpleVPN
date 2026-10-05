@@ -148,12 +148,15 @@ struct OnePasswordListTests {
             .appendingPathComponent("SimpleVPN/UI/Connection/FirstConnectSetupCard.swift"), encoding: .utf8)
 
         let linkStart = try #require(auth.range(of: "func linkOnePasswordEntry"))
-        let linkEnd = try #require(auth.range(of: "// MARK: - Can it serve", range: linkStart.upperBound..<auth.endIndex))
+        let linkEnd = try #require(auth.range(of: "\n    }\n", range: linkStart.upperBound..<auth.endIndex))
         let linkBody = String(auth[linkStart.lowerBound..<linkEnd.lowerBound])
         #expect(!linkBody.contains("OnePasswordNative"))
         #expect(!linkBody.contains("prepareEntry"))
         #expect(!linkBody.contains("inspectEntry"))
-        #expect(setup.contains("The well is available before authorization and before an account"))
+        let body = try #require(setup.range(of: "var body: some View"))
+        let sourceSwitch = try #require(setup.range(of: "switch source.kind", range: body.upperBound..<setup.endIndex))
+        #expect(setup[body.upperBound..<sourceSwitch.lowerBound].contains("onePasswordWell"),
+                "the drop well must remain outside the source-specific authorization controls")
     }
 
     @Test func explicitFirstConnectCanOverrideOnlyTheCachedOnePasswordGate() throws {

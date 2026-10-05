@@ -41,21 +41,27 @@ struct ExportImportSettings: View {
 
     @State private var pending: PendingConfigImport?
     @State private var problem: String?
+    @State private var secretMode: ConfigSecretMode = .placeholders
+    @State private var exporting = false
 
     private var locked: String? { ConfigTransfer.policyRefusal }
 
     var body: some View {
         Section("Export & Import") {
             VStack(alignment: .leading, spacing: 6) {
+                Picker("Export credentials", selection: $secretMode) {
+                    Text("Placeholders").tag(ConfigSecretMode.placeholders)
+                    Text("Include secrets").tag(ConfigSecretMode.include)
+                }
+                .accessibilityIdentifier("config.export.secret-mode")
+                .disabled(locked != nil || exporting)
                 Button("Export All Settings\u{2026}") { export() }
-                    .disabled(locked != nil)
+                    .disabled(locked != nil || exporting)
                     .help(locked ?? "Write every VPN and every SimpleVPN setting to one file")
                     .accessibilityValue(locked.map { "unavailable \u{2014} \($0)" } ?? "")
-                Text("Writes every VPN and every SimpleVPN setting to a single file you can read \u{2014} "
-                     + "JSON or YAML, whichever you name it. No passwords, keys or other secrets are "
-                     + "ever written to it, and there is no option to include them: a file like that "
-                     + "can\u{2019}t be recalled once it exists. It says what it left out and how to put "
-                     + "it back.")
+                Text(secretMode == .include
+                     ? "Writes JSON or YAML with saved passwords and private keys in plain text. Keep the file private. Protected credentials require authentication; external vault and SSH agent keys stay with their provider."
+                     : "Writes every VPN and app setting to JSON or YAML. Secret values are replaced with placeholders; import never treats a placeholder as a credential.")
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -111,10 +117,12 @@ struct ExportImportSettings: View {
     // MARK: Export
 
     private func export() {
-        guard locked == nil else { return }
+        guard locked == nil, !exporting else { return }
+        let mode = secretMode
         let panel = NSSavePanel()
         panel.title = "Export SimpleVPN Settings"
-        panel.message = "No passwords, keys or other secrets are written to this file."
+        panel.message = mode == .include ? "This file will contain secrets in plain text. Keep it private."
+            : "Secret values will be replaced with placeholders."
         panel.nameFieldStringValue = ConfigTransfer.suggestedFileName(format: .yaml)
         // Two types, so the panel's own pop-up chooses the encoding and the file's
         // name stays an honest record of what is in it.
@@ -122,12 +130,16 @@ struct ExportImportSettings: View {
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let format = ConfigFileFormat.forFileName(url.lastPathComponent)
-        let text = ConfigTransfer.exportText(vpn: vpn, tunnels: tunnels, nativeVPN: nativeVPN,
-                                             labels: labels, format: format)
-        do {
-            try text.write(to: url, atomically: true, encoding: .utf8)
-        } catch {
-            problem = "The file couldn\u{2019}t be written: \(error.localizedDescription)"
+        exporting = true
+        Task {
+            defer { exporting = false }
+            do {
+                let snapshot = try await ConfigTransfer.exportSnapshot(vpn: vpn, tunnels: tunnels,
+                    nativeVPN: nativeVPN, labels: labels, mode: mode)
+                try ConfigSecretTransfer.write(ConfigDocument.text(from: snapshot, format: format, secretMode: mode), to: url)
+            } catch {
+                problem = "The file couldn't be written: \(error.localizedDescription)"
+            }
         }
     }
 

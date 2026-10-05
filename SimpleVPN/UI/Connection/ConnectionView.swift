@@ -450,8 +450,9 @@ struct ConnectionView: View {
                 // prompt for something the user hasn't asked for yet. VPNController does
                 // it on the first connect (see ensureExtensionReady).
                 let doctor = extDoctor
-                vpn.ensureExtensionReady = { [weak ext, weak doctor] in
-                    guard let ext else { return true }
+                let extensionManager = ext
+                vpn.ensureExtensionReady = { [weak extensionManager, weak doctor] in
+                    guard let ext = extensionManager else { return true }
                     // The connect gate doubles as a doctor trigger: a wedged
                     // engine should be noticed the moment someone reaches for
                     // it. Fire-and-forget — the doctor single-flights and

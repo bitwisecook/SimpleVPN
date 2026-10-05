@@ -249,6 +249,7 @@ nonisolated final class LiveSSHServer: @unchecked Sendable {
     private let logURL: URL
     private let lock = NSLock()
     private var reaped = false
+    private let terminated = DispatchSemaphore(value: 0)
 
     /// A write to a socket whose peer has gone would otherwise raise SIGPIPE and
     /// take the whole test host down with it — and this suite kills servers on
@@ -276,6 +277,8 @@ nonisolated final class LiveSSHServer: @unchecked Sendable {
         }
         process.standardOutput = handle
         process.standardError = handle
+        let terminated = terminated
+        process.terminationHandler = { _ in terminated.signal() }
         do { try process.run() } catch { throw Failure.launchFailed("\(error)") }
 
         guard Loopback.wait(upTo: 10, for: { Loopback.accepts(port: port) }) else {
@@ -309,7 +312,15 @@ nonisolated final class LiveSSHServer: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard !reaped else { return }
         reaped = true
-        process.waitUntilExit()
+        // waitUntilExit spins this cooperative worker's run loop and has hung
+        // after sshd was already gone. Register termination before launch, wait
+        // for that signal with a deadline, and escalate only our own child.
+        if terminated.wait(timeout: .now() + 3) == .timedOut {
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            if terminated.wait(timeout: .now() + 3) == .timedOut {
+                Issue.record("The disposable SSH server did not report termination after shutdown.")
+            }
+        }
         try? FileManager.default.removeItem(at: logURL)
     }
 
@@ -342,7 +353,7 @@ nonisolated final class EchoTarget: @unchecked Sendable {
     /// peer has half-closed — the shape of every request/response protocol that
     /// signals "request over" with a FIN, and the one a flow that closes both
     /// halves at once silently truncates.
-    enum Mode { case immediate, afterEOF }
+    enum Mode { case immediate, afterEOF, beforeInput }
 
     let port: UInt16
     private let listenFD: Int32
@@ -350,8 +361,13 @@ nonisolated final class EchoTarget: @unchecked Sendable {
     private let lock = NSLock()
     private var running = true
     private var accepted = 0
+    private var completed: [[UInt8]] = []
+    private var clientFDs: Set<Int32> = []
+    private let acceptFinished = DispatchSemaphore(value: 0)
+    private let workers = DispatchGroup()
 
     var connectionCount: Int { lock.lock(); defer { lock.unlock() }; return accepted }
+    var completedPayloads: [[UInt8]] { lock.lock(); defer { lock.unlock() }; return completed }
 
     init(mode: Mode = .immediate) throws {
         self.mode = mode
@@ -371,7 +387,8 @@ nonisolated final class EchoTarget: @unchecked Sendable {
         let bound = withUnsafePointer(to: &addr) { raw in
             raw.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, size) }
         }
-        guard bound == 0, listen(fd, 64) == 0 else {
+        guard bound == 0, listen(fd, 64) == 0,
+              fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) == 0 else {
             close(fd)
             throw POSIXError(.EADDRINUSE)
         }
@@ -385,35 +402,73 @@ nonisolated final class EchoTarget: @unchecked Sendable {
 
         let accept = Thread { [self] in acceptLoop() }
         accept.name = "echo-accept"
+        accept.qualityOfService = .userInitiated
         accept.start()
     }
 
     func shutdownTarget() {
         lock.lock()
-        let wasRunning = running
+        guard running else { lock.unlock(); return }
         running = false
+        // Hold the registry lock through shutdown: a worker must not close and
+        // reuse a descriptor while this method is still about to touch it.
+        for fd in clientFDs { shutdown(fd, SHUT_RDWR) }
         lock.unlock()
-        if wasRunning { close(listenFD) }   // unblocks accept()
+        // accept is nonblocking and polls at most 100 ms. Let it finish BEFORE
+        // closing its descriptor, rather than leaving a blocked accept thread
+        // behind whose descriptor number another fixture can reuse.
+        acceptFinished.wait()
+        close(listenFD)
+        workers.wait()
     }
 
     private var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return running }
 
     private func acceptLoop() {
+        defer { acceptFinished.signal() }
         while isRunning {
+            var readiness = pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)
+            let ready = poll(&readiness, 1, 100)
+            if ready == 0 { continue }
+            if ready < 0 {
+                if errno == EINTR { continue }
+                return
+            }
             let fd = accept(listenFD, nil, nil)
             if fd < 0 {
-                if errno == EINTR { continue }
+                if errno == EINTR || errno == EAGAIN { continue }
                 return   // the listener was closed
             }
+            // Darwin inherits O_NONBLOCK from the listening socket. The worker
+            // deliberately uses blocking recv/send, with shutdown for cancellation.
+            _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK)
             Loopback.suppressSIGPIPE(fd)
-            lock.lock(); accepted += 1; lock.unlock()
+            lock.lock()
+            guard running else { lock.unlock(); close(fd); return }
+            accepted += 1
+            clientFDs.insert(fd)
+            workers.enter()
+            lock.unlock()
             let worker = Thread { [self] in serve(fd) }
             worker.name = "echo-conn"
+            worker.qualityOfService = .userInitiated
             worker.start()
         }
     }
 
     private func serve(_ fd: Int32) {
+        defer {
+            lock.lock()
+            clientFDs.remove(fd)
+            close(fd)
+            lock.unlock()
+            workers.leave()
+        }
+        if mode == .beforeInput {
+            let banner = Array("server-finished".utf8)
+            _ = sendAll(fd, banner, banner.count)
+            shutdown(fd, SHUT_WR)
+        }
         var buf = [UInt8](repeating: 0, count: 64 * 1024)
         var held = [UInt8]()
         while true {
@@ -424,15 +479,15 @@ nonisolated final class EchoTarget: @unchecked Sendable {
             if n <= 0 { break }
             switch mode {
             case .immediate:
-                if !sendAll(fd, buf, n) { close(fd); return }
-            case .afterEOF:
+                if !sendAll(fd, buf, n) { return }
+            case .afterEOF, .beforeInput:
                 held.append(contentsOf: buf[0..<n])
             }
         }
         if mode == .afterEOF, !held.isEmpty { _ = sendAll(fd, held, held.count) }
+        lock.lock(); completed.append(held); lock.unlock()
         // FIN, not a reset: the SSH channel must see a clean EOF.
         shutdown(fd, SHUT_WR)
-        close(fd)
     }
 
     private func sendAll(_ fd: Int32, _ bytes: [UInt8], _ count: Int) -> Bool {
@@ -664,9 +719,74 @@ nonisolated enum SOCKS5Client {
     /// CONNECT through `proxyPort` to `host:port`, send `payload`, read back the same
     /// number of bytes.
     static func roundTrip(proxyPort: UInt16, host: String, port: UInt16,
-                          payload: [UInt8], timeout: Double = 20) throws -> [UInt8] {
-        let fd = try connect(port: proxyPort, timeout: timeout)
+                          payload: [UInt8], timeout: Double = 20,
+                          halfClose: Bool = false) throws -> [UInt8] {
+        let fd = try connectedStream(proxyPort: proxyPort, host: host, port: port, timeout: timeout)
         defer { close(fd) }
+
+        try send(fd, payload)
+        if halfClose { shutdown(fd, SHUT_WR) }
+        return try receive(fd, payload.count, "echo")
+    }
+
+    static func sendAfterServerFIN(proxyPort: UInt16, port: UInt16, payload: [UInt8]) throws {
+        let fd = try connectedStream(proxyPort: proxyPort, host: "127.0.0.1", port: port, timeout: 20)
+        defer { close(fd) }
+        let banner = try receive(fd, 15, "server banner")
+        guard banner == Array("server-finished".utf8) else { throw Failure.handshake("wrong banner") }
+        var byte: UInt8 = 0
+        let eof = recv(fd, &byte, 1, 0)
+        guard eof == 0 else { throw Failure.handshake("server FIN was not delivered") }
+        try send(fd, payload)
+        shutdown(fd, SHUT_WR)
+    }
+
+    static func coalescedRoundTrip(proxyPort: UInt16, port: UInt16, payload: [UInt8],
+                                   fragmented: Bool) throws -> [UInt8] {
+        let fd = try connect(port: proxyPort, timeout: 10)
+        defer { close(fd) }
+        let greeting: [UInt8] = [0x05, 0x01, 0x00]
+        if fragmented {
+            for byte in greeting { try send(fd, [byte]); Thread.sleep(forTimeInterval: 0.01) }
+        } else { try send(fd, greeting) }
+        guard try receive(fd, 2, "method choice") == [0x05, 0x00] else {
+            throw Failure.handshake("no-auth was not selected")
+        }
+        // Exercise both the fixed-width address and the length-prefixed domain.
+        let domain = Array("127.0.0.1".utf8)
+        let address: [UInt8] = fragmented ? [0x03, UInt8(domain.count)] + domain : [0x01, 127, 0, 0, 1]
+        let request: [UInt8] = [0x05, 0x01, 0x00] + address + [UInt8(port >> 8), UInt8(port & 0xff)]
+        if fragmented {
+            for byte in request.dropLast() { try send(fd, [byte]); Thread.sleep(forTimeInterval: 0.01) }
+            try send(fd, [request.last!] + payload)
+        } else { try send(fd, request + payload) }
+        shutdown(fd, SHUT_WR)
+        let reply = try receive(fd, 10, "CONNECT reply")
+        guard reply[1] == 0x00 else { throw Failure.handshake("CONNECT was refused") }
+        return try receive(fd, payload.count, "coalesced payload")
+    }
+
+    static func rejectedMethod(proxyPort: UInt16, greeting: [UInt8]) throws -> [UInt8] {
+        let fd = try connect(port: proxyPort, timeout: 5)
+        defer { close(fd) }
+        try send(fd, greeting)
+        return try receive(fd, 2, "method refusal")
+    }
+
+    static func rejectedRequest(proxyPort: UInt16, request: [UInt8]) throws -> [UInt8] {
+        let fd = try connect(port: proxyPort, timeout: 5)
+        defer { close(fd) }
+        try send(fd, [0x05, 0x01, 0x00])
+        _ = try receive(fd, 2, "method choice")
+        try send(fd, request)
+        return try receive(fd, 10, "request refusal")
+    }
+
+    private static func connectedStream(proxyPort: UInt16, host: String, port: UInt16,
+                                        timeout: Double) throws -> Int32 {
+        let fd = try connect(port: proxyPort, timeout: timeout)
+        var ready = false
+        defer { if !ready { close(fd) } }
 
         try send(fd, [0x05, 0x01, 0x00])                        // VER, NMETHODS, no-auth
         let choice = try receive(fd, 2, "method choice")
@@ -683,8 +803,8 @@ nonisolated enum SOCKS5Client {
             throw Failure.handshake("CONNECT was refused with \(reply)")
         }
 
-        try send(fd, payload)
-        return try receive(fd, payload.count, "echo")
+        ready = true
+        return fd
     }
 
     private static func connect(port: UInt16, timeout: Double) throws -> Int32 {
@@ -1033,8 +1153,8 @@ nonisolated struct SSHLiveIntegrationTests {
     /// ever driven it against a server: connect, pinned host key, key sign-in, the
     /// SOCKS5 listener, a direct-tcpip channel per accepted connection, and the pump.
     /// A real SOCKS client goes through all of it.
-    @Test(.enabled(if: LiveSSHFixture.isAvailable))
-    func theAppEngineServesSOCKSOverARealSession() async throws {
+    @Test(.enabled(if: LiveSSHFixture.isAvailable), arguments: ["key", "keychain"])
+    func theAppEngineServesSOCKSOverARealSession(_ authMethod: String) async throws {
         let fixture = try fixture()
         let server = try LiveSSHServer(fixture: fixture)
         defer { server.stop() }
@@ -1050,7 +1170,16 @@ nonisolated struct SSHLiveIntegrationTests {
         config.knownHostsPath = nil
         config.pinnedHostKeySHA256 = fixture.hostKeyFingerprintHex
         config.strictHostKey = "yes"
-        config.authMethod = "key"
+        config.authMethod = authMethod
+        let keychainID = "ssh-live-\(UUID().uuidString)"
+        defer { KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(keychainID).sshKey") }
+        if authMethod == "keychain" {
+            let pem = try String(contentsOfFile: fixture.clientKeyPath, encoding: .utf8)
+            try KeychainCredentialStore.saveSSHPrivateKey(profile: keychainID, pem: pem)
+            let storedKey: String = try #require(KeychainCredentialStore.loadSSHPrivateKey(profile: keychainID))
+            config.privateKeyPEM = storedKey
+            config.identityFile = nil
+        }
         config.keepaliveInterval = 1
 
         let engine = SSHTunnelEngine()
@@ -1082,11 +1211,107 @@ nonisolated struct SSHLiveIntegrationTests {
         #expect(server.log().contains("keepalive@openssh.com"),
                 "the engine's keepalive timer never reached the server")
 
+        // Request/response protocols may wait for the client's FIN before replying.
+        // More than one receive buffer exercises partial writes and preserves order.
+        let afterEOF = try EchoTarget(mode: .afterEOF)
+        defer { afterEOF.shutdownTarget() }
+        let largePayload = (0..<(512 * 1024)).map { UInt8(($0 &* 29 &+ 7) & 0xff) }
+        let afterFIN = try SOCKS5Client.roundTrip(proxyPort: socksPort, host: "127.0.0.1",
+                                                port: afterEOF.port, payload: largePayload,
+                                                halfClose: true)
+        #expect(afterFIN == largePayload, "the response after client FIN lost or reordered bytes")
+
+        let beforeInput = try EchoTarget(mode: .beforeInput)
+        defer { beforeInput.shutdownTarget() }
+        try SOCKS5Client.sendAfterServerFIN(proxyPort: socksPort, port: beforeInput.port, payload: largePayload)
+        #expect(Loopback.wait(upTo: 10) { beforeInput.completedPayloads.first == largePayload },
+                "server FIN closed the client's still-live sending direction")
+
         engine.stop()
         #expect(Loopback.wait(upTo: 5) { engine.state == .idle })
         // …and the listener is really gone, not just marked idle.
         #expect(Loopback.wait(upTo: 5) { !Loopback.accepts(port: socksPort) },
                 "the SOCKS listener is still accepting after stop()")
+    }
+
+    @Test(.enabled(if: LiveSSHFixture.isAvailable))
+    func socksRejectsUnofferedMethodsAndMalformedRequests() async throws {
+        let fixture = try fixture()
+        let server = try LiveSSHServer(fixture: fixture)
+        defer { server.stop() }
+        let socksPort = try #require(Loopback.freePort())
+        var config = SSHTunnelEngine.Config(host: "127.0.0.1", port: Int(server.port),
+            username: fixture.user, password: nil, identityFile: fixture.clientKeyPath, socksPort: Int(socksPort))
+        config.knownHostsPath = nil
+        config.pinnedHostKeySHA256 = fixture.hostKeyFingerprintHex
+        config.strictHostKey = "yes"
+        let engine = SSHTunnelEngine()
+        defer { engine.stop() }
+        try await engine.startSOCKS(config)
+        for greeting: [UInt8] in [[0x05, 0x01, 0x02], [0x05, 0x00]] {
+            #expect(try SOCKS5Client.rejectedMethod(proxyPort: socksPort, greeting: greeting) == [0x05, 0xff])
+        }
+        let malformed: [([UInt8], UInt8)] = [
+            ([0x04], 0x01), ([0x05, 0x02], 0x07), ([0x05, 0x01, 0x01], 0x01),
+            ([0x05, 0x01, 0x00, 0x05], 0x08), ([0x05, 0x01, 0x00, 0x03, 0x00], 0x08),
+            ([0x05, 0x01, 0x00, 0x03, 0x01, 0xff, 0, 80], 0x08),
+            ([0x05, 0x01, 0x00, 0x03, 0x01, 0x00, 0, 80], 0x08)
+        ]
+        for (request, code) in malformed {
+            let reply = try SOCKS5Client.rejectedRequest(proxyPort: socksPort, request: request)
+            #expect(reply[0] == 0x05 && reply[1] == code)
+        }
+    }
+
+    @Test(.enabled(if: LiveSSHFixture.isAvailable), arguments: [false, true])
+    func socksPreservesPayloadAfterCoalescedOrFragmentedRequests(_ fragmented: Bool) async throws {
+        let fixture = try fixture()
+        let server = try LiveSSHServer(fixture: fixture)
+        defer { server.stop() }
+        let echo = try EchoTarget(mode: .afterEOF)
+        defer { echo.shutdownTarget() }
+        let socksPort = try #require(Loopback.freePort())
+        var config = SSHTunnelEngine.Config(host: "127.0.0.1", port: Int(server.port),
+            username: fixture.user, password: nil, identityFile: fixture.clientKeyPath, socksPort: Int(socksPort))
+        config.knownHostsPath = nil
+        config.pinnedHostKeySHA256 = fixture.hostKeyFingerprintHex
+        config.strictHostKey = "yes"
+        let engine = SSHTunnelEngine()
+        defer { engine.stop() }
+        try await engine.startSOCKS(config)
+        let payload = (0..<(64 * 1024)).map { UInt8(($0 &* 19 &+ 11) & 0xff) }
+        let received = try SOCKS5Client.coalescedRoundTrip(proxyPort: socksPort, port: echo.port,
+            payload: payload, fragmented: fragmented)
+        #expect(received == payload)
+    }
+
+    @Test(.enabled(if: LiveSSHFixture.isAvailable))
+    func disconnectInvalidatesRetainedChannelWrappers() throws {
+        let fixture = try fixture()
+        let server = try LiveSSHServer(fixture: fixture)
+        defer { server.stop() }
+        let echo = try EchoTarget(mode: .immediate)
+        defer { echo.shutdownTarget() }
+        let session = SSHSession()
+        defer { session.disconnect() }
+        try session.connect(toHost: "127.0.0.1", port: Int32(server.port), timeout: 10,
+                            kexAlgorithms: nil, compression: false)
+        try session.verifyHostKey(withKnownHosts: nil, pin: fixture.hostKeyFingerprintHex,
+                                  strict: "yes")
+        try session.authKey(forUser: fixture.user, privateKeyPath: fixture.clientKeyPath,
+                            certificatePath: nil, passphrase: nil)
+        session.enterDataMode()
+        let channel = try session.openDirectTCPIP(toHost: "127.0.0.1", port: Int32(echo.port))
+        session.disconnect()
+        #expect(channel.isClosed())
+        #expect(channel.isEOF())
+        #expect(!channel.sendEOF())
+        var bytes: [UInt8] = [1, 2, 3]
+        let read = bytes.withUnsafeMutableBytes { channel.read($0.baseAddress!, maxLength: $0.count) }
+        let written = bytes.withUnsafeBytes { channel.write($0.baseAddress!, length: $0.count) }
+        #expect(read == -1)
+        #expect(written == -1)
+        channel.close() // Double teardown must also remain safe.
     }
 
     // MARK: 4 — the event loop: does the wake actually interrupt the poll?

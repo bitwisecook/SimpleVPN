@@ -663,11 +663,12 @@ struct WireGuardView: View {
         // same move on every save path. BOTH keys use the same nil convention
         // ("leave the stored one alone"): the pre-shared key used to be passed as
         // a plain value, so an import that carried no key destroyed it.
-        vpn.setWireGuardSecrets(
+        do { try vpn.setWireGuardSecrets(
             privateKey: draft.privateKey.isEmpty ? nil : draft.privateKey,
             presharedKey: WireGuardConfig.presharedKeyToSave(draft: draft.presharedKey,
                                                              removing: removingPSK),
-            for: profileID)
+            for: profileID) }
+        catch { vpn.lastError = "Couldn't save the WireGuard key: \(error.localizedDescription)"; return }
         // Fire-and-forget: save() is called synchronously from a focus change; both
         // persists are idempotent, and CustomRoutingTabView's own onDisappear covers
         // the case where the view closes before this lands.

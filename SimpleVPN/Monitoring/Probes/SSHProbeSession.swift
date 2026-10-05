@@ -177,6 +177,16 @@ nonisolated final class SSHProbeSession: @unchecked Sendable {
 
     /// Offer the configured key. Reusable material, no account state — see the
     /// file note for why this is on the automatic side of the boundary.
+    func tryPublicKey(user: String, keyPEM: String, passphrase: String?) async -> Result<Void, SSHProbeFailure> {
+        await on { session in
+            guard let session else { return .failure(SSHProbeFailure(message: "The connection was lost.")) }
+            do {
+                try session.authKey(forUser: user, privateKeyPEM: keyPEM, certificatePEM: nil, passphrase: passphrase)
+                return .success(())
+            } catch { return .failure(SSHProbeFailure(message: error.localizedDescription)) }
+        }
+    }
+
     func tryPublicKey(user: String, keyPath: String, passphrase: String?) async -> Result<Void, SSHProbeFailure> {
         await on { session in
             guard let session else { return .failure(SSHProbeFailure(message: "The connection was lost.")) }

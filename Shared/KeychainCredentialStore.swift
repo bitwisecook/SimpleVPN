@@ -13,7 +13,7 @@ import Foundation
 import Security
 import os
 
-enum KeychainCredentialStore {
+nonisolated enum KeychainCredentialStore {
 
     private static let log = Logger(subsystem: "com.bragi0.SimpleVPN", category: "keychain")
 
@@ -45,8 +45,49 @@ enum KeychainCredentialStore {
         guard let d = get(service: credsService, account: profile) else { return nil }
         return try? JSONDecoder().decode(Credentials.self, from: d)
     }
+    /// Export must distinguish a missing record from an unreadable/corrupt one.
+    static func credentialsForExport(profile: String) throws -> Credentials? {
+        try exportValue(service: credsService, account: profile)
+    }
+    static func profileSecretsForExport(profile: String) throws -> ProfileSecrets? {
+        try exportValue(service: secretsService, account: profile)
+    }
+    static func routingProxyAuthForExport(profile: String) throws -> CustomRoutingProxyAuth? {
+        try exportValue(service: customRoutingProxyAuthService, account: profile)
+    }
+    static func wireGuardPeerSecretsForExport(profile: String) throws -> [String: String] {
+        try exportValue(service: wgPeersService, account: profile) ?? [:]
+    }
+    static func ovpnInlineSecretsForExport(profile: String) throws -> [String: String] {
+        try exportValue(service: ovpnInlineService, account: profile) ?? [:]
+    }
     static func deleteCredentials(profile: String) {
         delete(service: credsService, account: profile)
+    }
+
+    /// User-login keychain. Normal profile storage contains no key or temporary
+    /// identity file; libssh consumes PEM in memory. Explicit secret export may copy it.
+    static func saveSSHPrivateKey(profile: String, pem: String) throws {
+        try saveCredentials(profile: "tunnel.\(profile).sshKey", .init(username: "ssh", password: pem))
+    }
+
+    static func loadSSHPrivateKey(profile: String) -> String? {
+        loadCredentials(profile: "tunnel.\(profile).sshKey")?.password
+    }
+
+    private static let wgPeersService = "com.bragi0.SimpleVPN.wg-peers"
+
+    static func saveWireGuardPeerSecrets(profile: String, _ keys: [String: String]) throws {
+        try set(service: wgPeersService, account: profile, data: try JSONEncoder().encode(keys))
+    }
+
+    static func loadWireGuardPeerSecrets(profile: String) -> [String: String] {
+        guard let data = get(service: wgPeersService, account: profile) else { return [:] }
+        return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
+    }
+
+    static func deleteWireGuardPeerSecrets(profile: String) {
+        delete(service: wgPeersService, account: profile)
     }
 
     // MARK: Persistent per-profile engine secrets (proxy / private-key passwords)
@@ -204,7 +245,13 @@ enum KeychainCredentialStore {
     }
 
     private static func set(service: String, account: String, data: Data) throws {
-        SecItemDelete(appQuery(service: service, account: account) as CFDictionary)
+        let query = appQuery(service: service, account: account)
+        let update = SecItemUpdate(query as CFDictionary,
+                                   [kSecValueData as String: data] as CFDictionary)
+        guard update == errSecSuccess || update == errSecItemNotFound else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(update),
+                          userInfo: [NSLocalizedDescriptionKey: "Couldn't update the secret in the keychain (\(update))."])
+        }
         var q = appQuery(service: service, account: account)
         q[kSecValueData as String] = data
         // NOTE, and it is a note rather than a fix: on macOS `kSecAttrAccessible` is
@@ -220,7 +267,7 @@ enum KeychainCredentialStore {
         // "…ThisDeviceOnly" class this line names, so do not read that guarantee off
         // this call.
         q[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let status = SecItemAdd(q as CFDictionary, nil)
+        let status = update == errSecSuccess ? errSecSuccess : SecItemAdd(q as CFDictionary, nil)
         guard status == errSecSuccess else {
             log.error("keychain write \(service, privacy: .public) failed: OSStatus \(status)")
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(status),
@@ -232,6 +279,29 @@ enum KeychainCredentialStore {
     }
 
     private static func get(service: String, account: String) -> Data? {
+        do {
+            let result = try read(service: service, account: account)
+            if result.legacy, let data = result.data {
+                try? set(service: service, account: account, data: data)
+            }
+            return result.data
+        } catch {
+            log.error("keychain read \(service, privacy: .public) failed: \((error as NSError).code)")
+            return nil
+        }
+    }
+
+    private static func exportValue<T: Decodable>(service: String, account: String) throws -> T? {
+        guard let data = try read(service: service, account: account).data else { return nil }
+        do { return try JSONDecoder().decode(T.self, from: data) }
+        catch {
+            // Decoder errors may quote input. Never return a credential value in an alert.
+            throw NSError(domain: "KeychainExport", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "A saved Keychain record is malformed; the export was stopped."])
+        }
+    }
+
+    private static func read(service: String, account: String) throws -> (data: Data?, legacy: Bool) {
         var q = appQuery(service: service, account: account)
         q[kSecReturnData as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -239,20 +309,28 @@ enum KeychainCredentialStore {
         let status = SecItemCopyMatching(q as CFDictionary, &out)
         if status == errSecSuccess, let d = out as? Data {
             log.log("keychain read \(service, privacy: .public) hit")
-            return d
+            return (d, false)
         }
-        // Migrate an item a data-protection build wrote, if any.
+        guard status == errSecItemNotFound else { throw readError(status) }
+        // A build 16–22 may have left a data-protection item instead. Export is
+        // read-only; ordinary callers migrate only after a successful read.
         var dp = dataProtectionQuery(service: service, account: account)
         dp[kSecReturnData as String] = true
         dp[kSecMatchLimit as String] = kSecMatchLimitOne
         var dpOut: CFTypeRef?
-        if SecItemCopyMatching(dp as CFDictionary, &dpOut) == errSecSuccess, let d = dpOut as? Data {
+        let dpStatus = SecItemCopyMatching(dp as CFDictionary, &dpOut)
+        if dpStatus == errSecSuccess, let d = dpOut as? Data {
             log.log("keychain read \(service, privacy: .public) migrated from data-protection")
-            try? set(service: service, account: account, data: d)
-            return d
+            return (d, true)
         }
+        guard dpStatus == errSecItemNotFound else { throw readError(dpStatus) }
         log.log("keychain read \(service, privacy: .public) miss (status \(status))")
-        return nil
+        return (nil, false)
+    }
+
+    private static func readError(_ status: OSStatus) -> NSError {
+        NSError(domain: NSOSStatusErrorDomain, code: Int(status),
+            userInfo: [NSLocalizedDescriptionKey: "Couldn't read a saved Keychain record (\(status)); the export was stopped."])
     }
 
     private static func delete(service: String, account: String) {
@@ -272,20 +350,12 @@ enum KeychainCredentialStore {
     ///   caller that swallowed that `nil` would only see an opaque native-VPN
     ///   failure much later, with no way back to "the keychain write failed".
     static func persistentReference(forSecret secret: String, account: String) throws -> Data {
-        let acct = account
-        SecItemDelete([kSecClass as String: kSecClassGenericPassword,
-                       kSecAttrService as String: nativeService,
-                       kSecAttrAccount as String: acct] as CFDictionary)
-        let add: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: nativeService,
-            kSecAttrAccount as String: acct,
-            kSecValueData as String: Data(secret.utf8),
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            kSecReturnPersistentRef as String: true,
-        ]
+        try set(service: nativeService, account: account, data: Data(secret.utf8))
+        var query = appQuery(service: nativeService, account: account)
+        query[kSecReturnPersistentRef as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
         var out: CFTypeRef?
-        let status = SecItemAdd(add as CFDictionary, &out)
+        let status = SecItemCopyMatching(query as CFDictionary, &out)
         guard status == errSecSuccess, let data = out as? Data else {
             log.error("native keychain ref write for account \(account, privacy: .public) failed: OSStatus \(status)")
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(status),

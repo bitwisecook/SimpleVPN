@@ -12,6 +12,18 @@ us. That makes four things possible that a key file cannot:
 The user-facing documentation is the embedded manual (`#ssh-agent`, `#ssh-agent-socket`). This note is
 the engineering side: where it runs, why, and what to check when it doesn't.
 
+The app's SSH editor also offers **User Keychain**. A selected private-key file is
+imported into `KeychainCredentialStore` under `tunnel.<id>.sshKey`; only the method
+name is persisted with the profile. `SSHTunnelEngine` reads the PEM into its transient
+connect config and uses the bridge's in-memory sign-in method. No temporary key file
+is created. It supports the in-process SOCKS/local/dynamic-forward paths; jump hosts,
+reverse forwards and extra arguments require the subprocess path and are refused for
+Keychain keys. File-key and user-agent sign-in remain available for those paths.
+
+Apple Passwords' password picker is a username/password source, not a private-key
+store exposed through that picker. This feature uses the user's macOS Keychain.
+The system-extension agent gap below remains open and is registered in `Docs/Drift.md`.
+
 ## Where agent sign-in can run — and where it cannot
 
 | SSH surface | Process | Agent sign-in |

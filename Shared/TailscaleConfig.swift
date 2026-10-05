@@ -360,20 +360,21 @@ nonisolated struct TailscaleStartConfig: Codable, Sendable, Equatable {
     /// it verbatim and a wrong value here is a silently broken tunnel.
     static let defaultMTU = 1280
 
-    init(config: TailscaleConfig, authKey: String, stateDir: String, mtu: Int = TailscaleStartConfig.defaultMTU) {
+    init(config: TailscaleConfig, authKey: String, stateDir: String, mtu: Int = TailscaleStartConfig.defaultMTU,
+         gatewayOwned: Bool = true) {
         controlURL = config.effectiveControlURL
         hostname = config.hostname.trimmingCharacters(in: .whitespacesAndNewlines)
         self.authKey = authKey
         self.stateDir = stateDir
         acceptRoutes = config.acceptRoutes
         acceptDNS = config.acceptDNS
-        useExitNode = config.useExitNode
-        exitNode = config.useExitNode ? config.exitNode.trimmingCharacters(in: .whitespaces) : ""
+        useExitNode = config.useExitNode && gatewayOwned
+        exitNode = useExitNode ? config.exitNode.trimmingCharacters(in: .whitespaces) : ""
         // Symmetric with `exitNode` above: the LAN carve-out only exists to poke a
         // hole in an exit machine's default route, so with no exit machine there is
         // nothing for it to describe. Sending it anyway put a live-looking value in
         // the engine's prefs for a feature that isn't running.
-        exitNodeAllowLANAccess = config.useExitNode && config.exitNodeAllowLANAccess
+        exitNodeAllowLANAccess = useExitNode && config.exitNodeAllowLANAccess
         advertiseRoutes = config.advertiseRoutes
         self.mtu = mtu
     }

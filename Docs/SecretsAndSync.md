@@ -19,7 +19,7 @@ Naming follows `ONTOLOGY.md`. See `Docs/AuthArchitecture.md` for how sources are
 
 ```mermaid
 flowchart TB
-    subgraph Never["NEVER holds a secret — test-enforced"]
+    subgraph Never["Target invariant — exceptions listed below"]
         PC["providerConfiguration<br/><i>profiles, settings, references</i>"]
         UD["UserDefaults<br/><i>paths, ports, switches</i>"]
         LG["logs · error strings · diagnostic bundle"]
@@ -48,6 +48,17 @@ Four stores, chosen by what the secret *is*:
 preferred where it exists — see `.possession` in the architecture doc. (A PKCS#11 token was the other
 example of the same virtue; smartcard sign-in has since been removed for reasons that have nothing to
 do with this argument — `Docs/AuthSecPKCS11.md`.)
+
+### Storage exceptions found in the October 2026 review
+
+The invariant above is not universal today. Tailscale's root-owned state file stores node
+identity; it is restricted to its owner, but it is not in the user's Keychain. Managed
+OpenVPN profiles whose configuration cannot be rewritten, and migrations whose Keychain
+write fails, can retain inline material with a visible migration notice. Native proxy
+authentication is attached to `NEProxyServer` in the saved system VPN configuration;
+its persistence boundary needs verification. User-selected `.ssh` and other key files
+remain file-backed by choice. These gaps are registered in `Docs/Drift.md` and detailed
+in `Docs/AppReview.md`; do not describe all app secrets as Keychain-only.
 
 ### Touch ID, precisely ✅
 
@@ -144,102 +155,47 @@ that is the original bug wearing a warning label.
 
 ## 3. Export ✅ / 📐
 
-```mermaid
-flowchart LR
-    subgraph now["Today"]
-        A[".ovpn export ✅<br/><i>omits secret blocks,<br/>header says what and how to restore</i>"]
-        B["wg-quick export ✅<br/><i>omits keys by default;<br/>a second, named action<br/>writes them after consent</i>"]
-    end
-    subgraph next["Designed"]
-        C["JSON / YAML export ✅<br/><i>whole config, portable</i>"]
-        D["Encrypted archive 📐<br/><i>config + secrets, passphrase</i>"]
-    end
-```
+JSON and YAML exports now offer **Placeholders** (the default) or **Include Secrets**.
+Both encodings carry the same settings. Manage VPNs offers the same choices for one VPN
+through its context menu. Recovery snapshots always omit credentials.
 
-**`.ovpn` export omits secrets with no opt-out** ✅. An exported file leaves every protection the app
-has — mail, a shared folder, a repo, a backup — and cannot be recalled; a consent dialog is a thing
-people click through, and once clicked the file exists. The material is recoverable (still in the
-keychain; the issuer can reissue). Tunnelblick made the same call; Viscosity's plaintext tarball is
-the other road.
+A placeholder is a structured instruction under `secrets:`, not a dummy password. Import
+skips that record until the user supplies its real value. An explicit secret export collects
+only the app's known accounts for those VPNs. Protected records require device-owner
+authentication; one authenticated context serves a whole export. The file header says
+`CONTAINS SECRETS IN PLAIN TEXT`, and the writer opens an exclusive temporary file with
+mode 0600 before writing bytes, then atomically replaces the chosen destination.
 
-✅ **`wg-quick` export: omission by default, keys only by explicit consent.** It used to write
-`PrivateKey` and `PresharedKey` in the clear, unannounced, on the only export button there was.
+Imported secrets are validated against a closed set of roles and fields. Account names
+are derived from the **new** profile ID, so an input file cannot select arbitrary existing
+Keychain accounts. Review describes the number of credential records, without exposing
+values in the settings diff. Custom Routing credentials are rebound to that new identity.
 
-**Why not the `.ovpn` answer.** Both halves of the `.ovpn` argument fail here:
+| Format | Default | Explicit secret action |
+|---|---|---|
+| JSON / YAML | Placeholder records | Saved VPN credentials, key material and protected records |
+| OpenVPN `.ovpn` | Omit secret blocks, with restoration instructions | Reassemble the Keychain's inline blocks |
+| WireGuard `.conf` | Omit private and pre-shared keys | Reassemble the first peer and additional peers' Keychain keys |
+| L2TP `.mobileconfig` | Placeholder shared secret, with restoration instructions | Saved shared secret and PPP password |
 
-- `wg-quick up` **refuses** a configuration with no `PrivateKey`, so a secret-free WireGuard file
-  cannot be used by the receiving client at all — where a secret-free `.ovpn` is still a working
-  description of the server.
-- A WireGuard public key is **derived from** the private key and registered against that peer on the
-  server. "Ask whoever set up the VPN to reissue it" is not something the user can do alone the way an
-  OpenVPN CA reissue is: a new key pair means the server's own peer entry has to change too.
+WireGuard's additional peer PSKs are stored by peer public key, so reordering peers does
+not reattach a key to a different peer. Config text retains blank slots. The live WireGuard
+engine still supports the first peer only; this preserves multi-peer import/export material.
 
-So omission-with-no-opt-out would mean the app can never move a working WireGuard VPN onto a phone or
-a second Mac, which is the commonest reason anyone exports one. **The argument that was rejected** is
-exactly that one — copy the `.ovpn` rule for consistency and accept the loss — and it was rejected
-because consistency between two exporters is worth less than the feature the rule would delete, and
-because the honest way to describe that rule would have been "SimpleVPN can import a WireGuard VPN but
-cannot export one".
+These exports do **not** extract private keys from SSH agents, export external vaults,
+copy provider-wide unlock credentials, or back up Tailscale node identity. They are not a
+complete backup of the user's Keychain. An external file key remains a path unless it has
+been explicitly imported into SimpleVPN's Keychain. Export stops on failed or malformed
+Keychain reads; protected reads report authentication failure.
 
-**What makes consent more than a dialog**, given that a dialog is a thing people click through:
+`SecretExportTests` checks both encodings, placeholders that cannot become passwords,
+secret-free recovery, malformed records, multi-peer PSK redaction, and destination mode.
+`WireGuardExportTests` and the existing portability exclusion tests continue to guard the
+default exporter. The manual describes the opt-in choices.
 
-- **Two actions, not one action with a checkbox.** `Export .conf…` cannot produce a file with a key in
-  it — so there is no dialog whose default button leaks, and nothing to click *through* to. The leaky
-  path is a separately named button, `Export .conf with Keys…`.
-- **The confirmation is specific.** It names the material ("private key and pre-shared key"), the
-  consequence ("anyone who can read the file can connect to this VPN as this Mac"), the
-  irrevocability, and the safe alternative. No generic "are you sure" — asserted by test.
-- **The confirming button says what it does** — "Export With Private Key", never "OK" — carries the
-  destructive role, and nothing claims the default action, so Return and Escape both cancel.
-- **Consent is asked before the save panel**, not after: asking once the user has named a file makes
-  the question read as a formality on the way to a file they have already decided to create.
-- **Either file says what it contains in its own header**, which is the `.ovpn` exporter's precedent
-  and the half that survives the file being forwarded, renamed, or found in a backup by someone who
-  never saw the dialog. One says "No secrets are in this file"; the other says "THIS FILE CONTAINS
-  SECRETS" and tells the reader to delete it.
-- **The secret-free file is honest about being unusable as-is**: its header says wg-quick will refuse
-  it and where the key goes back. A silently incomplete configuration that fails on the other machine
-  with no explanation would be worse than the leak it replaced.
-
-Details worth knowing: the redacted body is literally `redactedForStorage()`'s output — one redaction,
-shared with the `providerConfiguration` guard — and a marker comment sits under `[Interface]` and
-`[Peer]` where each key belonged. Neither the redacted file nor the app's own notice ever writes the
-token `PrivateKey`, so a plain grep for it is a real check rather than one the explanatory prose
-defeats: the same discipline as `OVPNSecretMaterial` never writing `<key>`.
-
-Pinned by `SimpleVPNTests/Import/WireGuardExportTests.swift`, in the shape of
-`SimpleVPNTests/Portability/`'s exclusion tests: a canary private key and pre-shared key that must not
-reach the file, and the over-redaction counterpart asserting the endpoint, the peer's public key, the
-allowed networks, the MTU and both export-only settings **survive**. Plus source-level guards that
-nothing writes a raw `serialize()` to a file, that only the consented action passes
-`includingSecrets: true`, and that the consent precedes the save panel.
-
-✅ **JSON/YAML export/import of the whole configuration.** Human-readable and portable, secret-free
-with **no** opt-out, and the same serialisation the sync design needs — which is why it was worth
-building first even if sync never follows. Lives in `SimpleVPN/Portability/`.
-
-Two decisions in it that a reader of this document should know:
-
-- **Secret-free is proved, not asserted.** The exclusion test hands the exporter a snapshot whose
-  secrets are *present* and fails if a canary reaches either encoding — and separately asserts the
-  public `<ca>` and `cipher` line **survive**, because over-redaction is its own failure. A `Mirror`
-  walk fails the build if a field whose *name* looks like a secret is neither withheld nor recorded as
-  reviewed-not-secret with a reason, so next year's `rotationPassword` breaks the build until someone
-  classifies it, and is withheld at runtime meanwhile.
-- **Two key vocabularies, on purpose.** `settings:` uses the stable descriptor ids, which
-  `ONTOLOGY.md` records as the contract that never changes. But `custom-routing:`, `endpoints:` and
-  `interface:` carry the app's own persisted JSON keys verbatim, because those settings have no
-  descriptor ids and some are structures no flat id could name. Stated in the exported file's own
-  header so nobody has to infer it.
-
-Import produces a **plan**, never a change, and refuses anything that would weaken verification —
-`ssh.strict-host-key: no`, `StrictHostKeyChecking=no`, `--no-cert-check`, `tlsSkipVerify` and the rest
-of a declared token list, wherever they appear including inside the `.ovpn` text. The app has no
-option to disable certificate verification anywhere, and must not acquire one through a file format.
-
-📐 **Encrypted archive** for a real backup: config *and* secrets, under a passphrase the user chooses,
-AEAD, no opt-out on the encryption. This is the honest answer to "back up my whole setup" and it
-sidesteps every cloud question.
+📐 **Encrypted archive** remains designed rather than implemented. Explicit secret exports
+are plaintext. They have owner-only permissions locally, but a copy sent elsewhere has no
+Keychain protection.
 
 ---
 

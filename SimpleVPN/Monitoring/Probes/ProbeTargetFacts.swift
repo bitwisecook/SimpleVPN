@@ -153,6 +153,10 @@ nonisolated extension ProbeTargetFacts {
 
         if config.kind == .ssh {
             f.identityFilePath = config.identityFile.isEmpty ? nil : config.identityFile
+            if config.sshAuthMethod == "keychain" {
+                f.identityFilePath = nil
+                f.clientKeyPEM = KeychainCredentialStore.loadSSHPrivateKey(profile: config.id)
+            }
             f.knownHostsPath = ("~/.ssh/known_hosts" as NSString).expandingTildeInPath
             f.strictHostKey = config.strictHostKey
             // SSH signs in with a key or a password — never a certificate chain.

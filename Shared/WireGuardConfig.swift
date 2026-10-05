@@ -113,11 +113,12 @@ extension WireGuardConfig {
         var peerIndex = 0
 
         func values(_ s: String) -> [String] {
-            s.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            s.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         }
 
-        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
+        for rawLine in text.components(separatedBy: .newlines) {
+            let line = (rawLine.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             if line.isEmpty || line.hasPrefix("#") { continue }
             if line.hasPrefix("[") {
                 let tag = line.lowercased()
@@ -187,11 +188,20 @@ extension WireGuardConfig {
     /// that needs the real secret (export, the doctor/probe handshake), not
     /// just to display "set"/"not set".
     func withSecretsFromKeychain() -> WireGuardConfig {
-        guard privateKey.isEmpty || presharedKey.isEmpty else { return self }
         let creds = KeychainCredentialStore.loadCredentials(profile: keychainProfile)
+        return withSecrets(creds, peers: KeychainCredentialStore.loadWireGuardPeerSecrets(profile: id))
+    }
+
+    func withSecretsForExport() throws -> WireGuardConfig {
+        try withSecrets(KeychainCredentialStore.credentialsForExport(profile: keychainProfile),
+                        peers: KeychainCredentialStore.wireGuardPeerSecretsForExport(profile: id))
+    }
+
+    private func withSecrets(_ creds: KeychainCredentialStore.Credentials?, peers: [String: String]) -> WireGuardConfig {
         var c = self
         if c.privateKey.isEmpty { c.privateKey = creds?.password ?? "" }
         if c.presharedKey.isEmpty { c.presharedKey = creds?.proxyPassword ?? "" }
+        c = c.replacingExtraPeerSecrets(peers, redact: false)
         return c
     }
 
@@ -202,7 +212,73 @@ extension WireGuardConfig {
         var c = self
         c.privateKey = ""
         c.presharedKey = ""
+        c = c.replacingExtraPeerSecrets([:], redact: true)
         return c
+    }
+
+    /// Keyed by peer public key so reordering peers cannot attach a PSK to a
+    /// different peer. Raw peer text contains only a blank PSK slot in storage.
+    var extraPeerSecrets: [String: String] {
+        var keys: [String: String] = [:]
+        for peer in extraPeerBlocks {
+            let fields = peer.compactMap { line -> (String, String)? in
+                guard let eq = line.firstIndex(of: "=") else { return nil }
+                return (line[..<eq].trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+                        line[line.index(after: eq)...].trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            if let publicKey = fields.first(where: { $0.0 == "publickey" })?.1,
+               let psk = fields.first(where: { $0.0 == "presharedkey" })?.1, !psk.isEmpty {
+                keys[publicKey] = psk
+            }
+        }
+        return keys
+    }
+
+    func replacingExtraPeerSecrets(_ keys: [String: String], redact: Bool) -> WireGuardConfig {
+        var copy = self
+        copy.rawExtraPeers = extraPeerBlocks.flatMap { peer in
+            let publicKey = peer.compactMap { line -> String? in
+                guard let eq = line.firstIndex(of: "="),
+                      line[..<eq].trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "publickey" else { return nil }
+                return line[line.index(after: eq)...].trimmingCharacters(in: .whitespacesAndNewlines)
+            }.first ?? ""
+            return peer.map { line in
+                guard let eq = line.firstIndex(of: "="),
+                      line[..<eq].trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "presharedkey" else { return line }
+                let value = line[line.index(after: eq)...].trimmingCharacters(in: .whitespacesAndNewlines)
+                return "PresharedKey = \(redact ? "" : (value.isEmpty ? (keys[publicKey] ?? "") : value))"
+            }
+        }
+        return copy
+    }
+
+    private var extraPeerBlocks: [[String]] {
+        var peers: [[String]] = []
+        for line in rawExtraPeers {
+            if line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "[peer]" || peers.isEmpty {
+                peers.append([])
+            }
+            peers[peers.count - 1].append(line)
+        }
+        return peers
+    }
+
+    func saveExtraPeerSecrets() throws {
+        let secretSlots = extraPeerBlocks.filter { peer in
+            peer.contains { line in
+                guard let eq = line.firstIndex(of: "=") else { return false }
+                return line[..<eq].trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "presharedkey"
+                    && !line[line.index(after: eq)...].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+        }.count
+        guard secretSlots == extraPeerSecrets.count else {
+            throw NSError(domain: "WireGuard", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Each additional peer with a pre-shared key needs its own public key before it can be saved securely."])
+        }
+        guard !extraPeerSecrets.isEmpty else { return }
+        var keys = KeychainCredentialStore.loadWireGuardPeerSecrets(profile: id)
+        keys.merge(extraPeerSecrets) { _, new in new }
+        try KeychainCredentialStore.saveWireGuardPeerSecrets(profile: id, keys)
     }
 
     /// This config with an imported `.conf` applied over it. Every field the file
@@ -274,6 +350,7 @@ extension WireGuardConfig {
         switch field {
         case "privateKey": "private key"
         case "presharedKey": "pre-shared key"
+        case "extraPeerPresharedKeys": "additional peers' pre-shared keys"
         default: field
         }
     }
@@ -282,13 +359,15 @@ extension WireGuardConfig {
     /// A key that was never set is nothing to warn about and nothing to explain —
     /// the same rule the JSON/YAML exporter follows.
     var presentSecretFields: [String] {
-        Self.secretFieldNames.filter { field in
+        var present = Self.secretFieldNames.filter { field in
             switch field {
             case "privateKey": !privateKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             case "presharedKey": !presharedKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             default: false
             }
         }
+        if !extraPeerSecrets.isEmpty { present.append("extraPeerPresharedKeys") }
+        return present
     }
 
     /// The line left where a secret went, so a reader of the exported file knows the
@@ -327,7 +406,7 @@ extension WireGuardConfig {
         guard !present.isEmpty else {
             // Nothing secret to decide about: no header, no notes, no lecture about
             // a key this VPN never had.
-            return serialize()
+            return includingSecrets ? serialize() : redactedForStorage().serialize()
         }
         if includingSecrets {
             return Self.secretBearingHeader(present) + serialize()
@@ -349,6 +428,9 @@ extension WireGuardConfig {
             }
             if tag == "[peer]", fields.contains("presharedKey") {
                 out.append(secretMarker(for: "presharedKey"))
+            }
+            if tag == "[peer]", fields.contains("extraPeerPresharedKeys") {
+                out.append(secretMarker(for: "extraPeerPresharedKeys"))
             }
         }
         return out.joined(separator: "\n")
@@ -945,6 +1027,7 @@ nonisolated struct WireGuardEngineStatus: Codable, Sendable, Equatable {
 @Observable
 final class WireGuardStore {
     private(set) var configs: [WireGuardConfig] = []
+    private(set) var lastError: String?
     private static let key = "wireguard.v1"
 
     init() { load() }
@@ -958,21 +1041,21 @@ final class WireGuardStore {
         // Normalize on the way in (every save path does) so a stored value can
         // never be one the editor's own ranges would refuse.
         let c = raw.normalized()
-        if !c.privateKey.isEmpty || !c.presharedKey.isEmpty {
-            try? KeychainCredentialStore.saveCredentials(
-                profile: c.keychainProfile,
-                .init(username: c.name, password: c.privateKey,
-                      proxyPassword: c.presharedKey.isEmpty ? nil : c.presharedKey))
+        do {
+            try saveSecrets(c)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+            return // Keep the previous config until the Keychain write succeeds.
         }
-        var stored = c
-        stored.privateKey = ""
-        stored.presharedKey = ""
+        let stored = c.redactedForStorage()
         if let i = configs.firstIndex(where: { $0.id == stored.id }) { configs[i] = stored } else { configs.append(stored) }
         persist()
     }
     func remove(_ id: String) {
         configs.removeAll { $0.id == id }
         KeychainCredentialStore.deleteCredentials(profile: "wg.\(id)")
+        KeychainCredentialStore.deleteWireGuardPeerSecrets(profile: id)
         persist()
     }
 
@@ -989,6 +1072,28 @@ final class WireGuardStore {
         guard let d = UserDefaults.standard.data(forKey: Self.key),
               let list = try? JSONDecoder().decode([WireGuardConfig].self, from: d) else { return }
         configs = list
+        var changed = false
+        for index in configs.indices {
+            let config = configs[index]
+            guard !config.privateKey.isEmpty || !config.presharedKey.isEmpty || !config.extraPeerSecrets.isEmpty else { continue }
+            do {
+                try saveSecrets(config)
+                configs[index] = config.redactedForStorage()
+                changed = true
+            } catch {
+                lastError = error.localizedDescription // Preserve the original on failure.
+            }
+        }
+        if changed { persist() }
+    }
+    private func saveSecrets(_ c: WireGuardConfig) throws {
+        if !c.privateKey.isEmpty || !c.presharedKey.isEmpty {
+            let existing = KeychainCredentialStore.loadCredentials(profile: c.keychainProfile)
+            try KeychainCredentialStore.saveCredentials(profile: c.keychainProfile,
+                .init(username: c.name, password: c.privateKey.isEmpty ? (existing?.password ?? "") : c.privateKey,
+                      proxyPassword: c.presharedKey.isEmpty ? existing?.proxyPassword : c.presharedKey))
+        }
+        try c.saveExtraPeerSecrets()
     }
     private func persist() {
         if let d = try? JSONEncoder().encode(configs) { UserDefaults.standard.set(d, forKey: Self.key) }

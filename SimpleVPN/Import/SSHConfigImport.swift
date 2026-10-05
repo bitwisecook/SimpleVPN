@@ -65,7 +65,7 @@ nonisolated enum SSHConfigImport {
         var current = Block(patterns: ["*"], options: [])   // pre-Host options apply to all
         var skippingMatch = false
 
-        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+        for rawLine in text.components(separatedBy: .newlines) {
             guard let (key, value) = parseLine(String(rawLine)) else { continue }
             switch key {
             case "host":
@@ -107,7 +107,15 @@ nonisolated enum SSHConfigImport {
 
     /// "Key value", "Key=value", quoted values, comments. Returns lowercased key.
     private static func parseLine(_ line: String) -> (String, String)? {
-        var s = line.trimmingCharacters(in: .whitespaces)
+        var clean = "", quoted = false, escaped = false, previous: Character?
+        for character in line {
+            if character == "#", !quoted, !escaped, previous == nil || previous!.isWhitespace { break }
+            clean.append(character)
+            if character == "\"", !escaped { quoted.toggle() }
+            if character == "\\", !escaped { escaped = true } else { escaped = false }
+            previous = character
+        }
+        var s = clean.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty, !s.hasPrefix("#") else { return nil }
         // Split on the first '=' or whitespace run.
         guard let splitIndex = s.firstIndex(where: { $0 == "=" || $0 == " " || $0 == "\t" }) else { return nil }

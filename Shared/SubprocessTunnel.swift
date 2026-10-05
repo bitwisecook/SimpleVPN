@@ -99,7 +99,7 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     // the historical chain). Explicit values pin ONE method — both connect
     // paths then use exactly that method and nothing else (PreferredAuthentications
     // on the subprocess, a single bridge call in-process):
-    //   "password" | "key" | "certificate" | "agent" | "kerberos"
+    //   "password" | "key" | "keychain" | "certificate" | "agent" | "kerberos"
     // Kerberos (gssapi-with-mic) is never tried unless chosen — opt-in.
     var sshAuthMethod: String? = nil
     var sshCertificateFile: String? = nil // OpenSSH certificate (…-cert.pub) presented with the key
@@ -701,7 +701,7 @@ final class SubprocessTunnelStore {
         // an explicit act by the person who owns the secret — and leaving the item
         // behind then would orphan it in their keychain for ever, with nothing left on
         // screen to say what it belonged to.
-        for suffix in ["", ".proxy", ".jump", ".token", ".privateKey", ".pkcs11"] {
+        for suffix in ["", ".proxy", ".jump", ".token", ".privateKey", ".pkcs11", ".sshKey"] {
             KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(id)\(suffix)")
         }
         persist()

@@ -427,7 +427,27 @@ final class VPNController {
                     proxyTunnelConfigs[id] = ProxyTunnelConfig.decode(from: proto?.providerConfiguration?["proxytunnel"] as? Data)
                 }
                 if kind == .wireGuard {
-                    wireGuardConfigs[id] = WireGuardConfig.decode(from: proto?.providerConfiguration?["wireguard"] as? Data)
+                    var config = WireGuardConfig.decode(from: proto?.providerConfiguration?["wireguard"] as? Data)
+                    config.id = id
+                    if !ManagedPolicy.lockConfiguration,
+                       (!config.privateKey.isEmpty || !config.presharedKey.isEmpty || !config.extraPeerSecrets.isEmpty),
+                       let proto {
+                        do {
+                            try setWireGuardSecrets(privateKey: config.privateKey.isEmpty ? nil : config.privateKey,
+                                presharedKey: config.presharedKey.isEmpty ? nil : config.presharedKey, for: id)
+                            try config.saveExtraPeerSecrets()
+                            let clean = config.redactedForStorage()
+                            var stored = proto.providerConfiguration ?? [:]
+                            stored["wireguard"] = clean.encodedBlob()
+                            proto.providerConfiguration = stored
+                            mgr.protocolConfiguration = proto
+                            try await mgr.saveToPreferences()
+                            config = clean
+                        } catch {
+                            Self.log.error("WireGuard peer key migration failed; retaining original profile")
+                        }
+                    }
+                    wireGuardConfigs[id] = config
                 }
                 if kind == .sshNetworkTunnel {
                     sshNetworkTunnelConfigs[id] = SSHNetworkTunnelConfig.decode(from: proto?.providerConfiguration?["sshnet"] as? Data)

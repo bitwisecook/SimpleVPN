@@ -48,7 +48,8 @@ extension VPNController {
                          name: String? = nil) async throws -> String {
         guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
         let id = seed.id
-        setWireGuardSecrets(privateKey: seed.privateKey.isEmpty ? nil : seed.privateKey,
+        try seed.saveExtraPeerSecrets()
+        try setWireGuardSecrets(privateKey: seed.privateKey.isEmpty ? nil : seed.privateKey,
                             presharedKey: seed.presharedKey.isEmpty ? nil : seed.presharedKey,
                             for: id)
         let config = seed.redactedForStorage()
@@ -82,7 +83,10 @@ extension VPNController {
         // normalized() on every save path (the OpenVPNOverrides rule): trimmed
         // strings, no empty list entries, and out-of-range numbers collapsed to
         // "engine default" rather than persisted for the engine to choke on.
-        var stored = config.normalized().redactedForStorage()
+        var incoming = config.normalized()
+        incoming.id = id
+        try incoming.saveExtraPeerSecrets()
+        var stored = incoming.redactedForStorage()
         stored.id = id
         var conf = proto.providerConfiguration ?? [:]
         conf["profile"] = id
@@ -114,7 +118,7 @@ extension VPNController {
     /// write-only private-key field sends nil when untouched); a value —
     /// including "" — replaces it, so clearing the preshared-key field really
     /// clears it. Both empty deletes the item.
-    func setWireGuardSecrets(privateKey: String?, presharedKey: String?, for id: String) {
+    func setWireGuardSecrets(privateKey: String?, presharedKey: String?, for id: String) throws {
         let existing = wireGuardSecrets(for: id)
         let newPriv = privateKey.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             ?? existing.privateKey
@@ -125,7 +129,7 @@ extension VPNController {
             KeychainCredentialStore.deleteCredentials(profile: Self.wireGuardKeyProfile(id))
             return
         }
-        try? KeychainCredentialStore.saveCredentials(
+        try KeychainCredentialStore.saveCredentials(
             profile: Self.wireGuardKeyProfile(id),
             .init(username: "wireguard", password: newPriv,
                   proxyPassword: newPSK.isEmpty ? nil : newPSK))
@@ -164,6 +168,7 @@ extension VPNController {
         }
 
         var options: [String: NSObject] = ["wgPrivateKey": secrets.privateKey as NSString]
+        options["wgExtraPeers"] = config.withSecretsFromKeychain().rawExtraPeers as NSArray
         if !secrets.presharedKey.isEmpty {
             options["wgPresharedKey"] = secrets.presharedKey as NSString
         }

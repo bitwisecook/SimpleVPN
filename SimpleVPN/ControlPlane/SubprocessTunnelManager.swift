@@ -698,13 +698,23 @@ final class SubprocessTunnelManager {
     /// single rule the editor's Connect button and connect() both consult, so
     /// a doomed sign-in is refused with its fix rather than failing downstream.
     static func sshAuthBlockReason(_ c: SubprocessTunnelConfig) -> String? {
-        // A malformed agent socket path blocks whatever the method is: automatic
+        // A malformed agent socket path blocks the existing CLI-capable methods: automatic
         // sign-in asks the agent too, so a path neither connect path can use is a
         // problem before the method is even considered.
-        if let problem = SubprocessTunnelConfig.agentSocketProblem(c.sshAgentSocket ?? "") {
+        // Keychain sign-in is in-process only and never uses the disabled agent row.
+        if sshAuthMethod(c) != "keychain",
+           let problem = SubprocessTunnelConfig.agentSocketProblem(c.sshAgentSocket ?? "") {
             return problem
         }
         switch sshAuthMethod(c) {
+        case "keychain":
+            guard willRunInProcessSSH(c) else {
+                return "Keychain keys require SOCKS proxy or local/dynamic port forwards without a jump host or extra SSH arguments."
+            }
+            guard let pem = KeychainCredentialStore.loadSSHPrivateKey(profile: c.id), !pem.isEmpty else {
+                return "Import a private key into the user Keychain under Sign-In."
+            }
+            return nil
         case "key" where c.identityFile.trimmingCharacters(in: .whitespaces).isEmpty:
             return "Key sign-in needs an identity file — set it under Sign-In."
         case "certificate" where c.identityFile.trimmingCharacters(in: .whitespaces).isEmpty
@@ -790,6 +800,8 @@ final class SubprocessTunnelManager {
             // "" would burn the whole in-process fallback timeout for nothing.
             username: config.username.isEmpty ? NSUserName() : config.username,
             password: password, identityFile: config.identityFile.isEmpty ? nil : config.identityFile,
+            privateKeyPEM: Self.sshAuthMethod(config) == "keychain"
+                ? KeychainCredentialStore.loadSSHPrivateKey(profile: config.id) : nil,
             certificateFile: (config.sshCertificateFile?.isEmpty == false) ? config.sshCertificateFile : nil,
             socksPort: config.socksPort,
             pinnedHostKeySHA256: Self.sshPinnedKey(config),

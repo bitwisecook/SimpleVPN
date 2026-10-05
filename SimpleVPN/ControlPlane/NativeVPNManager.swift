@@ -38,9 +38,8 @@ struct NativeVPNConfig: Codable, Sendable, Equatable, Identifiable {
     /// was no way to say "no XAuth" — a username left over from a `.pcf` import
     /// meant `useExtendedAuthentication` stayed on with nothing behind it.
     ///
-    /// OPTIONAL on purpose: this type uses the synthesized `Codable`, so a
-    /// non-optional field would make every previously-stored native VPN fail to
-    /// decode (and `load()`'s `try?` would drop the lot). nil means "not
+    /// OPTIONAL on purpose: the decoder preserves nil for old profiles, rather
+    /// than turning a missing choice into an explicit yes/no. nil means "not
     /// answered yet", which `usesXAuth` reads as the old behaviour: XAuth is in
     /// play exactly when a username was entered.
     var xauth: Bool? = nil
@@ -73,6 +72,33 @@ struct NativeVPNConfig: Codable, Sendable, Equatable, Identifiable {
     /// only thing that reads or writes it. Optional so configs saved before the field
     /// existed still decode (the `xauth` precedent).
     var order: Int? = nil
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decodeIfPresent(String.self, forKey: .id) ?? id
+        name = try values.decodeIfPresent(String.self, forKey: .name) ?? name
+        kind = try values.decodeIfPresent(VPNKind.self, forKey: .kind) ?? kind
+        server = try values.decodeIfPresent(String.self, forKey: .server) ?? server
+        remoteID = try values.decodeIfPresent(String.self, forKey: .remoteID) ?? remoteID
+        username = try values.decodeIfPresent(String.self, forKey: .username) ?? username
+        usesSharedSecret = try values.decodeIfPresent(Bool.self, forKey: .usesSharedSecret) ?? usesSharedSecret
+        groupOrRealm = try values.decodeIfPresent(String.self, forKey: .groupOrRealm) ?? groupOrRealm
+        onDemand = try values.decodeIfPresent(Bool.self, forKey: .onDemand) ?? onDemand
+        xauth = try values.decodeIfPresent(Bool.self, forKey: .xauth)
+        ikeEncryption = try values.decodeIfPresent(String.self, forKey: .ikeEncryption) ?? ikeEncryption
+        ikeIntegrity = try values.decodeIfPresent(String.self, forKey: .ikeIntegrity) ?? ikeIntegrity
+        ikeDHGroup = try values.decodeIfPresent(String.self, forKey: .ikeDHGroup) ?? ikeDHGroup
+        ikeLifetimeMinutes = try values.decodeIfPresent(Int.self, forKey: .ikeLifetimeMinutes)
+        deadPeerDetection = try values.decodeIfPresent(String.self, forKey: .deadPeerDetection) ?? deadPeerDetection
+        disableMOBIKE = try values.decodeIfPresent(Bool.self, forKey: .disableMOBIKE) ?? disableMOBIKE
+        enablePFS = try values.decodeIfPresent(Bool.self, forKey: .enablePFS) ?? enablePFS
+        disconnectOnSleep = try values.decodeIfPresent(Bool.self, forKey: .disconnectOnSleep) ?? disconnectOnSleep
+        includeAllNetworks = try values.decodeIfPresent(Bool.self, forKey: .includeAllNetworks) ?? includeAllNetworks
+        excludeLocalNetworks = try values.decodeIfPresent(Bool.self, forKey: .excludeLocalNetworks) ?? excludeLocalNetworks
+        order = try values.decodeIfPresent(Int.self, forKey: .order)
+    }
 
     // MARK: Legal ranges (single source of truth for UI validation)
 

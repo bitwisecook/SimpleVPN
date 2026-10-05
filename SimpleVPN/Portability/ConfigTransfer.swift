@@ -25,6 +25,7 @@
 //
 
 import Foundation
+import LocalAuthentication
 import os
 
 @MainActor
@@ -92,6 +93,7 @@ enum ConfigTransfer {
                                            kind: tunnel.kind, server: tunnel.server)
             entry.labelIDs = labels.labels(for: tunnel.id).map(\.id)
             entry.subprocess = tunnel
+            entry.customRouting = vpn.customRouting(for: tunnel.id)
             snapshot.vpns.append(entry)
         }
         for config in nativeVPN.configs {
@@ -99,12 +101,42 @@ enum ConfigTransfer {
                                            kind: config.kind, server: config.server)
             entry.labelIDs = labels.labels(for: config.id).map(\.id)
             entry.native = config
+            entry.customRouting = vpn.customRouting(for: config.id)
             snapshot.vpns.append(entry)
         }
         return snapshot
     }
 
     // MARK: Export
+
+    static func exportSnapshot(vpn: VPNController, tunnels: SubprocessTunnelStore,
+                               nativeVPN: NativeVPNManager, labels: LabelStore,
+                               mode: ConfigSecretMode, profileID: String? = nil) async throws -> ConfigSnapshot {
+        var snapshot = snapshot(vpn: vpn, tunnels: tunnels, nativeVPN: nativeVPN, labels: labels)
+        if let profileID {
+            snapshot.vpns.removeAll { $0.id != profileID }
+            snapshot.appSettings = []
+            let labels = Set(snapshot.vpns.flatMap(\.labelIDs))
+            snapshot.labels.removeAll { !labels.contains($0.id) }
+        }
+        var authenticationContext: LAContext?
+        if mode == .include, snapshot.vpns.contains(where: { BiometricCredentialStore.exists(profile: $0.id) }) {
+            let context = LAContext()
+            try await context.evaluatePolicy(.deviceOwnerAuthentication,
+                localizedReason: "Export protected VPN credentials to a configuration file")
+            authenticationContext = context
+        }
+        for index in snapshot.vpns.indices {
+            let id = snapshot.vpns[index].id
+            snapshot.vpns[index].secrets = try await ConfigSecretTransfer.collect(id: id, mode: mode,
+                authenticationContext: authenticationContext)
+            if mode == .include, let stored = snapshot.vpns[index].ovpn {
+                snapshot.vpns[index].ovpn = OVPNSecretMaterial.merge(stored,
+                    secrets: try KeychainCredentialStore.ovpnInlineSecretsForExport(profile: id))
+            }
+        }
+        return snapshot
+    }
 
     static func exportText(vpn: VPNController, tunnels: SubprocessTunnelStore,
                           nativeVPN: NativeVPNManager, labels: LabelStore,
@@ -241,6 +273,7 @@ enum ConfigTransfer {
             var seed = entry.wireGuard ?? WireGuardConfig()
             seed.id = entry.id
             seed.name = entry.name
+            try ConfigSecretTransfer.save(entry.secrets, id: seed.id)
             let id = try await vpn.createWireGuard(from: seed, name: entry.name)
             try await applyShared(entry, to: id, vpn: vpn)
             return id
@@ -264,12 +297,16 @@ enum ConfigTransfer {
         case .ikev2, .ipsec, .l2tp:
             guard var config = entry.native else { throw error("it has no settings.") }
             config.id = UUID().uuidString
+            try ConfigSecretTransfer.save(entry.secrets, id: config.id)
+            if let routing = routing(entry.customRouting, for: config.id) { try await vpn.setCustomRouting(routing, for: config.id) }
             nativeVPN.save(config)
             return config.id
         case .ssh, .fortinet, .f5apm, .ciscoAnyConnect, .globalProtect,
              .juniper, .pulse, .arrayNetworks:
             guard var config = entry.subprocess else { throw error("it has no settings.") }
             config.id = UUID().uuidString
+            try ConfigSecretTransfer.save(entry.secrets, id: config.id)
+            if let routing = routing(entry.customRouting, for: config.id) { try await vpn.setCustomRouting(routing, for: config.id) }
             tunnels.save(config)
             return config.id
         }
@@ -280,15 +317,22 @@ enum ConfigTransfer {
     /// Custom Routing filter is a setting to redo, not a reason to throw the
     /// profile away.
     private static func applyShared(_ entry: ConfigSnapshot.VPN, to id: String,
-                                    vpn: VPNController) async throws {
+                                     vpn: VPNController) async throws {
+        try ConfigSecretTransfer.save(entry.secrets, id: id)
         if let auth = entry.auth { try? await vpn.setAuthConfig(auth, for: id) }
         if let source = entry.credentialSourceJSON?.mapValue,
            let decoded = ConfigImport.decode(CredentialSource.self, from: source) {
             try? await vpn.setCredentialSource(decoded, for: id)
         }
-        if let routing = entry.customRouting { try? await vpn.setCustomRouting(routing, for: id) }
+        if let routing = routing(entry.customRouting, for: id) { try await vpn.setCustomRouting(routing, for: id) }
         if let endpoints = entry.endpoints { await vpn.setEndpointList(endpoints, for: id) }
         if let prefs = entry.uiPrefs { await vpn.setUIPrefs(prefs, for: id) }
+    }
+
+    private static func routing(_ input: CustomRoutingProfile?, for id: String) -> CustomRoutingProfile? {
+        guard var routing = input else { return nil }
+        if routing.proxy.authSource != nil { routing.proxy.authSource = ProxyAuthSourceRef.ref(forProfile: id) }
+        return routing
     }
 
     private static func error(_ message: String) -> NSError {

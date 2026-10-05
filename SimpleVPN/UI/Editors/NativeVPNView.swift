@@ -24,6 +24,8 @@ struct NativeVPNView: View {
     /// L2TP needs the IPSec shared secret AND a user password at once, and the
     /// exported .mobileconfig carries them in different payload dictionaries.
     @State private var pppPassword = ""
+    @State private var exportSecretMode: ConfigSecretMode = .placeholders
+    @State private var exportProblem: String?
     @State private var loaded = false
     @State private var customRouting = CustomRoutingProfile()
     @State private var crProxyAuthUsername = ""
@@ -580,7 +582,7 @@ struct NativeVPNView: View {
                     EngineSettingLabel(spec: Self.specs["native.password"], value: pppPassword)
                 }
             }
-            Text("Written into the exported profile as well, so connecting doesn't ask again. Clear it to remove both.")
+            Text("Stored in your Keychain. Choose Include secrets below to put it in the exported profile.")
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             EngineSettingRow(spec: Self.specs["native.shared-secret"], value: secret) {
@@ -595,12 +597,22 @@ struct NativeVPNView: View {
             }
         }
         Section {
+            Picker("Export credentials", selection: $exportSecretMode) {
+                Text("Placeholders").tag(ConfigSecretMode.placeholders)
+                Text("Include secrets").tag(ConfigSecretMode.include)
+            }
+            .accessibilityIdentifier("native.export.secret-mode")
             Button("Export Configuration Profile…") { exportMobileconfig() }
                 .disabled(l2tpExportDisabledReason != nil)
                 // A dead export must say why on the control, not only in the footer.
                 .help(l2tpExportDisabledReason
                       ?? "Write a .mobileconfig you double-click to install this VPN in System Settings.")
                 .accessibilityValue(l2tpExportDisabledReason.map { "unavailable — \($0)" } ?? "")
+            Text(exportSecretMode == .include
+                ? "The file will contain your shared secret and saved password in plain text. Keep it private."
+                : "Passwords and shared secrets will be empty placeholders. Fill them in before installing the profile.")
+                .font(.caption).foregroundStyle(.secondary)
+            if let exportProblem { Label(exportProblem, systemImage: "exclamationmark.triangle") }
         } header: {
             Text("Configuration Profile")
         } footer: {
@@ -634,7 +646,7 @@ struct NativeVPNView: View {
     /// Why the L2TP export is unavailable, in the user's language, or nil.
     private var l2tpExportDisabledReason: String? {
         if let p = draft.serverProblem { return p }
-        if secret.isEmpty { return "Enter the shared secret before exporting — the profile needs it to configure IPSec." }
+        if exportSecretMode == .include, secret.isEmpty { return "Enter the shared secret before exporting — the profile needs it to configure IPSec." }
         return nil
     }
 
@@ -717,10 +729,16 @@ struct NativeVPNView: View {
         save()
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "\(draft.name).mobileconfig"
+        panel.message = exportSecretMode == .include ? "This file will contain secrets in plain text. Keep it private."
+            : "Fill the empty secret placeholders before installing this profile."
         panel.allowedContentTypes = [.init(filenameExtension: "mobileconfig") ?? .data]
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        try? NativeVPNProfile.l2tpMobileconfig(draft, secret: secret, pppPassword: pppPassword)
-            .write(to: url, atomically: true, encoding: .utf8)
+        let include = exportSecretMode == .include
+        var text = NativeVPNProfile.l2tpMobileconfig(draft, secret: include ? secret : "", pppPassword: include ? pppPassword : "")
+        let note = include ? "Contains secrets — keep this file private." : "Secret placeholders: fill IPSec SharedSecret and PPP AuthPassword before installing."
+        text = text.replacingOccurrences(of: "<plist", with: "<!-- \(note) -->\n<plist")
+        do { try ConfigSecretTransfer.write(text, to: url); exportProblem = nil }
+        catch { exportProblem = "Couldn't export the profile: \(error.localizedDescription)" }
     }
 }
 

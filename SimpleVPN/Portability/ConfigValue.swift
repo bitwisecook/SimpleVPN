@@ -80,7 +80,7 @@ nonisolated indirect enum ConfigValue: Equatable, Sendable {
     var intValue: Int? {
         switch self {
         case .int(let i): i
-        case .double(let d): d == d.rounded() ? Int(d) : nil
+        case .double(let d): Int(exactly: d)
         case .string(let s), .text(let s): Int(s.trimmingCharacters(in: .whitespaces))
         default: nil
         }
