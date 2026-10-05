@@ -54,12 +54,14 @@ nonisolated struct SSHNetworkTunnelConfig: Codable, Sendable, Equatable {
         case password
         case privateKey
         case certificate
+        case agent
 
         var displayName: String {
             switch self {
             case .password: "Password"
             case .privateKey: "Private Key"
             case .certificate: "Certificate"
+            case .agent: "SSH Agent"
             }
         }
 
@@ -71,6 +73,8 @@ nonisolated struct SSHNetworkTunnelConfig: Codable, Sendable, Equatable {
                 "Sign in with a private key. SimpleVPN keeps the key itself, so it works without an SSH agent."
             case .certificate:
                 "Sign in with a key plus the certificate your organisation signed it with."
+            case .agent:
+                "Ask your SSH agent, including 1Password, to sign. Keep SimpleVPN running; private keys stay with the agent."
             }
         }
     }
@@ -78,9 +82,7 @@ nonisolated struct SSHNetworkTunnelConfig: Codable, Sendable, Equatable {
     /// Why an SSH sign-in method everyone expects to see is not offered. Shown
     /// next to the picker, never silently omitted.
     nonisolated static let unavailableMethodReason =
-        "SSH agent and Kerberos sign-in can't work here: the tunnel runs as a system service, "
-        + "outside your login session, so it can reach neither your agent nor your Kerberos ticket. "
-        + "Use a private key or certificate instead — SimpleVPN holds the key for you."
+        "Kerberos sign-in is unavailable in the system service because it cannot access your login session's ticket cache."
 
     /// What to do about the server's host key. The EXTENSION is pin-only and
     /// never prompts; this is the app's ladder for arriving at the pin.
@@ -110,6 +112,7 @@ nonisolated struct SSHNetworkTunnelConfig: Codable, Sendable, Equatable {
     var username: String = ""
 
     var authMethod: AuthMethod = .password
+    var agentSocketPath: String = ""
     var hostKeyPolicy: HostKeyPolicy = .trustOnFirstUse
     /// The expected host-key fingerprint, SHA-256 hex (with or without a
     /// "SHA256:" prefix). REQUIRED for `.pinned`; filled in by the app for the
@@ -200,6 +203,7 @@ nonisolated struct SSHNetworkTunnelConfig: Codable, Sendable, Equatable {
         port = (try? c.decodeIfPresent(Int.self, forKey: .port)) ?? 0
         username = (try? c.decodeIfPresent(String.self, forKey: .username)) ?? ""
         authMethod = (try? c.decodeIfPresent(AuthMethod.self, forKey: .authMethod)) ?? .password
+        agentSocketPath = (try? c.decodeIfPresent(String.self, forKey: .agentSocketPath)) ?? ""
         hostKeyPolicy = (try? c.decodeIfPresent(HostKeyPolicy.self, forKey: .hostKeyPolicy)) ?? .trustOnFirstUse
         pinnedHostKeySHA256 = (try? c.decodeIfPresent(String.self, forKey: .pinnedHostKeySHA256)) ?? ""
         includeDefaultRoute = (try? c.decodeIfPresent(Bool.self, forKey: .includeDefaultRoute)) ?? true
@@ -446,6 +450,12 @@ extension SSHNetworkTunnelConfig {
         if port != 0, !Self.portRange.contains(port) {
             return SettingFault("sshnet.port", "\(port) isn't a valid port — use 1 to 65535.")
         }
+        if authMethod == .agent, !agentSocketPath.isEmpty {
+            let path = (agentSocketPath as NSString).expandingTildeInPath
+            if !path.hasPrefix("/") || path.utf8.count >= 104 || path.contains("\0") {
+                return SettingFault("sshnet.agent-socket-path", "Choose an absolute SSH agent socket path shorter than 104 bytes.")
+            }
+        }
         // The extension is PIN-ONLY, so a `.pinned` config with no usable pin can
         // never connect. The other two policies resolve their pin at connect.
         if hostKeyPolicy == .pinned, let p = Self.pinProblem(pinnedHostKeySHA256) {
@@ -496,6 +506,7 @@ nonisolated struct SSHNetworkTunnelStartConfig: Sendable, Equatable {
     var password: String
     var privateKeyPEM: String
     var certificatePEM: String
+    var usesAgent: Bool
     /// The ONLY host key this session will accept. The extension never prompts,
     /// never trusts on first use and cannot read known_hosts (root, sandboxed) —
     /// so an empty pin here is a refusal to connect, not a permissive default.
@@ -523,6 +534,7 @@ nonisolated struct SSHNetworkTunnelStartConfig: Sendable, Equatable {
         self.password = password
         self.privateKeyPEM = privateKeyPEM
         self.certificatePEM = certificatePEM
+        self.usesAgent = config.authMethod == .agent
         self.expectedHostKeySHA256 = expectedHostKeySHA256
         keyExchange = config.keyExchange
         keepaliveSeconds = config.keepaliveSeconds

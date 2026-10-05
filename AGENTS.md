@@ -192,9 +192,11 @@ with a symbol cross-check).
 - **Codesigning:** the archive is statically linked, dlopens nothing, and therefore needs **no**
   hardened-runtime relaxation — unlike the 1Password SDK, which is why that one lives in the separate
   `opnative-helper` binary. No entitlement changed for this engine, and none may be added to the app.
-- **Node state** lives at `/Library/Application Support/SimpleVPN/tailscale/<profile>` (root, 0700) so
-  the node key survives relaunches. The app cannot delete it (root-owned); `remove(id:)` asks the
-  extension to shred it via the `tsforget` IPC message, which only works while a session exists.
+- **Node state** lives in the user's Keychain, brokered by the app through private,
+  revisioned NE session messages. The extension acknowledges a state change only after
+  the app saves and reads back that exact revision; the app must remain running while
+  connected. A legacy root-owned state file is deleted only after this acknowledgement.
+  Never restore file-backed identity persistence or include node state in public stats.
 - Auth keys ride `startTunnel(options:)` in memory like every other credential; they are never in
   `providerConfiguration`, never logged (`TailscaleStartConfig.redactedJSONString()` is the only
   loggable form), and never echoed back in `TSStatus`.

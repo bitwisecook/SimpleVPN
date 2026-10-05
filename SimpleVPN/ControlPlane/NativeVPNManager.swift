@@ -287,7 +287,10 @@ final class NativeVPNManager {
 
     private var store: [NativeVPNConfig] = []
     private static let key = "nativeVPNs.v1"
+    private static let installedIdentityKey = "nativeVPN.installedIdentity.v1"
     private var observer: NSObjectProtocol?
+    @ObservationIgnored private let operations = AsyncOperationGate()
+    private var lifecycleRevision: UInt64 = 0
 
     var configs: [NativeVPNConfig] { store }
 
@@ -304,7 +307,7 @@ final class NativeVPNManager {
                     // The tunnel can drop OS-side (sleep, server, auth) without a
                     // call to disconnect(); clear the active id so the UI doesn't
                     // keep showing the config as connected.
-                    if s == .disconnected || s == .invalid { self.activeConfigID = nil }
+                    self.restoreActiveIdentity(NEVPNManager.shared())
                 }
             }
         Task { await refreshStatus() }
@@ -333,7 +336,37 @@ final class NativeVPNManager {
         if changed { persist() }
     }
 
-    func remove(_ id: String) {
+    @discardableResult func remove(_ id: String) async -> Bool {
+        lifecycleRevision += 1
+        await operations.acquire()
+        defer { operations.release() }
+        let manager = NEVPNManager.shared()
+        do {
+            try await manager.loadFromPreferences()
+            let identity = UserDefaults.standard.data(forKey: Self.installedIdentityKey).flatMap {
+                try? JSONDecoder().decode(NativeVPNInstalledIdentity.self, from: $0)
+            }
+            if identity?.id == id && identity?.matches(manager.protocolConfiguration) != true {
+                lastError = "The installed native VPN changed outside this saved profile. Its configuration and credentials were kept."
+                return false
+            }
+            if identity == nil, let config = store.first(where: { $0.id == id }),
+               manager.protocolConfiguration?.serverAddress == config.server,
+               manager.localizedDescription == config.name {
+                lastError = "Connect this legacy native VPN once to verify its installed identity before removing it. Its credentials were kept."
+                return false
+            }
+            if let identity,
+               identity.id == id, identity.matches(manager.protocolConfiguration) {
+                manager.connection.stopVPNTunnel()
+                try await manager.removeFromPreferences()
+                UserDefaults.standard.removeObject(forKey: Self.installedIdentityKey)
+                activeConfigID = nil
+            }
+        } catch {
+            lastError = "The installed native VPN could not be removed. Its configuration and credentials were kept."
+            return false
+        }
         store.removeAll { $0.id == id }
         // Both the persistent-reference copies (nativeService, keyed by the
         // accounts connect() writes) and the credsService copy NativeVPNView.save()
@@ -343,19 +376,81 @@ final class NativeVPNManager {
         KeychainCredentialStore.deleteCredentials(profile: "native.\(id)")
         KeychainCredentialStore.deleteCredentials(profile: "native.\(id).secret")
         KeychainCredentialStore.deleteCredentials(profile: "native.\(id).ppp")
+        KeychainCredentialStore.deleteCredentials(profile: "native.proxy.http.\(id)")
+        KeychainCredentialStore.deleteCredentials(profile: "native.proxy.https.\(id)")
         // The Custom Routing proxy sign-in and the filter's fallback blob are keyed by
         // the profile id too — same stale-secret rule.
         KeychainCredentialStore.deleteCustomRoutingProxyAuth(profile: id)
         CustomRoutingFallbackStore().clear(id)
         persist()
+        return true
     }
 
     // MARK: Connect
 
     func refreshStatus() async {
+        let revision = lifecycleRevision
+        await operations.acquire()
+        defer { operations.release() }
+        guard revision == lifecycleRevision else { return }
         let mgr = NEVPNManager.shared()
         try? await mgr.loadFromPreferences()
+        guard revision == lifecycleRevision else { return }
         status = mgr.connection.status
+        restoreActiveIdentity(mgr)
+        _ = await migrateStoredProxyCredentials(mgr)
+    }
+
+    private func restoreActiveIdentity(_ manager: NEVPNManager) {
+        guard UI.isActive(status),
+              let data = UserDefaults.standard.data(forKey: Self.installedIdentityKey),
+              let installed = try? JSONDecoder().decode(NativeVPNInstalledIdentity.self, from: data),
+              store.contains(where: { $0.id == installed.id }), installed.matches(manager.protocolConfiguration) else {
+            activeConfigID = nil; return
+        }
+        activeConfigID = installed.id
+    }
+
+    private func migrateStoredProxyCredentials(_ manager: NEVPNManager) async -> Bool {
+        guard let proto=manager.protocolConfiguration, let proxy=proto.proxySettings,
+              NativeProxyCredentials.hasStoredSecret(proxy) else { return true }
+        guard manager.connection.status == .disconnected || manager.connection.status == .invalid else {
+            lastError="Disconnect the native VPN to move its previous proxy credentials into your Keychain."; return false
+        }
+        let candidates=store.filter { config in
+            config.server == proto.serverAddress && config.name == manager.localizedDescription
+                && ((config.kind == .ikev2 && proto is NEVPNProtocolIKEv2) || (config.kind == .ipsec && proto is NEVPNProtocolIPSec && !(proto is NEVPNProtocolIKEv2)))
+        }
+        guard let id=activeConfigID ?? (candidates.count == 1 ? candidates[0].id : nil) else {
+            lastError="The previous native proxy credentials could not be matched to a saved VPN. The original configuration was kept."; return false
+        }
+        let credentials=[("http",proxy.httpServer),("https",proxy.httpsServer)].compactMap { kind, server -> (String,KeychainCredentialStore.Credentials)? in
+            guard let server, let password=server.password, !password.isEmpty else { return nil }
+            return ("native.proxy.\(kind).\(id)",.init(username:server.username ?? "",password:password))
+        }
+        do {
+            try await Task.detached {
+                for (account,credential) in credentials {
+                    try KeychainCredentialStore.saveCredentials(profile:account,credential)
+                    guard let saved=try KeychainCredentialStore.credentialsForExport(profile:account), saved.username == credential.username, saved.password == credential.password else { throw NSError(domain:"SimpleVPN.Keychain",code:1) }
+                }
+            }.value
+            guard manager.protocolConfiguration === proto,
+                  store.contains(where: { $0.id == id }),
+                  manager.connection.status == .disconnected || manager.connection.status == .invalid else {
+                lastError="The native VPN changed while its credentials were being migrated. Retry after disconnecting."; return false
+            }
+            let updated=proto.copy() as! NEVPNProtocol
+            updated.proxySettings=NativeProxyCredentials.redacted(proxy)
+            manager.protocolConfiguration=updated
+            do { try await manager.saveToPreferences(); try await manager.loadFromPreferences() }
+            catch { manager.protocolConfiguration=proto; throw error }
+            guard !NativeProxyCredentials.hasStoredSecret(manager.protocolConfiguration?.proxySettings) else { throw NSError(domain:"SimpleVPN.Keychain",code:1) }
+            lastError=NativeProxyCredentials.unsupported
+            return true
+        } catch {
+            lastError="The previous native proxy credentials could not be migrated. The original configuration was kept."; return false
+        }
     }
 
     /// Push this config into the single personal-VPN slot and start it.
@@ -365,18 +460,30 @@ final class NativeVPNManager {
     /// `proxy` is the user's Custom Routing proxy realized as `NEProxySettings`
     /// (see `ProxyCustomization.nativeApplyRequest`) — for these kinds the APP is
     /// the proxy applier, at connect, through the VPN configuration itself; any
-    /// sign-in rides `NEProxyServer.username`/`password` in memory (the OS stores
-    /// the saved configuration, never our keychain rows). No default: every caller
+    /// authenticated native proxies are refused because this API persists their
+    /// password values instead of referencing our Keychain rows. Every caller
     /// must decide, so a new call site can't silently drop the user's proxy.
     func connect(_ c: NativeVPNConfig, secret: String, sharedSecret: String = "",
                  proxy: NEProxySettings?) async {
+        lifecycleRevision += 1
+        let revision = lifecycleRevision
+        await operations.acquire()
+        defer { operations.release() }
+        guard revision == lifecycleRevision, store.contains(where: { $0.id == c.id }), !Task.isCancelled else { return }
         lastError = nil; needsEntitlement = false
         guard c.kind != .l2tp else {
             lastError = "L2TP can't be configured programmatically on macOS. Use “Export Configuration Profile” and install it."
             return
         }
+        guard !NativeProxyCredentials.requiresBroker(proxy) else {
+            lastError=NativeProxyCredentials.unsupported; return
+        }
         let mgr = NEVPNManager.shared()
         try? await mgr.loadFromPreferences()
+        guard revision == lifecycleRevision, !Task.isCancelled else { return }
+        guard await migrateStoredProxyCredentials(mgr) else { return }
+        guard revision == lifecycleRevision, !Task.isCancelled else { return }
+        lastError=nil
 
         // Distinct keychain accounts per secret — IPsec needs the group PSK
         // and the XAuth password to coexist, so they can no longer share one
@@ -469,7 +576,12 @@ final class NativeVPNManager {
             mgr.onDemandRules = c.onDemand ? [NEOnDemandRuleConnect()] : []
 
             try await mgr.saveToPreferences()
+            if let identity = NativeVPNInstalledIdentity(id: c.id, protocol: mgr.protocolConfiguration),
+               let data = try? JSONEncoder().encode(identity) {
+                UserDefaults.standard.set(data, forKey: Self.installedIdentityKey)
+            }
             try await mgr.loadFromPreferences()
+            guard revision == lifecycleRevision, store.contains(where: { $0.id == c.id }), !Task.isCancelled else { return }
             try mgr.connection.startVPNTunnel()
             activeConfigID = c.id
         } catch {
@@ -597,6 +709,7 @@ final class NativeVPNManager {
     }
 
     func disconnect() {
+        lifecycleRevision += 1
         NEVPNManager.shared().connection.stopVPNTunnel()
         activeConfigID = nil
     }

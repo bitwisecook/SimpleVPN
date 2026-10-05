@@ -314,6 +314,11 @@ struct NetworkToolsView: View {
                 }
 
                 Divider()
+                if let problem = vpn.routes.lastApplyError {
+                    Label(problem, systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let drift = vpn.routes.lastDrift {
                     driftLine(drift)
                 } else {
@@ -386,6 +391,11 @@ struct NetworkToolsView: View {
                         .font(.caption2.monospaced()).foregroundStyle(.tertiary)
                         .textSelection(.enabled)
                 }
+                if let problem = vpn.dns.lastApplyError {
+                    Label(problem, systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let drift = vpn.dns.lastDrift {
                     driftLine(drift)
                 } else {
@@ -446,6 +456,11 @@ struct NetworkToolsView: View {
                 } else if vpn.proxies.observed.enabled, let pac = vpn.proxies.observed.pacURL {
                     Text("System now: PAC \(pac)")
                         .font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                }
+                if let problem = vpn.proxies.lastApplyError {
+                    Label(problem, systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if let drift = vpn.proxies.lastDrift {
                     driftLine(drift)

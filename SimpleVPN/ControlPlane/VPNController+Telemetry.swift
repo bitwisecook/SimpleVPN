@@ -18,12 +18,28 @@ extension VPNController {
 
     /// One-shot IPC to the running tunnel; nil when no session or send fails.
     func sendMessage(_ message: String, to id: String) async -> String? {   // was private — internal for the +File split
-        await sendMessageData(message, to: id).flatMap { String(data: $0, encoding: .utf8) }
+        let reply = await sendMessageData(message, to: id).flatMap { String(data: $0, encoding: .utf8) }
+        if reply == "ok", ["gateway:", "routes:", "dns:", "proxy:", "router:apply-plan:", "router:stop-port", "pause:", "resume"].contains(where: message.hasPrefix) {
+            networkStateSamples.invalidate()
+        }
+        return reply
     }
 
     func sendMessageData(_ message: String, to id: String,   // was private — internal for the +File split
                                  timeout: TimeInterval = 8) async -> Data? {
-        guard let session = managers[id]?.connection as? NETunnelProviderSession else { return nil }
+        let virtual = virtualManager(for: id)
+        guard let session = (virtual ?? managers[id])?.connection as? NETunnelProviderSession else { return nil }
+        var wireMessage = message
+        if virtual != nil, message != "version" {
+            guard let data = try? JSONEncoder().encode(VirtualRoutingMessage(profile: id, message: message)),
+                  let text = String(data: data, encoding: .utf8) else { return nil }
+            wireMessage = "router:message:" + text
+        }
+        return await sendSessionMessageData(Data(wireMessage.utf8), session: session, timeout: timeout)
+    }
+
+    func sendSessionMessageData(_ message: Data, session: NETunnelProviderSession,
+                                timeout: TimeInterval = 8) async -> Data? {
         return await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
             // Single-resume guard + timeout: if the session is torn down between the
             // guard and the call, or the completion never fires, the continuation
@@ -33,7 +49,7 @@ extension VPNController {
             let finish: @Sendable (Data?) -> Void = { d in if once.claim() { cont.resume(returning: d) } }
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { finish(nil) }
             do {
-                try session.sendProviderMessage(Data(message.utf8)) { reply in finish(reply) }
+                try session.sendProviderMessage(message) { reply in finish(reply) }
             } catch {
                 finish(nil)
             }
@@ -43,6 +59,7 @@ extension VPNController {
     /// Live telemetry poll — the only channel that crosses the root(system)
     /// extension ↔ user app boundary. nil when not connected.
     func fetchStats(id: String) async -> TunnelStats? {
+        let revision = networkStateSamples.revision
         guard let data = await sendMessageData("stats", to: id) else {
             // A connected tunnel that stops answering its own stats IPC is the
             // extension doctor's wake-up call (dead or wedged extension). Only
@@ -52,7 +69,10 @@ extension VPNController {
             }
             return nil
         }
+        guard networkStateSamples.accepts(revision) else { return nil }
         let stats = try? JSONDecoder().decode(TunnelStats.self, from: data)
+        if let stats, let previous = pushedNetworkStats[id],
+           let old = previous.settingsRevision, let new = stats.settingsRevision, new < old { return nil }
         // Fold the engine's ground-truth default-route ownership into the gateway
         // coordinator on every poll: keeps the applied-role cache honest and heals
         // any full/split desync live (RC1/RC4). The stats poll is the only channel
@@ -61,7 +81,18 @@ extension VPNController {
         // Fold the engine's ground-truth pushed proxy into the Proxy mediator, the same
         // way as the default-route ownership above. Only kinds that PUSH a proxy
         // structurally do this today (OpenVPN); OpenConnect is a marked TODO below.
-        if let stats { notePushedProxy(id: id, from: stats) }
+        if let stats {
+            let prior = pushedNetworkStats[id]
+            pushedNetworkStats[id] = stats
+            if prior?.advertisedPrefixes != stats.advertisedPrefixes {
+                routes.reconcileGateway()
+            }
+            if prior?.dnsServers != stats.dnsServers || prior?.searchDomains != stats.searchDomains ||
+                prior?.dnsMatchDomains != stats.dnsMatchDomains {
+                dns.reconcile()
+            }
+            notePushedProxy(id: id, from: stats)
+        }
         return stats
     }
 

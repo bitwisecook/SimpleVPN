@@ -8,6 +8,7 @@ require (
 	// Match tailscale.com's stable release: newer wireguard-go revisions change
 	// tun.Device.Read and do not compile with Tailscale 1.102.x (Docs/Drift.md §14).
 	github.com/tailscale/wireguard-go v0.0.0-20260715223240-2e01ba5b00f0
+	golang.org/x/sys v0.48.0
 	// The proxy-tunnel engine (SimpleVPN's Proxy Tunnel VPN kind) is folded into
 	// THIS Go c-archive rather than its own: two Go c-archives cannot link into one
 	// binary (duplicate runtime symbols), and PacketTunnel already links this one.
@@ -83,7 +84,6 @@ require (
 	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba // indirect
 	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/term v0.46.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.16.0 // indirect

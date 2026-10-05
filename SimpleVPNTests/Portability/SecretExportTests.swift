@@ -225,3 +225,25 @@ struct SecretExportTests {
         #expect(!ConfigImport.plan(text: #"{"format":1e300}"#, current: ConfigSnapshot()).fatal.isEmpty)
     }
 }
+
+@MainActor struct TailscaleIdentityExportTests {
+    @Test func nodeIdentityUsesTheClosedRoleAndRestoresIntoTheUsersKeychain() async throws {
+        let source=UUID().uuidString, destination=UUID().uuidString
+        let state="{\"node-key\":\"VEVTVF9OT0RFX0tFWQ==\"}"
+        defer {
+            KeychainCredentialStore.deleteCredentials(profile:VPNController.tailscaleNodeStateProfile(source))
+            KeychainCredentialStore.deleteCredentials(profile:VPNController.tailscaleNodeStateProfile(destination))
+        }
+        try KeychainCredentialStore.saveCredentials(profile:VPNController.tailscaleNodeStateProfile(source),.init(username:"node-state",password:state))
+        let collected=try await ConfigSecretTransfer.collect(id:source,mode:.include)
+        #expect(collected["tailscale-state"]?.mapValue?["password"]?.stringValue == state)
+        try ConfigSecretTransfer.save(collected,id:destination)
+        #expect(try KeychainCredentialStore.credentialsForExport(profile:VPNController.tailscaleNodeStateProfile(destination))?.password == state)
+        #expect(!ConfigSecretTransfer.placeholders(collected).jsonRepresentation.description.contains("VEVTVF9OT0RFX0tFWQ"))
+    }
+    @Test func malformedNodeStateCannotBeAccepted() {
+        #expect(!TailscaleNodeState(revision:1,data:"{\"node-key\":123}").isValid)
+        #expect(!TailscaleNodeState(revision:1,data:"{\"node-key\":\"!invalid!\"}").isValid)
+        #expect(TailscaleNodeState(revision:1,data:"{}").isValid)
+    }
+}

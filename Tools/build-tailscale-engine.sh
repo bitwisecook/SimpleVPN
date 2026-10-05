@@ -102,14 +102,14 @@ mv "$OUT/libtsengine.h" "$INCLUDE/libtsengine.h"
 # The stable headers must declare exactly what the archive exports — BOTH engines
 # now live in this one archive (Tailscale's own symbols and the folded-in proxy
 # engine's), so both symbol sets are cross-checked against their stable headers.
-for sym in _TSSetCallbacks _TSStart _TSStop _TSStatus _TSUpdatePrefs _TSPacketIn _TSFree; do
+for sym in _TSSetCallbacks _TSStart _TSStop _TSStatus _TSUpdatePrefs _TSPacketIn _TSFree _TSCreateInstance _TSStopInstance _TSStatusInstance _TSUpdatePrefsInstance _TSPacketInInstance _TSNodeState _TSAckNodeState; do
   nm -gU "$OUT/libtsengine.a" 2>/dev/null | grep -q " T $sym\$" \
     || { echo "error: $sym missing from libtsengine.a" >&2; exit 1; }
   grep -q "${sym#_}" "$INCLUDE/tsengine.h" \
     || { echo "error: ${sym#_} not declared in include/tsengine.h" >&2; exit 1; }
 done
 PXHEADER="$REPO/Vendor/proxy-engine/include/pxengine.h"
-for sym in _PXSetCallbacks _PXSetFlowDialCallback _PXStart _PXStop _PXStatus _PXPacketIn _PXFree; do
+for sym in _PXSetCallbacks _PXSetFlowDialCallback _PXStart _PXStop _PXStatus _PXPacketIn _PXFree _PXCreateInstance _PXStopInstance _PXStatusInstance _PXPacketInInstance; do
   nm -gU "$OUT/libtsengine.a" 2>/dev/null | grep -q " T $sym\$" \
     || { echo "error: folded-in $sym missing from libtsengine.a" >&2; exit 1; }
   grep -q "${sym#_}" "$PXHEADER" \
@@ -117,11 +117,18 @@ for sym in _PXSetCallbacks _PXSetFlowDialCallback _PXStart _PXStop _PXStatus _PX
 done
 # Third family in the same archive: the plain-WireGuard engine (wireguard.go),
 # declared by its own stable header next to tsengine.h.
-for sym in _WGSetCallbacks _WGStart _WGStop _WGStatus _WGPacketIn _WGFree; do
+for sym in _WGSetCallbacks _WGStart _WGStop _WGStatus _WGPacketIn _WGFree _WGCreateInstance _WGStopInstance _WGStatusInstance _WGPacketInInstance; do
   nm -gU "$OUT/libtsengine.a" 2>/dev/null | grep -q " T $sym\$" \
     || { echo "error: $sym missing from libtsengine.a" >&2; exit 1; }
   grep -q "${sym#_}" "$INCLUDE/wgengine.h" \
     || { echo "error: ${sym#_} not declared in include/wgengine.h" >&2; exit 1; }
+done
+
+for sym in _VRCreateInstance _VRSetUnderlayInterface _VRPacketIn _VRApplyPolicy _VRCheckPolicy _VRStatus _VRStopPort _VRStopInstance _VRFree; do
+  nm -gU "$OUT/libtsengine.a" 2>/dev/null | grep -q " T $sym\$" \
+    || { echo "error: $sym missing from libtsengine.a" >&2; exit 1; }
+  grep -q "${sym#_}" "$INCLUDE/virtualrouter.h" \
+    || { echo "error: ${sym#_} not declared in include/virtualrouter.h" >&2; exit 1; }
 done
 
 # Size note: this archive is large (~50 MB) because it carries the whole

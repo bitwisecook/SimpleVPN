@@ -103,31 +103,11 @@ nonisolated enum DiagnosticBundle {
     /// `DiagnosticReportLog`, which needs exactly the same guarantees (absolute
     /// path, no inherited environment surprises, never hangs the collection).
     static func run(_ tool: String, _ args: [String]) async -> String {
-        await withCheckedContinuation { cont in
-            DispatchQueue.global(qos: .userInitiated).async {
-                guard FileManager.default.isExecutableFile(atPath: tool) else {
-                    cont.resume(returning: "(\(tool) unavailable)"); return
-                }
-                let p = Process()
-                p.executableURL = URL(fileURLWithPath: tool)
-                p.arguments = args
-                let out = Pipe(), err = Pipe()
-                p.standardOutput = out; p.standardError = err
-                // Don't let a wedged tool hang the capture.
-                let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
-                DispatchQueue.global().asyncAfter(deadline: .now() + 25, execute: killer)
-                do { try p.run() } catch {
-                    cont.resume(returning: "(failed to run: \(error.localizedDescription))"); return
-                }
-                let data = out.fileHandleForReading.readDataToEndOfFile()
-                let errData = err.fileHandleForReading.readDataToEndOfFile()
-                p.waitUntilExit()
-                killer.cancel()
-                var text = String(data: data, encoding: .utf8) ?? ""
-                if text.isEmpty, let e = String(data: errData, encoding: .utf8), !e.isEmpty { text = "(stderr) " + e }
-                cont.resume(returning: text.isEmpty ? "(no output)" : text)
-            }
-        }
+        let result = await LocalToolRunner.run(executable: tool, arguments: args, deadline: 25)
+        var text = String(decoding: result.stdout, as: UTF8.self)
+        if text.isEmpty, !result.stderr.isEmpty { text = "(stderr) " + result.stderr }
+        if result.timedOut { text += "\n(timed out)" }
+        return text.isEmpty ? "(no output)" : text
     }
 
 }

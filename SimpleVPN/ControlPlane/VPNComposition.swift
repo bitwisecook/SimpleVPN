@@ -9,9 +9,10 @@
 //     by specificity (a split tunnel's specific routes win over a full tunnel's
 //     default), so full+split or split+split coexist. Two FULL tunnels conflict
 //     (both claim 0.0.0.0/0) — flagged before connecting.
-//   • over (chained) — a member starts only once the member it runs "over" is up,
-//     so its transport rides that tunnel (its server must be routed by the lower
-//     tunnel). Expressed as a per-member dependency; connect honors the order.
+//   • over (chained) — retained in saved data, but refused at connect until an
+//     actual transport connector exists. Start order does not select an underlay.
+//   WireGuard compositions also have an explicit action that connects through
+//   one virtual capture interface, using internal packet ports and flow routing.
 //
 //  Compositions hold no secrets — each member authenticates with its own saved
 //  credentials or password-manager source, so a composition connect is
@@ -40,25 +41,36 @@ struct VPNComposition: Codable, Sendable, Equatable, Identifiable {
         var label: String { self == .full ? "Full tunnel" : "Split tunnel" }
     }
 
-    /// Members ordered so dependencies (the tunnel you run "over") start first.
-    /// Cycles are broken defensively — order is best-effort, never a hang.
-    var startOrder: [Member] {
-        var ordered: [Member] = []
-        var remaining = members
-        var guardCount = 0
-        while !remaining.isEmpty && guardCount < members.count + 1 {
-            let ready = remaining.filter { m in
-                guard let dep = m.dependsOn else { return true }
-                return ordered.contains { $0.profileID == dep } || !members.contains { $0.profileID == dep }
+    /// Invalid graphs have no start order; callers must surface the reason rather
+    /// than breaking a cycle or dropping a missing dependency into physical dialing.
+    var validationProblem: String? {
+        let ids = members.map(\.profileID)
+        if Set(ids).count != ids.count { return "A VPN appears more than once in this composition." }
+        for member in members {
+            if let dependency = member.dependsOn, !ids.contains(dependency) {
+                return "A VPN this composition depends on is missing."
             }
-            if ready.isEmpty { ordered += remaining; break }   // cycle: give up ordering
-            ordered += ready
+        }
+        if topologicalOrder == nil { return "This composition has a circular VPN dependency." }
+        return nil
+    }
+
+    private var topologicalOrder: [Member]? {
+        var result: [Member] = []
+        var remaining = members
+        while !remaining.isEmpty {
+            let ready = remaining.filter { member in
+                member.dependsOn.map { dependency in result.contains { $0.profileID == dependency } } ?? true
+            }
+            guard !ready.isEmpty else { return nil }
+            result += ready
             let readyIDs = Set(ready.map(\.profileID))
             remaining.removeAll { readyIDs.contains($0.profileID) }
-            guardCount += 1
         }
-        return ordered
+        return result
     }
+
+    var startOrder: [Member] { validationProblem == nil ? topologicalOrder ?? [] : [] }
 
     /// More than one full-tunnel member can't coexist (both want the default route).
     var fullTunnelConflict: Bool { members.filter { $0.role == .full }.count > 1 }
@@ -92,11 +104,8 @@ final class CompositionStore {
         for i in compositions.indices {
             let before = compositions[i].members.count
             compositions[i].members.removeAll { !existingProfileIDs.contains($0.profileID) }
-            for j in compositions[i].members.indices {
-                if let dep = compositions[i].members[j].dependsOn, !existingProfileIDs.contains(dep) {
-                    compositions[i].members[j].dependsOn = nil
-                }
-            }
+            // Keep missing dependencies visible: clearing one would silently
+            // change a chained connection into a physical-underlay connection.
             if compositions[i].members.count != before { changed = true }
         }
         if changed { persist() }

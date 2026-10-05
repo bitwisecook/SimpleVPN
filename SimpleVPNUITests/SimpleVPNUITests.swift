@@ -26,6 +26,42 @@ final class SimpleVPNUITests: XCTestCase {
         continueAfterFailure = false
     }
 
+    /// A disposable, disconnected profile exercises the actual shared list field.
+    /// Teardown removes only the profile this test creates; no real VPN connects.
+    @MainActor
+    func testCommaListPreservesTypingAcrossFocusChanges() throws {
+        let app = try launchOrSkip()
+        app.menuBarItems["VPN"].click()
+        app.menuBarItems["VPN"].menuItems["Manage VPNs…"].click()
+        let manage = app.windows["manage"]
+        XCTAssertTrue(manage.waitForExistence(timeout: 10))
+        let add = manage.buttons["Add VPN"]
+        XCTAssertTrue(add.waitForExistence(timeout: 5))
+        add.click()
+        app.menuItems["WireGuard"].click()
+        let dns = manage.textFields["DNS Servers"]
+        XCTAssertTrue(dns.waitForExistence(timeout: 15), "The disposable WireGuard editor did not appear.")
+        addTeardownBlock { @MainActor in
+            let remove = manage.buttons["Remove the selected VPN"]
+            if remove.exists && remove.isEnabled {
+                remove.click()
+                let confirm = app.buttons["Remove"].firstMatch
+                if confirm.waitForExistence(timeout: 5) { confirm.click() }
+            }
+        }
+        dns.click()
+        dns.typeText("10.0.0.53, ")
+        XCTAssertTrue((dns.value as? String)?.contains("10.0.0.53,") == true,
+                      "Normalization removed the separator while the user was typing.")
+        dns.typeText("10.0.1.53")
+        let endpoint = manage.textFields["Server Endpoint"]
+        if endpoint.exists { endpoint.click() } else { dns.typeKey(.tab, modifierFlags: []) }
+        dns.click()
+        let value = dns.value as? String ?? ""
+        XCTAssertTrue(value.contains("10.0.0.53") && value.contains("10.0.1.53"),
+                      "Focus changes lost a list value: \(value)")
+    }
+
     /// The audit gate. Audits everything the macOS audit supports EXCEPT:
     ///  • .contrast — the app's status language rides on Liquid Glass materials
     ///    whose effective background is composited at draw time; the audit

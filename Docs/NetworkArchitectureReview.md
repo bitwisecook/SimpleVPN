@@ -1,5 +1,47 @@
 # Network architecture review
 
+## Implementation follow-up — 2026-10-05
+
+The analysis below describes the pre-fix architecture and the longer-term target.
+The current change implements its first packet-routing slice and repairs the existing
+control plane: one acknowledged OS settings writer; complete filtered route plans;
+serialized route/DNS/proxy apply and forced drift; scoped Go engine handles and callback
+contexts; and an explicit WireGuard composition running through one virtual interface.
+
+```mermaid
+flowchart LR
+  Apps[Mac applications] --> Capture[Stable virtual interface]
+  Capture --> Router[Versioned flow router and source translation]
+  Router --> A[WireGuard port A]
+  Router --> B[WireGuard port B]
+  A --> Physical[Bound physical underlay]
+  B --> Physical
+  Physical --> Return[Encrypted peer replies]
+  Return --> Reverse[Port and generation keyed return translation]
+  Reverse --> Capture
+```
+
+The virtual mode captures IPv4/IPv6, selects destination prefixes by longest match,
+pins existing flows across policy changes, translates source/return addresses, handles
+bounded fragments and ICMP/PMTU, and drops unsupported or unavailable egress. A complete
+route plan changes the OS capture once and commits one Go revision after acknowledgement.
+Stopped private routes stay captured; default loss stays captured until explicit Direct.
+Physical WireGuard UDP sockets are scoped before bind; a missing physical path blackholes.
+
+Real encrypted two-peer tests cover IPv4/IPv6 TCP/UDP, overlapping assigned addresses,
+policy switches and isolated member stop. Race and malformed-packet fuzz tests cover the
+core. Swift delayed/failing hosts cover acknowledged ownership and supersession. This is
+not a provider-crash kill-switch proof or complete platform acceptance.
+
+**Visible compatibility boundary:** virtual compositions support two to sixteen
+single-peer WireGuard members. Other engines retain independent sessions. Distinct DNS
+resolvers, custom proxy/local exclusion combinations, chains, native packet ports,
+per-app/fake-IP/L7/Tcl routing are gated. `Docs/Drift.md` §18 and
+`NetworkArchitectureBoundaryTests` guard this boundary. Notarized live capture,
+sleep/wake/provider crash, Tailscale enrollment and macOS 26/27 remain platform checks;
+keep these checks open until actual evidence exists.
+
+
 Reviewed 5 October 2026 against commit `802bd99`. The objective is a stable virtual
 interface that receives the user's traffic, with an internal routing layer selecting
 the VPN tunnel for each flow. This is a source and architecture review; the proposed

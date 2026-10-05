@@ -620,6 +620,12 @@ struct ManageVPNsView: View {
             // Edit/Remove used to live only in the context menu, which plain
             // keyboard can't open — this menu is the Tab-reachable path.
             Menu {
+                Button("Connect Through One Virtual Interface") {
+                    Task { await vpn.connectThroughVirtualInterface(comp) }
+                }
+                .disabled(vpn.virtualCompositionProblem(comp) != nil)
+                .help(vpn.virtualCompositionProblem(comp) ?? "Keep one connection to this Mac and route traffic internally between the VPNs.")
+                .accessibilityValue(vpn.virtualCompositionProblem(comp) ?? "Available")
                 Button("Edit…") { editingComposition = comp }
                 Button("Remove", role: .destructive) { requestRemoval(.composition(id: comp.id, name: comp.name)) }
             } label: {
@@ -631,6 +637,12 @@ struct ManageVPNsView: View {
         .padding(.vertical, ConnectionRowMetrics.verticalPadding)
         .frame(minHeight: ConnectionRowMetrics.minHeight)
         .contextMenu {
+            Button("Connect Through One Virtual Interface") {
+                Task { await vpn.connectThroughVirtualInterface(comp) }
+            }
+            .disabled(vpn.virtualCompositionProblem(comp) != nil)
+            .help(vpn.virtualCompositionProblem(comp) ?? "Route this composition through one virtual interface.")
+            .accessibilityValue(vpn.virtualCompositionProblem(comp) ?? "Available")
             Button(active ? "Disconnect All" : "Connect All") {
                 if active { vpn.disconnectComposition(comp) } else { Task { await vpn.connectComposition(comp) } }
             }
@@ -768,11 +780,16 @@ struct ManageVPNsView: View {
         case let .tunnel(id, _):
             tunnelManager.disconnect(id); tunnels.remove(id)
         case let .native(id, _):
-            nativeVPN.remove(id)
+            Task {
+                if !(await nativeVPN.remove(id)) { vpn.lastError = nativeVPN.lastError }
+            }
         case let .profile(id, _):
             Task { try? await vpn.remove(id: id) }
         case let .composition(id, _):
-            compositions.remove(id)
+            Task {
+                do { try await vpn.removeVirtualComposition(id); compositions.remove(id) }
+                catch { vpn.lastError = error.localizedDescription }
+            }
         }
     }
 

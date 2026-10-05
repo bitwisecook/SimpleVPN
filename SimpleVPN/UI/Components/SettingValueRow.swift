@@ -379,12 +379,30 @@ struct SettingValueField: View {
     /// Web-gateway fields accept a complete URL as well as a hostname.  This is
     /// a keyboard/input hint only: the binding preserves exactly what was pasted.
     var acceptsURL = false
+    private var list: Binding<[String]>? = nil
+    @State private var listDraft = ""
+
+    init(spec: EngineSettingSpec, text: Binding<String>, prompt: String, problem: String? = nil,
+         secure: Bool = false, mono: Bool = false, spokenName: String? = nil, changed: Bool? = nil,
+         extraSpoken: String? = nil, acceptsURL: Bool = false) {
+        self.spec = spec; self._text = text; self.prompt = prompt; self.problem = problem
+        self.secure = secure; self.mono = mono; self.spokenName = spokenName; self.changed = changed
+        self.extraSpoken = extraSpoken; self.acceptsURL = acceptsURL
+    }
+
+    private static func values(_ draft: String) -> [String] {
+        draft.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
 
     /// The scalar binding used by the common text field.  This is deliberately
     /// here, not at each call site, so a pasted HTML fragment or copied paragraph
     /// cannot turn one of the app's ordinary settings into a multi-line control.
     private var singleLineText: Binding<String> {
-        Binding(get: { text }, set: { text = SettingValueMetrics.singleLine($0) })
+        Binding(get: { list == nil ? text : listDraft }, set: {
+            let value = SettingValueMetrics.singleLine($0)
+            if let list { listDraft = value; list.wrappedValue = Self.values(value) }
+            else { text = value }
+        })
     }
 
     var body: some View {
@@ -398,6 +416,9 @@ struct SettingValueField: View {
         } label: {
             SettingNameLabel(settingID: spec.id, name: spec.name,
                              changed: changed ?? spec.isChanged(text))
+        }
+        .onChange(of: list?.wrappedValue) { _, value in
+            if let value, value != Self.values(listDraft) { listDraft = value.joined(separator: ", ") }
         }
     }
 
@@ -421,7 +442,7 @@ struct SettingValueField: View {
 
     private var spokenValue: String {
         // A secret's own value is never read back out loud.
-        let base = secure ? "" : text
+        let base = secure ? "" : (list == nil ? text : listDraft)
         return [base, problem.map { "Problem: \($0)" }, extraSpoken]
             .compactMap { $0 }
             .filter { !$0.isEmpty }
@@ -448,6 +469,8 @@ extension SettingValueField {
                     }),
                   prompt: prompt, problem: problem, secure: false, mono: mono,
                   spokenName: spokenName, changed: spec.isChanged(list.wrappedValue))
+        self.list = list
+        self._listDraft = State(initialValue: list.wrappedValue.joined(separator: ", "))
     }
 }
 

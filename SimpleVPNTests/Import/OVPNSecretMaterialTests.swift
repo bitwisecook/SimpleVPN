@@ -591,25 +591,15 @@ struct NoInliningRegressionTests {
     /// source because it is an ORDERING and a side effect, neither of which shows up
     /// in any value: the policy branch has to set the badge and `continue` before
     /// anything touches the stored configuration.
-    @Test func aLockedProfileIsLeftAloneAndBadged() throws {
+    @Test func aPolicyLockCannotSkipVerifiedSecretStorageMigration() throws {
         let crud = try #require(try Self.sources("SimpleVPN")["VPNController+CRUD.swift"])
         let migrate = try #require(crud.range(of: "func migrateInlineOVPNSecrets()")
             .map { String(crud[$0.lowerBound...]) })
-        let gate = try #require(migrate.range(of: "if ManagedPolicy.lockConfiguration {"))
-        let badge = try #require(migrate.range(of: "OVPNSecretMaterial.managedInlineSecretNotice"))
+        #expect(!migrate.contains("ManagedPolicy.lockConfiguration"))
+        let verified = try #require(migrate.range(of: "guard KeychainCredentialStore.saveAndVerifyOVPNInlineSecrets"))
         let rewrite = try #require(migrate.range(of: "conf[\"ovpn\"] = split.config"))
-        // The badge is inside the policy branch, and the branch leaves before the
-        // rewrite. A `continue` between them is what makes "left alone" true.
-        #expect(gate.upperBound < badge.lowerBound)
-        #expect(badge.upperBound < rewrite.lowerBound)
-        // The branch ends at its own `continue`, and that `continue` comes before
-        // anything that touches the keychain or the stored configuration — which is
-        // what makes "left alone" mean untouched rather than half-moved.
-        let exit = try #require(migrate.range(of: "continue", range: badge.upperBound..<migrate.endIndex))
-        let branch = migrate[gate.upperBound..<exit.upperBound]
-        #expect(!branch.contains("saveAndVerifyOVPNInlineSecrets"))
-        #expect(!branch.contains("conf[\"ovpn\"]"))
-        #expect(exit.upperBound < rewrite.lowerBound)
+        #expect(verified.upperBound < rewrite.lowerBound)
+        #expect(migrate.contains("inlineSecretMigrationFailures[id]"))
     }
 
     /// THE OVER-REDACTION COUNTERPART of the decision above, and the reason it needs
@@ -626,7 +616,7 @@ struct NoInliningRegressionTests {
         // that would quietly stop migrating everybody.
         #expect(migrate.contains("conf[\"ovpn\"] = split.config"))
         #expect(migrate.contains("guard KeychainCredentialStore.saveAndVerifyOVPNInlineSecrets"))
-        #expect(migrate.components(separatedBy: "ManagedPolicy.lockConfiguration").count == 2,
+        #expect(migrate.components(separatedBy: "ManagedPolicy.lockConfiguration").count == 1,
                 "more than one policy gate in the migration — which one skips the strip?")
     }
 }

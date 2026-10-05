@@ -210,6 +210,9 @@ struct NativeVPNView: View {
                                     proxyAuthUsername: $crProxyAuthUsername,
                                     proxyAuthPassword: $crProxyAuthPassword,
                                     kind: draft.kind)
+                if customRouting.proxy.authSource != nil {
+                    SettingCaveat(NativeProxyCredentials.unsupported)
+                }
             }
             .formStyle(.grouped)
             .revealsSettings()

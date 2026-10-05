@@ -14,11 +14,8 @@
 //  directions, so this pump must NOT add one. The packet's own IP version
 //  nibble is what tells us which protocol number to hand NEPacketTunnelFlow.
 //
-//  CALLBACK CONTEXT — the engine's callbacks are plain C function pointers,
-//  which by construction cannot capture Swift context. Exactly one tunnel runs
-//  per provider process, so the callbacks route through a single lock-guarded
-//  static reference rather than through a context pointer we would have to
-//  keep alive and cast by hand.
+//  CALLBACK CONTEXT — C callbacks carry a scoped registry ID. Removing a stopped
+//  context fences late callbacks without disturbing another engine instance.
 //
 
 import Foundation
@@ -45,7 +42,7 @@ final class TailscaleEngine: @unchecked Sendable {
     /// start completion, so this must fire comfortably inside that window.
     private static let startGrace: TimeInterval = 45
 
-    private weak var provider: NEPacketTunnelProvider?
+    private weak var provider: (NEPacketTunnelProvider & SVPTunnelSettingsApplying)?
     private weak var delegate: (any TailscaleEngineDelegate)?
 
     private let lock = NSLock()
@@ -75,15 +72,12 @@ final class TailscaleEngine: @unchecked Sendable {
     private var stopped = false
 
     /// The engine currently wired to the C callbacks.
-    private static let currentLock = NSLock()
-    nonisolated(unsafe) private static var current: TailscaleEngine?
+    private static let callbacks = EngineCallbackRegistry<TailscaleEngine>()
+    private var handle: UInt64 = 0
+    private var callbackContext: UInt64 = 0
+    private var starting = false
 
-    private static func active() -> TailscaleEngine? {
-        currentLock.lock(); defer { currentLock.unlock() }
-        return current
-    }
-
-    init(provider: NEPacketTunnelProvider, delegate: any TailscaleEngineDelegate) {
+    init(provider: NEPacketTunnelProvider & SVPTunnelSettingsApplying, delegate: any TailscaleEngineDelegate) {
         self.provider = provider
         self.delegate = delegate
     }
@@ -94,10 +88,19 @@ final class TailscaleEngine: @unchecked Sendable {
     /// error; otherwise `completion` fires when the tunnel is usable, when the
     /// engine asks for interactive sign-in, or when the grace period expires.
     func start(config: TailscaleStartConfig, completion: @escaping (Error?) -> Void) {
-        lock.lock(); startCompletion = completion; lock.unlock()
-
-        Self.currentLock.lock(); Self.current = self; Self.currentLock.unlock()
-        TSSetCallbacks(Self.packetOut, Self.stateChanged, Self.browseToURL, Self.netmapChanged, Self.logLine)
+        let context: UInt64? = lock.withLock {
+            guard !starting, !stopped, handle == 0 else { return nil }
+            starting = true
+            startCompletion = completion
+            let context = Self.callbacks.register(self)
+            callbackContext = context
+            return context
+        }
+        guard let context else {
+            completion(NSError(domain: "SimpleVPN.Tailscale", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "This Tailscale node is already connected."]))
+            return
+        }
 
         Self.log.log("tailscale start: \(config.redactedJSONString(), privacy: .public)")
 
@@ -105,11 +108,24 @@ final class TailscaleEngine: @unchecked Sendable {
         // fail the start rather than letting NE reap the whole extension.
         armStartTimer()
 
-        let reply = config.jsonString().withCString { TSStart($0) }
+        let reply = config.jsonString().withCString {
+            TSCreateInstance($0, context, Self.packetOut, Self.stateChanged, Self.browseToURL, Self.netmapChanged, Self.logLine)
+        }
         let response = Self.takeString(reply)
-        if let err = Self.engineError(from: response, fallback: "Tailscale could not start.") {
+        let error = Self.engineError(from: response, fallback: "Tailscale could not start.")
+        let created = EngineCallbackRegistry<TailscaleEngine>.handle(from: response)
+        let accepted = lock.withLock {
+            starting = false
+            guard error == nil, created != 0, !stopped else { return false }
+            handle = created
+            return true
+        }
+        if !accepted {
+            Self.callbacks.remove(context)
+            if created != 0 { _ = Self.takeString(TSStopInstance(created)) }
             cancelStartTimer()
-            finishStart(with: err)
+            finishStart(with: error ?? NSError(domain: "SimpleVPN.Tailscale", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "The Tailscale start was cancelled."]))
             return
         }
     }
@@ -117,19 +133,21 @@ final class TailscaleEngine: @unchecked Sendable {
     /// Tear the node down. Safe to call more than once, and safe to call after
     /// a failed start.
     func stop() {
-        lock.lock()
-        if stopped { lock.unlock(); return }
-        stopped = true
-        lock.unlock()
+        let (current, context) = lock.withLock {
+            stopped = true
+            pumpRunning = false
+            let pair = (handle, callbackContext)
+            handle = 0; callbackContext = 0
+            return pair
+        }
 
         cancelStartTimer()
-        _ = Self.takeString(TSStop())
-        Self.currentLock.lock()
-        if Self.current === self { Self.current = nil }
-        Self.currentLock.unlock()
+        finishStart(with: NSError(domain: "SimpleVPN.Tailscale", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "The Tailscale connection was cancelled."]))
+        Self.callbacks.remove(context)
+        if current != 0 { _ = Self.takeString(TSStopInstance(current)) }
         // Drop the callbacks last: a packet already inside the Go writer would
         // otherwise land on a torn-down flow.
-        TSSetCallbacks(nil, nil, nil, nil, nil)
         Self.log.log("tailscale stopped")
     }
 
@@ -137,7 +155,7 @@ final class TailscaleEngine: @unchecked Sendable {
 
     /// Current engine status, or an empty status when the engine is not up.
     func status() -> TailscaleStatus {
-        guard let json = Self.takeString(TSStatus()), let s = TailscaleStatus.decode(json: json) else {
+        guard let json = Self.takeString(TSStatusInstance(lock.withLock { handle })), let s = TailscaleStatus.decode(json: json) else {
             return TailscaleStatus()
         }
         return s
@@ -154,7 +172,8 @@ final class TailscaleEngine: @unchecked Sendable {
     /// Apply a live prefs change (exit node / accept-routes / accept-DNS /
     /// advertised routes). Returns nil on success or a message on failure.
     func updatePrefs(_ patch: TailscalePrefsPatch) -> String? {
-        let reply = patch.jsonString().withCString { TSUpdatePrefs($0) }
+        let current = lock.withLock { stopped ? 0 : handle }
+        let reply = patch.jsonString().withCString { TSUpdatePrefsInstance(current, $0) }
         guard let response = Self.takeString(reply) else { return "The engine did not answer." }
         return Self.engineError(from: response, fallback: "The change could not be applied.")?.localizedDescription
     }
@@ -206,8 +225,9 @@ final class TailscaleEngine: @unchecked Sendable {
                 // boundary. A full queue drops (TSPacketIn returns 0), which is
                 // correct: a VPN must shed load, never stall the flow reader.
                 packet.withUnsafeBytes { raw in
-                    guard let base = raw.baseAddress, !raw.isEmpty else { return }
-                    _ = TSPacketIn(base, Int32(raw.count))
+                    guard let base = raw.baseAddress, !raw.isEmpty, raw.count <= 65_535 else { return }
+                    let current = self.lock.withLock { self.stopped ? 0 : self.handle }
+                    _ = TSPacketInInstance(current, base, Int32(raw.count))
                 }
             }
             self.lock.lock(); let running = self.pumpRunning && !self.stopped; self.lock.unlock()
@@ -219,6 +239,7 @@ final class TailscaleEngine: @unchecked Sendable {
     /// thread-safe, so no hop is needed (and a hop would add latency to every
     /// packet).
     fileprivate func deliver(_ packet: Data) {
+        guard !lock.withLock({ stopped }) else { return }
         guard let flow = provider?.packetFlow, let first = packet.first else { return }
         // IP version nibble decides the protocol number NE carries alongside
         // the packet — the packet itself stays raw.
@@ -230,8 +251,15 @@ final class TailscaleEngine: @unchecked Sendable {
 
     fileprivate func handleState(_ json: String) {
         guard let event = TailscaleStateEvent.decode(json: json) else { return }
+        if event.state == "StatePersistenceFailed" {
+            guard !lock.withLock({ stopped }) else { return }
+            delegate?.tailscaleEngine(self, didFailWithError: NSError(domain: "SimpleVPN.Tailscale", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Your Keychain did not save this VPN's identity. Keep SimpleVPN running and unlock your Keychain before reconnecting."]))
+            return
+        }
         let state = TailscaleBackendState(engineName: event.state)
         lock.lock()
+        guard !stopped else { lock.unlock(); return }
         let changed = state != lastState
         lastState = state
         lock.unlock()
@@ -248,7 +276,10 @@ final class TailscaleEngine: @unchecked Sendable {
 
     fileprivate func handleBrowseToURL(_ url: String) {
         guard !url.isEmpty else { return }
-        lock.lock(); pendingAuthURL = url; lock.unlock()
+        lock.lock()
+        guard !stopped else { lock.unlock(); return }
+        pendingAuthURL = url
+        lock.unlock()
         Self.log.log("tailscale sign-in required")   // the URL itself is a bearer secret
         delegate?.tailscaleEngine(self, needsSignIn: url)
         finishStart(with: nil)
@@ -259,8 +290,8 @@ final class TailscaleEngine: @unchecked Sendable {
         work.async { [weak self] in
             guard let self, let provider = self.provider else { return }
             self.lock.lock()
+            guard !self.stopped else { self.lock.unlock(); return }
             let unchanged = self.lastConfig == config
-            self.lastConfig = config
             self.lock.unlock()
             guard !unchanged else { return }
 
@@ -273,8 +304,9 @@ final class TailscaleEngine: @unchecked Sendable {
                 // applying empty settings would drop what is already there.
                 return
             }
-            provider.setTunnelNetworkSettings(settings) { [weak self] error in
+            provider.applyNetworkSettings(settings) { [weak self] error in
                 guard let self else { return }
+                guard !self.lock.withLock({ self.stopped }) else { return }
                 if let error {
                     Self.log.error("tailscale settings failed: \(error.localizedDescription, privacy: .public)")
                     self.delegate?.tailscaleEngine(self, didFailWithError: error)
@@ -285,7 +317,7 @@ final class TailscaleEngine: @unchecked Sendable {
                 // The flow only exists once settings are applied; starting the
                 // pump earlier reads from a flow with no addresses.
                 self.startPump()
-                self.lock.lock(); self.pendingAuthURL = ""; self.lock.unlock()
+                self.lock.lock(); self.lastConfig = config; self.pendingAuthURL = ""; self.lock.unlock()
                 self.finishStart(with: nil)
             }
         }
@@ -318,12 +350,12 @@ final class TailscaleEngine: @unchecked Sendable {
         final class ResultBox: @unchecked Sendable { var ok = false }
         let box = ResultBox()
         let done = DispatchSemaphore(value: 0)
-        provider.setTunnelNetworkSettings(settings) { error in
+        provider.applyNetworkSettings(settings) { error in
             box.ok = (error == nil)
             if let error { Self.log.error("tailscale proxy apply failed: \(error.localizedDescription, privacy: .public)") }
             done.signal()
         }
-        _ = done.wait(timeout: .now() + 15)
+        done.wait()
         return box.ok
     }
 
@@ -350,6 +382,18 @@ final class TailscaleEngine: @unchecked Sendable {
         guard let done else { return }
         cancelStartTimer()
         done(error)
+    }
+
+    /// Credential channel only. Never attach this value to stats or diagnostics.
+    func nodeStateSnapshot() -> String? {
+        let owned = lock.withLock { stopped ? 0 : handle }
+        return owned == 0 ? nil : Self.takeString(TSNodeState(owned))
+    }
+    func acknowledgeNodeState(_ revision: UInt64) -> Bool {
+        let owned = lock.withLock { stopped ? 0 : handle }
+        guard owned != 0 else { return false }
+        let text = Self.takeString(TSAckNodeState(owned, revision))
+        return Self.engineError(from: text, fallback: "The VPN identity was not saved.") == nil
     }
 
     // MARK: - C boundary helpers
@@ -384,34 +428,34 @@ final class TailscaleEngine: @unchecked Sendable {
     // These are `@convention(c)` by inference: none of them captures anything,
     // which is what lets them be handed to the Go side as function pointers.
 
-    private static let packetOut: TSPacketCallback = { bytes, length in
+    private static let packetOut: TSInstancePacketCallback = { context, bytes, length in
         guard let bytes, length > 0 else { return }
         let data = Data(bytes: bytes, count: Int(length))
-        active()?.deliver(data)
+        callbacks.lookup(context)?.deliver(data)
     }
 
-    private static let stateChanged: TSStringCallback = { text in
+    private static let stateChanged: TSInstanceStringCallback = { context, text in
         guard let text else { return }
         let s = String(cString: text)
-        active()?.handleState(s)
+        callbacks.lookup(context)?.handleState(s)
     }
 
-    private static let browseToURL: TSStringCallback = { text in
+    private static let browseToURL: TSInstanceStringCallback = { context, text in
         guard let text else { return }
         let s = String(cString: text)
-        active()?.handleBrowseToURL(s)
+        callbacks.lookup(context)?.handleBrowseToURL(s)
     }
 
-    private static let netmapChanged: TSStringCallback = { text in
+    private static let netmapChanged: TSInstanceStringCallback = { context, text in
         guard let text else { return }
         let s = String(cString: text)
-        active()?.handleNetmap(s)
+        callbacks.lookup(context)?.handleNetmap(s)
     }
 
-    private static let logLine: TSStringCallback = { text in
+    private static let logLine: TSInstanceStringCallback = { context, text in
         guard let text else { return }
         let s = String(cString: text)
-        active()?.handleLog(s)
+        callbacks.lookup(context)?.handleLog(s)
     }
 }
 

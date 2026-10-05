@@ -42,7 +42,7 @@ settings:
     # dependency below. Xcode resolves this default before that dependency
     # runs, so the two product targets stamp the newly allocated value into
     # their generated plists before signing.
-    CURRENT_PROJECT_VERSION: "247"
+    CURRENT_PROJECT_VERSION: "279"
     # Xcode "recommended settings" we accept (signing stays Developer ID, ARCHS stays arm64 by design).
     DEAD_CODE_STRIPPING: YES
     ENABLE_USER_SCRIPT_SANDBOXING: YES

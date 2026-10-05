@@ -37,7 +37,7 @@ struct TailscaleConfigTests {
         let obj = try #require(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
 
         // startConfig in main.go: these names are the contract.
-        let expected: Set<String> = ["controlURL", "hostname", "authKey", "stateDir",
+        let expected: Set<String> = ["controlURL", "hostname", "authKey", "stateDir", "userKeychainState", "nodeState",
                                      "acceptRoutes", "acceptDNS", "useExitNode", "exitNode",
                                      "exitNodeAllowLANAccess", "advertiseRoutes", "mtu"]
         #expect(Set(obj.keys) == expected)
@@ -84,8 +84,11 @@ struct TailscaleConfigTests {
     }
 
     @Test func redactedPayloadNeverCarriesTheAuthKey() {
-        let start = TailscaleStartConfig(config: TailscaleConfig(), authKey: "tskey-auth-verysecret",
+        var start = TailscaleStartConfig(config: TailscaleConfig(), authKey: "tskey-auth-verysecret",
                                          stateDir: "/tmp/x")
+        start.nodeState = "NODE_IDENTITY_CANARY"
+        #expect(start.userKeychainState)
+        #expect(!start.redactedJSONString().contains("NODE_IDENTITY_CANARY"))
         #expect(!start.redactedJSONString().contains("verysecret"))
         #expect(start.redactedJSONString().contains("<redacted>"))
         // An absent key must not be reported as a redacted one.

@@ -255,10 +255,10 @@ flowchart LR
   note that if a future build switches to AF headers, the read and write must change together.
 * **The Go and netstack engines never touch a descriptor.** `wireguard-go`, the Tailscale engine, the
   `tun2socks` proxy engine and the SSH network tunnel are handed raw IP packets across a C callback
-  boundary (`WGPacketIn` / `WGSetCallbacks` and their equivalents). Because the callbacks are plain
+  boundary (`WGPacketInInstance` / instance callbacks and their equivalents). Because the callbacks are plain
   `@convention(c)` pointers that cannot capture Swift context, each engine routes them through a
-  single lock-guarded static — legitimate precisely because **only one tunnel runs per provider
-  process**.
+  scoped registry keyed by a callback context, paired with monotonically allocated Go
+  instance handles. Stopping one context removes its callbacks without invalidating another.
 * **The netstack engines are not carrying IP at all.** The proxy tunnel and the SSH network tunnel
   terminate the guest's TCP in a userspace stack (gVisor netstack, `Vendor/proxy-engine`) and
   re-originate each flow as a SOCKS/CONNECT dial or an SSH `direct-tcpip` channel. Two consequences

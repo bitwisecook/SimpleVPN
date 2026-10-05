@@ -225,6 +225,9 @@ typedef NS_ENUM(NSInteger, SSHHostKeyStatus) {
 ///
 /// NOT USABLE FROM THE PACKET-TUNNEL EXTENSION: it runs as root in the system
 /// context, has no `SSH_AUTH_SOCK`, and must not reach into a user's session.
+/// Takes ownership of an already connected agent socket, including on failure.
+- (BOOL)useAgentSocketDescriptor:(int)descriptor error:(NSError * _Nullable * _Nullable)error;
+
 - (BOOL)authAgentForUser:(NSString *)user error:(NSError * _Nullable * _Nullable)error;
 /// Kerberos single sign-on (gssapi-with-mic) using the user's existing ticket —
 /// a libssh capability libssh2 never had. Needs a ticket (kinit / AD login);

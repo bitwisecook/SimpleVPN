@@ -169,6 +169,26 @@ nonisolated struct VPNEndpoint: Codable, Sendable, Equatable, Identifiable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        if decoder.userInfo[.strictConfigImport] as? Bool == true {
+            host = try c.decode(String.self, forKey: .host)
+            guard !host.trimmingCharacters(in: .whitespaces).isEmpty else {
+                throw DecodingError.dataCorruptedError(forKey: .host, in: c, debugDescription: "Missing endpoint host")
+            }
+            port = try c.decodeIfPresent(Int.self, forKey: .port)
+            proto = try c.decodeIfPresent(String.self, forKey: .proto)
+            label = try c.decodeIfPresent(String.self, forKey: .label)
+            country = try c.decodeIfPresent(String.self, forKey: .country)?.uppercased()
+            region = try c.decodeIfPresent(RegionBucket.self, forKey: .region)
+            userAdded = try c.decodeIfPresent(Bool.self, forKey: .userAdded)
+            order = try c.decodeIfPresent(Int.self, forKey: .order)
+            peerPublicKey = try c.decodeIfPresent(String.self, forKey: .peerPublicKey)
+            fromProvider = try c.decodeIfPresent(String.self, forKey: .fromProvider)
+            if port.map({ !(1...65535).contains($0) }) == true || order.map({ $0 < 0 }) == true ||
+               peerPublicKey.map({ WireGuardConfig.keyProblem($0) != nil }) == true {
+                throw DecodingError.dataCorruptedError(forKey: .host, in: c, debugDescription: "Invalid endpoint settings")
+            }
+            return
+        }
         host = (try? c.decode(String.self, forKey: .host)) ?? ""
         if let p = try? c.decode(Int.self, forKey: .port) {
             port = p
@@ -243,7 +263,10 @@ nonisolated struct VPNEndpointList: Codable, Sendable, Equatable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        let raw = (try? c.decode([VPNEndpoint].self, forKey: .endpoints)) ?? []
+        let raw: [VPNEndpoint]
+        if decoder.userInfo[.strictConfigImport] as? Bool == true {
+            raw = try c.decodeIfPresent([VPNEndpoint].self, forKey: .endpoints) ?? []
+        } else { raw = (try? c.decode([VPNEndpoint].self, forKey: .endpoints)) ?? [] }
         // A hostless entry is meaningless and unfixable in the UI — drop it
         // rather than show a blank row somebody can't get rid of.
         endpoints = raw.filter { !$0.host.trimmingCharacters(in: .whitespaces).isEmpty }

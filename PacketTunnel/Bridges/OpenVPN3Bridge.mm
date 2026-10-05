@@ -189,7 +189,7 @@ private:
 
 // MARK: - Bridge implementation.
 @implementation OpenVPN3Bridge {
-    __weak NEPacketTunnelProvider *_provider;
+    __weak NEPacketTunnelProvider<SVPTunnelSettingsApplying> *_provider;
     __weak id<OpenVPN3BridgeDelegate> _delegate;
     std::unique_ptr<Client> _client;
     dispatch_queue_t _runQueue;   // runs the blocking connect()
@@ -250,7 +250,7 @@ private:
     NSMutableArray<NEIPv6Route *> *_extraV6Included;
 }
 
-- (instancetype)initWithProvider:(NEPacketTunnelProvider *)provider delegate:(id<OpenVPN3BridgeDelegate>)delegate {
+- (instancetype)initWithProvider:(NEPacketTunnelProvider<SVPTunnelSettingsApplying> *)provider delegate:(id<OpenVPN3BridgeDelegate>)delegate {
     if ((self = [super init])) {
         _provider = provider;
         _delegate = delegate;
@@ -651,12 +651,12 @@ private:
 
 /// Apply settings synchronously (callers are off the main thread). Returns nil error on success.
 - (NSError *)applyTunSettings:(NEPacketTunnelNetworkSettings *)settings {
-    NEPacketTunnelProvider *provider = _provider;
+    NEPacketTunnelProvider<SVPTunnelSettingsApplying> *provider = _provider;
     if (!provider) return [NSError errorWithDomain:kOVPNErrorDomain code:102
         userInfo:@{NSLocalizedDescriptionKey: @"provider gone"}];
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     __block NSError *applyError = nil;
-    [provider setTunnelNetworkSettings:settings completionHandler:^(NSError *e) {
+    [provider applyNetworkSettings:settings completionHandler:^(NSError *e) {
         applyError = e; dispatch_semaphore_signal(sem);
     }];
     dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
@@ -683,7 +683,7 @@ private:
     _ourFD = fds[1];
     _pumpGeneration.fetch_add(1);   // new session: new pump generation
 
-    NEPacketTunnelProvider *provider = _provider;
+    NEPacketTunnelProvider<SVPTunnelSettingsApplying> *provider = _provider;
     if (!provider) { BLOG("tunEstablish: provider gone before pump start"); return -1; }
     [self startReadingPacketsInto:provider.packetFlow];
     [self startReadingFDIntoFlow:provider.packetFlow];

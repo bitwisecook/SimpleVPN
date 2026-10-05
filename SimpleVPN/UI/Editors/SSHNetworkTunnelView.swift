@@ -36,7 +36,8 @@ struct SSHNetworkTunnelView: View {
     @State private var dnsText = ""
     @State private var searchDomainsText = ""
     @State private var loaded = false
-    @State private var saving = false
+    @State private var saves = LatestSettingsSave()
+    private var saving: Bool { saves.isApplying }
     @State private var checkingHostKey = false
     @State private var hostKeyReport: VPNController.SSHNetHostKeyReport?
     @State private var status: SSHNetworkTunnelStatus?
@@ -88,6 +89,15 @@ struct SSHNetworkTunnelView: View {
                 Text(draft.authMethod.summary)
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if draft.authMethod == .agent {
+                    EngineSettingRow(spec: Self.specs["sshnet.agent-socket-path"], value: draft.agentSocketPath) {
+                        SettingValueField(spec: Self.specs["sshnet.agent-socket-path"], text: $draft.agentSocketPath,
+                                          prompt: "Default login-session agent", mono: true)
+                    }
+                    ForEach(SSHAgentProbe.vendorAgents.filter { FileManager.default.fileExists(atPath: $0.expandedPath) }, id: \.name) { vendor in
+                        Button("Use \(vendor.name)") { draft.agentSocketPath = vendor.socketPath }
+                    }
+                }
                 // ABSENT WITH THE REASON, not silently missing: everyone who uses
                 // SSH expects an agent option, and its absence without explanation
                 // reads as a bug rather than a constraint.
@@ -426,8 +436,9 @@ struct SSHNetworkTunnelView: View {
         Self.specs["sshnet.keepalive"].isChanged(draft.keepaliveSeconds) ? 1 : 0
     }
 
-    private var saveDisabledReason: String? {
-        if saving { return "Saving…" }
+    private var saveDisabledReason: String? { saving ? "Saving…" : validationProblem }
+
+    private var validationProblem: String? {
         if name.trimmingCharacters(in: .whitespaces).isEmpty { return "Give this VPN a name first." }
         if draft.server.trimmingCharacters(in: .whitespaces).isEmpty { return "Enter the SSH server address." }
         if let p = serverProblem { return p }
@@ -510,9 +521,7 @@ struct SSHNetworkTunnelView: View {
     /// and not stored.
     private func save() async {
         guard !ManagedPolicy.lockConfiguration else { return }
-        guard saveDisabledReason == nil else { return }
-        saving = true
-        defer { saving = false }
+        guard validationProblem == nil else { return }
         draft.port = Int(portText.trimmingCharacters(in: .whitespaces)) ?? 0
         draft.includedRoutes = ProxyTunnelConfig.splitRoutes(includedText)
         draft.excludedRoutes = ProxyTunnelConfig.splitRoutes(excludedText)
@@ -520,22 +529,34 @@ struct SSHNetworkTunnelView: View {
         draft.searchDomains = ProxyTunnelConfig.splitRoutes(searchDomainsText)
         // normalized() on every save path (the OpenVPNOverrides rule).
         draft = draft.normalized()
-        do {
-            try await vpn.rename(id: profileID, to: name)
-            try await vpn.setSSHNetworkTunnelConfig(draft, for: profileID)
-            vpn.setSSHNetworkTunnelSecrets(password: password,
-                                           privateKeyPEM: draft.needsPrivateKey ? privateKeyPEM : "",
-                                           certificatePEM: draft.needsCertificate ? certificatePEM : "",
-                                           for: profileID)
-            customRouting = await commitCustomRouting(vpn, profileID: profileID, profile: customRouting,
-                                                      proxyAuthUsername: crProxyAuthUsername,
-                                                      proxyAuthPassword: crProxyAuthPassword)
-            // No "Saved" transient: it reused the SAME `checkmark` glyph as "Save"
-            // in an icon-only toolbar, so a successful save was invisible to a
-            // sighted user while VoiceOver heard "Saved". Deleting the button
-            // deleted the bug.
-        } catch {
-            vpn.report(error, profile: profileID)
+        let saved_profileID = profileID
+        let saved_name = name
+        let saved_draft = draft
+        let saved_customRouting = customRouting
+        let saved_crProxyAuthUsername = crProxyAuthUsername
+        let saved_crProxyAuthPassword = crProxyAuthPassword
+        let saved_password = password
+        let saved_privateKeyPEM = privateKeyPEM
+        let saved_certificatePEM = certificatePEM
+        await saves.submit { isCurrent in
+            do {
+                try await vpn.rename(id: saved_profileID, to: saved_name)
+                try await vpn.setSSHNetworkTunnelConfig(saved_draft, for: saved_profileID)
+                vpn.setSSHNetworkTunnelSecrets(password: saved_password,
+                                               privateKeyPEM: saved_draft.needsPrivateKey ? saved_privateKeyPEM : "",
+                                               certificatePEM: saved_draft.needsCertificate ? saved_certificatePEM : "",
+                                               for: saved_profileID)
+                let committedRouting = await commitCustomRouting(vpn, profileID: saved_profileID, profile: saved_customRouting,
+                                                          proxyAuthUsername: saved_crProxyAuthUsername,
+                                                          proxyAuthPassword: saved_crProxyAuthPassword)
+                if isCurrent() { customRouting = committedRouting }
+                // No "Saved" transient: it reused the SAME `checkmark` glyph as "Save"
+                // in an icon-only toolbar, so a successful save was invisible to a
+                // sighted user while VoiceOver heard "Saved". Deleting the button
+                // deleted the bug.
+            } catch {
+                vpn.report(error, profile: saved_profileID)
+            }
         }
     }
 

@@ -23,7 +23,8 @@ struct TailscaleView: View {
     @State private var authKey = ""
     @State private var advertiseText = ""
     @State private var loaded = false
-    @State private var saving = false
+    @State private var saves = LatestSettingsSave()
+    private var saving: Bool { saves.isApplying }
     @State private var status: TailscaleStatus?
     @State private var prefsError: String?
     @State private var customRouting = CustomRoutingProfile()
@@ -415,8 +416,9 @@ struct TailscaleView: View {
         return SettingNeeds(byID: out)
     }
 
-    private var saveDisabledReason: String? {
-        if saving { return "Saving…" }
+    private var saveDisabledReason: String? { saving ? "Saving…" : validationProblem }
+
+    private var validationProblem: String? {
         if name.trimmingCharacters(in: .whitespaces).isEmpty { return "Give this VPN a name first." }
         if let p = draft.controlURLProblem { return p }
         // Ungated before: saving this produced a tunnel that silently sent
@@ -455,39 +457,48 @@ struct TailscaleView: View {
     /// and not stored.
     private func save() async {
         guard !ManagedPolicy.lockConfiguration else { return }
-        guard saveDisabledReason == nil else { return }
-        saving = true
-        defer { saving = false }
+        guard validationProblem == nil else { return }
         draft.advertiseRoutes = TailscaleConfig.splitRoutes(advertiseText)
         // normalized() on every save path (the OpenVPNOverrides rule).
         draft = draft.normalized()
-        do {
-            try await vpn.rename(id: profileID, to: name)
-            try await vpn.setTailscaleConfig(draft, for: profileID)
-            vpn.setTailscaleAuthKey(authKey, for: profileID)
-            // A running session shouldn't need a reconnect just to change which
-            // machine carries the traffic — push what the engine can take live.
-            if vpn.profiles.first(where: { $0.id == profileID })?.status == .connected {
-                // Same symmetry the start payload keeps (TailscaleStartConfig):
-                // no exit machine ⇒ no exit node id and no LAN carve-out.
-                let patch = TailscalePrefsPatch(
-                    acceptRoutes: draft.acceptRoutes, acceptDNS: draft.acceptDNS,
-                    useExitNode: draft.useExitNode,
-                    exitNode: draft.useExitNode ? draft.exitNode : "",
-                    exitNodeAllowLANAccess: draft.useExitNode && draft.exitNodeAllowLANAccess,
-                    advertiseRoutes: draft.advertiseRoutes)
-                prefsError = await vpn.pushTailscalePrefs(patch, id: profileID)
-            } else {
-                prefsError = nil
+        let saved_profileID = profileID
+        let saved_name = name
+        let saved_draft = draft
+        let saved_customRouting = customRouting
+        let saved_crProxyAuthUsername = crProxyAuthUsername
+        let saved_crProxyAuthPassword = crProxyAuthPassword
+        let saved_authKey = authKey
+        await saves.submit { isCurrent in
+            do {
+                try await vpn.rename(id: saved_profileID, to: saved_name)
+                try await vpn.setTailscaleConfig(saved_draft, for: saved_profileID)
+                vpn.setTailscaleAuthKey(saved_authKey, for: saved_profileID)
+                // A running session shouldn't need a reconnect just to change which
+                // machine carries the traffic — push what the engine can take live.
+                if vpn.profiles.first(where: { $0.id == saved_profileID })?.status == .connected {
+                    // Same symmetry the start payload keeps (TailscaleStartConfig):
+                    // no exit machine ⇒ no exit node id and no LAN carve-out.
+                    let patch = TailscalePrefsPatch(
+                        acceptRoutes: saved_draft.acceptRoutes, acceptDNS: saved_draft.acceptDNS,
+                        useExitNode: saved_draft.useExitNode,
+                        exitNode: saved_draft.useExitNode ? saved_draft.exitNode : "",
+                        exitNodeAllowLANAccess: saved_draft.useExitNode && saved_draft.exitNodeAllowLANAccess,
+                        advertiseRoutes: saved_draft.advertiseRoutes)
+                    let problem = await vpn.pushTailscalePrefs(patch, id: saved_profileID)
+                    if isCurrent() { prefsError = problem }
+                } else {
+                    if isCurrent() { prefsError = nil }
+                }
+                let committedRouting = await commitCustomRouting(vpn, profileID: saved_profileID, profile: saved_customRouting,
+                                                          proxyAuthUsername: saved_crProxyAuthUsername,
+                                                          proxyAuthPassword: saved_crProxyAuthPassword)
+                if isCurrent() { customRouting = committedRouting }
+                // No "Saved" transient: it reused the SAME glyph as "Save" in an
+                // icon-only toolbar, so a successful save was invisible to a sighted user
+                // while VoiceOver heard "Saved". Deleting the button deleted the bug.
+            } catch {
+                vpn.report(error, profile: saved_profileID)
             }
-            customRouting = await commitCustomRouting(vpn, profileID: profileID, profile: customRouting,
-                                                      proxyAuthUsername: crProxyAuthUsername,
-                                                      proxyAuthPassword: crProxyAuthPassword)
-            // No "Saved" transient: it reused the SAME glyph as "Save" in an
-            // icon-only toolbar, so a successful save was invisible to a sighted user
-            // while VoiceOver heard "Saved". Deleting the button deleted the bug.
-        } catch {
-            vpn.report(error, profile: profileID)
         }
     }
 

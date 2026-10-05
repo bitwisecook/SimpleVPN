@@ -14,6 +14,9 @@ nonisolated enum ConfigSecretMode: String, CaseIterable, Sendable {
 enum ConfigSecretTransfer {
     static func accounts(id: String) -> [(String, String)] {
         [("credentials", id), ("wireguard", "wg.\(id)"), ("tailscale", "tailscale.\(id)"),
+         ("tailscale-state", "tailscale.state.\(id)"),
+         ("native-http-proxy", "native.proxy.http.\(id)"),
+         ("native-https-proxy", "native.proxy.https.\(id)"),
          ("ssh-network", "sshnet.\(id)"), ("tunnel", "tunnel.\(id)"),
          ("tunnel-proxy", "tunnel.\(id).proxy"), ("tunnel-jump", "tunnel.\(id).jump"),
          ("tunnel-passphrase", "tunnel.\(id).privateKey"), ("ssh-key", "tunnel.\(id).sshKey"),
@@ -113,6 +116,10 @@ enum ConfigSecretTransfer {
             guard Set(fields.entries.map(\.key)).isSubset(of: allowed) else { throw invalid() }
             if credentialRoles.contains(entry.key) || entry.key == "protected" || entry.key == "routing-proxy" {
                 guard fields["username"]?.stringValue != nil, fields["password"]?.stringValue != nil else { throw invalid() }
+            }
+            if entry.key == "tailscale-state" {
+                guard let state = fields["password"]?.stringValue,
+                      TailscaleNodeState(revision: 0, data: state).isValid else { throw invalid() }
             }
             output.put(entry.key, entry.value)
         }

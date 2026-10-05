@@ -98,12 +98,10 @@ final class ControlPlaneDispatcher {
             guard vpn.profiles.first(where: { $0.id == id })?.status == .connected else {
                 return .failed("only a connected VPN can pause")
             }
-            await vpn.pause(id: id)
-            return .ok
+            return await vpn.pause(id: id) ? .ok : .failed(vpn.lastError ?? "Pause was not acknowledged.")
         case .resume(let id):
             guard hasProfile(id) else { return .failed("no such VPN: \(id)") }
-            await vpn.resume(id: id)
-            return .ok
+            return await vpn.resume(id: id) ? .ok : .failed(vpn.lastError ?? "Resume was not acknowledged.")
         case .setDefaultGateway(let owner):
             if let owner {
                 guard hasProfile(owner) else { return .failed("no such VPN: \(owner)") }
@@ -112,6 +110,10 @@ final class ControlPlaneDispatcher {
                 }
             }
             await vpn.setDefaultGateway(to: owner)
+            guard let applied = vpn.routes.appliedPlan, applied.owner == owner,
+                  vpn.routes.lastApplyError == nil else {
+                return .failed(vpn.routes.lastApplyError ?? "The requested gateway was not acknowledged.")
+            }
             return .ok
         }
     }

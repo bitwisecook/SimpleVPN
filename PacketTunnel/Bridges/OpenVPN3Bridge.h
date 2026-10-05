@@ -12,6 +12,7 @@
 
 #import <Foundation/Foundation.h>
 #import <NetworkExtension/NetworkExtension.h>
+#import "TunnelSettingsApplying.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -103,7 +104,7 @@ typedef NS_ENUM(NSInteger, OVPNStatus) {
 NS_SWIFT_SENDABLE
 @interface OpenVPN3Bridge : NSObject
 
-- (instancetype)initWithProvider:(NEPacketTunnelProvider *)provider
+- (instancetype)initWithProvider:(NEPacketTunnelProvider<SVPTunnelSettingsApplying> *)provider
                         delegate:(id<OpenVPN3BridgeDelegate>)delegate;
 
 /// Start a connection. `ovpnConfig` is the full .ovpn text. username/password are

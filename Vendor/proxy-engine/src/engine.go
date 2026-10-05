@@ -229,8 +229,11 @@ func PXSetCallbacks(packetOut C.PXPacketCallback, stateChanged C.PXStringCallbac
 // ---- Engine state -----------------------------------------------------------
 
 type engineState struct {
-	stack *stack.Stack
-	ep    *channel.Endpoint
+	packetOutput func([]byte)
+	diagnostic   func(string, ...any)
+	stateOutput  func(string, string)
+	stack        *stack.Stack
+	ep           *channel.Endpoint
 	// up is the CONCRETE in-process proxy upstream, and is NIL when the flows are
 	// dialled by the extension (ssh://). Everything that needs the proxy itself
 	// — the SOCKS UDP-ASSOCIATE relay above all — must nil-check it.
@@ -267,7 +270,7 @@ func (st *engineState) setLastError(format string, args ...any) {
 	st.lastErrMu.Lock()
 	st.lastErr = msg
 	st.lastErrMu.Unlock()
-	logf("%s", msg)
+	st.diagnostic("%s", msg)
 }
 
 var (
@@ -346,10 +349,14 @@ func PXStart(cfgJSON *C.char) *C.char {
 // upstream itself. A struct (rather than a growing parameter list) so a new
 // field cannot silently take an existing argument's position.
 type engineOptions struct {
-	up          *upstream
-	mtu         int
-	dnsSentinel string
-	dnsUpstream string
+	packetOutput func([]byte)
+	diagnostic   func(string, ...any)
+	stateOutput  func(string, string)
+	flowDial     flowDialer
+	up           *upstream
+	mtu          int
+	dnsSentinel  string
+	dnsUpstream  string
 }
 
 // buildEngine is the two-argument form the tests use; the options form is what
@@ -359,6 +366,15 @@ func buildEngine(up *upstream, mtu int) (*engineState, error) {
 }
 
 func buildEngineWithOptions(opts engineOptions) (*engineState, error) {
+	if opts.packetOutput == nil {
+		opts.packetOutput = emitLegacyPacket
+	}
+	if opts.diagnostic == nil {
+		opts.diagnostic = logf
+	}
+	if opts.stateOutput == nil {
+		opts.stateOutput = emitState
+	}
 	up, mtu := opts.up, opts.mtu
 	s := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
@@ -415,13 +431,16 @@ func buildEngineWithOptions(opts engineOptions) (*engineState, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	st := &engineState{
-		stack:       s,
-		ep:          ep,
-		scheme:      schemeName(up.kind),
-		dnsSentinel: opts.dnsSentinel,
-		dnsUpstream: opts.dnsUpstream,
-		ctx:         ctx,
-		cancel:      cancel,
+		packetOutput: opts.packetOutput,
+		diagnostic:   opts.diagnostic,
+		stateOutput:  opts.stateOutput,
+		stack:        s,
+		ep:           ep,
+		scheme:       schemeName(up.kind),
+		dnsSentinel:  opts.dnsSentinel,
+		dnsUpstream:  opts.dnsUpstream,
+		ctx:          ctx,
+		cancel:       cancel,
 		// The real OS dialer for reaching the proxy. KeepAlive keeps a busy
 		// proxy connection healthy; the timeout is per-dial (also bounded by the
 		// per-flow context).
@@ -436,6 +455,9 @@ func buildEngineWithOptions(opts engineOptions) (*engineState, error) {
 		st.flowDial = up
 	} else {
 		st.flowDial = extensionDialer{}
+	}
+	if opts.flowDial != nil && !up.kind.dialledInProcess() {
+		st.flowDial = opts.flowDial
 	}
 
 	// Forwarders: one per transport. Each inbound flow becomes a handler call.
@@ -464,15 +486,19 @@ func (st *engineState) startOutboundPump() {
 			pkt.DecRef()
 			data := view.AsSlice()
 			if len(data) == 0 || len(data) > maxPacketSize {
+				view.Release()
 				continue
 			}
-			f := cbPacketOut.Load()
-			if f == nil {
-				continue
-			}
-			C.pxCallPacket(*f, (*C.uchar)(unsafe.Pointer(&data[0])), C.int(len(data)))
+			st.packetOutput(data)
+			view.Release()
 		}
 	}()
+}
+
+func emitLegacyPacket(data []byte) {
+	if f := cbPacketOut.Load(); f != nil && len(data) > 0 {
+		C.pxCallPacket(*f, (*C.uchar)(unsafe.Pointer(&data[0])), C.int(len(data)))
+	}
 }
 
 // ---- Packet ingress ---------------------------------------------------------
@@ -601,13 +627,17 @@ func schemeName(k proxyKind) string {
 //export PXStatus
 func PXStatus() *C.char {
 	st := current.Load()
+	return cJSON(statusEngine(st))
+}
+
+func statusEngine(st *engineState) statusPayload {
 	if st == nil {
-		return cJSON(statusPayload{State: "stopped"})
+		return statusPayload{State: "stopped"}
 	}
 	st.lastErrMu.Lock()
 	lastErr := st.lastErr
 	st.lastErrMu.Unlock()
-	return cJSON(statusPayload{
+	return statusPayload{
 		State:         "running",
 		Scheme:        st.scheme,
 		LastError:     lastErr,
@@ -620,7 +650,7 @@ func PXStatus() *C.char {
 		BytesUp:       st.bytesUp.Load(),
 		BytesDown:     st.bytesDown.Load(),
 		PacketsInDrop: st.packetsInDrop.Load(),
-	})
+	}
 }
 
 // ---- Stop -------------------------------------------------------------------
@@ -634,6 +664,11 @@ func PXStop() *C.char {
 		return cJSON(okResponse{OK: true}) // idempotent
 	}
 	current.Store(nil)
+	stopEngine(st)
+	return cJSON(okResponse{OK: true})
+}
+
+func stopEngine(st *engineState) {
 
 	// Cancel first so the outbound pump and every in-flight per-flow context
 	// unwind, then close the stack (which closes the channel endpoint and every
@@ -648,11 +683,10 @@ func PXStop() *C.char {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		logf("outbound pump did not exit within 5s")
+		st.diagnostic("outbound pump did not exit within 5s")
 	}
 	// Reap the netstack's own goroutines so they do not accumulate across
 	// reconnects in this long-lived extension process.
 	st.stack.Wait()
-	emitState("stopped", "")
-	return cJSON(okResponse{OK: true})
+	st.stateOutput("stopped", "")
 }

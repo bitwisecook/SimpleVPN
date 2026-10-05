@@ -33,6 +33,7 @@ nonisolated struct RouteIntent: MediatorIntent {
     /// `RouteMediator.participation` == .full && (kind-specific gating, e.g. a
     /// Tailscale exit node). Only capable engines enter owner selection.
     var canOwnDefault: Bool
+    var prefixesRewritten = false
     var metric: Int
     /// Recency of this engine's connection — the deterministic auto-promotion
     /// tiebreak (newest capable wins). Later = more recent.
@@ -71,6 +72,8 @@ nonisolated struct RoutePlan: Sendable, Equatable {
     /// The application order: every `.split` FIRST, then the single `.full`. Applying
     /// in this order makes two-defaults structurally impossible. Idempotent per step.
     var orderedApplication: [GatewayPolicy.Step]
+    var routeRequests: [String: RouteApplyRequest] = [:]
+    var userChoseDirect = false
 
     /// Convenience: the ≤1 engine that ends up full.
     var fullOwners: [String] { roles.filter { $0.value == .full }.map(\.key) }
@@ -116,7 +119,10 @@ nonisolated enum RouteArbiter: MediatorArbiter {
         }
         if let owner, roles[owner] == .full { ordered.append(.full(owner)) }
 
-        return RoutePlan(owner: owner, roles: roles, orderedApplication: ordered)
+        return RoutePlan(owner: owner, roles: roles, orderedApplication: ordered,
+                         routeRequests: Dictionary(uniqueKeysWithValues: intents.map {
+                            ($0.engine, RouteApplyRequest(prefixes: $0.prefixesRewritten ? $0.advertisedPrefixes : nil))
+                         }), userChoseDirect: policy.userChoseDirect)
     }
 }
 

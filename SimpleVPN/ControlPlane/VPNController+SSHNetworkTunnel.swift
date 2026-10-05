@@ -275,8 +275,8 @@ extension VPNController {
             "sshUsername": config.username as NSString,
             "sshExpectedHostKeySHA256": pin as NSString,
         ]
-        if !secrets.password.isEmpty { options["sshPassword"] = secrets.password as NSString }
-        if !secrets.privateKeyPEM.isEmpty {
+        if config.authMethod != .agent, !secrets.password.isEmpty { options["sshPassword"] = secrets.password as NSString }
+        if config.needsPrivateKey, !secrets.privateKeyPEM.isEmpty {
             options["sshPrivateKeyPEM"] = secrets.privateKeyPEM as NSString
         }
         if config.needsCertificate, !secrets.certificatePEM.isEmpty {
@@ -299,7 +299,15 @@ extension VPNController {
         guard let session = mgr.connection as? NETunnelProviderSession else {
             throw err("The VPN configuration isn't ready — try removing and re-creating it.")
         }
+        var agentSocket: String?
+        if config.authMethod == .agent {
+            let configured = config.agentSocketPath
+            let state = await Task.detached { SSHAgentProbe().probe(configuredSocketPath: configured) }.value
+            guard state.canSignIn, let socket=state.socketPath else { throw err(state.summary) }
+            agentSocket=socket; options["sshAgentBroker"] = true as NSNumber
+        }
         try session.startTunnel(options: options)
+        if let agentSocket { watchSSHAgentSigning(id, session:session, socket:agentSocket) }
         Self.log.log("ssh network tunnel startTunnel dispatched for \(id, privacy: .public)")
         resyncStatuses()
     }
