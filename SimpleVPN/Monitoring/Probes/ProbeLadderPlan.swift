@@ -138,7 +138,7 @@ nonisolated enum ProbeLadderPlan {
                                detail: "Asks which ways of signing in the server will accept.",
                                blocking: false))
 
-        if facts.identityFilePath?.isEmpty == false {
+        if facts.identityFilePath?.isEmpty == false || facts.clientKeyPEM?.isEmpty == false {
             steps.append(ProbeStep(.sshPublicKey,
                                    title: "Prove your key",
                                    detail: "Offers the key this VPN is set up with. A key is reusable, so this costs nothing and consumes nothing.",

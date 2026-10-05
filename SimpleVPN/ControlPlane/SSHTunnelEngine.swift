@@ -82,6 +82,13 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
 
     private let ssh = DispatchQueue(label: "com.bragi0.SimpleVPN.ssh.session")
     private var session: SSHSession?      // touched only on `ssh`
+    private struct Flow {
+        var channel: SSHChannel
+        var connection: NWConnection
+        var clientEOF = false
+        var serverEOF = false
+    }
+    private var activeFlows: [ObjectIdentifier: Flow] = [:] // `ssh` only
     private var listener: NWListener?
 
     // Live forwards added while connected ("-L"/"-D" listeners keyed by their
@@ -104,6 +111,7 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
         var username: String
         var password: String?
         var identityFile: String?
+        var privateKeyPEM: String? = nil
         /// OpenSSH certificate (…-cert.pub) presented alongside the identity key.
         var certificateFile: String? = nil
         var socksPort: Int
@@ -148,8 +156,9 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
     /// Publish `state` on the main queue so the `@Observable` bookkeeping and any
     /// SwiftUI reads are serialized on one thread (writes arrive from several).
     private func publish(_ s: State) {
-        if Thread.isMainThread { state = s }
-        else { DispatchQueue.main.async { self.state = s } }
+        let update: @Sendable () -> Void = { self.state = self.stopped ? .idle : s }
+        if Thread.isMainThread { update() }
+        else { DispatchQueue.main.async(execute: update) }
     }
 
     /// Establish the SSH session and start the SOCKS5 listener. Returns once the
@@ -207,6 +216,7 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
     private func establishSession(_ config: Config) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             ssh.async {
+                guard !self.stopped else { cont.resume(throwing: CancellationError()); return }
                 let s = SSHSession()
                 do {
                     try s.connect(toHost: config.host, port: Int32(config.port),
@@ -251,6 +261,7 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
         /// A private key from a file; `certificate` means an OpenSSH …-cert.pub is
         /// grafted onto it so the userauth request presents the certificate.
         case key(certificate: Bool)
+        case storedKey
         case agent
         case kerberos
     }
@@ -268,6 +279,11 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
         let key = c.identityFile?.trimmingCharacters(in: .whitespaces) ?? ""
         let cert = c.certificateFile?.trimmingCharacters(in: .whitespaces) ?? ""
         switch c.authMethod ?? "" {
+        case "keychain":
+            guard let pem = c.privateKeyPEM, !pem.isEmpty else {
+                throw AuthError("Keychain sign-in is selected but no private key is stored.")
+            }
+            return [.storedKey]
         case "password":
             guard let pw = c.password, !pw.isEmpty else {
                 throw AuthError("Password sign-in is selected but no password was provided.")
@@ -354,6 +370,9 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
                 case .password:
                     // authPlan only puts .password in a plan when there IS one.
                     try s.authPassword(forUser: c.username, password: c.password ?? "")
+                case .storedKey:
+                    try s.authKey(forUser: c.username, privateKeyPEM: c.privateKeyPEM ?? "",
+                                  certificatePEM: nil, passphrase: c.password)
                 case .key(let certificate):
                     do {
                         try s.authKey(forUser: c.username, privateKeyPath: c.identityFile ?? "",
@@ -383,8 +402,9 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
     /// asynchronously via `stateUpdateHandler`, so returning at `start()` would
     /// report a proxy that can never accept a connection.
     private func startListener(port: Int) async throws {
-        let listener = try NWListener(using: .tcp,
-                                      on: NWEndpoint.Port(rawValue: UInt16(port)) ?? .any)
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: UInt16(port))!)
+        let listener = try NWListener(using: parameters)
         listener.newConnectionHandler = { [weak self] conn in self?.handleSOCKS(conn) }
         self.listener = listener   // published before start so stop() can cancel it mid-await
         try await Self.startAndAwaitReady(listener)
@@ -438,14 +458,16 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
             guard let port = Self.dynamicPort(spec), (1...65535).contains(port) else {
                 throw SSHForwardError("Couldn't parse a SOCKS port out of “\(spec)”.")
             }
-            try await startForwardListener(key: key, port: port) { [weak self] conn in
+            let fields = Self.forwardFields(spec)
+            let bind = fields.count == 2 ? fields[0] : "127.0.0.1"
+            try await startForwardListener(key: key, port: port, bind: bind) { [weak self] conn in
                 self?.handleSOCKS(conn)
             }
         case "L":
-            guard let (localPort, host, remotePort) = Self.localForwardParts(spec) else {
-                throw SSHForwardError("Couldn't parse “\(spec)” — expected [bind:]port:host:hostport (bracketed IPv6 binds aren't supported in-process).")
+            guard let (localPort, host, remotePort, bind) = Self.localForwardParts(spec) else {
+                throw SSHForwardError("Couldn't parse “\(spec)” — expected [bind:]port:host:hostport.")
             }
-            try await startForwardListener(key: key, port: localPort) { [weak self] conn in
+            try await startForwardListener(key: key, port: localPort, bind: bind) { [weak self] conn in
                 self?.handleLocalForward(conn, host: host, port: remotePort)
             }
         case "R":
@@ -480,11 +502,13 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
 
     /// Register the listener under its key BEFORE starting it, so stop()/remove
     /// can cancel it even mid-startup; deregister again if it never got ready.
-    private func startForwardListener(key: String, port: Int,
+    private func startForwardListener(key: String, port: Int, bind: String,
                                       onConnection: @escaping @Sendable (NWConnection) -> Void) async throws {
         guard !stopped else { throw CancellationError() }
-        let listener = try NWListener(using: .tcp,
-                                      on: NWEndpoint.Port(rawValue: UInt16(port)) ?? .any)
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(bind.isEmpty || bind == "*" ? "0.0.0.0" : bind),
+            port: NWEndpoint.Port(rawValue: UInt16(port))!)
+        let listener = try NWListener(using: parameters)
         listener.newConnectionHandler = onConnection
         forwardLock.withLock {
             _forwards[key]?.cancel()   // replacing an edited spec under the same key
@@ -515,19 +539,34 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
 
     /// "[bind:]port" → port (the -D spec).
     private static func dynamicPort(_ spec: String) -> Int? {
-        Int(spec.split(separator: ":").last.map(String.init) ?? spec)
+        let fields = forwardFields(spec)
+        guard fields.count == 1 || fields.count == 2 else { return nil }
+        return fields.last.flatMap(Int.init)
     }
 
-    /// "[bind:]port:host:hostport" → (localPort, host, remotePort). Bracketed
-    /// IPv6 fields break the colon split and return nil (surfaced as an error).
-    private static func localForwardParts(_ spec: String) -> (Int, String, Int)? {
-        let parts = spec.split(separator: ":").map(String.init)
+    /// "[bind:]port:host:hostport" → (localPort, host, remotePort, bind).
+    /// Brackets preserve IPv6 colons inside an address field.
+    static func localForwardParts(_ spec: String) -> (Int, String, Int, String)? {
+        let parts = forwardFields(spec)
         guard parts.count == 3 || parts.count == 4 else { return nil }
         let p = parts.count == 4 ? Array(parts.dropFirst()) : parts   // drop the bind address
         guard let localPort = Int(p[0]), (1...65535).contains(localPort),
               let remotePort = Int(p[2]), (1...65535).contains(remotePort),
               !p[1].isEmpty else { return nil }
-        return (localPort, p[1], remotePort)
+        return (localPort, p[1], remotePort, parts.count == 4 ? parts[0] : "127.0.0.1")
+    }
+
+    private static func forwardFields(_ spec: String) -> [String] {
+        var fields: [String] = [], field = "", bracket = false
+        for character in spec {
+            if character == "[" { bracket = true }
+            else if character == "]" { bracket = false }
+            else if character == ":", !bracket { fields.append(field); field = "" }
+            else { field.append(character) }
+        }
+        guard !bracket else { return [] }
+        fields.append(field)
+        return fields
     }
 
     // MARK: SOCKS5 (RFC 1928, CONNECT + no-auth only)
@@ -553,94 +592,126 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
                 if isDone || err != nil { conn.cancel(); return }
                 self.readGreeting(conn, buf); return
             }
+            guard nmethods > 0, buf[2..<(2 + nmethods)].contains(0x00) else {
+                conn.send(content: Data([0x05, 0xff]), completion: .contentProcessed { _ in conn.cancel() })
+                return
+            }
             // Any bytes past the greeting are the start of the request (pipelined).
             let rest = buf.count > 2 + nmethods ? buf.subdata(in: (2 + nmethods)..<buf.count) : Data()
-            conn.send(content: Data([0x05, 0x00]), completion: .contentProcessed { _ in
-                self.readRequest(conn, rest)
+            conn.send(content: Data([0x05, 0x00]), completion: .contentProcessed { error in
+                guard error == nil, err == nil, !self.stopped else { conn.cancel(); return }
+                self.readRequest(conn, rest, clientEOF: isDone)
             })
         }
     }
 
     /// Accumulate until the full request (VER CMD RSV ATYP DST.ADDR DST.PORT) is in.
-    private func readRequest(_ conn: NWConnection, _ acc: Data) {
-        // CONNECT only; reject other commands as soon as CMD is known.
-        if acc.count >= 2, acc[1] != 0x01 {
-            conn.send(content: Data([0x05, 0x07, 0x00, 0x01, 0,0,0,0, 0,0]), completion: .idempotent)
-            conn.cancel(); return
-        }
-        if let (host, port) = Self.parseSOCKSAddr(acc) {
-            openChannelAndPump(conn, host: host, port: port); return
+    private func readRequest(_ conn: NWConnection, _ acc: Data, clientEOF: Bool = false) {
+        guard !stopped else { conn.cancel(); return }
+        switch Self.parseSOCKSRequest(acc) {
+        case .invalid(let code):
+            rejectRequest(conn, code: code); return
+        case .connect(let host, let port, let consumed):
+            openChannelAndPump(conn, host: host, port: port,
+                initialData: acc.subdata(in: consumed..<acc.count), clientEOF: clientEOF)
+            return
+        case .incomplete:
+            if clientEOF { conn.cancel(); return }
         }
         conn.receive(minimumIncompleteLength: 1, maximumLength: 262) { data, _, isDone, err in
             var buf = acc
             if let d = data { buf.append(d) }
-            if buf.count >= 2, buf[1] != 0x01 {
-                conn.send(content: Data([0x05, 0x07, 0x00, 0x01, 0,0,0,0, 0,0]), completion: .idempotent)
-                conn.cancel(); return
-            }
-            if let (host, port) = Self.parseSOCKSAddr(buf) {
-                self.openChannelAndPump(conn, host: host, port: port); return
-            }
-            if isDone || err != nil { conn.cancel(); return }
-            self.readRequest(conn, buf)
+            guard err == nil else { conn.cancel(); return }
+            self.readRequest(conn, buf, clientEOF: isDone)
         }
     }
 
-    /// Parse a (possibly still-incomplete) SOCKS5 request. Returns nil when more
-    /// bytes are needed, so the caller keeps accumulating.
-    private static func parseSOCKSAddr(_ r: Data) -> (String, Int)? {
-        guard r.count >= 4, r[0] == 0x05 else { return nil }
+    private func rejectRequest(_ conn: NWConnection, code: UInt8) {
+        conn.send(content: Data([0x05, code, 0x00, 0x01, 0,0,0,0, 0,0]),
+                  completion: .contentProcessed { _ in conn.cancel() })
+    }
+
+    private enum SOCKSRequest {
+        case incomplete, invalid(UInt8), connect(host: String, port: Int, consumed: Int)
+    }
+
+    /// Distinguish incomplete frames from invalid ones; preserve bytes beyond
+    /// DST.PORT as application input rather than dropping a coalesced first write.
+    private static func parseSOCKSRequest(_ r: Data) -> SOCKSRequest {
+        if let version = r.first, version != 0x05 { return .invalid(0x01) }
+        if r.count >= 2, r[1] != 0x01 { return .invalid(0x07) }
+        if r.count >= 3, r[2] != 0x00 { return .invalid(0x01) }
+        guard r.count >= 4 else { return .incomplete }
         let atyp = r[3]
         switch atyp {
         case 0x01:   // IPv4
-            guard r.count >= 10 else { return nil }
+            guard r.count >= 10 else { return .incomplete }
             let host = "\(r[4]).\(r[5]).\(r[6]).\(r[7])"
             let port = Int(r[8]) << 8 | Int(r[9])
-            return (host, port)
+            return .connect(host: host, port: port, consumed: 10)
         case 0x03:   // domain
-            guard r.count >= 5 else { return nil }
-            let len = Int(r[4]); guard r.count >= 5 + len + 2 else { return nil }
-            let host = String(data: r.subdata(in: 5..<5+len), encoding: .utf8) ?? ""
+            guard r.count >= 5 else { return .incomplete }
+            let len = Int(r[4])
+            guard len > 0 else { return .invalid(0x08) }
+            guard r.count >= 5 + len + 2 else { return .incomplete }
+            guard let host = String(data: r.subdata(in: 5..<5+len), encoding: .utf8),
+                  !host.contains("\0") else { return .invalid(0x08) }
             let port = Int(r[5+len]) << 8 | Int(r[5+len+1])
-            return host.isEmpty ? nil : (host, port)
+            return .connect(host: host, port: port, consumed: 7 + len)
         case 0x04:   // IPv6
-            guard r.count >= 22 else { return nil }
+            guard r.count >= 22 else { return .incomplete }
             var parts: [String] = []
             for i in stride(from: 4, to: 20, by: 2) { parts.append(String(format: "%02x%02x", r[i], r[i+1])) }
             let port = Int(r[20]) << 8 | Int(r[21])
-            return (parts.joined(separator: ":"), port)
-        default: return nil
+            return .connect(host: parts.joined(separator: ":"), port: port, consumed: 22)
+        default: return .invalid(0x08)
         }
     }
 
-    private func openChannelAndPump(_ conn: NWConnection, host: String, port: Int) {
+    private func openChannelAndPump(_ conn: NWConnection, host: String, port: Int,
+                                    initialData: Data, clientEOF: Bool) {
         ssh.async {
             guard !self.stopped, let s = self.session,
                   let channel = try? s.openDirectTCPIP(toHost: host, port: Int32(port)) else {
-                conn.send(content: Data([0x05, 0x05, 0x00, 0x01, 0,0,0,0, 0,0]), completion: .idempotent)
-                conn.cancel(); return
+                self.rejectRequest(conn, code: 0x05); return
             }
             // Success reply (bound addr 0.0.0.0:0 is acceptable for CONNECT).
             conn.send(content: Data([0x05, 0x00, 0x00, 0x01, 0,0,0,0, 0,0]), completion: .idempotent)
-            self.pump(conn, channel)
+            self.pump(conn, channel, initialData: initialData, clientEOF: clientEOF)
         }
     }
 
     /// Free a channel. MUST be invoked on the `ssh` queue.
     private func closeChannel(_ channel: SSHChannel) {
         if !channel.isClosed() { channel.close() }
+        activeFlows.removeValue(forKey: ObjectIdentifier(channel))
+    }
+
+    /// An EOF closes only its direction. Keep the channel until both halves have
+    /// drained, including a server that finishes output before reading the request.
+    private func finishHalf(_ channel: SSHChannel, client: Bool) {
+        let id = ObjectIdentifier(channel)
+        guard var flow = activeFlows[id] else { return }
+        if client { flow.clientEOF = true } else { flow.serverEOF = true }
+        if flow.clientEOF && flow.serverEOF {
+            closeChannel(channel)
+            flow.connection.cancel()
+        }
+        else { activeFlows[id] = flow }
     }
 
     /// Bridge an NWConnection to an SSH channel. Client→channel is event-driven
     /// (with full-write retry); channel→client is polled on the non-blocking ssh
-    /// queue. Both directions free the channel on the ssh queue at end/error.
-    private func pump(_ conn: NWConnection, _ channel: SSHChannel) {
+    /// queue. Both halves drain before teardown; errors free it on the ssh queue.
+    private func pump(_ conn: NWConnection, _ channel: SSHChannel,
+                      initialData: Data = Data(), clientEOF: Bool = false) {
+        activeFlows[ObjectIdentifier(channel)] = Flow(channel: channel, connection: conn)
         // Write every byte, retrying the unwritten tail on partial writes / EAGAIN.
         // @Sendable throughout: these three hand themselves between the `ssh` queue
         // and Network.framework's callback queue, and only touch queue-confined state.
-        @Sendable func writeAll(_ d: Data, _ from: Int) {
+        @Sendable func writeAll(_ d: Data, _ from: Int, completion: @escaping @Sendable () -> Void) {
             self.ssh.async {
-                if channel.isClosed() { return }
+                guard !self.stopped, !channel.isClosed() else { return }
                 let remaining = d.count - from
                 let n: Int = d.withUnsafeBytes { raw in
                     channel.write(raw.baseAddress!.advanced(by: from), length: remaining)
@@ -649,36 +720,70 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
                 let wrote = from + n
                 if wrote < d.count {
                     // Partial write or EAGAIN(0): flush the remainder shortly.
-                    self.ssh.asyncAfter(deadline: .now() + 0.003) { writeAll(d, wrote) }
+                    self.ssh.asyncAfter(deadline: .now() + 0.003) { writeAll(d, wrote, completion: completion) }
+                } else {
+                    completion()
                 }
             }
         }
+        @Sendable func sendEOF() {
+            self.ssh.async {
+                guard !self.stopped, !channel.isClosed() else { return }
+                if !channel.sendEOF() {
+                    self.ssh.asyncAfter(deadline: .now() + 0.003) { sendEOF() }
+                } else { self.finishHalf(channel, client: true) }
+            }
+        }
         @Sendable func clientToChannel() {
-            conn.receive(minimumIncompleteLength: 1, maximumLength: 32768) { data, _, isDone, _ in
-                if let d = data, !d.isEmpty { writeAll(d, 0) }
-                if isDone { self.ssh.async { self.closeChannel(channel) }; return }
-                clientToChannel()
+            self.ssh.async {
+                guard !self.stopped, !channel.isClosed(),
+                      let flow = self.activeFlows[ObjectIdentifier(channel)], !flow.clientEOF else { return }
+                conn.receive(minimumIncompleteLength: 1, maximumLength: 32768) { data, _, isDone, error in
+                    // A final callback can carry both bytes and EOF/an error.
+                    // Drain those bytes before acting on its terminal status.
+                    let next: @Sendable () -> Void = {
+                        if error != nil { self.ssh.async { self.closeChannel(channel); conn.cancel() } }
+                        else if isDone { sendEOF() }
+                        else { clientToChannel() }
+                    }
+                    if let d = data, !d.isEmpty { writeAll(d, 0, completion: next) }
+                    else { next() }
+                }
             }
         }
         @Sendable func channelToClient() {
             self.ssh.async {
-                if channel.isClosed() { return }
+                guard !self.stopped, !channel.isClosed() else { return }
                 var buf = [UInt8](repeating: 0, count: 32768)
                 let cap = buf.count
                 let n = buf.withUnsafeMutableBytes { channel.read($0.baseAddress!, maxLength: cap) }
                 if n > 0 {
-                    conn.send(content: Data(buf[0..<Int(n)]), completion: .contentProcessed { _ in })
-                    self.ssh.async { channelToClient() }   // drain promptly; more may be buffered
+                    conn.send(content: Data(buf[0..<Int(n)]), completion: .contentProcessed { error in
+                        if error != nil { self.ssh.async { self.closeChannel(channel) }; conn.cancel() }
+                        else { channelToClient() }
+                    })
                     return
                 }
-                if n < 0 || channel.isEOF() {   // hard error or clean EOF → done
+                if n < 0 {
                     self.closeChannel(channel); conn.cancel(); return
+                }
+                if channel.isEOF() {
+                    conn.send(content: nil, contentContext: .finalMessage, isComplete: true,
+                        completion: .contentProcessed { error in
+                            self.ssh.async {
+                                if error != nil { self.closeChannel(channel); conn.cancel() }
+                                else { self.finishHalf(channel, client: false) }
+                            }
+                        })
+                    return
                 }
                 // n == 0: EAGAIN — nothing available yet, poll again shortly.
                 self.ssh.asyncAfter(deadline: .now() + 0.02) { channelToClient() }
             }
         }
-        clientToChannel()
+        let startInput: @Sendable () -> Void = { if clientEOF { sendEOF() } else { clientToChannel() } }
+        if initialData.isEmpty { startInput() }
+        else { writeAll(initialData, 0, completion: startInput) }
         channelToClient()
     }
 
@@ -691,6 +796,11 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
         for l in extras.values { l.cancel() }
         ssh.async {
             self.keepaliveTimer?.cancel(); self.keepaliveTimer = nil
+            for flow in self.activeFlows.values {
+                flow.connection.cancel()
+                flow.channel.close()
+            }
+            self.activeFlows.removeAll()
             self.session?.disconnect(); self.session = nil
         }
         publish(.idle)
@@ -715,7 +825,7 @@ nonisolated final class SSHTunnelEngine: @unchecked Sendable {
         let t = DispatchSource.makeTimerSource(queue: ssh)
         t.schedule(deadline: .now() + .seconds(seconds), repeating: .seconds(seconds), leeway: .seconds(1))
         t.setEventHandler { [weak self] in
-            guard let self, let s = self.session else { return }
+            guard let self, !self.stopped, let s = self.session else { return }
             if !s.sendKeepalive() {
                 // Not fatal on its own: the data path reports the real failure. Worth
                 // one line, because "the tunnel died after N minutes idle" is exactly

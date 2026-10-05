@@ -208,7 +208,6 @@ nonisolated enum KeePassXCAssociationStore {
     }
 
     static func save(databaseHash: String, _ association: Association) {
-        delete(databaseHash: databaseHash)
         guard let blob = try? JSONEncoder().encode(association) else { return }
         let add: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -220,7 +219,11 @@ nonisolated enum KeePassXCAssociationStore {
             kSecAttrLabel as String: "SimpleVPN \u{2194} KeePassXC pairing",
             kSecValueData as String: blob,
         ]
-        let status = SecItemAdd(add as CFDictionary, nil)
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service, kSecAttrAccount as String: databaseHash,
+            kSecAttrAccessGroup as String: accessGroup, kSecUseDataProtectionKeychain as String: true]
+        let update = SecItemUpdate(query as CFDictionary, [kSecValueData as String: blob] as CFDictionary)
+        let status = update == errSecItemNotFound ? SecItemAdd(add as CFDictionary, nil) : update
         if status != errSecSuccess {
             log.error("association write failed: OSStatus \(status)")
         }

@@ -47,10 +47,8 @@
 //  schema's field names, which are just as stable: they are the app↔extension wire
 //  format, they decode leniently, and renaming one already means a migration.
 //
-//  SECRET-FREE BY DEFAULT, AND PROVABLY. See `ConfigSecrets`. Nothing here can be
-//  switched off: an exported file leaves every protection the app has, cannot be
-//  recalled, and the material it would carry is all recoverable — the same
-//  argument, and the same answer, as `OVPNSecretMaterial.exportText`.
+//  SECRET-FREE BY DEFAULT. See `ConfigSecrets`. Explicit export can include the
+//  validated Keychain sidecar or placeholders; recovery keeps the default.
 //
 
 import Foundation
@@ -105,6 +103,7 @@ nonisolated enum ConfigDocumentKeys {
     static let kind = "kind"
     static let server = "server"
     static let settings = "settings"
+    static let secrets = "secrets"
     static let openVPNConfiguration = "openvpn-configuration"
     static let signIn = "sign-in"
     static let customRouting = "custom-routing"
@@ -168,6 +167,7 @@ nonisolated struct ConfigSnapshot: Sendable {
         var customRouting: CustomRoutingProfile? = nil
         var endpoints: VPNEndpointList? = nil
         var uiPrefs: VPNUIPrefs? = nil
+        var secrets = ConfigMap()
 
         init(id: String, name: String, kind: VPNKind, server: String) {
             self.id = id
@@ -516,8 +516,8 @@ enum ConfigDocument {
             "Every VPN and every SimpleVPN setting on the Mac this came from, in one file.",
             "Import it from SimpleVPN Settings \u{25B8} General \u{25B8} Export & Import.",
             "",
-            "NO PASSWORDS, KEYS OR OTHER SECRETS ARE IN THIS FILE, and there is no option to",
-            "put them in. An exported file leaves every protection SimpleVPN has \u{2014} mail, a",
+            "NO PASSWORDS, KEYS OR OTHER SECRETS ARE IN THIS FILE.",
+            "An exported file leaves every protection SimpleVPN has \u{2014} mail, a",
             "shared folder, a repository, a backup \u{2014} and cannot be recalled. Everything left",
             "out is recoverable: it is still in the keychain of the Mac that wrote this, and",
             "whoever set up the VPN can issue it again.",
@@ -543,7 +543,7 @@ enum ConfigDocument {
 
     /// The document, plus the kinds of secret it had to leave out (which the header
     /// summarises, and each VPN repeats in its own words).
-    static func build(from snapshot: ConfigSnapshot) -> (root: ConfigMap, withheld: [String]) {
+    static func build(from snapshot: ConfigSnapshot, secretMode: ConfigSecretMode = .omit) -> (root: ConfigMap, withheld: [String]) {
         var withheld: [String] = []
         var root = ConfigMap()
         root.put(ConfigDocumentKeys.format, .int(ConfigFormat.current))
@@ -563,7 +563,7 @@ enum ConfigDocument {
 
         var vpns: [ConfigValue] = []
         for vpn in snapshot.vpns {
-            let built = build(vpn: vpn)
+            let built = build(vpn: vpn, secretMode: secretMode)
             vpns.append(.map(built.map))
             for subject in built.withheld where !withheld.contains(subject) { withheld.append(subject) }
         }
@@ -572,9 +572,14 @@ enum ConfigDocument {
     }
 
     /// The whole file as text, in whichever of the two encodings was asked for.
-    static func text(from snapshot: ConfigSnapshot, format: ConfigFileFormat) -> String {
-        let (root, withheld) = build(from: snapshot)
-        let comments = headerComments(app: snapshot.appVersion,
+    static func text(from snapshot: ConfigSnapshot, format: ConfigFileFormat,
+                     secretMode: ConfigSecretMode = .omit) -> String {
+        let (root, withheld) = build(from: snapshot, secretMode: secretMode)
+        let comments = secretMode == .include
+            ? ["SimpleVPN exported settings — CONTAINS SECRETS IN PLAIN TEXT.",
+               "Keep this file private. Import stores the credentials in the user's Keychain.",
+               "External vault and SSH agent private keys are not copied."]
+            : headerComments(app: snapshot.appVersion,
                                      exported: snapshot.exportedAt,
                                      withheld: withheld)
         switch format {
@@ -587,7 +592,7 @@ enum ConfigDocument {
 
     /// One VPN's entry, the sentences it needs to explain its own omissions, and the
     /// house names of what was withheld (which the header collects).
-    static func build(vpn: ConfigSnapshot.VPN) -> (map: ConfigMap, notes: [String], withheld: [String]) {
+    static func build(vpn: ConfigSnapshot.VPN, secretMode: ConfigSecretMode = .omit) -> (map: ConfigMap, notes: [String], withheld: [String]) {
         var m = ConfigMap()
         var notes: [String] = []
         var withheld: [String] = []
@@ -606,7 +611,10 @@ enum ConfigDocument {
             withheld += built.withheld
         }
         add(vpn.overrides, unchanged: OpenVPNOverrides(), "openvpn.")
-        add(vpn.wireGuard, unchanged: WireGuardConfig(), "wg.")
+        add(vpn.wireGuard?.replacingExtraPeerSecrets([:], redact: true), unchanged: WireGuardConfig(), "wg.")
+        if let config = vpn.wireGuard, !config.privateKey.isEmpty || !config.presharedKey.isEmpty || !config.extraPeerSecrets.isEmpty {
+            withheld.append("WireGuard keys")
+        }
         add(vpn.tailscale, unchanged: TailscaleConfig(), "ts.")
         add(vpn.proxyTunnel, unchanged: ProxyTunnelConfig(), "px.")
         add(vpn.sshNetworkTunnel, unchanged: SSHNetworkTunnelConfig(), "sshnet.")
@@ -623,10 +631,11 @@ enum ConfigDocument {
         // its key inline. `exportText` writes the note about what it removed into
         // the configuration itself.
         if let ovpn = vpn.ovpn, !ovpn.isEmpty {
-            m.put(ConfigDocumentKeys.openVPNConfiguration, .document(OVPNSecretMaterial.exportText(ovpn)))
+            m.put(ConfigDocumentKeys.openVPNConfiguration,
+                  .document(secretMode == .include ? ovpn : OVPNSecretMaterial.exportText(ovpn)))
             let split = OVPNSecretMaterial.split(ovpn)
             let tags = Set(split.secrets.keys).union(OVPNSecretMaterial.markedTags(in: ovpn))
-            for tag in OVPNSecretMaterial.secretTags where tags.contains(tag) {
+            for tag in OVPNSecretMaterial.secretTags where tags.contains(tag) && secretMode != .include {
                 let name = OVPNSecretMaterial.humanName(for: tag)
                 withheld.append(name)
                 notes.append("this VPN\u{2019}s \(name) \u{2014} left out because it is a secret. SimpleVPN "
@@ -672,6 +681,10 @@ enum ConfigDocument {
 
         if !notes.isEmpty {
             m.put(ConfigDocumentKeys.omitted, .strings(notes))
+        }
+        if secretMode != .omit && !vpn.secrets.isEmpty {
+            m.put(ConfigDocumentKeys.secrets, .map(secretMode == .include
+                ? vpn.secrets : ConfigSecretTransfer.placeholders(vpn.secrets)))
         }
         return (m, notes, withheld)
     }

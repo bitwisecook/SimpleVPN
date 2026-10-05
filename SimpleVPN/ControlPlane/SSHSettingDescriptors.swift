@@ -72,7 +72,7 @@ enum SSHSettings {
         // MARK: Sign-In
 
         .init(id: "ssh.auth-method", name: "Sign-In Method",
-              summary: "How to prove who you are. Automatic tries your key, then the SSH agent, then the password; choosing one method uses exactly that method.",
+              summary: "Use a key file, a private key in your Keychain, an SSH agent such as 1Password, a certificate, a password or Kerberos. Automatic tries your key, then the agent, then the password; choosing one method uses exactly that method.",
               group: .signIn, default: ""),
 
         .init(id: "ssh.username", name: "Username",

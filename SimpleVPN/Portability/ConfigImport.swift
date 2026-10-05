@@ -57,6 +57,7 @@ nonisolated enum ConfigImportGuard {
         "stricthostkeychecking=no",
         "stricthostkeychecking no",
         "userknownhostsfile=/dev/null",
+        "userknownhostsfile /dev/null",
         "checkhostip=no",
         "--no-cert-check",
         "--no-system-trust",
@@ -102,6 +103,8 @@ nonisolated enum ConfigImportGuard {
         switch value {
         case .string(let s), .text(let s):
             let lower = s.lowercased()
+                .replacingOccurrences(of: "\\s*=\\s*", with: "=", options: .regularExpression)
+                .replacingOccurrences(of: "[\\t ]+", with: " ", options: .regularExpression)
             return unsafeTokens.first { lower.contains($0) }
         case .list(let items):
             for item in items { if let hit = unsafeToken(in: item) { return hit } }
@@ -341,7 +344,12 @@ enum ConfigImport {
         }
 
         var vpn = ConfigSnapshot.VPN(id: UUID().uuidString, name: name, kind: kind,
-                                     server: map[ConfigDocumentKeys.server]?.stringValue ?? "")
+                                      server: map[ConfigDocumentKeys.server]?.stringValue ?? "")
+        if let secrets = map[ConfigDocumentKeys.secrets] {
+            guard let fields = secrets.mapValue else { return .failure("its secret section isn't readable.") }
+            do { vpn.secrets = try ConfigSecretTransfer.validated(fields) }
+            catch { return .failure("its secret section contains an unknown or malformed credential.") }
+        }
         vpn.labelIDs = map[ConfigDocumentKeys.labelIDs]?.stringList ?? []
 
         // The engine's own settings, decoded by the engine's OWN decoder. Anything
@@ -410,6 +418,9 @@ enum ConfigImport {
                               settings: ConfigMap, vpn: ConfigSnapshot.VPN) -> [String] {
         var out: [String] = []
         if !server.isEmpty { out.append("Server address: \(server)") }
+        if !vpn.secrets.isEmpty {
+            out.append("Contains \(vpn.secrets.entries.count) credential record(s); import saves them to your Keychain.")
+        }
         /// id → how to say it. Only settings that decide trust or destination.
         let watched: [(String, String)] = [
             ("openvpn.server", "Server address override"),

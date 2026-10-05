@@ -46,7 +46,7 @@ enum CiscoImport {
         let d = AnyConnectXMLDelegate()
         let parser = XMLParser(data: Data(xml.utf8))
         parser.delegate = d
-        parser.parse()
+        guard parser.parse() else { return [] }
         return d.hosts.compactMap { entry in
             guard !entry.address.isEmpty else { return nil }
             var c = SubprocessTunnelConfig()

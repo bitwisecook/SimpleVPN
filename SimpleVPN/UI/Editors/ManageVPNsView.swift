@@ -501,6 +501,7 @@ struct ManageVPNsView: View {
     /// can is separately named and separately confirmed
     /// (`WireGuardConfig.exportText(includingSecrets:)` owns that decision).
     @ViewBuilder private func exportItems(for p: VPNController.Profile) -> some View {
+        configurationExportItems(id: p.id, name: p.name)
         if vpn.isWireGuard(p.id) {
             let c = wireGuardExportTarget(p.id)
             // Not disabled with a reason, because a reason on a context-menu item is
@@ -517,6 +518,9 @@ struct ManageVPNsView: View {
             EmptyView()
         } else {
             Button("Export .ovpn\u{2026}") { export(p) }
+            Button("Export .ovpn with Secrets…") { exportOVPNWithSecrets(p) }
+                .disabled(ConfigTransfer.policyRefusal != nil)
+                .help(ConfigTransfer.policyRefusal ?? "Include saved private key material")
         }
     }
 
@@ -537,6 +541,7 @@ struct ManageVPNsView: View {
             .tag(Self.tunnelTag + t.id)
         .contextMenu {
             ReorderMenuItems(commands: order.commands(for: Self.tunnelTag + t.id))
+            configurationExportItems(id: t.id, name: t.name)
             Divider()
             Button("Remove", role: .destructive) {
                 requestRemoval(.tunnel(id: t.id, name: t.name))
@@ -558,6 +563,7 @@ struct ManageVPNsView: View {
             .tag(Self.nativeTag + c.id)
         .contextMenu {
             ReorderMenuItems(commands: order.commands(for: Self.nativeTag + c.id))
+            configurationExportItems(id: c.id, name: c.name)
             Divider()
             Button("Remove", role: .destructive) { requestRemoval(.native(id: c.id, name: c.name)) }
         }
@@ -1091,6 +1097,49 @@ struct ManageVPNsView: View {
     /// wrote the user's client private key to whatever file they chose, in the
     /// clear, with no warning. See `OVPNSecretMaterial.exportText` for why omitting
     /// beats asking.
+    @ViewBuilder private func configurationExportItems(id: String, name: String) -> some View {
+        Menu("Export Settings") {
+            Button("With Secret Placeholders…") { exportConfiguration(id: id, name: name, mode: .placeholders) }
+            Button("With Secrets…") { exportConfiguration(id: id, name: name, mode: .include) }
+        }
+        .disabled(ConfigTransfer.policyRefusal != nil)
+        .help(ConfigTransfer.policyRefusal ?? "Export this VPN's settings")
+    }
+
+    private func exportConfiguration(id: String, name: String, mode: ConfigSecretMode) {
+        guard ConfigTransfer.policyRefusal == nil else { return }
+        let panel = NSSavePanel()
+        panel.title = "Export \(name)"
+        panel.message = mode == .include ? "This file will contain secrets in plain text. Keep it private."
+            : "Secret values will be replaced with placeholders."
+        panel.allowedContentTypes = [.yaml, .json]
+        panel.nameFieldStringValue = name + ".yaml"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            do {
+                let snapshot = try await ConfigTransfer.exportSnapshot(vpn: vpn, tunnels: tunnels,
+                    nativeVPN: nativeVPN, labels: labels, mode: mode, profileID: id)
+                try ConfigSecretTransfer.write(ConfigDocument.text(from: snapshot,
+                    format: .forFileName(url.lastPathComponent), secretMode: mode), to: url)
+            } catch { vpn.lastError = "Couldn't export settings: \(error.localizedDescription)" }
+        }
+    }
+
+    private func exportOVPNWithSecrets(_ p: VPNController.Profile) {
+        guard ConfigTransfer.policyRefusal == nil, let stored = vpn.storedOVPNText(id: p.id) else { return }
+        let panel = NSSavePanel()
+        panel.title = "Export OpenVPN with Secrets"
+        panel.message = "This file will contain private keys in plain text. Keep it private."
+        panel.nameFieldStringValue = p.name + ".ovpn"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let text = OVPNSecretMaterial.merge(stored,
+                secrets: try KeychainCredentialStore.ovpnInlineSecretsForExport(profile: p.id))
+            try ConfigSecretTransfer.write("# Contains secrets — keep this file private.\n" + text, to: url)
+        }
+        catch { vpn.lastError = "Couldn't export configuration: \(error.localizedDescription)" }
+    }
+
     private func export(_ p: VPNController.Profile) {
         guard let text = vpn.exportableOVPNText(id: p.id) else {
             vpn.lastError = "No configuration to export"; return
@@ -1120,14 +1169,15 @@ struct ManageVPNsView: View {
     /// file's own text is `WireGuardConfig.exportText(includingSecrets:)`, which is
     /// where the headers and the redaction live so a test can hold them.
     private func exportWireGuard(_ id: String, includingSecrets: Bool) {
-        let toExport = wireGuardExportTarget(id)
+        let toExport: WireGuardConfig
+        do { toExport = try vpn.wireGuardConfig(for: id).withSecretsForExport() }
+        catch { vpn.lastError = "Couldn't read the keys for export: \(error.localizedDescription)"; return }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "\(toExport.name.isEmpty ? vpn.displayName(for: id) : toExport.name).conf"
         panel.allowedContentTypes = [UTType(filenameExtension: "conf") ?? .data]
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            try toExport.exportText(includingSecrets: includingSecrets)
-                .write(to: url, atomically: true, encoding: .utf8)
+            try ConfigSecretTransfer.write(toExport.exportText(includingSecrets: includingSecrets), to: url)
         } catch {
             vpn.lastError = error.localizedDescription
             return

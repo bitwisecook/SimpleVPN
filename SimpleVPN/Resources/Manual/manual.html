@@ -509,16 +509,17 @@
 <h2 id="exporting">Moving to Another Mac</h2>
 <p><strong>Settings &#9656; General &#9656; Export &amp; Import</strong> writes every VPN and every SimpleVPN setting to one file, and reads one back. Name the file <code>.yaml</code> or <code>.json</code> and you get that encoding &mdash; they carry exactly the same thing, so pick whichever you would rather read.</p>
 <ul>
-  <li><a href="#exporting-secrets">No passwords or keys are in the file</a></li>
+  <li><a href="#exporting-secrets">Choose placeholders or include saved secrets</a></li>
   <li><a href="#exporting-import">What importing does, and what it will not do</a></li>
   <li><a href="#exporting-managed">On a managed Mac</a></li>
 </ul>
 <p>Inside the file, a name like <code>openvpn.port</code> or <code>wg.endpoint</code> is SimpleVPN's own name for that setting. Those names never change, so a file keeps working even when a label on screen is reworded &mdash; and you can look any of them up in this manual.</p>
 
-<h3 id="exporting-secrets">No passwords or keys are in the file</h3>
-<p>Nothing secret is ever written, and there is no option to include it: an exported file leaves every protection SimpleVPN has &mdash; mail, a shared folder, a repository, a backup &mdash; and cannot be recalled once it exists. Everything left out is recoverable, because it is still in this Mac's keychain and whoever set up the VPN can issue it again.</p>
-<p>The file lists what it left out and what to do about it, both at the top and under each VPN. After importing, type the missing password or key in once and the VPN is complete. Public material <em>is</em> included &mdash; a certificate authority decides who your tunnel trusts, so it belongs where you can read and compare it.</p>
-<p>If you want a backup that includes your secrets, that is a different thing and is not this: keep using Time Machine and your keychain, or ask your VPN's owner for the original files.</p>
+<h3 id="exporting-secrets">Choose placeholders or include saved secrets</h3>
+<p><strong>Placeholders</strong> is the default. The file describes where a saved password or key belongs, without writing its value. Import leaves those instructions alone; enter the missing material in the new VPN's Sign-In settings. Public certificates and server keys remain available for comparison.</p>
+<p>Choose <strong>Include Secrets</strong> to copy the selected VPNs' saved Keychain credentials into the file. Protected credentials require your Mac's authentication. This file contains passwords and private keys in plain text and says so in its header. SimpleVPN creates it with owner-only permissions; a copy sent elsewhere has no Keychain protection.</p>
+<p>Manage VPNs also offers <strong>Export Settings</strong> on each VPN's context menu, with the same choices in JSON or YAML. OpenVPN and WireGuard have separate export actions for their original formats, including explicit actions that write their keys. L2TP's configuration-profile export offers placeholders or saved secrets too.</p>
+<p>An export copies credentials SimpleVPN stores for these VPNs. It does not extract keys from an SSH agent, copy an external password-manager vault, or back up Tailscale's node identity. Automatic recovery files continue to omit secrets.</p>
 
 <h3 id="exporting-import">What importing does, and what it will not do</h3>
 <ul>
@@ -818,6 +819,7 @@
 <ul>
   <li><strong>Password</strong> — the saved or typed password only. Keys and the agent are never offered.</li>
   <li><strong>Key file</strong> — the identity file only (other keys on your Mac are not tried). This includes a <a href="#ssh-identity-file">hardware security key</a>, which asks for a touch.</li>
+  <li><strong>User Keychain</strong> — import a private key from a file, including your <code>~/.ssh</code> folder. SimpleVPN stores its contents in your Keychain and reads it into memory at connect. An encrypted key uses the password field for its passphrase. This choice supports SOCKS and local/dynamic forwards without a jump host or extra SSH arguments; other combinations give a configuration error.</li>
   <li><strong>Certificate</strong> — the identity file plus its <a href="#ssh-certificate-file">certificate</a>.</li>
   <li><strong>SSH agent</strong> — only keys held by an <a href="#ssh-agent">SSH agent</a> (1Password, Secretive, KeePassXC, <code>ssh-agent</code>). The key never leaves the agent; choose which one with <a href="#ssh-agent-socket">SSH Agent Socket</a>.</li>
   <li><strong>Kerberos</strong> — your organisation's existing Kerberos ticket (the sign-on from Active Directory, or <code>kinit</code>); nothing to type at all. Never tried unless chosen.</li>

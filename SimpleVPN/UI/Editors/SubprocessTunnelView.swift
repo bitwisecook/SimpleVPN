@@ -38,6 +38,7 @@ struct SubprocessTunnelView: View {
     @State private var proxyPassword = ""
     @State private var jumpPassword = ""
     @State private var keyPassphrase = ""
+    @State private var sshKeychainStatus = ""
     // New tunnels never assume a password should be retained. `loadOnce` flips
     // this on only when this tunnel already has a keychain item.
     @State private var remember = false
@@ -347,12 +348,23 @@ struct SubprocessTunnelView: View {
                     Text("Automatic").tag("")
                     Text("Password").tag("password")
                     Text("Key file").tag("key")
+                    Text("User Keychain").tag("keychain")
                     Text("Certificate").tag("certificate")
                     Text("SSH agent").tag("agent")
                     Text("Kerberos").tag("kerberos")
                 } label: { EngineSettingLabel(spec: spec("ssh.auth-method"), value: sshMethod) }
             }
             row("ssh.username", text: $draft.username, prompt: "alex")
+            if sshMethod == "keychain" {
+                VStack(alignment: .leading, spacing: 6) {
+                    Button("Import Private Key into Keychain…") { importSSHKeychainKey() }
+                        .accessibilityIdentifier("ssh.keychain-key.import")
+                    Text(sshKeychainStatus)
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("The key stays in your login Keychain. Enter its passphrase below if it is encrypted. For 1Password, choose SSH agent and Use 1Password Agent.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
             // Each credential row is live only under the methods that use it —
             // a disabled row says which choice re-enables it (.help + AX value).
             row("ssh.identity-file", text: $draft.identityFile, prompt: "~/.ssh/id_ed25519",
@@ -386,7 +398,7 @@ struct SubprocessTunnelView: View {
         let problem = SubprocessTunnelConfig.agentSocketProblem(path)
         // Mutual exclusion, same shape as the identity-file and password rows: a
         // disabled row says which choice brings it back.
-        let unused: String? = ["password", "key", "certificate", "kerberos"].contains(sshMethod)
+        let unused: String? = ["password", "key", "keychain", "certificate", "kerberos"].contains(sshMethod)
             ? "Not used when signing in with \(sshMethodLabel) — choose Automatic or \u{201C}SSH agent\u{201D}."
             : nil
         EngineSettingRow(spec: s, value: path, disabledReason: unused) {
@@ -458,7 +470,7 @@ struct SubprocessTunnelView: View {
         // Don't go poking somebody's vault for a method that never asks an agent
         // anything — the row is greyed out in that case, and a probe would be a
         // connection to their key manager they didn't ask for.
-        guard !["password", "key", "certificate", "kerberos"].contains(sshMethod),
+        guard !["password", "key", "keychain", "certificate", "kerberos"].contains(sshMethod),
               SubprocessTunnelConfig.agentSocketProblem(path) == nil else {
             agentStatus = nil
             return
@@ -480,6 +492,7 @@ struct SubprocessTunnelView: View {
         switch sshMethod {
         case "password": "a password"
         case "key": "a key file"
+        case "keychain": "a key in your Keychain"
         case "certificate": "a certificate"
         case "agent": "the SSH agent"
         case "kerberos": "Kerberos"
@@ -1664,9 +1677,34 @@ struct SubprocessTunnelView: View {
             invalidMessage: "Enter a port between 1 and 65535. Leave empty for the standard HTTPS port.")
     }
 
+    private func importSSHKeychainKey() {
+        guard !ManagedPolicy.lockConfiguration else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Import SSH Private Key into User Keychain"
+        panel.directoryURL = URL(fileURLWithPath: ("~/.ssh" as NSString).expandingTildeInPath)
+        panel.showsHiddenFiles = true
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let pem = try String(contentsOf: url, encoding: .utf8)
+            guard pem.contains("PRIVATE KEY-----"), pem.contains("-----END ") else {
+                sshKeychainStatus = "Choose an OpenSSH or PEM private key, rather than a public key."
+                return
+            }
+            try KeychainCredentialStore.saveSSHPrivateKey(profile: draft.id, pem: pem)
+            sshKeychainStatus = "Private key stored in your login Keychain."
+            save()
+        } catch {
+            sshKeychainStatus = "Couldn't store the private key: \(error.localizedDescription)"
+        }
+    }
+
     private func loadOnce() {
         guard !loaded else { return }
         loaded = true
+        sshKeychainStatus = KeychainCredentialStore.loadSSHPrivateKey(profile: draft.id) == nil
+            ? "No private key stored." : "Private key stored in your login Keychain."
         search.kind = draft.kind
         if let c = KeychainCredentialStore.loadCredentials(profile: "tunnel." + draft.id) {
             password = c.password

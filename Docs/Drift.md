@@ -332,6 +332,61 @@ it, rerun the `AGENTS.md` macOS build command and `SimpleVPNTests` against these
 updated dependencies. Use macOS 26-compatible native libraries as described in
 `README.md` to avoid newer-host Homebrew deployment-target warnings.
 
+## 15. Secret persistence across engines ⚠️ NOT YET DECIDED
+
+The October 2026 review is recorded in `Docs/AppReview.md`. App-owned VPN passwords,
+OpenVPN inline material, WireGuard private/PSK material (including additional peers),
+SSH Network Tunnel PEMs and app SSH imported PEMs use the user's Keychain. Their
+configurations retain settings and references, with connect-time values in memory.
+
+That is **not** the boundary everywhere. `Vendor/tailscale-engine/src/main.go` uses
+Tailscale's root-owned file store for node identity. Managed OpenVPN profiles and failed
+Keychain migrations can retain original inline keys; the existing migration notice must
+remain. `NativeVPNManager.connect` saves `NEProxyServer` authentication as part of the
+OS configuration; verify its persistence before describing it as Keychain-only.
+User-selected file keys and external vault stores are intentional separate sources.
+
+`ConfigSecretTransfer.accounts` is an explicit export vocabulary alongside each
+engine's account construction. **KEEP SEPARATE:** an import may name only a closed role,
+never an arbitrary Keychain account. New credential roles must be added to that vocabulary
+and given an export/import regression test. Exports do not back up provider-wide vault
+unlock credentials or Tailscale node identity.
+
+**Verdict for the engine storage gaps: NOT YET DECIDED.** A user-Keychain broker/state
+store for the root extension needs design and live lifecycle tests. These gaps remain
+open; owner-only filesystem permissions do not satisfy user-Keychain storage.
+
+## 16. SSH signing in the app and system extension ⚠️ KEEP SEPARATE WITH AN OPEN GAP
+
+`SSHTunnelEngine` can use a selected `.ssh` key file, the user's SSH agent (including
+1Password), or an imported Keychain PEM. The subprocess path supports file/agent
+signing for reverse forwards and jump hosts; it refuses Keychain PEM mode instead of
+writing a temporary private key. The probe uses the same file/PEM distinction and
+the existing file-key probe rules; password probes require account-level opt-in.
+
+`PacketTunnel/Engines/SSHNetworkTunnelEngine.swift` runs as root and takes PEM/password
+material through transient start options. It has no user-agent channel. **KEEP SEPARATE**
+for the process boundary; **the agent capability gap remains open**. It needs an authenticated
+app-to-extension signing broker or relocation of session ownership. A signature made for
+the app's SSH session cannot be reused for the extension's session. See `Docs/AuthSecSSHAgent.md`.
+
+Apple Passwords' picker is a password source; the new private-key mode is macOS Keychain.
+Do not label it as private-key access through Apple Passwords.
+
+## 17. Mediator apply loops and live editor saves ⚠️ NOT YET DECIDED
+
+Routes, DNS and proxies each launch an asynchronous reconciliation task and cache applied
+state. They still need a common serialized/latest-plan application contract: the task
+handles do not themselves serialize operations across suspension points, and unchanged
+plan caches can suppress an external-drift reassert. The source-path risks and affected
+functions are listed in `Docs/AppReview.md`; pure arbiter tests do not exercise them.
+
+`ProxyTunnelView`, `TailscaleView` and `SSHNetworkTunnelView` also each suppress saves
+while an earlier asynchronous save is active, without retaining a pending latest draft.
+**NOT YET DECIDED:** add slow-host tests and a shared queued-save mechanism, then retire
+these findings. Neither disabling the audit nor claiming UI state equals saved state is
+a resolution.
+
 ## Adding to this file
 
 Two occasions, and both are cheap:

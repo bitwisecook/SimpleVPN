@@ -500,36 +500,47 @@ actor ProbeStageRunner {
     }
 
     private func sshPublicKey() async -> ProbeStepOutcome {
-        guard let session = ssh, let path = facts.identityFilePath, !path.isEmpty else {
-            return .notApplicable("This VPN has no key file set.")
+        let path = facts.identityFilePath ?? ""
+        let pem = facts.clientKeyPEM
+        guard let session = ssh, !path.isEmpty || pem?.isEmpty == false else {
+            return .notApplicable("This VPN has no private key set.")
         }
         guard sshMethods.isEmpty || sshMethods.contains("publickey") else {
             return .notApplicable("This server doesn\u{2019}t accept keys, so there was nothing to try.")
         }
-        switch SSHPrivateKeyFile.protection(ofFileAt: path) {
+        let origin = pem == nil ? "Key file: \(path)" : "Private key: user Keychain"
+        let protection = pem.map { SSHPrivateKeyFile.protection(ofPEM: $0) }
+            ?? SSHPrivateKeyFile.protection(ofFileAt: path)
+        switch protection {
         case .unreadable:
             return .failed("The key file couldn\u{2019}t be read.",
-                           evidence: ["Key file: \(path)"],
+                           evidence: [origin],
                            remedy: .probeRemedy(.publicKeyRejected, vpnName: facts.profileName))
         case .passphraseProtected where (signIn?.privateKeyPassphrase ?? "").isEmpty:
             return ProbeStepOutcome(
                 status: .skipped,
                 detail: "Your key is password-protected, and its password wasn\u{2019}t available to this check.",
-                evidence: ["Key file: \(path)", "Encrypted private key"],
+                evidence: [origin, "Encrypted private key"],
                 remedy: .probeRemedy(.clientKeyLocked, vpnName: facts.profileName))
         default:
             break
         }
-        let result = await session.tryPublicKey(user: facts.username, keyPath: path,
+        let result: Result<Void, SSHProbeFailure>
+        if let pem {
+            result = await session.tryPublicKey(user: facts.username, keyPEM: pem,
                                                 passphrase: signIn?.privateKeyPassphrase)
+        } else {
+            result = await session.tryPublicKey(user: facts.username, keyPath: path,
+                                                passphrase: signIn?.privateKeyPassphrase)
+        }
         switch result {
         case .success:
             return .ok("The server accepted your key.",
-                       evidence: ["Key file: \(path)", "Accepted for \(facts.username)"])
+                       evidence: [origin, "Accepted for \(facts.username)"])
         case .failure(let error):
             let reason = error.message
             return .failed("The server didn\u{2019}t accept your key.",
-                           evidence: ["Key file: \(path)", reason],
+                           evidence: [origin, reason],
                            remedy: .probeRemedy(.publicKeyRejected, vpnName: facts.profileName,
                                                 detail: reason))
         }

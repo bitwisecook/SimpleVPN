@@ -68,6 +68,21 @@ struct TailscaleConfigTests {
         #expect(start.exitNode.isEmpty)
     }
 
+    @Test func aNonOwnerCannotEnableAnExitNodeAtEstablish() {
+        var c = TailscaleConfig()
+        c.useExitNode = true
+        c.exitNode = "100.64.0.7"
+        c.exitNodeAllowLANAccess = true
+        let nonOwner = TailscaleStartConfig(config: c, authKey: "", stateDir: "/tmp/x", gatewayOwned: false)
+        #expect(!nonOwner.useExitNode)
+        #expect(nonOwner.exitNode.isEmpty)
+        #expect(!nonOwner.exitNodeAllowLANAccess)
+        let owner = TailscaleStartConfig(config: c, authKey: "", stateDir: "/tmp/x", gatewayOwned: true)
+        #expect(owner.useExitNode)
+        #expect(owner.exitNode == c.exitNode)
+        #expect(c.useExitNode) // Ownership changes do not overwrite the saved preference.
+    }
+
     @Test func redactedPayloadNeverCarriesTheAuthKey() {
         let start = TailscaleStartConfig(config: TailscaleConfig(), authKey: "tskey-auth-verysecret",
                                          stateDir: "/tmp/x")

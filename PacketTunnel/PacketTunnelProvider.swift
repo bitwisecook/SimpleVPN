@@ -406,7 +406,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
         lock.lock(); tsEngine = engine; startCompletion = completionHandler; lock.unlock()
 
         let start = TailscaleStartConfig(config: config, authKey: authKey,
-                                         stateDir: Self.tailscaleStateDir(profile: profile))
+                                         stateDir: Self.tailscaleStateDir(profile: profile),
+                                         gatewayOwned: (options?["gatewayOwned"] as? NSNumber)?.boolValue ?? true)
         engine.start(config: start) { [weak self] error in
             guard let self else { return }
             if let error {
@@ -538,6 +539,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, OpenVPN3BridgeDelegate
                                 localNetworks: [String],
                                 completionHandler: @escaping (Error?) -> Void) {
         var config = WireGuardConfig.decode(from: conf?["wireguard"] as? Data)
+        if let peers = options?["wgExtraPeers"] as? [String] { config.rawExtraPeers = peers }
         // Catch a bad config here so it becomes a settings message before any
         // device is composed.
         if let problem = config.connectProblem {

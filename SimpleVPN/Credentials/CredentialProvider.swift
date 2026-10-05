@@ -75,7 +75,6 @@ nonisolated enum BiometricCredentialStore {
 
     /// Writing needs NO biometric prompt — only reads are gated.
     static func save(profile: String, _ creds: ProtectedCredentials) throws {
-        delete(profile: profile)
         var error: Unmanaged<CFError>?
         guard let access = SecAccessControlCreateWithFlags(
             nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .userPresence, &error) else {
@@ -91,7 +90,13 @@ nonisolated enum BiometricCredentialStore {
             kSecAttrLabel as String: creds.totpSecret == nil ? labelPlain : labelWithTOTP,
             kSecValueData as String: try JSONEncoder().encode(creds),
         ]
-        let status = SecItemAdd(add as CFDictionary, nil)
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service, kSecAttrAccount as String: profile,
+            kSecAttrAccessGroup as String: accessGroup, kSecUseDataProtectionKeychain as String: true]
+        let update = SecItemUpdate(query as CFDictionary,
+            [kSecValueData as String: try JSONEncoder().encode(creds),
+             kSecAttrLabel as String: creds.totpSecret == nil ? labelPlain : labelWithTOTP] as CFDictionary)
+        let status = update == errSecItemNotFound ? SecItemAdd(add as CFDictionary, nil) : update
         guard status == errSecSuccess else {
             log.error("protected write failed: OSStatus \(status)")
             throw err("Couldn't protect the credentials (\(status)).")

@@ -149,6 +149,7 @@ extension VPNController {
         KeychainCredentialStore.clearSession(profile: id)
         KeychainCredentialStore.deleteCredentials(profile: Self.tailscaleKeyProfile(id))
         KeychainCredentialStore.deleteCredentials(profile: Self.wireGuardKeyProfile(id))
+        KeychainCredentialStore.deleteWireGuardPeerSecrets(profile: id)
         BiometricCredentialStore.delete(profile: id)
         FirstSuccessfulConnectionStore.clear(profile: id)
         ConnectionBaselineStore.clear(profile: id)

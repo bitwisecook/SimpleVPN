@@ -149,6 +149,9 @@ static NSString *hexTail(NSString *s) {
     NSString *_host;
     int _port;
     BOOL _acceptedNewHostKey;
+    // Weak wrappers: callers own their flows, while the session must invalidate
+    // every surviving wrapper before ssh_free reclaims its channel pointers.
+    NSHashTable<SSHChannel *> *_channels;
 }
 
 + (void)initialize {
@@ -169,6 +172,7 @@ static NSString *hexTail(NSString *s) {
         _wakePipe[0] = -1;
         _wakePipe[1] = -1;
         _wakeLock = OS_UNFAIR_LOCK_INIT;
+        _channels = [NSHashTable weakObjectsHashTable];
     }
     return self;
 }
@@ -610,7 +614,9 @@ static NSString *hexTail(NSString *s) {
         if (error) *error = sshErrDetail(failureMessage, _session);
         return nil;
     }
-    return [[SSHChannel alloc] initWithChannel:c];
+    SSHChannel *channel = [[SSHChannel alloc] initWithChannel:c];
+    [_channels addObject:channel];
+    return channel;
 }
 
 - (SSHChannel *)openDirectTCPIPToHost:(NSString *)host port:(int)port error:(NSError **)error {
@@ -770,6 +776,11 @@ static NSString *hexTail(NSString *s) {
 }
 
 - (void)disconnect {
+    // All callers serialize disconnect with channel operations. Closing here
+    // clears each wrapper's pointer BEFORE the parent session frees its memory,
+    // so a queued read/write/close after teardown safely sees a closed channel.
+    for (SSHChannel *channel in _channels.allObjects) [channel close];
+    [_channels removeAllObjects];
     if (_hostKey) { ssh_key_free(_hostKey); _hostKey = NULL; }
     // Remove the session from the poll set BEFORE freeing either: ssh_event holds
     // the session's socket, and freeing the session first leaves the event with a
