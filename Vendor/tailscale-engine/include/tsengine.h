@@ -17,6 +17,7 @@
 
 #ifndef TSENGINE_H
 #define TSENGINE_H
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,6 +31,19 @@ typedef void (*TSPacketCallback)(const unsigned char *bytes, int len);
 /// Engine → Swift text delivery (JSON, or a bare URL for browseToURL).
 /// The string is valid for the duration of the call only.
 typedef void (*TSStringCallback)(const char *text);
+typedef void (*TSInstancePacketCallback)(uint64_t context, const unsigned char *bytes, int len);
+typedef void (*TSInstanceStringCallback)(uint64_t context, const char *text);
+char *TSCreateInstance(const char *configJSON, uint64_t context,
+    TSInstancePacketCallback packetOut, TSInstanceStringCallback stateChanged,
+    TSInstanceStringCallback browseToURL, TSInstanceStringCallback netmapChanged,
+    TSInstanceStringCallback logLine);
+char *TSStopInstance(uint64_t handle);
+// Private user-Keychain broker, not status. Returned state contains credentials.
+char *TSNodeState(uint64_t handle);
+char *TSAckNodeState(uint64_t handle, uint64_t revision);
+char *TSStatusInstance(uint64_t handle);
+char *TSUpdatePrefsInstance(uint64_t handle, const char *patchJSON);
+int TSPacketInInstance(uint64_t handle, const void *bytes, int length);
 
 /// Register the callbacks. Call once before TSStart; any may be NULL.
 /// Callbacks fire on arbitrary Go goroutines: the Swift implementations must

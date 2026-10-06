@@ -710,25 +710,61 @@ extension VPNController {
     /// Members needing a fresh OTP are collected in `compositionNeedsAttention`.
     func connectComposition(_ composition: VPNComposition) async {
         compositionNeedsAttention = []
+        guard composition.validationProblem == nil else {
+            lastError = composition.validationProblem
+            return
+        }
+        guard !composition.fullTunnelConflict else {
+            lastError = "Choose one full tunnel for this composition."
+            return
+        }
+        guard composition.members.allSatisfy({ member in profiles.contains { $0.id == member.profileID } }) else {
+            lastError = "A VPN in this composition is missing."
+            return
+        }
+        // Ordering alone does not select an underlay. Until the connector can
+        // bind a carrier to a specific internal engine, never promise VPN-on-VPN
+        // or let a failed/missing dependency fall back to physical dialing.
+        guard !composition.members.contains(where: { $0.dependsOn != nil }) else {
+            lastError = "Chained VPNs need a routed connection between their tunnels. This connection method does not provide one yet."
+            return
+        }
+        compositionRouteRoles = Dictionary(uniqueKeysWithValues: composition.members.map {
+            ($0.profileID, $0.role == .full ? GatewayRole.full : .split)
+        })
         for member in composition.startOrder {
-            if let dep = member.dependsOn {
-                await waitForConnected(id: dep, timeout: 15)
-            }
+            guard !Task.isCancelled else { return }
             let ok = await connectWithSavedCredentials(id: member.profileID)
-            if !ok {
-                compositionNeedsAttention.append(member.profileID)
+            if !ok { compositionNeedsAttention.append(member.profileID) }
+        }
+        if let owner = composition.members.first(where: { $0.role == .full })?.profileID {
+            if await waitForConnected(id: owner, timeout: 15) {
+                await setDefaultGateway(to: owner)
+            } else if !compositionNeedsAttention.contains(owner) {
+                compositionNeedsAttention.append(owner)
             }
+        } else {
+            await setDefaultGateway(to: nil)
         }
         if !compositionNeedsAttention.isEmpty {
-            let names = compositionNeedsAttention
-                .compactMap { id in profiles.first { $0.id == id }?.name }
+            let names = compositionNeedsAttention.compactMap { id in profiles.first { $0.id == id }?.name }
                 .joined(separator: ", ")
-            lastError = "Connected the rest of \(composition.name). These still need a code or sign-in: \(names)."
+            lastError = "These VPNs in \(composition.name) still need a code, sign-in or connection: \(names)."
         }
     }
 
     func disconnectComposition(_ composition: VPNComposition) {
-        for member in composition.members { disconnect(id: member.profileID) }
+        connectionReservations.cancel(owner: "virtual." + composition.id)
+        if let manager = virtualManagers[composition.id], UI.isActive(manager.connection.status) {
+            manager.connection.stopVPNTunnel()
+            resyncStatuses()
+            return
+        }
+        let order = composition.validationProblem == nil ? composition.startOrder : composition.members
+        for member in order.reversed() {
+            disconnect(id: member.profileID)
+            compositionRouteRoles[member.profileID] = nil
+        }
     }
 
     /// True while any member of the composition is active.
@@ -738,11 +774,13 @@ extension VPNController {
         }
     }
 
-    private func waitForConnected(id: String, timeout: Int) async {
+    private func waitForConnected(id: String, timeout: Int) async -> Bool {
         for _ in 0..<(timeout * 10) {
-            if profiles.first(where: { $0.id == id })?.status == .connected { return }
-            try? await Task.sleep(for: .milliseconds(100))
+            guard !Task.isCancelled else { return false }
+            if profiles.first(where: { $0.id == id })?.status == .connected { return true }
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return false }
         }
+        return false
     }
 
     // MARK: Pause / Resume
@@ -756,23 +794,24 @@ extension VPNController {
     // the wire format is unchanged — the app just only ever asks for bypass.
 
 
-    func pause(id: String) async {
-        if let why = controlDenied(.pause(profile: id)) { lastError = why; return }
+    @discardableResult func pause(id: String) async -> Bool {
+        if let why = controlDenied(.pause(profile: id)) { lastError = why; return false }
         guard let reply = await sendMessage("pause:bypass", to: id), reply == "ok" else {
             lastError = "Pause failed — the tunnel didn't acknowledge."
-            return
+            return false
         }
         pausedProfiles.insert(id)
         Self.log.log("paused \(id, privacy: .public)")
+        return true
     }
 
-    func resume(id: String) async {
-        if let why = controlDenied(.resume(profile: id)) { lastError = why; return }
+    @discardableResult func resume(id: String) async -> Bool {
+        if let why = controlDenied(.resume(profile: id)) { lastError = why; return false }
         let acknowledged = (await sendMessage("resume", to: id)) == "ok"
         pausedProfiles.remove(id)
         guard acknowledged else {
             await recoverFailedResume(id: id, why: "the tunnel didn't acknowledge resuming")
-            return
+            return false
         }
         Self.log.log("resumed \(id, privacy: .public)")
         // Acknowledged is NOT the same as recovered. Resuming re-applies the tunnel's
@@ -780,6 +819,7 @@ extension VPNController {
         // brief pass through .reasserting is the "flash" — and if the re-apply or the
         // engine restart fails, NE tears the tunnel down a moment later. Watch for it.
         startResumeWatchdog(id: id)
+        return true
     }
 
     /// Resume is only really done once the session is back up. Nothing else notices a
@@ -932,6 +972,8 @@ extension VPNController {
 
     func disconnect(id: String) {
         if let why = controlDenied(.disconnect(profile: id)) { lastError = why; return }
+        connectionReservations.cancel(member: id)
+        if disconnectVirtualMember(id) { return }
         // Cancelling a connect that was already grinding away is the same evidence the
         // watchdog collects — the user just got there first. Remember the network so the
         // next attempt from here is forewarned. Short cancels (changed my mind) don't
@@ -945,5 +987,6 @@ extension VPNController {
             }
         }
         managers[id]?.connection.stopVPNTunnel()
+        resyncStatuses()
     }
 }

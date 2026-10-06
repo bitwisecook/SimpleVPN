@@ -7,6 +7,13 @@ guarantees (never two default gateways, coherent DNS, one proxy decision), stay 
 react the instant something else changes the system. It is backing-agnostic: the same mediator
 API is realized by today's multi-tunnel model and, later, by the PBR utun (`PolicyRouting.md`).
 
+**Implementation review, 2026-10-05:** [NetworkArchitectureReview.md](NetworkArchitectureReview.md)
+traces the remaining gaps in this intended model. Live gateway execution bypasses the
+filtered route plan; prefix application and pushed DNS capture are incomplete; asynchronous
+appliers can interleave or skip a drift repair. Engines still own their packet pumps and
+interface settings. P4 is therefore not merely another realizer implementation, and the
+guarantees below describe the intended contract rather than proven end-to-end behavior.
+
 ## The problem it fixed
 
 **P1–P3 are built.** All three mediators are owned by the controller (`VPNController.routes` /

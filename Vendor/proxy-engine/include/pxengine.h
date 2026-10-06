@@ -19,6 +19,7 @@
 
 #ifndef PXENGINE_H
 #define PXENGINE_H
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -54,6 +55,18 @@ void PXSetCallbacks(PXPacketCallback packetOut,
 ///   -4 the server refused the forward · -5 timed out
 /// Flows are never queued: while the session is down every dial refuses with -3.
 typedef int (*PXFlowDialCallback)(const char *host, int port);
+typedef void (*PXInstancePacketCallback)(uint64_t context, const unsigned char *bytes, int len);
+typedef void (*PXInstanceStringCallback)(uint64_t context, const char *text);
+typedef int (*PXInstanceFlowDialCallback)(uint64_t context, const char *host, int port);
+
+/// Scoped sessions. Callbacks and the SSH dialler belong to this handle only;
+/// removed handles never address a later session. The response includes handle.
+char *PXCreateInstance(const char *configJSON, uint64_t context,
+    PXInstancePacketCallback packetOut, PXInstanceStringCallback stateChanged,
+    PXInstanceStringCallback logLine, PXInstanceFlowDialCallback flowDial);
+char *PXStopInstance(uint64_t handle);
+char *PXStatusInstance(uint64_t handle);
+int PXPacketInInstance(uint64_t handle, const void *bytes, int length);
 
 /// Register the flow dialler. REQUIRED before PXStart when the upstream URL is
 /// `ssh://…` (PXStart refuses that scheme without one, rather than leaving every

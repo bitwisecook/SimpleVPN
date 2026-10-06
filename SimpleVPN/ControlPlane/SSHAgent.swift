@@ -425,8 +425,14 @@ nonisolated final class UnixSocketAgentTransport: SSHAgentTransport, @unchecked 
     private let fd: Int32
     private let lock = NSLock()
     private var closed = false
+    private var retired = false
+    private var inFlight = 0
+    private let transaction = NSLock()
+    private let timeout: TimeInterval
+    private var requestDeadline = Date.distantPast
 
     init(path: String, timeout: TimeInterval) throws {
+        self.timeout = timeout
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let bytes = Array(path.utf8)
@@ -472,10 +478,21 @@ nonisolated final class UnixSocketAgentTransport: SSHAgentTransport, @unchecked 
         lock.lock(); defer { lock.unlock() }
         guard !closed else { return }
         closed = true
-        _ = Darwin.close(fd)
+        _ = shutdown(fd, SHUT_RDWR)
+        if inFlight == 0 { retired = true; _ = Darwin.close(fd) }
     }
 
     func roundTrip(_ request: Data) throws -> Data {
+        transaction.lock(); defer { transaction.unlock() }
+        lock.lock()
+        guard !closed else { lock.unlock(); throw SSHAgentTransportError("the agent connection was closed") }
+        inFlight += 1; lock.unlock()
+        defer {
+            lock.lock(); inFlight -= 1
+            if closed && !retired && inFlight == 0 { retired = true; _ = Darwin.close(fd) }
+            lock.unlock()
+        }
+        requestDeadline = Date().addingTimeInterval(timeout)
         try writeAll(request)
         // Read the 4-byte frame, then exactly that many bytes: an agent may
         // answer in several TCP-style chunks even over a unix socket.
@@ -493,6 +510,7 @@ nonisolated final class UnixSocketAgentTransport: SSHAgentTransport, @unchecked 
         var sent = 0
         let bytes = [UInt8](data)
         while sent < bytes.count {
+            try boundRemainingTime()
             let n = bytes.withUnsafeBytes { raw -> Int in
                 write(fd, raw.baseAddress!.advanced(by: sent), bytes.count - sent)
             }
@@ -503,9 +521,18 @@ nonisolated final class UnixSocketAgentTransport: SSHAgentTransport, @unchecked 
         }
     }
 
+    private func boundRemainingTime() throws {
+        let remaining = requestDeadline.timeIntervalSinceNow
+        guard remaining > 0 else { throw SSHAgentTransportError("the agent didn't answer before the deadline") }
+        var time = timeval(tv_sec: Int(remaining), tv_usec: Int32((remaining - floor(remaining)) * 1_000_000))
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &time, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &time, socklen_t(MemoryLayout<timeval>.size))
+    }
+
     private func readSome(_ want: Int) throws -> Data {
         var buffer = [UInt8](repeating: 0, count: want)
         while true {
+            try boundRemainingTime()
             let n = buffer.withUnsafeMutableBytes { raw in read(fd, raw.baseAddress!, want) }
             if n > 0 { return Data(buffer.prefix(n)) }
             if n == 0 { throw SSHAgentTransportError("the agent closed the connection") }

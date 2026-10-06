@@ -33,6 +33,13 @@ struct TunnelStats: Codable, Sendable, Equatable {
     var serverPort: String? = nil      // transport port
     var serverProto: String? = nil     // transport protocol ("udp"/"tcp"…)
     var searchDomains: [String]? = nil // pushed DNS search domains
+    var advertisedPrefixes: [String]? = nil
+    var dnsMatchDomains: [String]? = nil
+    var settingsRevision: UInt64? = nil
+    /// A shared capture session. Default ownership denotes the selected egress
+    /// here; it does not mean this member owns a separate OS interface.
+    var virtualRoutingSession: String? = nil
+    var defaultCaptureBlocked: Bool? = nil
     var mtu: Int? = nil                // tunnel MTU
 
     // Structured pushed-proxy capture (Proxy mediator P3 — the per-kind intent for

@@ -13,6 +13,7 @@
 
 #import <Foundation/Foundation.h>
 #import <NetworkExtension/NetworkExtension.h>
+#import "TunnelSettingsApplying.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -117,7 +118,7 @@ typedef NS_ENUM(NSInteger, OCStatus) {
 NS_SWIFT_SENDABLE
 @interface OpenConnectBridge : NSObject
 
-- (instancetype)initWithProvider:(NEPacketTunnelProvider *)provider
+- (instancetype)initWithProvider:(NEPacketTunnelProvider<SVPTunnelSettingsApplying> *)provider
                         delegate:(id<OpenConnectBridgeDelegate>)delegate;
 
 /// Authenticate and bring the tunnel up. Returns NO + `error` if setup fails to

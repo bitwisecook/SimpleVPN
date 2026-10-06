@@ -146,11 +146,24 @@ extension VPNController {
     /// keys ARE the sign-in, read from the keychain here and handed over via
     /// startTunnel options in memory.
     func connectWireGuard(id: String) async throws {
+        if let why = controlDenied(.connect(profile: id)) { throw err(why) }
+        guard virtualManager(for: id) == nil else { throw err("Disconnect this VPN's virtual connection before starting it independently.") }
         guard let mgr = managers[id],
               mgr.protocolConfiguration is NETunnelProviderProtocol else { throw err("no such profile") }
+        guard !UI.isActive(mgr.connection.status) else { throw err("This VPN is already connected or connecting.") }
+        guard let attempt = connectionReservations.reserve(owner: "profile." + id, members: [id]) else {
+            throw err("This VPN is already preparing a connection.")
+        }
+        defer { connectionReservations.finish(attempt); resyncStatuses() }
+        resyncStatuses()
+        await wireGuardConfigurationOperations.acquire()
+        defer { wireGuardConfigurationOperations.release() }
+        guard connectionReservations.isCurrent(attempt), !Task.isCancelled else { throw CancellationError() }
         if let ensureExtensionReady, !(await ensureExtensionReady()) {
             throw err("SimpleVPN needs its network extension approved before it can connect. Open System Settings ▸ General ▸ Login Items & Extensions ▸ Network Extensions and allow SimpleVPN.")
         }
+        guard connectionReservations.isCurrent(attempt), !Task.isCancelled,
+              managers[id] === mgr else { throw CancellationError() }
         let config = wireGuardConfig(for: id)
         if let problem = config.connectProblem { throw err(problem) }
         let secrets = wireGuardSecrets(for: id)
@@ -189,7 +202,10 @@ extension VPNController {
 
         mgr.isEnabled = true
         try await mgr.saveToPreferences()
+        guard connectionReservations.isCurrent(attempt), !Task.isCancelled else { throw CancellationError() }
         try await mgr.loadFromPreferences()
+        guard connectionReservations.isCurrent(attempt), !Task.isCancelled,
+              managers[id] === mgr else { throw CancellationError() }
         guard let session = mgr.connection as? NETunnelProviderSession else {
             throw err("The VPN configuration isn't ready — try removing and re-creating it.")
         }

@@ -51,14 +51,15 @@ do with this argument — `Docs/AuthSecPKCS11.md`.)
 
 ### Storage exceptions found in the October 2026 review
 
-The invariant above is not universal today. Tailscale's root-owned state file stores node
-identity; it is restricted to its owner, but it is not in the user's Keychain. Managed
-OpenVPN profiles whose configuration cannot be rewritten, and migrations whose Keychain
-write fails, can retain inline material with a visible migration notice. Native proxy
-authentication is attached to `NEProxyServer` in the saved system VPN configuration;
-its persistence boundary needs verification. User-selected `.ssh` and other key files
-remain file-backed by choice. These gaps are registered in `Docs/Drift.md` and detailed
-in `Docs/AppReview.md`; do not describe all app secrets as Keychain-only.
+Tailscale node identity now uses the user-Keychain state broker, with exact-revision
+acknowledgement and verified legacy-file deletion. Editing locks no longer bypass
+OpenVPN secret migration. A failed Keychain write or OS-managed configuration rewrite
+retains the only copy and reports a migration notice. Authenticated native proxy saves
+are blocked because `NEProxyServer` has no persistent-secret-reference property; legacy
+proxy credentials are verified in user Keychain before OS redaction.
+User-selected `.ssh` and other key files remain file-backed by choice, and vendor
+agents/vaults remain their owners' stores. These process and platform boundaries are
+registered in `Docs/Drift.md` and detailed in `Docs/AppReview.md`.
 
 ### Touch ID, precisely ✅
 
@@ -109,47 +110,20 @@ compare byte-for-byte, and only then rewrite the stored config. Any failure leav
 completely untouched — working, still leaky — and badges it. Losing somebody's only copy of a client
 key would be worse than the leak being fixed.
 
-### Managed profiles: the rewrite is skipped, and the profile is badged ✅
+### Storage migration on profiles whose editing is locked
 
-**Decided: under `lockConfiguration` SimpleVPN does not rewrite the stored configuration, and the
-profile carries a visible badge saying its key is stored alongside its settings.** It used to be
-skipped *silently*, logged and nothing more, which was the part that was actually wrong.
+The user's secret-storage requirement also applies when configuration editing is
+locked. Migration keeps the connection's exact values: it writes and verifies the
+user-Keychain copy before replacing inline material with references. The lock still
+blocks changes to connection settings. It does not skip security storage migration.
 
-The argument for leaving the profile alone:
+NetworkExtension can refuse to rewrite a profile owned by an administrator, and a
+locked or unavailable Keychain can refuse the copy. Either failure preserves the
+original and displays a migration notice. An administrator must replace an externally
+managed profile if the OS will not permit its rewrite. Never discard the only copy.
 
-- **The material is already inside the trust boundary that produced it.** An MDM-delivered profile's
-  inline key was put there by the organisation, in a profile the organisation pushed to a Mac it
-  manages. This is the fact that makes a managed profile genuinely different from a user's own, where
-  nobody but SimpleVPN was ever going to fix it. Here the party who can fix it properly — by pushing
-  a profile that keeps the block out, or by unlocking configuration — is the same party that created
-  it.
-- **Every other `lockConfiguration` site in the app refuses to write.** A single silent exception is
-  how a policy stops meaning anything, and we cannot see *why* the lock was set: an administrator may
-  be comparing the stored profile against a known-good baseline, in which case a rewrite reads as
-  tampering rather than as hygiene.
-- **A rewrite of managed state cannot be recalled**, and a re-push re-leaks anyway.
-
-**And the case against, which is real and was nearly decisive.** Moving a secret into the keychain is
-not a *configuration* edit in the sense the policy means. The profile's meaning is unchanged, the
-tunnel connects identically, the engine gets a byte-identical configuration — and an administrator who
-locked settings meant "the user must not change these values", not "the private key must stay readable
-in the VPN preferences". Under that reading this preserves a leak out of deference to a policy that
-never contemplated it. Nor is "it will be re-pushed" a complete answer: many profiles are pushed once
-and never again, so a one-time strip would be a real reduction, not churn.
-
-What settles it is that the choice is not between *fixing* and *not fixing* — it is between two parties
-fixing it, and only one of them has the authority and the durable fix. So the outcome is made
-**visible instead of silent**: the same `key.slash.fill` badge a failed migration raises, on the same
-row, with copy that says the VPN works normally and names who can change it — and that deliberately
-does *not* offer the user the failure path's fix ("unlock your keychain and reopen SimpleVPN"), which
-would send them chasing a cause that is not the cause. `OVPNSecretMaterial.managedInlineSecretNotice`
-owns that wording; the decision itself is recorded on `VPNController.migrateInlineOVPNSecrets`.
-
-Two tests hold it, and the second is the one that matters most: `aLockedProfileIsLeftAloneAndBadged`
-pins the ordering in the source (the badge is set and the branch exits *before* anything touches the
-keychain or `providerConfiguration`), and `anUnmanagedProfileIsStillStripped` is its
-over-redaction counterpart — "leave it and badge it" must never become the universal answer, because
-that is the original bug wearing a warning label.
+`aPolicyLockCannotSkipVerifiedSecretStorageMigration` guards the write/verify/rewrite
+ordering and the absence of an app-policy early exit.
 
 ---
 
@@ -183,7 +157,8 @@ not reattach a key to a different peer. Config text retains blank slots. The liv
 engine still supports the first peer only; this preserves multi-peer import/export material.
 
 These exports do **not** extract private keys from SSH agents, export external vaults,
-copy provider-wide unlock credentials, or back up Tailscale node identity. They are not a
+or copy provider-wide unlock credentials. Tailscale node identity and migrated native proxy
+credentials use closed export roles, with secrets or placeholders. They are not a
 complete backup of the user's Keychain. An external file key remains a path unless it has
 been explicitly imported into SimpleVPN's Keychain. Export stops on failed or malformed
 Keychain reads; protected reads report authentication failure.

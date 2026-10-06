@@ -1,4 +1,15 @@
-# SSH Network Tunnel — design and implementation notes
+# SSH Network Tunnel — implementation follow-up
+
+Authentication now includes SSH Agent through a provider-local signing socketpair and
+private user-app session broker. No root read of the user's agent socket is required.
+Only key enumeration and signing are forwarded, after host-key verification; keys stay
+with the agent. Keep SimpleVPN running. Interactive sign-in has a 150-second connect
+watchdog and 120-second per-agent-operation deadline. Password/Keychain PEM remain
+transient start options. Kerberos and chained transports remain unavailable.
+
+The design history below predates this addition; its D4/agent-unavailable statements are
+superseded by `Shared/SSHAgentSigningBroker.swift` and `Docs/Drift.md` §16.
+
 
 **Status: SHIPPED** (commit `b6fc52c`). This was written as a pre-implementation plan and has been
 past-tensed against the landed code; the design rationale is kept because it is the record of *why*

@@ -38,10 +38,31 @@ static void tsCallString(TSStringCallback f, const char *s) { if (f != NULL) f(s
 
 #line 1 "cgo-generated-wrapper"
 
+#line 5 "tailscale_instances.go"
+
+#include <stdint.h>
+#include <stdlib.h>
+typedef void (*TSInstancePacketCallback)(uint64_t context, const unsigned char *bytes, int len);
+typedef void (*TSInstanceStringCallback)(uint64_t context, const char *text);
+static void tsInstancePacket(TSInstancePacketCallback f, uint64_t c, const unsigned char *p, int n) { if (f) f(c,p,n); }
+static void tsInstanceString(TSInstanceStringCallback f, uint64_t c, const char *s) { if (f) f(c,s); }
+
+#line 1 "cgo-generated-wrapper"
+
+#line 5 "virtual_router.go"
+
+#include <stdint.h>
+#include <stdlib.h>
+typedef void (*VRPacketCallback)(uint64_t context, const unsigned char *bytes, int length);
+static void vrPacket(VRPacketCallback f, uint64_t c, const unsigned char *p, int n) { if (f) f(c,p,n); }
+
+#line 1 "cgo-generated-wrapper"
+
 #line 68 "wireguard.go"
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 // Callback types crossing to Swift. `packetOut` borrows its buffer for the
 // duration of the call only — Swift must copy before returning.
@@ -52,6 +73,10 @@ typedef void (*WGStringCallback)(const char *text);
 // check in one place.
 static void wgCallPacket(WGPacketCallback f, const unsigned char *b, int n) { if (f != NULL) f(b, n); }
 static void wgCallString(WGStringCallback f, const char *s) { if (f != NULL) f(s); }
+typedef void (*WGInstancePacketCallback)(uint64_t context, const unsigned char *bytes, int len);
+typedef void (*WGInstanceStringCallback)(uint64_t context, const char *text);
+static void wgInstancePacket(WGInstancePacketCallback f, uint64_t c, const unsigned char *b, int n) { if (f) f(c,b,n); }
+static void wgInstanceString(WGInstanceStringCallback f, uint64_t c, const char *s) { if (f) f(c,s); }
 
 #line 1 "cgo-generated-wrapper"
 
@@ -122,9 +147,29 @@ extern char* TSStart(char* cfgJSON);
 extern char* TSStatus(void);
 extern char* TSUpdatePrefs(char* patchJSON);
 extern char* TSStop(void);
+extern char* TSCreateInstance(char* cfgJSON, uint64_t context, TSInstancePacketCallback packet, TSInstanceStringCallback state, TSInstanceStringCallback browse, TSInstanceStringCallback netmap, TSInstanceStringCallback diagnostic);
+extern int TSPacketInInstance(uint64_t handle, void* bytes, int length);
+extern char* TSStatusInstance(uint64_t handle);
+extern char* TSUpdatePrefsInstance(uint64_t handle, char* patchJSON);
+extern char* TSStopInstance(uint64_t handle);
+extern char* TSNodeState(uint64_t handle);
+extern char* TSAckNodeState(uint64_t handle, uint64_t revision);
+extern char* VRCreateInstance(char* configuration, uint64_t context, VRPacketCallback packetOut);
+extern int VRPacketIn(uint64_t handle, void* bytes, int length);
+extern char* VRApplyPolicy(uint64_t handle, char* policy);
+extern char* VRCheckPolicy(uint64_t handle, char* policy);
+extern char* VRStatus(uint64_t handle);
+extern char* VRStopPort(uint64_t handle, char* id);
+extern char* VRStopInstance(uint64_t handle);
+extern void VRFree(char* text);
+extern int VRSetUnderlayInterface(uint64_t handle, uint32_t index);
 extern void WGSetCallbacks(WGPacketCallback packetOut, WGStringCallback logLine);
 extern void WGFree(char* p);
 extern char* WGStart(char* cfgJSON);
+extern char* WGCreateInstance(char* cfgJSON, uint64_t context, WGInstancePacketCallback packet, WGInstanceStringCallback logLine);
+extern int WGPacketInInstance(uint64_t handle, void* bytes, int length);
+extern char* WGStatusInstance(uint64_t handle);
+extern char* WGStopInstance(uint64_t handle);
 extern int WGPacketIn(void* bytes, int length);
 extern char* WGStatus(void);
 extern char* WGStop(void);

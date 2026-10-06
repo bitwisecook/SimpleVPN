@@ -3,6 +3,14 @@
 Design doc, 2026-08-03. Status: **agreed direction, phased build**. The near-term
 destination/CIDR divert rules shipped earlier remain the fallback path when PBR is off.
 
+**Review gate, 2026-10-05:** read [NetworkArchitectureReview.md](NetworkArchitectureReview.md)
+before implementing this proposal. The current app still uses independent VPN interfaces;
+the virtual router is unbuilt. The review identifies incomplete live route/DNS application,
+single-instance engine APIs, missing translation/transport contracts, and platform limits
+on the proposed Direct/DNS/PF paths. Assertions below about completed mediation or supported
+capture behavior must be checked against that review. Core interface virtualization and
+optional Tcl scripting are separate migration stages.
+
 ### Which kinds honour a divert rule (2026-08-04)
 
 The divert blobs (`providerConfiguration["routingRules"]` / `["routingIncludes"]`) are

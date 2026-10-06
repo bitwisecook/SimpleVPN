@@ -15,6 +15,19 @@ import Testing
 
 struct DNSMediatorTests {
 
+    @Test func scopedResolverAndSearchListDriftAreChecked() {
+        let plan = DNSArbiter.plan(intents: [DNSIntent(engine: "lab", resolvers: ["10.9.0.53"],
+            searchDomains: ["lab.example"], matchDomains: ["lab.example"])], policy: DNSPolicy(defaultOwner: nil))
+        let request = DNSApplyRequest(servers: ["10.9.0.53"], searchDomains: ["lab.example"], matchDomains: ["lab.example"])
+        var observation = DNSObservation(resolvers: ["192.0.2.53"], searchDomains: [], scoped: [request])
+        #expect(DNSDriftDecision.action(expected: plan, observed: observation, withinSuppressWindow: false) == .none)
+        observation.scoped[0].searchDomains = []
+        #expect(DNSDriftDecision.action(expected: plan, observed: observation, withinSuppressWindow: false) == .reassert)
+        observation.scoped = []
+        #expect(DNSDriftDecision.action(expected: plan, observed: observation, withinSuppressWindow: false) == .reassert)
+        #expect(DNSDriftDecision.action(expected: plan, observed: observation, withinSuppressWindow: true) == .none)
+    }
+
     private func intent(_ id: String, resolvers: [String], match: [String] = [],
                         catchAll: Bool = false, at seconds: Double? = nil) -> DNSIntent {
         DNSIntent(engine: id, resolvers: resolvers, searchDomains: [], matchDomains: match,

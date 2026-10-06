@@ -14,13 +14,8 @@
 //      so the TimelineView is `paused` at idle → zero redraws, zero CPU.
 //    - accessibilityReduceMotion skips the animation entirely: the Canvas still
 //      draws the new static state, it just never runs the moving beam.
-//  The transition is a "beam" travelling along the active path, masking the brief
-//  no-default gap the STRIP-OLD→ADD-NEW gateway switch opens.
-//
-//  The OWNER is the route mediator's published truth (`vpn.routes.
-//  effectiveGatewayOwner`) — the same value the picker beside this strip binds to,
-//  so the two can never tell different stories. (The old card also surfaced the
-//  engine-truth desync; here the gatewayBar's own "Applying…" pill carries that.)
+//  Confirmed engine ownership drives the path. A virtual capture without an
+//  eligible default port is blocked, never pictured as Direct.
 //
 //  DANGER (layout-loop-crash invariant): this view is Canvas-only — no spinners,
 //  toggles or any platform-backed view — so it stays safe even though the bar it
@@ -41,15 +36,16 @@ struct TrafficPathStrip: View {
     var body: some View {
         // The mediator's published truth drives the picture — the exact value the
         // picker in the same bar reads and writes.
-        let owner = vpn.routes.effectiveGatewayOwner
+        let owner = vpn.routes.displayedGatewayOwner
         let ownerName = vpn.routes.name(for: owner)
+        let blocked = vpn.virtualDefaultCaptureBlocked
 
         TimelineView(.animation(minimumInterval: liveVisuals.frameInterval(normalFramesPerSecond: 30),
                                 paused: !liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion)
                                     || animatingSince == nil)) { context in
             let phase = animatingSince == nil ? 0 : context.date.timeIntervalSinceReferenceDate
             Canvas { ctx, size in
-                draw(ctx: ctx, size: size, ownerName: ownerName, phase: phase)
+                draw(ctx: ctx, size: size, ownerName: ownerName, phase: phase, blocked: blocked)
             }
         }
         .frame(width: 260, height: 40)
@@ -60,7 +56,7 @@ struct TrafficPathStrip: View {
         // so a switch is spoken exactly once.
         .accessibilityElement()
         .accessibilityLabel("Internet traffic path")
-        .accessibilityValue(pathDescription(ownerName: ownerName))
+        .accessibilityValue(blocked ? "Internet traffic is blocked; the selected VPN is unavailable" : pathDescription(ownerName: ownerName))
         // A switch (or an owner-disconnect fallback) is exactly a change of the
         // effective owner — animate on that, then settle. onChange only, so the
         // strip's first appearance draws still.
@@ -84,7 +80,7 @@ struct TrafficPathStrip: View {
 
     // MARK: Drawing (Canvas/Text/shapes only)
 
-    private func draw(ctx: GraphicsContext, size: CGSize, ownerName: String?, phase: TimeInterval) {
+    private func draw(ctx: GraphicsContext, size: CGSize, ownerName: String?, phase: TimeInterval, blocked: Bool) {
         let midY: CGFloat = 14
         let r: CGFloat = 8
         // Inset leaves room for the labels centred under the end nodes.
@@ -97,7 +93,7 @@ struct TrafficPathStrip: View {
 
         var points = [mac]
         if let hop { points.append(hop) }
-        points.append(net)
+        if !blocked { points.append(net) }
 
         // Base line — solid, active colour: this is the path in force.
         var line = Path()
@@ -122,7 +118,7 @@ struct TrafficPathStrip: View {
         // Nodes on top of the line.
         node(ctx, at: mac, radius: r, symbol: "laptopcomputer", tint: ink, filled: true)
         if let hop { node(ctx, at: hop, radius: r, symbol: "lock.shield.fill", tint: ink, filled: true) }
-        node(ctx, at: net, radius: r, symbol: "globe",
+        node(ctx, at: net, radius: r, symbol: blocked ? "hand.raised.fill" : "globe",
              tint: ownerName == nil ? .secondary : ink, filled: ownerName != nil)
 
         // Labels beneath each node. The owner name is clipped by character count —
@@ -133,7 +129,7 @@ struct TrafficPathStrip: View {
             label(ctx, ownerName.count > 16 ? String(ownerName.prefix(15)) + "…" : ownerName,
                   at: CGPoint(x: hop.x, y: hop.y + r + 3), strong: true)
         }
-        label(ctx, ownerName == nil ? "Internet (direct)" : "Internet",
+        label(ctx, blocked ? "Internet blocked" : ownerName == nil ? "Internet (direct)" : "Internet",
               at: CGPoint(x: net.x, y: net.y + r + 3))
     }
 

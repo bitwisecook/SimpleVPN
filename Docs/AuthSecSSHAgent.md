@@ -1,4 +1,17 @@
-# SSH agent sign-in
+# SSH agent sign-in — current process boundary
+
+SSH Network Tunnel now supports SSH Agent through `SSHAgentSigningBroker`: libssh in
+the extension owns its session and uses a provider-local socketpair. Private NE session
+messages carry bounded key-list/signing requests to the user app, which alone opens the
+chosen user-agent socket. Exact request IDs, frame limits, signing-only commands,
+120-second agent deadlines and cancellation prevent mutation or indefinite approval
+waits. Host-key pin checking precedes authentication. Keep the app running for reconnects.
+
+The real agent/sshd suite authenticates through this bridge and verifies libssh descriptor
+cleanup. Interactive 1Password authorization and installed-extension approval remain live
+checks. The original app-agent protocol analysis below is historical where it calls the
+extension capability unavailable; it must not override this implemented contract.
+
 
 SimpleVPN can sign an SSH tunnel in with the keys an **SSH agent** holds, instead of being handed a
 private key file. libssh asks the agent to sign the server's challenge; the key itself never reaches

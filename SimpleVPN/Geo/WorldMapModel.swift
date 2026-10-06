@@ -286,8 +286,9 @@ enum WorldMapModel {
                       stats: [String: TunnelStats],
                       device: (lat: Double, lon: Double, place: String?)? = nil,
                       hints: [String: GatewayHint] = [:],
+                      defaultOwner: String? = nil,
                       name: (String) -> String) -> Result {
-        build(vantage: Vantage(publicIP), stats: stats, device: device, hints: hints, name: name)
+        build(vantage: Vantage(publicIP), stats: stats, device: device, hints: hints, defaultOwner: defaultOwner, name: name)
     }
 
     /// `hints` carries what the app knows about each connected profile's active
@@ -298,6 +299,7 @@ enum WorldMapModel {
                       stats: [String: TunnelStats],
                       device: (lat: Double, lon: Double, place: String?)? = nil,
                       hints: [String: GatewayHint] = [:],
+                      defaultOwner: String? = nil,
                       locate: @MainActor (String) -> GeoPlace? = WorldMapModel.geoIPPlace,
                       name: (String) -> String) -> Result {
         var pins: [MapPin] = []
@@ -324,7 +326,6 @@ enum WorldMapModel {
         // Iterate in a stable (id-sorted) order so the map — and the egress
         // attribution below — doesn't flip arbitrarily between rebuilds (Dictionary
         // has no defined order).
-        var placed: [(id: String, cc: String, exact: Bool)] = []  // gateways we could put on the globe
         var unlocatable: [String] = []                  // live tunnels with no location at all
         var approximate = false
         var tethered = 0                                // satellite slots already handed out
@@ -351,7 +352,6 @@ enum WorldMapModel {
                     tethered += 1
                 }
                 pins.append(node)
-                placed.append((id, fix.place.countryCode, fix.source.isExact))
                 approximate = approximate || !fix.source.isExact
             } else {
                 // Nothing anywhere can say where this is. Pin it *beside* home in
@@ -378,33 +378,21 @@ enum WorldMapModel {
         // Egress — where traffic reaches the internet now. Only distinct when it's
         // in a different country than home (country-level data); otherwise egress
         // effectively coincides with home (split tunnel / no full tunnel).
-        if let elat = vantage.egressLat, let elon = vantage.egressLon,
+        if !stats.values.contains(where: { $0.defaultCaptureBlocked == true }),
+           let elat = vantage.egressLat, let elon = vantage.egressLon,
            let ecc = vantage.egressCountryCode, ecc != vantage.homeCountryCode {
             let egressIP = vantage.egressIP ?? ""
             pins.append(MapPin(id: "egress", kind: .egress, lat: elat, lon: elon,
                                title: "Internet egress",
                                subtitle: "Appears from \(egressIP.isEmpty ? "" : egressIP + " · ")\(vantage.egressCountryName ?? "")"))
-            // Attribution, in order of confidence:
-            //  1. a gateway sitting in the egress country (best-effort with
-            //     country-level data), preferring one placed from its live address
-            //     over one placed from configuration, and deterministically the
-            //     first by sorted id so it doesn't reassign at random when several
-            //     share a country;
-            //  2. otherwise, exactly one tunnel we couldn't place — egress moved off
-            //     home's country and that tunnel is the only thing that could have
-            //     moved it, so it gets the credit;
-            //  3. otherwise it exits via none of them (or the choice is ambiguous) →
-            //     a dashed home→egress bypass.
-            let inCountry = placed.first { $0.cc == ecc && $0.exact } ?? placed.first { $0.cc == ecc }
-            if let match = inCountry {
-                conns.append(MapConnection(from: "vpn.\(match.id)", to: "egress", kind: .tunnel))
-            } else if unlocatable.count == 1 {
-                conns.append(MapConnection(from: "vpn.\(unlocatable[0])", to: "egress", kind: .tunnel))
+            // Country-level locations cannot identify the VPN carrying egress.
+            // Only the route mediator's confirmed owner can earn this arc.
+            if let defaultOwner, pins.contains(where: { $0.id == "vpn.\(defaultOwner)" }) {
+                conns.append(MapConnection(from: "vpn.\(defaultOwner)", to: "egress", kind: .tunnel))
             } else {
                 conns.append(MapConnection(from: "home", to: "egress", kind: .bypass))
             }
         }
-
         return Result(pins: pins, connections: conns,
                       hasUnlocatableTunnel: !unlocatable.isEmpty,
                       hasApproximateTunnel: approximate,

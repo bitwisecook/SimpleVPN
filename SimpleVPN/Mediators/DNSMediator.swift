@@ -88,6 +88,7 @@ final class DNSRealizer: MediatorRealizer {
     /// The last plan this realizer wrote — so it can clear a participant that dropped
     /// out of the plan and skip an unchanged decision (idempotent, mirrors ProxyRealizer).
     private var lastPlan: DNSPlan?
+    private var appliedRequests: [String: DNSApplyRequest] = [:]
 
     init(host: DNSMediatorHost?, log: Logger) {
         self.host = host
@@ -96,43 +97,53 @@ final class DNSRealizer: MediatorRealizer {
 
     /// A session ended / the mediator reset — forget what we wrote (a fresh reconcile
     /// re-applies from scratch).
-    func forgetOwner() { lastPlan = nil }
+    func forgetOwner() { lastPlan = nil; appliedRequests.removeAll() }
+    func forget(id: String) { lastPlan = nil; appliedRequests[id] = nil }
 
     /// SOLE WRITER: realize the arbitrated split-DNS on EVERY participant via
     /// `dns:apply:`. STRIP participants that left the plan (clear their override) →
     /// SET the current per-participant requests. An engine with no live applier returns
     /// no ack; we then reconnect it so its config-pushed DNS is re-established.
     func realize(_ plan: DNSPlan, from previous: DNSPlan?) async {
-        let prior = lastPlan
-        guard plan != prior else { return }
-        lastPlan = plan
-
-        let requests = plan.applyRequests()
-        // Clear any participant that dropped out of the plan (owner moved, or split
-        // domain reassigned), so a stale engine never keeps asserting DNS the plan no
-        // longer wants.
-        if let prior {
-            let gone = Set(prior.applyRequests().keys).subtracting(requests.keys)
-            for engine in gone.sorted() {
-                log.log("DNS: clearing \(engine, privacy: .public)'s override (left the plan)")
-                _ = await host?.dnsApply(nil, to: engine)
-            }
-        }
-        // Apply the current decision to each participant.
-        for engine in requests.keys.sorted() {
-            let request = requests[engine]!
-            let ack = await host?.dnsApply(request.isEmpty ? nil : request, to: engine)
-            if ack == nil {
-                // No live DNS applier for this tunnel (proxy-tunnel / Tailscale / native):
-                // fall back to the reconnect re-assert lever so its pushed DNS is
-                // re-established from its own config.
-                log.log("DNS: no live applier for \(engine, privacy: .public) — reconnecting to re-push resolvers")
-                await host?.dnsReconnect(id: engine)
-            } else {
-                log.log("DNS: applied \(engine, privacy: .public)'s resolvers (\(request.isEmpty ? "clear" : (request.matchDomains == [""] ? "catch-all" : "split"), privacy: .public))")
-            }
-        }
+        _ = await apply(plan, force: false)
     }
+
+    @discardableResult
+    func apply(_ plan: DNSPlan, force: Bool, isCurrent: @MainActor () -> Bool = { true }) async -> Bool {
+        guard let host else { return false }
+        let requests = plan.applyRequests()
+        guard force || requests != appliedRequests else { return true }
+        do {
+            for engine in Set(appliedRequests.keys).subtracting(requests.keys).sorted() {
+                guard isCurrent() else { return false }
+                // A disconnected session no longer owns any resolver settings.
+                if host.dnsProfiles.contains(where: { $0.id == engine && $0.engaged }) {
+                    guard await host.dnsApply(nil, to: engine) == "ok" else { return false }
+                }
+                appliedRequests[engine] = nil
+            }
+        }
+        let order = requests.keys.sorted {
+            let a = requests[$0]?.matchDomains == [""]
+            let b = requests[$1]?.matchDomains == [""]
+            return a != b ? !a : $0 < $1
+        }
+        for engine in order {
+            guard isCurrent() else { return false }
+            if !force, appliedRequests[engine] == requests[engine] { continue }
+            let ack = await host.dnsApply(requests[engine], to: engine)
+            guard ack == "ok" else {
+                log.error("DNS apply not acknowledged for \(engine, privacy: .public): \(ack ?? "no reply", privacy: .public)")
+                // Reconnecting the original config cannot realize this policy.
+                return false
+            }
+            appliedRequests[engine] = requests[engine]
+        }
+        guard isCurrent() else { return false }
+        lastPlan = plan // cache only the completely acknowledged plan
+        return true
+    }
+
 }
 
 // MARK: - DNS mediator
@@ -247,18 +258,34 @@ final class DNSMediator {
     // MARK: - Reconcile / re-assert
 
     /// Recompute the coherent plan and (tier-2) re-establish the catch-all owner's DNS.
-    @ObservationIgnored private var reconcileTask: Task<Void, Never>?
-    func reconcile() {
+    @ObservationIgnored private let applyLoop = MediatorApplyLoop<DNSPlan>()
+    private(set) var appliedPlan: DNSPlan?
+    private(set) var lastApplyError: String?
+    func reconcile(force: Bool = false) {
         refreshIntents()
-        let plan = self.plan
-        lastApplyAt = Date()   // open the suppress window: any resulting change is ours
-        reconcileTask = Task { [weak self] in
-            await self?.realizer.realize(plan, from: nil)
+        applyLoop.enqueue(plan, force: force) { [weak self] next, forced, revision in
+            guard let self else { return false }
+            self.lastApplyAt = Date()
+            let success = await self.realizer.apply(next, force: forced) {
+                self.applyLoop.isCurrent(revision)
+            }
+            guard self.applyLoop.isCurrent(revision) else { return false }
+            self.lastApplyAt = Date()
+            self.lastApplyError = success ? nil : "DNS change was not acknowledged."
+            if success {
+                self.appliedPlan = next
+                if let drift = self.lastDrift, !drift.reasserted, forced {
+                    let confirmed = MediatorDriftEvent(summary: drift.summary, reasserted: true, at: drift.at)
+                    self.lastDrift = confirmed
+                    self.driftHook?(confirmed)
+                }
+            }
+            return success
         }
     }
 
-    /// Re-assert desired DNS on demand (the Network-Tools "Re-assert" action).
-    func reassertNow() { reconcile() }
+    func reassertNow() { reconcile(force: true) }
+    func waitUntilIdle() async { await applyLoop.waitUntilIdle() }
 
     // MARK: - Status hooks (from the host's NE observer)
 
@@ -267,10 +294,12 @@ final class DNSMediator {
             refreshIntents()
             // No forced reconnect on a fresh connect — the engine just pushed its DNS.
             // Sample the observed resolvers so the UI reflects reality promptly.
+            reconcile()
             observeNow()
         } else if disconnected {
             withdraw(engine: id)
-            realizer.forgetOwner()
+            realizer.forget(id: id)
+            reconcile()
             observeNow()
         }
     }
@@ -302,15 +331,14 @@ final class DNSMediator {
         observedResolvers = observed.resolvers
         observedSearchDomains = observed.searchDomains
         let suppressed = lastApplyAt.map { Date().timeIntervalSince($0) < suppressWindow } ?? false
-        let expected = plan.systemResolvers
-        let action = DNSDriftDecision.action(expected: expected, observed: observed.resolvers,
+        let action = DNSDriftDecision.action(expected: appliedPlan ?? plan, observed: observed,
                                              withinSuppressWindow: suppressed)
         guard action == .reassert else { return }
-        let event = MediatorDriftEvent(summary: driftSummary(observed), reasserted: true)
+        let event = MediatorDriftEvent(summary: driftSummary(observed), reasserted: false)
         lastDrift = event
         driftHook?(event)
         Self.log.log("external DNS drift: \(event.summary, privacy: .public) — re-asserting")
-        reconcile()
+        reconcile(force: true)
     }
 
     private func driftSummary(_ observed: DNSObservation) -> String {
@@ -328,11 +356,18 @@ final class DNSMediator {
     /// DNS dictionary. `nonisolated` + `@Sendable`-callable so the SC monitor can invoke
     /// it on its dispatch queue.
     nonisolated static func readSystemDNS() -> DNSObservation {
-        guard let store = SCDynamicStoreCreate(nil, "SimpleVPN.DNSMonitor.read" as CFString, nil, nil),
-              let dns = SCDynamicStoreCopyValue(store, "State:/Network/Global/DNS" as CFString) as? [String: Any]
+        guard let store = SCDynamicStoreCreate(nil, "SimpleVPN.DNSMonitor.read" as CFString, nil, nil)
         else { return DNSObservation(resolvers: [], searchDomains: []) }
+        let dns = SCDynamicStoreCopyValue(store, "State:/Network/Global/DNS" as CFString) as? [String: Any] ?? [:]
         let servers = dns["ServerAddresses"] as? [String] ?? []
         let search = dns["SearchDomains"] as? [String] ?? []
-        return DNSObservation(resolvers: servers, searchDomains: search)
+        let services = SCDynamicStoreCopyMultiple(store, nil,
+            ["State:/Network/Service/.*/DNS"] as CFArray) as? [String: [String: Any]] ?? [:]
+        let scoped = services.keys.sorted().compactMap { key -> DNSApplyRequest? in
+            guard let value = services[key], let servers = value["ServerAddresses"] as? [String] else { return nil }
+            return DNSApplyRequest(servers: servers, searchDomains: value["SearchDomains"] as? [String] ?? [],
+                matchDomains: value["SupplementalMatchDomains"] as? [String] ?? [""])
+        }
+        return DNSObservation(resolvers: servers, searchDomains: search, scoped: scoped)
     }
 }

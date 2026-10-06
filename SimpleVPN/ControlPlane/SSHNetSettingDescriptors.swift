@@ -24,10 +24,8 @@
 //      `SSH_OPTIONS_PROCESS_CONFIG` off and `WITH_EXEC=OFF` as policy — nothing
 //      may exec from a config file.
 //    • no raw extra options: same reason. There is no ssh_config on this path.
-//    • no SSH-agent or Kerberos sign-in: the packet-tunnel extension runs as root
-//      in the system context, so `SSH_AUTH_SOCK` and the Kerberos ticket cache
-//      simply are not there. The editor SHOWS this rather than quietly offering a
-//      shorter list — see `SSHNetworkTunnelConfig.unavailableMethodReason`.
+//    • Kerberos still needs the user's ticket cache. SSH Agent instead uses a
+//      private session signing broker; the root extension never opens that socket.
 //    • no MSS clamp and no separate "base MTU": nothing is encapsulated on this
 //      path (the netstack terminates the guest's TCP and re-originates a stream),
 //      so there is no outer header to make room for. See the header of
@@ -61,15 +59,19 @@ enum SSHNetSettings {
               group: .signIn, default: ""),
 
         .init(id: "sshnet.auth-method", name: "Sign-In Method",
-              summary: "How to prove who you are: the account password, a private key, or a key with the certificate your organisation signed it with.",
+              summary: "How to prove who you are: a password, a Keychain private key or certificate, or your SSH agent (including 1Password).",
               group: .signIn, default: SSHNetworkTunnelConfig.AuthMethod.password),
+
+        .init(id: "sshnet.agent-socket-path", name: "SSH Agent Socket",
+              summary: "The agent to ask for signatures. Empty uses your login session's default agent. Set 1Password's socket to use its keys. Private keys stay with the agent; keep SimpleVPN running.",
+              group: .signIn, default: ""),
 
         .init(id: "sshnet.password", name: "Password",
               summary: "Used when the server asks for a password, and to unlock a protected key. Kept in your Keychain and never shown again once saved.",
               group: .signIn, default: false),
 
         .init(id: "sshnet.private-key", name: "Private Key",
-              summary: "The private key itself, pasted in. SimpleVPN holds it for you because the tunnel runs outside your login session, where an SSH agent isn't reachable.",
+              summary: "The private key itself, pasted in. SimpleVPN keeps it in your Keychain and hands it to the tunnel only in memory.",
               group: .signIn, default: false),
 
         .init(id: "sshnet.certificate", name: "Certificate",

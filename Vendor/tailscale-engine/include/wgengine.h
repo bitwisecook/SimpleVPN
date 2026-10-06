@@ -19,6 +19,7 @@
 
 #ifndef WGENGINE_H
 #define WGENGINE_H
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -66,6 +67,17 @@ char *WGStatus(void);
 /// when queued, 0 when dropped (queue full / not running / bad length).
 /// Never blocks — a VPN must drop rather than stall the flow reader.
 int WGPacketIn(const void *bytes, int length);
+
+/// Scoped lifecycle: independent devices, callbacks carry an opaque caller context.
+/// Successful create returns {"ok":true,"handle":<nonzero>,"endpoint":"…"}.
+/// Handles are never reused. Stop removes the instance before closing its device.
+typedef void (*WGInstancePacketCallback)(uint64_t context, const unsigned char *bytes, int len);
+typedef void (*WGInstanceStringCallback)(uint64_t context, const char *text);
+char *WGCreateInstance(const char *configJSON, uint64_t context,
+                       WGInstancePacketCallback packetOut, WGInstanceStringCallback logLine);
+char *WGStopInstance(uint64_t handle);
+char *WGStatusInstance(uint64_t handle);
+int WGPacketInInstance(uint64_t handle, const void *bytes, int length);
 
 /// Free any string returned by WGStart/WGStop/WGStatus.
 void WGFree(char *p);

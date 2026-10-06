@@ -17,10 +17,8 @@
 //  The Go TUN deals in RAW IP packets both ways; the packet's own IP version
 //  nibble is what tells us which protocol number to hand NEPacketTunnelFlow.
 //
-//  CALLBACK CONTEXT — the engine's callbacks are plain C function pointers,
-//  which by construction cannot capture Swift context. Exactly one tunnel runs
-//  per provider process, so the callbacks route through a single lock-guarded
-//  static reference, exactly like TailscaleEngine and ProxyTunnelEngine.
+//  CALLBACK CONTEXT — each device has an opaque Go handle and monotonic Swift
+//  callback context. Stopping one device cannot clear another device's callbacks.
 //
 
 import Foundation
@@ -48,18 +46,17 @@ final class WireGuardEngine: @unchecked Sendable {
     /// honest remote address (set once at start, then read-only).
     private var endpoint = ""
 
-    /// The engine currently wired to the C callbacks.
-    private static let currentLock = NSLock()
-    nonisolated(unsafe) private static var current: WireGuardEngine?
+    private static let callbacks = EngineCallbackRegistry<WireGuardEngine>()
+    private var handle: UInt64 = 0
+    private var callbackContext: UInt64 = 0
+    private var starting = false
+    private let packetOutput: (@Sendable (Data) -> Void)?
 
-    private static func active() -> WireGuardEngine? {
-        currentLock.lock(); defer { currentLock.unlock() }
-        return current
-    }
-
-    init(provider: NEPacketTunnelProvider, delegate: any WireGuardEngineDelegate) {
+    init(provider: NEPacketTunnelProvider? = nil, delegate: any WireGuardEngineDelegate,
+         packetOutput: (@Sendable (Data) -> Void)? = nil) {
         self.provider = provider
         self.delegate = delegate
+        self.packetOutput = packetOutput
     }
 
     // MARK: - Lifecycle
@@ -70,23 +67,36 @@ final class WireGuardEngine: @unchecked Sendable {
     /// The caller then applies the tunnel network settings (using
     /// `resolvedEndpoint` as the remote address) and calls `startPump()`.
     func start(config: WireGuardStartConfig) -> Error? {
-        Self.currentLock.lock(); Self.current = self; Self.currentLock.unlock()
-        WGSetCallbacks(Self.packetOut, Self.logLine)
-
+        let context: UInt64? = lock.withLock {
+            guard !starting, !stopped, handle == 0 else { return nil }
+            starting = true
+            let context = Self.callbacks.register(self)
+            callbackContext = context
+            return context
+        }
+        guard let context else {
+            return WireGuardEngineError.engine(kind: "alreadyRunning", message: "")
+        }
         Self.log.log("wireguard start: \(config.redactedJSONString(), privacy: .public)")
-
-        let reply = config.jsonString().withCString { WGStart($0) }
-        guard let response = Self.takeString(reply) else {
-            return WireGuardEngineError.engine(kind: "other", message: "The WireGuard engine did not answer.")
+        let reply = config.jsonString().withCString {
+            WGCreateInstance($0, context, Self.packetOut, Self.logLine)
         }
-        if let error = Self.engineError(from: response, fallback: "WireGuard could not start.") {
-            return error
+        let response = Self.takeString(reply)
+        let problem = Self.engineError(from: response, fallback: "WireGuard could not start.")
+        let object = response.flatMap { $0.data(using: .utf8) }
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let created = (object?["handle"] as? NSNumber)?.uint64Value ?? 0
+        let accepted = lock.withLock {
+            starting = false
+            guard problem == nil, created != 0, !stopped else { return false }
+            handle = created
+            endpoint = object?["endpoint"] as? String ?? ""
+            return true
         }
-        // Success carries the resolved endpoint alongside ok:true.
-        if let data = response.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let resolved = obj["endpoint"] as? String {
-            lock.lock(); endpoint = resolved; lock.unlock()
+        guard accepted else {
+            Self.callbacks.remove(context)
+            if created != 0 { _ = Self.takeString(WGStopInstance(created)) }
+            return problem ?? WireGuardEngineError.engine(kind: "other", message: "WireGuard start was cancelled.")
         }
         return nil
     }
@@ -100,18 +110,16 @@ final class WireGuardEngine: @unchecked Sendable {
     /// Tear the device down. Safe to call more than once, and safe after a
     /// failed start.
     func stop() {
-        lock.lock()
-        if stopped { lock.unlock(); return }
-        stopped = true
-        lock.unlock()
-
-        _ = Self.takeString(WGStop())
-        Self.currentLock.lock()
-        if Self.current === self { Self.current = nil }
-        Self.currentLock.unlock()
-        // Drop the callbacks last: a packet already inside the Go writer would
-        // otherwise land on a torn-down flow.
-        WGSetCallbacks(nil, nil)
+        let (current, context) = lock.withLock {
+            stopped = true
+            pumpRunning = false
+            let pair = (handle, callbackContext)
+            handle = 0
+            callbackContext = 0
+            return pair
+        }
+        Self.callbacks.remove(context)
+        if current != 0 { _ = Self.takeString(WGStopInstance(current)) }
         Self.log.log("wireguard stopped")
     }
 
@@ -119,7 +127,8 @@ final class WireGuardEngine: @unchecked Sendable {
 
     /// Current engine status, or an empty status when the engine is not up.
     func status() -> WireGuardEngineStatus {
-        guard let json = Self.takeString(WGStatus()),
+        let current = lock.withLock { handle }
+        guard let json = Self.takeString(WGStatusInstance(current)),
               let s = WireGuardEngineStatus.decode(json: json) else {
             return WireGuardEngineStatus()
         }
@@ -174,13 +183,22 @@ final class WireGuardEngine: @unchecked Sendable {
                 // Raw IP packet straight in — no PF header on this boundary. A
                 // full queue drops (WGPacketIn returns 0), which is correct: a
                 // VPN must shed load, never stall the flow reader.
-                packet.withUnsafeBytes { raw in
-                    guard let base = raw.baseAddress, !raw.isEmpty else { return }
-                    _ = WGPacketIn(base, Int32(raw.count))
-                }
+                _ = self.send(packet)
             }
             self.lock.lock(); let running = self.pumpRunning && !self.stopped; self.lock.unlock()
             if running { self.readMore() }
+        }
+    }
+
+    /// Raw packet port for the shared router. Compatibility mode uses the same
+    /// scoped device through its NE flow pump.
+    @discardableResult
+    func send(_ packet: Data) -> Bool {
+        let current = lock.withLock { stopped ? 0 : handle }
+        guard current != 0 else { return false }
+        return packet.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress, !raw.isEmpty, raw.count <= 65_535 else { return false }
+            return WGPacketInInstance(current, base, Int32(raw.count)) == 1
         }
     }
 
@@ -188,6 +206,8 @@ final class WireGuardEngine: @unchecked Sendable {
     /// thread-safe, so no hop is needed (and a hop would add latency to every
     /// packet).
     fileprivate func deliver(_ packet: Data) {
+        guard !lock.withLock({ stopped }) else { return }
+        if let packetOutput { packetOutput(packet); return }
         guard let flow = provider?.packetFlow, let first = packet.first else { return }
         let proto: Int32 = (first >> 4) == 6 ? AF_INET6 : AF_INET
         flow.writePackets([packet], withProtocols: [NSNumber(value: proto)])
@@ -225,15 +245,15 @@ final class WireGuardEngine: @unchecked Sendable {
     // `@convention(c)` by inference: none captures anything, which is what lets
     // them be handed to the Go side as function pointers.
 
-    private static let packetOut: WGPacketCallback = { bytes, length in
+    private static let packetOut: WGInstancePacketCallback = { context, bytes, length in
         guard let bytes, length > 0 else { return }
         let data = Data(bytes: bytes, count: Int(length))
-        active()?.deliver(data)
+        callbacks.lookup(context)?.deliver(data)
     }
 
-    private static let logLine: WGStringCallback = { text in
+    private static let logLine: WGInstanceStringCallback = { context, text in
         guard let text else { return }
-        active()?.handleLog(String(cString: text))
+        callbacks.lookup(context)?.handleLog(String(cString: text))
     }
 }
 

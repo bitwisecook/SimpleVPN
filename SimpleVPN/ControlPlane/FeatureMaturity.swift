@@ -449,15 +449,9 @@ nonisolated struct MaturityNotice: Sendable, Equatable {
         case .partlyVerified(let checked):
             return MaturityNotice(
                 subject: name, maturity: maturity, key: "kind.\(kind.rawValue)",
-                title: "Nobody has fully tested \(name) yet",
-                detail: "Nothing is missing from this VPN and nothing is switched off \u{2014} this "
-                    + "is about our confidence, not about your setup. Part of it is already proven: "
-                    + "\(checked), and the rest of the \(name) code is written and reviewed. What "
-                    + "has never happened is a \(name) tunnel carrying real traffic in SimpleVPN, "
-                    + "because there is no \(name) server here to try it against. So it may well "
-                    + "work. If a connect fails it should say so and stop, not disturb anything "
-                    + "else on this Mac. Either way we would like to know how it went: telling us "
-                    + "what happened is what gets this notice removed.")
+                title: "\(name) is partly tested",
+                detail: "Verified: \(checked). A complete VPN connection still needs testing. "
+                    + "You can use this VPN and report your results.")
         case .untested:
             return MaturityNotice(
                 subject: name, maturity: maturity, key: "kind.\(kind.rawValue)",

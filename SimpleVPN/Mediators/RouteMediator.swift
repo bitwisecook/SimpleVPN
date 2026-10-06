@@ -43,9 +43,12 @@ struct RouteProfileInfo: Sendable, Identifiable {
 protocol RouteMediatorHost: AnyObject {
     /// Current profiles, freshly projected (reads the host's observable state).
     var routeProfiles: [RouteProfileInfo] { get }
+    var routeVirtualProfileIDs: Set<String> { get }
+    func routeApplyVirtualPlan(_ plan: RoutePlan) async -> Bool
     /// Send the generic gateway IPC to a running packet-tunnel session. Returns the
     /// engine's ack ("ok" / "needs-reconnect" / error / nil when no session).
     func routeSendGateway(full: Bool, to id: String) async -> String?
+    func routeApplyPrefixes(_ request: RouteApplyRequest, to id: String) async -> String?
     /// Apply gateway ownership to a Tailscale profile via its exit-node prefs path.
     /// Returns nil on success, else a problem string.
     func routeApplyTailscaleGateway(full: Bool, to id: String) async -> String?
@@ -58,8 +61,18 @@ protocol RouteMediatorHost: AnyObject {
     /// Config desire — redirect-gateway / exit node / SSL default. Only read when
     /// (re)building intents, so its per-profile cost stays off the hot read paths.
     func routeWantsFullTunnel(id: String) -> Bool
+    func routeCanCarryDefault(id: String) -> Bool
     /// The specific CIDRs a tunnel carries besides any default (for intent fidelity).
     func routeAdvertisedPrefixes(id: String) -> [String]
+}
+
+extension RouteMediatorHost {
+    var routeVirtualProfileIDs: Set<String> { [] }
+    func routeApplyVirtualPlan(_ plan: RoutePlan) async -> Bool { true }
+    func routeCanCarryDefault(id: String) -> Bool { true }
+    func routeApplyPrefixes(_ request: RouteApplyRequest, to id: String) async -> String? {
+        request.prefixes == nil ? "ok" : "error: prefix updates unavailable"
+    }
 }
 
 // MARK: - Realizer (stage 3 — the sole writer)
@@ -95,6 +108,7 @@ final class MultiTunnelRealizer: MediatorRealizer {
     /// sends: the IPC is idempotent engine-side, and never-skip is the safe direction
     /// for the ≤1-owner invariant.
     private var appliedRole: [String: GatewayRole] = [:]
+    private var appliedPrefixes: [String: RouteApplyRequest] = [:]
 
     init(host: RouteMediatorHost?, log: Logger) {
         self.host = host
@@ -104,27 +118,40 @@ final class MultiTunnelRealizer: MediatorRealizer {
     /// Seed/refresh the cache from the engine's ground-truth ownership.
     func seed(id: String, owned: Bool) { appliedRole[id] = owned ? .full : .split }
     /// The engine's session ended — forget what we thought was applied.
-    func forget(id: String) { appliedRole[id] = nil }
+    func forget(id: String) { appliedRole[id] = nil; appliedPrefixes[id] = nil }
     /// Read-back for the mediator's applied-role introspection.
     func applied(_ id: String) -> GatewayRole? { appliedRole[id] }
 
     /// Write ONE role to ONE profile. The idempotency guard, the tailscale-vs-generic
     /// split, and the needs-reconnect signal all live here — this is the sole writer.
     func apply(_ role: GatewayRole, to id: String, kind: VPNKind,
-               hasExitNode: Bool) async -> RouteApplyOutcome {
-        guard appliedRole[id] != role else { return .skipped }
+               hasExitNode: Bool, force: Bool = false) async -> RouteApplyOutcome {
+        guard let host else { return .failed }
+        guard force || appliedRole[id] != role else { return .skipped }
 
         if kind == .tailscale {
             if role == .full, !hasExitNode { return .skipped }   // not actually capable; leave as-is
-            if let problem = await host?.routeApplyTailscaleGateway(full: role == .full, to: id) {
+            if let problem = await host.routeApplyTailscaleGateway(full: role == .full, to: id) {
                 log.error("gateway \(role.rawValue, privacy: .public) (tailscale) failed for \(id, privacy: .public): \(problem, privacy: .public)")
                 return .failed
             }
+            // Accepting prefs is not proof the new netmap reached macOS. Wait
+            // for the settings writer's confirmed ownership before promotion.
+            var confirmed = false
+            for _ in 0..<40 {
+                if await host.routeSampleEffectiveOwned(id: id) == (role == .full) {
+                    confirmed = true
+                    break
+                }
+                do { try await Task.sleep(for: .milliseconds(100)) }
+                catch { return .failed }
+            }
+            guard confirmed else { return .failed }
             appliedRole[id] = role
             return .applied
         }
 
-        let reply = await host?.routeSendGateway(full: role == .full, to: id)
+        let reply = await host.routeSendGateway(full: role == .full, to: id)
         switch reply {
         case "ok":
             appliedRole[id] = role
@@ -138,16 +165,29 @@ final class MultiTunnelRealizer: MediatorRealizer {
         }
     }
 
+    func applyPrefixes(_ request: RouteApplyRequest, to id: String, force: Bool) async -> Bool {
+        if !force, appliedPrefixes[id] == request { return true }
+        guard let host, await host.routeApplyPrefixes(request, to: id) == "ok" else { return false }
+        appliedPrefixes[id] = request
+        return true
+    }
+
     /// Realize a whole plan in the safe STRIP-old → ADD-new order. The mediator uses
     /// `apply` directly (it needs each outcome for the needs-reconnect path); this
     /// exists to satisfy `MediatorRealizer` and for callers that only want the plan
     /// driven with no per-step handling.
     func realize(_ plan: RoutePlan, from previous: RoutePlan?) async {
         for step in plan.orderedApplication {
+            let role: GatewayRole
+            let id: String
             switch step {
-            case .split(let id): _ = await apply(.split, to: id, kind: .openVPN, hasExitNode: false)
-            case .full(let id):  _ = await apply(.full, to: id, kind: .openVPN, hasExitNode: false)
+            case .split(let engine): role = .split; id = engine
+            case .full(let engine): role = .full; id = engine
             }
+            guard let profile = host?.routeProfiles.first(where: { $0.id == id }) else { continue }
+            let outcome = await apply(role, to: id, kind: profile.kind,
+                                      hasExitNode: profile.tailscaleHasExitNode)
+            guard outcome == .applied || outcome == .skipped else { return }
         }
     }
 }
@@ -172,12 +212,14 @@ final class RouteMediator {
     /// intent before arbitration — left clean here (no Tcl engine now).
     private(set) var intents: [String: RouteIntent] = [:]
     @ObservationIgnored var intentHook: MediatorIntentHook<RouteIntent>?
+    @ObservationIgnored var captureHook: (@MainActor (RouteIntent) -> Void)?
     /// The tier-3 `ROUTE_CHANGED` seam: fired after the monitor confirms external
     /// drift. Left clean (nil) now.
     @ObservationIgnored var driftHook: MediatorDriftHook<MediatorDriftEvent>?
 
     /// The one capture point. Records (hook-rewritten) intent for an engine.
     func submit(_ intent: RouteIntent, from engine: String) {
+        captureHook?(intent)
         var rewritten = intent
         intentHook?(&rewritten)
         intents[engine] = rewritten
@@ -191,19 +233,16 @@ final class RouteMediator {
     /// by ControlPlaneDispatcher; feeds the one event stream every interface
     /// (CLI watch, intents, future Tcl) subscribes to.
     @ObservationIgnored var onOwnerChange: ((String?) -> Void)?
+    @ObservationIgnored private var pendingFallbackFrom: String?
 
     /// The profile that owns the default route. nil ⇒ Direct. UI policy, not a secret.
-    private(set) var defaultGatewayProfileID: String? {
-        didSet { if oldValue != defaultGatewayProfileID { onOwnerChange?(effectiveGatewayOwner) } }
-    }
+    private(set) var defaultGatewayProfileID: String?
     /// The user explicitly parked on Direct (vs. merely "unset").
-    private var gatewayUserChoseDirect = false {
-        didSet { if oldValue != gatewayUserChoseDirect { onOwnerChange?(effectiveGatewayOwner) } }
-    }
+    private var gatewayUserChoseDirect = false
 
     /// This is app-only policy; sharing it with the packet-tunnel extension is both
     /// unnecessary and can trigger macOS's protected app-data consent prompt.
-    private static let gatewayDefaults = UserDefaults.standard
+    @ObservationIgnored private let gatewayDefaults: UserDefaults?
     private static let gatewayOwnerKey = "gateway.ownerProfileID"
     private static let gatewayDirectKey = "gateway.userChoseDirect"
 
@@ -213,7 +252,9 @@ final class RouteMediator {
     private(set) var engineDefaultOwned: [String: Bool] = [:]
     /// Profiles whose gateway role we still owe after a needs-reconnect reconnect.
     @ObservationIgnored private var gatewayPendingReassert: Set<String> = []
-    @ObservationIgnored private var gatewayReconcileTask: Task<Void, Never>?
+    @ObservationIgnored private let applyLoop = MediatorApplyLoop<RoutePlan>()
+    private(set) var appliedPlan: RoutePlan?
+    private(set) var lastApplyError: String?
 
     // MARK: Stage 4 — drift monitor + published effective/drift state
 
@@ -227,23 +268,24 @@ final class RouteMediator {
     /// How long after our own write to ignore observed default-route changes.
     private let suppressWindow: TimeInterval = 3
 
-    init(monitor: PFRouteMonitor = PFRouteMonitor()) {
+    init(monitor: PFRouteMonitor = PFRouteMonitor(), preferences: UserDefaults? = .standard) {
         self.monitor = monitor
+        self.gatewayDefaults = preferences
     }
 
     /// Load the persisted gateway pick. Called from the host's `loadAll`.
     func loadPreference() {
-        defaultGatewayProfileID = Self.gatewayDefaults.string(forKey: Self.gatewayOwnerKey)
-        gatewayUserChoseDirect = Self.gatewayDefaults.bool(forKey: Self.gatewayDirectKey)
+        defaultGatewayProfileID = gatewayDefaults?.string(forKey: Self.gatewayOwnerKey)
+        gatewayUserChoseDirect = (gatewayDefaults?.bool(forKey: Self.gatewayDirectKey) ?? false)
     }
 
     private func persistPreference() {
         if let id = defaultGatewayProfileID {
-            Self.gatewayDefaults.set(id, forKey: Self.gatewayOwnerKey)
+            gatewayDefaults?.set(id, forKey: Self.gatewayOwnerKey)
         } else {
-            Self.gatewayDefaults.removeObject(forKey: Self.gatewayOwnerKey)
+            gatewayDefaults?.removeObject(forKey: Self.gatewayOwnerKey)
         }
-        Self.gatewayDefaults.set(gatewayUserChoseDirect, forKey: Self.gatewayDirectKey)
+        gatewayDefaults?.set(gatewayUserChoseDirect, forKey: Self.gatewayDirectKey)
     }
 
     // MARK: - VPN-kind participation (classify every kind cleanly)
@@ -321,8 +363,13 @@ final class RouteMediator {
     /// Whether a connected profile can be the full-tunnel owner.
     func canBeDefaultGateway(_ id: String) -> Bool {
         guard let info = info(id) else { return false }
-        return GatewayPolicy.canBeDefaultGateway(kind: info.kind, connected: info.connected,
-                                                 tailscaleHasExitNode: info.tailscaleHasExitNode)
+        guard GatewayPolicy.canBeDefaultGateway(kind: info.kind, connected: info.connected,
+                                                 tailscaleHasExitNode: info.tailscaleHasExitNode) else { return false }
+        guard host?.routeCanCarryDefault(id: id) == true else { return false }
+        var candidate = RouteIntent(engine: id, wantsDefault: host?.routeWantsFullTunnel(id: id) ?? false,
+                                    canOwnDefault: host?.routeCanCarryDefault(id: id) ?? false)
+        intentHook?(&candidate)
+        return candidate.canOwnDefault
     }
 
     /// Capable connected profile ids, most-recent-first.
@@ -330,13 +377,8 @@ final class RouteMediator {
         connectedInfos.map(\.id).filter { canBeDefaultGateway($0) }
     }
 
-    /// The owner actually in force right now (resolves the stored pick against what's
-    /// connected + capable, honoring an explicit Direct).
-    var effectiveGatewayOwner: String? {
-        GatewayPolicy.resolveOwner(stored: defaultGatewayProfileID,
-                                   userChoseDirect: gatewayUserChoseDirect,
-                                   capableConnected: capableConnectedIDs())
-    }
+    /// The same filtered plan drives inspection and live execution.
+    var effectiveGatewayOwner: String? { plan.owner }
 
     /// The role a connected profile currently plays. Prefers the engine's GROUND TRUTH
     /// (does its tunnel actually hold the default) so it can never disagree with
@@ -372,7 +414,7 @@ final class RouteMediator {
     /// The published desired plan (for inspection / the Network-Tools panel). Computed
     /// from the captured intents via the pure arbiter.
     var plan: RoutePlan {
-        RouteArbiter.plan(intents: Array(intents.values),
+        RouteArbiter.plan(intents: currentIntents(),
                           policy: RoutePolicy(storedOwner: defaultGatewayProfileID,
                                               userChoseDirect: gatewayUserChoseDirect))
     }
@@ -387,79 +429,139 @@ final class RouteMediator {
         // A native/SSH kind never carries the default; a Tailscale node's ownership
         // rides its own prefs path, not this flag.
         guard info.kind != .tailscale else { return false }
-        var capable = capableConnectedIDs()
-        if !capable.contains(id) { capable.insert(id, at: 0) }   // most-recent = newest connect
-        let owner = GatewayPolicy.resolveOwner(stored: defaultGatewayProfileID,
-                                               userChoseDirect: gatewayUserChoseDirect,
-                                               capableConnected: capable)
-        return owner == id
+        refreshIntents()
+        var prospective = RouteIntent(engine: id,
+                                      advertisedPrefixes: host?.routeAdvertisedPrefixes(id: id) ?? [],
+                                      wantsDefault: host?.routeWantsFullTunnel(id: id) ?? false,
+                                      canOwnDefault: host?.routeCanCarryDefault(id: id) ?? false, connectedAt: Date())
+        intentHook?(&prospective)
+        var all = intents
+        all[id] = prospective
+        return RouteArbiter.plan(intents: Array(all.values),
+                                 policy: RoutePolicy(storedOwner: defaultGatewayProfileID,
+                                                     userChoseDirect: gatewayUserChoseDirect)).owner == id
     }
 
     // MARK: - The user picked an owner (atomic strip → confirm → add)
 
-    /// The user picked a new default-gateway owner (nil ⇒ Direct). STRIP-OLD → confirm
-    /// (await ack) → ADD-NEW, so there is never a moment where two VPNs both advertise
-    /// 0.0.0.0/0. The brief no-default gap is masked by the traffic-path animation.
+    /// Explicit owner choice. Independent sessions withdraw before promotion;
+    /// members sharing a virtual interface switch in one complete transaction.
+    /// Published ownership changes only after acknowledgement.
     func setDefaultGateway(to newOwner: String?) async {
-        let current = effectiveGatewayOwner
         defaultGatewayProfileID = newOwner
         gatewayUserChoseDirect = (newOwner == nil)
-        persistPreference()
-        guard current != newOwner else { return }
-
-        for step in GatewayPolicy.switchSteps(from: current, to: newOwner) {
-            switch step {
-            case .split(let id): await applyGatewayRole(.split, to: id)
-            case .full(let id):  await applyGatewayRole(.full, to: id)
-            }
-        }
-        // Any other connected capable VPN must also be split.
-        for info in connectedInfos where info.id != newOwner && gatewayRoleApplies(info.kind) {
-            await applyGatewayRole(.split, to: info.id)
-        }
+        persistPreference() // desired preference; appliedPlan remains separate
+        reconcileGateway()
+        await applyLoop.waitUntilIdle()
     }
 
     // MARK: - Apply / reconcile
 
-    /// Push one role onto one profile's live session, through the realizer. Every
-    /// in-process engine (openvpn3, proxy tunnel, OpenConnect) demotes live; the
-    /// needs-reconnect fallback stays wired here for any future engine that can't.
-    private func applyGatewayRole(_ role: GatewayRole, to id: String) async {
-        guard let info = info(id), gatewayRoleApplies(info.kind), info.engaged else { return }
-        lastApplyAt = Date()   // open the suppress window: this write is ours
+    private func applyGatewayRole(_ role: GatewayRole, to id: String,
+                                  force: Bool) async -> Bool {
+        guard let info = info(id), gatewayRoleApplies(info.kind), info.engaged else { return true }
+        lastApplyAt = Date()
         let outcome = await realizer.apply(role, to: id, kind: info.kind,
-                                           hasExitNode: info.tailscaleHasExitNode)
-        if outcome == .needsReconnect {
+                                           hasExitNode: info.tailscaleHasExitNode, force: force)
+        switch outcome {
+        case .applied:
+            engineDefaultOwned[id] = role == .full
+            return true
+        case .skipped: return true
+        case .needsReconnect:
             gatewayPendingReassert.insert(id)
             await host?.routeReconnect(id: id)
+            // Reconnect is a request, not acknowledgement of route withdrawal.
+            return false
+        case .failed: return false
         }
     }
 
-    /// Recompute and apply gateway roles across every connected profile. Serialized
-    /// through one task so a strip and an add can't interleave. Exactly
-    /// `effectiveGatewayOwner` ends up full, everyone else split.
-    func reconcileGateway() {
+    func reconcileGateway(force: Bool = false) {
         refreshIntents()
-        gatewayReconcileTask = Task { [weak self] in
-            guard let self else { return }
-            let owner = self.effectiveGatewayOwner
-            // Persist an auto-adopted owner so the pick survives relaunch.
-            if owner != self.defaultGatewayProfileID, !self.gatewayUserChoseDirect {
-                self.defaultGatewayProfileID = owner
-                self.persistPreference()
+        let desired = plan
+        applyLoop.enqueue(desired, force: force) { [weak self] next, forced, revision in
+            guard let self else { return false }
+            let virtualIDs = self.host?.routeVirtualProfileIDs ?? []
+            var virtualApplied = virtualIDs.isEmpty
+            for step in next.orderedApplication {
+                // In particular, never promote an owner for a superseded plan.
+                guard self.applyLoop.isCurrent(revision) else { return false }
+                let role: GatewayRole
+                let id: String
+                switch step {
+                case .split(let engine): role = .split; id = engine
+                case .full(let engine): role = .full; id = engine
+                }
+                // Withdraw independent defaults first. Every virtual member then
+                // changes together, before any independent default is promoted.
+                if role == .full, !virtualApplied {
+                    guard await self.applyVirtualPlan(next, members: virtualIDs) else {
+                        self.lastApplyError = "The virtual interface did not acknowledge the routing plan."
+                        return false
+                    }
+                    virtualApplied = true
+                    guard self.applyLoop.isCurrent(revision) else { return false }
+                }
+                if virtualIDs.contains(id) { continue }
+                let request = next.routeRequests[id] ?? RouteApplyRequest()
+                if role == .full {
+                    guard await self.realizer.applyPrefixes(request, to: id, force: forced),
+                          self.applyLoop.isCurrent(revision) else {
+                        self.lastApplyError = "Routing prefixes were not acknowledged by \(self.name(for: id) ?? id)."
+                        return false
+                    }
+                }
+                guard await self.applyGatewayRole(role, to: id, force: forced) else {
+                    if self.applyLoop.isCurrent(revision) {
+                        self.lastApplyError = "Routing change was not acknowledged by \(self.name(for: id) ?? id)."
+                    }
+                    return false // failed demotion must prevent promotion
+                }
+                if role == .split {
+                    guard self.applyLoop.isCurrent(revision),
+                          await self.realizer.applyPrefixes(request, to: id, force: forced) else {
+                        self.lastApplyError = "Routing prefixes were not acknowledged by \(self.name(for: id) ?? id)."
+                        return false
+                    }
+                }
             }
-            // Strip everyone that isn't the owner FIRST, then grant the owner.
-            for info in self.connectedInfos where info.id != owner && self.gatewayRoleApplies(info.kind) {
-                await self.applyGatewayRole(.split, to: info.id)
+            if !virtualApplied {
+                guard self.applyLoop.isCurrent(revision),
+                      await self.applyVirtualPlan(next, members: virtualIDs) else {
+                    self.lastApplyError = "The virtual interface did not acknowledge the routing plan."
+                    return false
+                }
             }
-            if let owner, self.info(owner)?.engaged == true {
-                await self.applyGatewayRole(.full, to: owner)
+            guard self.applyLoop.isCurrent(revision) else { return false }
+            self.appliedPlan = next
+            self.lastApplyError = nil
+            self.lastApplyAt = Date()
+            if let drift = self.lastDrift, !drift.reasserted, forced {
+                let confirmed = MediatorDriftEvent(summary: drift.summary, reasserted: true, at: drift.at)
+                self.lastDrift = confirmed
+                self.driftHook?(confirmed)
             }
+            self.onOwnerChange?(next.owner)
+            if let previous = self.pendingFallbackFrom {
+                self.pendingFallbackFrom = nil
+                self.announceGatewayFallback(previousOwner: previous)
+            }
+            return true
         }
     }
 
-    /// Re-assert desired state on demand (the Network-Tools "Re-assert" action).
-    func reassertNow() { reconcileGateway() }
+    private func applyVirtualPlan(_ plan: RoutePlan, members: Set<String>) async -> Bool {
+        guard await host?.routeApplyVirtualPlan(plan) == true else { return false }
+        for (id, role) in plan.roles where members.contains(id) {
+            engineDefaultOwned[id] = role == .full
+            realizer.seed(id: id, owned: role == .full)
+        }
+        return true
+    }
+
+    func reassertNow() { reconcileGateway(force: true) }
+    func waitUntilIdle() async { await applyLoop.waitUntilIdle() }
 
     // MARK: - Status hooks (from the host's NE observer)
 
@@ -474,12 +576,12 @@ final class RouteMediator {
             seedGatewayRoleFromEngine(id: id)
             reconcileGateway()
         } else if disconnected {
+            let wasOwner = (id == defaultGatewayProfileID) || (id == effectiveGatewayOwner)
             realizer.forget(id: id)
             engineDefaultOwned[id] = nil
             withdraw(engine: id)
-            let wasOwner = (id == defaultGatewayProfileID) || (id == effectiveGatewayOwner)
+            if wasOwner { pendingFallbackFrom = id }
             reconcileGateway()
-            if wasOwner { announceGatewayFallback(previousOwner: id) }
         }
     }
 
@@ -516,7 +618,7 @@ final class RouteMediator {
     private func announceGatewayFallback(previousOwner id: String) {
         guard !connectedInfos.isEmpty else { return }
         let goneName = info(id)?.name ?? "The VPN"
-        if let newOwner = effectiveGatewayOwner, let newName = info(newOwner)?.name {
+        if let newOwner = appliedPlan?.owner, let newName = info(newOwner)?.name {
             ToastCenter.shared.post(
                 "\(goneName) disconnected — \(newName) is now the gateway.",
                 symbol: "arrow.triangle.swap", tint: .indigo, seconds: 6)
@@ -532,19 +634,24 @@ final class RouteMediator {
     /// Rebuild intents from the live profiles through the capture seam. Live owner
     /// selection uses `resolveOwner` directly (unchanged); this keeps the inspectable
     /// `intents`/`plan` in step with reality and gives the Tcl hook a real attach point.
-    private func refreshIntents() {
-        let live = connectedInfos.filter { gatewayRoleApplies($0.kind) }
-        let liveIDs = Set(live.map(\.id))
-        for gone in intents.keys where !liveIDs.contains(gone) { withdraw(engine: gone) }
-        for info in live {
-            submit(RouteIntent(engine: info.id,
-                               advertisedPrefixes: host?.routeAdvertisedPrefixes(id: info.id) ?? [],
-                               wantsDefault: host?.routeWantsFullTunnel(id: info.id) ?? false,
-                               canOwnDefault: canBeDefaultGateway(info.id),
-                               metric: 0,
-                               connectedAt: info.lastConnectedAt),
-                   from: info.id)
+    private func currentIntents(capture: Bool = false) -> [RouteIntent] {
+        guard let host else { return Array(intents.values) }
+        return connectedInfos.filter { gatewayRoleApplies($0.kind) }.map { info in
+            var intent = RouteIntent(engine: info.id,
+                                     advertisedPrefixes: host.routeAdvertisedPrefixes(id: info.id),
+                                     wantsDefault: host.routeWantsFullTunnel(id: info.id),
+                                     canOwnDefault: host.routeCanCarryDefault(id: info.id) && GatewayPolicy.canBeDefaultGateway(
+                                        kind: info.kind, connected: info.connected,
+                                        tailscaleHasExitNode: info.tailscaleHasExitNode),
+                                     metric: 0, connectedAt: info.lastConnectedAt)
+            if capture { captureHook?(intent) }
+            intentHook?(&intent)
+            return intent
         }
+    }
+
+    private func refreshIntents() {
+        intents = Dictionary(uniqueKeysWithValues: currentIntents(capture: true).map { ($0.engine, $0) })
     }
 
     // MARK: - Drift monitor lifecycle + handling
@@ -578,11 +685,11 @@ final class RouteMediator {
                                                observed: observed,
                                                withinSuppressWindow: suppressed)
         guard action == .reassert else { return }
-        let event = MediatorDriftEvent(summary: driftSummary(observed), reasserted: true)
+        let event = MediatorDriftEvent(summary: driftSummary(observed), reasserted: false)
         lastDrift = event
         driftHook?(event)
         Self.log.log("external default-route drift: \(event.summary, privacy: .public) — re-asserting")
-        reconcileGateway()
+        reconcileGateway(force: true)
     }
 
     private func driftSummary(_ observed: DefaultRouteState) -> String {

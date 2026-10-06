@@ -4,7 +4,7 @@ This review covers the app, packet-tunnel extension, native VPN manager, importe
 configuration, credential stores, SSH networking, state mediators and visualizations.
 It found and fixed a reproducible SSH shutdown crash, secret leakage in additional
 WireGuard peers, unsafe credential replacement, parser failures and configuration
-portability gaps. Several architectural and UI state issues remain open below.
+portability gaps. The follow-up repairs and remaining platform verification are recorded below.
 
 This is a source and automated-test review. It is not proof that every VPN backend
 works against a real service. Local SSH integration uses disposable keys and a
@@ -51,41 +51,51 @@ identities and never treats a placeholder as a password. Recovery exports omit s
 | Material | Current storage and transfer | Remaining qualification |
 |---|---|---|
 | Saved VPN passwords, service tokens, proxy/jump passwords and key passphrases | `KeychainCredentialStore`, user Keychain; transient memory at connect | Export reports inaccessible/corrupt records instead of silently omitting them. Normal connection reads still return nil on unavailable records. |
-| OpenVPN inline private/static keys and auth blocks | User Keychain, redacted provider configuration, reassembled in memory | Managed locked profiles and failed migrations can retain original inline material with a migration notice. |
+| OpenVPN inline private/static keys and auth blocks | User Keychain, redacted provider configuration, reassembled in memory | Failed Keychain or OS saves retain the only copy with a migration notice; editing locks no longer skip migration. |
 | WireGuard private key and all imported peer PSKs | User Keychain; redacted profile/legacy defaults | The live engine supports the first peer only. A failed legacy migration retains original data rather than losing keys. |
 | SSH app imported private key | `tunnel.<id>.sshKey` in user Keychain; memory PEM at connect | In-process paths only; user-selected file mode intentionally remains file-backed. |
-| SSH Network Tunnel PEM/password | User Keychain; transient extension start options | No user-agent signing channel in the root extension. |
+| SSH Network Tunnel PEM/password | User Keychain; transient extension start options | Private signing broker to the user agent; no private-key extraction. |
 | Touch ID VPN records, remembered vault unlocks | Data-protection Keychain with user-presence access control | Only per-VPN protected records are exported, after authentication. Provider-wide unlocks are excluded. |
 | KeePassXC pairing credentials | User Keychain; update preserves existing association on failure | External database/key files remain user-selected files. |
-| Native IKE/IPsec credentials | User Keychain with stable OS persistent references | Native proxy credentials are attached to saved `NEProxyServer`; verify the OS storage boundary. |
-| Tailscale authentication key | User Keychain and transient start payload | Tailscale node identity is separately persisted by the root-owned Tailscale state file. |
+| Native IKE/IPsec credentials | User Keychain with stable OS persistent references | Authenticated native proxy saves are refused; verified legacy migration removes passwords from the OS protocol. |
+| Tailscale authentication key | User Keychain and transient start payload | Node identity is revisioned into the user Keychain; root legacy files are deleted after verified acknowledgement. |
 | External vaults, SSH agents and Apple Passwords | Vendor/system-owned stores; fetched password or signing result | Config export does not extract agent private keys or external vault contents. Apple Passwords' picker exposes password credentials, not this PEM storage feature. |
 
-The requirement that **all actual secrets live in the user's Keychain is not fully met**.
-Tailscale state, locked/failed inline migrations and the native-proxy persistence boundary
-must be resolved before making that claim. These are registered in `Docs/Drift.md`.
+App-owned new secret writes use the user's Keychain, including Tailscale node identity.
+A failed legacy migration deliberately preserves the only copy with a visible notice;
+an OS or locked-Keychain refusal must be resolved before claiming that every existing
+profile has completed migration. External vaults and selected `.ssh` files retain their
+user-selected storage. These boundaries are registered in `Docs/Drift.md`.
 
-## Open findings
+## Resolution of the follow-up findings
 
-P1 affects confidentiality, crash safety or routing correctness. P2 affects persisted
-state, diagnostics or reliable operation. Source-path risks are labeled when no live
-reproduction has been performed.
+| Finding | Repair and regression evidence |
+|---|---|
+| Tailscale root-file identity | Revisioned user-Keychain state broker; acknowledgement and legacy deletion happen only after verified persistence. Race tests cover blocked writes, failure, shutdown and nil/empty values. |
+| Locked OpenVPN inline secrets | Verified storage migration runs even when editing is locked; failure preserves the only copy with a notice. |
+| Native proxy secrets in OS preferences | New authenticated native proxy saves are refused; legacy credentials are verified in user Keychain before redacting and verifying the OS protocol. |
+| Overlapping mediator applies and ineffective reassert | Shared serialized latest-plan loop; forced writes, acknowledged caches and delayed/failure integration tests. |
+| Missing pushed DNS/search intent | Engine stats project pushed resolvers/search lists; arbitration preserves them and readback checks scoped service DNS. |
+| Dropped editor saves | Shared queued latest valid draft; suspended-save tests. |
+| Competing connection starts and late starts after cancellation | WireGuard/virtual profile reservations and a FIFO configuration gate; overlap, cancellation and held-write removal regressions. |
+| Native status restored to the wrong row | Public installed-identity fingerprint must match the current OS protocol before restoring attribution. |
+| Wrong-typed imported settings | Scalar, enum, list and nested structural import checks refuse malformed values before permissive legacy migration decoders can default them. |
+| Diagnostic child pipe deadlocks | Shared runner drains both pipes, bounds output, enforces cancellation/deadlines and handles inherited descendant pipes. Disposable subprocess tests exercise all paths. |
+| SSH Network agent capability | Provider-local signing socketpair and private session broker to the user agent; real ssh-agent/sshd authentication and descriptor cleanup tests. |
+| Incorrect map egress attribution | Confirmed route owner determines the arc; blocked virtual capture has no egress arc. |
+| Old telemetry restores a superseded gateway | Revision fence rejects samples begun before acknowledged changes or older confirmed settings; CLI rejects failed pause/resume/gateway acknowledgements. |
+| Comma-list editing desync | A separate editing buffer preserves trailing separators while storage remains normalized. |
+| Narrow Manage VPNs controls | Independent titled toolbar actions retain native padding; Add has a circular menu button with a centered plus. |
+| Imported names escaping the sidebar | A 240pt minimum sidebar and vertically placed maturity badge leave room for a truncating name inside the row. |
+| Excessive testing notice text | Notices start collapsed with Show Details; partly tested notices use shorter wording and retain the checked evidence. |
+| Typed settings invisible to accessibility | Availability belongs to the containing row; child fields retain their actual typed value and validation. |
 
-| Priority | Finding and evidence | Next verification or repair |
-|---|---|---|
-| P1 | Tailscale node identity uses `store.New` on `tailscaled.state` in `Vendor/tailscale-engine/src/main.go`. Owner-only permissions are not user-Keychain storage. | Design an authenticated app/extension state broker or a Keychain-backed store, with root/user session, restart and lock tests. |
-| P1 | Locked OpenVPN profiles retain inline secrets: `VPNController+CRUD.migrateInlineOVPNSecrets` deliberately skips policy-locked configuration. Failed writes retain originals too. | Coordinate a policy-approved migration; preserve the existing notice and never discard the only copy. |
-| P1 | Native proxy auth is inserted into `NEProxyServer` and `NativeVPNManager.connect` saves that protocol to preferences. Source establishes the handoff, not the OS's at-rest representation. | Inspect OS persistence with a disposable proxy credential and define a supported memory-only or referenced-secret path. |
-| P1 | Route/DNS/proxy reconciliation launches fresh tasks without awaiting previous applies. `RouteMediator.reconcileGateway` captures an owner across awaits; a later owner change can interleave with the old grant. **Source-path race risk, not live reproduced.** | Hold a fake host at strip/apply suspension points, switch owners, and assert only the latest plan is granted. Serialize and coalesce application. |
-| P1 | Drift handlers call reconcile with the same desired plan, while `DNSRealizer`/`ProxyRealizer` skip `plan == lastPlan`; route reassert also retains `appliedRole`. A published reassert can issue no write. | Fake-host tests must assert writes after external drift, not just the pure drift decision. Invalidate/re-read the applied cache and handle failed acknowledgments. |
-| P2 | DNS intent projection in `VPNController+Gateway.dnsProfiles` always sends `searchDomains: []`; OpenVPN/OpenConnect/Tailscale pushed DNS is not projected. `DNSPlan.applyRequests` also discards search lists. | Capture actual engine DNS intent, preserve search domains through arbitration/application and test two simultaneous VPNs. |
-| P2 | `ProxyTunnelView`, `TailscaleView` and `SSHNetworkTunnelView` return from save while `saving` is true. A blur/close event during an awaited earlier save has no pending retry. **Source-path lost-save risk.** | Suspend a host save, edit again and close; verify the latest valid draft persists. Queue a final save or coalesce revisions. |
-| P2 | `NativeVPNManager.refreshStatus` restores OS status but never restores `activeConfigID`; only connect assigns it. | Restart while a disposable native connection is active. Persist and verify the installed profile identity against the OS protocol before showing its row as connected. |
-| P2 | Config models using `try? decodeIfPresent` can default a wrong-typed imported setting rather than refuse it, despite the manual's promise. `ConfigImport.apply` relies on those model decoders. | Validate input types against descriptor/template shape before decoding; add malformed settings fixtures for every engine. |
-| P2 | `DiagnosticBundle.run` drains stdout fully before stderr. A child filling stderr while keeping stdout open can stall until termination. The endpoint-discovery runner has the same sequential pipe pattern. **Source-path deadlock risk.** | Use a disposable child that fills both pipes; drain concurrently and enforce a deadline/cancellation in both runners. |
-| P2 | SSH Network Tunnel cannot use 1Password or the user's SSH agent, unlike app SSH. | An authenticated signing broker is needed; moving a signature from a different SSH session cannot authenticate this one. |
-| P2 | The globe chooses the first located tunnel in the egress country in `WorldMapModel`, without the arbiter's owner identity. Two tunnels in one country can draw a plausible but wrong egress link. This is an explicit heuristic in source. | Pass the effective route owner to the model, and render unresolved attribution as ambiguous. Test same-country simultaneous tunnels. |
-| P2 | The shared comma-list binding normalizes separators during editing. **UI hypothesis, not confirmed:** an in-progress trailing separator may be removed. | Type multiple values through real focus/blur interactions; preserve an editing buffer if normalization changes what can be entered. |
+The remaining checks concern external platform behavior, not silently skipped code:
+interactive 1Password approval, locked-Keychain/OS-managed migration failures, live
+Tailscale enrollment/restart, and notarized virtual capture
+on macOS 26 and 27 including provider crash and sleep/wake. The explicit virtual mode
+currently supports WireGuard; other backends and advanced routing are visibly gated and
+registered in `Docs/Drift.md` §18 with a source guard.
 
 ## Verification
 
@@ -104,10 +114,9 @@ deadline and kills only its own child if needed. Echo targets also stop their ac
 and client workers before closing/reusing descriptors. The final repeated run passed
 without that timeout or Thread Performance Checker findings.
 
-The Metal compiler component is unavailable on this machine, so the shader source and its dedicated compile test
-are excluded from local test builds. A normal complete production build and real
-globe rendering still require that component. No shader source or test was disabled
-in the project to hide this limit.
+The official Metal toolchain is now installed and the full signed app/extension test
+build includes the actual shader source and its compiler test. No source or test is
+excluded from the current full build.
 
 The broad UI run reported a disabled system Siri dialog without an accessibility
 description during the report-window audit, also reproduced in isolated reruns.
@@ -116,3 +125,43 @@ element's system process rather than the target app and failed to resolve it.
 This UI audit remains failing on this machine, with its existing checks intact.
 Other executed UI tests passed; profile-dependent walkthroughs skipped when their
 required screen was absent. A fully green UI result is not claimed.
+
+Latest follow-up validation: the complete signed run passed **2,833 Swift tests /
+320 suites in 52.162 seconds**, including the Data Protection Keychain probe and the
+disposable live SSH integration suite. A prior session returned
+`errSecInteractionNotAllowed` (-25308); the unchanged probe passed individually and
+in the complete rerun with a usable interactive Keychain session.
+
+The focused Manage VPNs UI run passed **both tests in 52.081 seconds**. It verifies
+toolbar target widths and Add's equal dimensions, imports a unique public-only
+disconnected profile, checks sidebar row bounds and the collapsed testing notice,
+then types a two-value DNS list through focus changes. It removes only its own
+fixture. Exported app screenshots confirm Add's circular glass background and
+centered plus. The window accessibility audit also passed; this does not clear
+the separate broad system-Siri audit failure above. XCTest still logs a transient
+negative-width geometry diagnostic while opening the split window; passing final
+row/control bounds do not diagnose that runtime message.
+
+TS/WG and proxy/router Go race suites passed. Two repeated real encrypted virtual-session
+runs covered IPv4/IPv6 TCP/UDP, overlapping member addresses, return translation, policy
+pinning and independent member stop. Packet-parser fuzzing executed 5,393,226 cases in
+15 seconds. Structural parser and connection cancellation guards passed in the final run.
+
+The original installed-extension UI checks could falsely pass: bundle-identifier lookup
+selected a development copy, and About never rendered the extension version claimed by
+the IPC assertion. `Tools/test-installed-app.sh` now explicitly sets Xcode's installed
+target path. Tests require the installed app's visible build and the OS's exact enabled
+extension build. The corrected run passed **all three installed UI tests** in
+31.515 seconds on build 307; the wrapper's OS registration check also passed. Registration is
+not live provider IPC or packet-capture evidence.
+
+The clean Release build **307** passed with no compiler warnings (only the documented
+PacketTunnel App Intents metadata notice). After signing Sparkle's nested helpers,
+`codesign --verify --deep --strict` passed outside the filesystem sandbox. Both app and
+system extension carry the expected Developer ID/system-extension entitlements and
+neither contains `get-task-allow`. With explicit user authorization, Apple accepted
+notarization submission `87cf6765-8cc1-47ee-9241-f4f2b0bdbb68`; the ticket was stapled
+and the app installed in `/Applications`. Installed signatures pass strict verification
+and Gatekeeper accepts it as Notarized Developer ID. macOS reports the **0.5/307**
+extension activated and enabled; the old **0.5/279** and **0.4/220** copies await cleanup on reboot.
+The external Tailscale connection stayed connected.

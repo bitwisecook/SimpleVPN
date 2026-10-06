@@ -112,6 +112,13 @@ Used by Manage VPNs' three row builders (which now pass in only what differs: wh
 answers, the caption's extra fact, the context menu) and by the main window's
 `otherConnectionRow`. `VPNRow` is deleted.
 
+The shared row now places the maturity badge below the name/caption, in the same
+text column. A fixed badge beside the name consumed the entire text width in a
+persisted 144pt sidebar, hiding the name and overflowing the column. Manage VPNs
+also enforces a 240pt minimum on both its list content and split-view column.
+The live UI regression imports a long public-only profile name and checks the
+row's bounds against the sidebar before removing only that fixture.
+
 **`VPNSidebarRow` keeps its own layout, with a stated reason** — its middle column is
 INTERACTIVE (a destination picker replaces the caption for a multi-endpoint VPN, and an
 interactive control cannot live inside the `.combine` element a one-sentence row is made
@@ -325,67 +332,128 @@ requires Bazel and lacks the source layout needed by standard Go tooling. The
 **Verdict: KEEP SEPARATE — each engine builds independently, with coordinated
 pins.** Verify all engine archives whenever a shared dependency changes.
 
-**App verification pending for the 2026-09-30 update:** all Go engine checks and
-archive builds passed, but the full app build stopped because Xcode 27's Metal
-compiler component is absent. Its component download stalled. After installing
-it, rerun the `AGENTS.md` macOS build command and `SimpleVPNTests` against these
-updated dependencies. Use macOS 26-compatible native libraries as described in
-`README.md` to avoid newer-host Homebrew deployment-target warnings.
+**Dependency build verification:** the official Metal component is installed and
+the signed app/extension build and full Swift suite include the actual shaders.
+Go engine builds, race suites and encrypted peer fixtures pass with these pins.
+Use macOS 26-compatible native libraries as described in `README.md` to avoid
+newer-host Homebrew deployment-target warnings. Platform checks remain in §18.
 
-## 15. Secret persistence across engines ⚠️ NOT YET DECIDED
+## 15. Secret persistence across engines — KEEP SEPARATE AT THE PROCESS BOUNDARY
 
-The October 2026 review is recorded in `Docs/AppReview.md`. App-owned VPN passwords,
-OpenVPN inline material, WireGuard private/PSK material (including additional peers),
-SSH Network Tunnel PEMs and app SSH imported PEMs use the user's Keychain. Their
-configurations retain settings and references, with connect-time values in memory.
+App-owned credentials, PEMs, WireGuard keys/PSKs and Tailscale node identity belong in
+user Keychain accounts. The extension receives transient start options. Tailscale's
+`keychain_state.go` emits bounded, revisioned snapshots through private session IPC;
+`VPNController+TailscaleState` saves and reads back the user-Keychain record before
+acknowledging it. Legacy state is deleted only after that acknowledgement. Shutdown
+releases blocked writes. The app must stay running for subsequent state changes.
 
-That is **not** the boundary everywhere. `Vendor/tailscale-engine/src/main.go` uses
-Tailscale's root-owned file store for node identity. Managed OpenVPN profiles and failed
-Keychain migrations can retain original inline keys; the existing migration notice must
-remain. `NativeVPNManager.connect` saves `NEProxyServer` authentication as part of the
-OS configuration; verify its persistence before describing it as Keychain-only.
-User-selected file keys and external vault stores are intentional separate sources.
+An editing policy lock no longer skips verified OpenVPN secret migration. A failed
+Keychain write or OS configuration save retains the only copy and surfaces a migration
+notice. Native proxy passwords have no OS persistent-reference property: new native
+proxy authentication is refused before saving; legacy passwords are moved to verified
+user-Keychain accounts before redacting the OS protocol. An OS refusal remains visible.
 
-`ConfigSecretTransfer.accounts` is an explicit export vocabulary alongside each
-engine's account construction. **KEEP SEPARATE:** an import may name only a closed role,
-never an arbitrary Keychain account. New credential roles must be added to that vocabulary
-and given an export/import regression test. Exports do not back up provider-wide vault
-unlock credentials or Tailscale node identity.
+`ConfigSecretTransfer.accounts` deliberately remains a closed role vocabulary alongside
+engine account construction. Import cannot choose an arbitrary account. Secret and
+placeholder exports include Tailscale identity and migrated native proxy credentials;
+external vault contents, agent keys and provider-wide unlocks remain external.
 
-**Verdict for the engine storage gaps: NOT YET DECIDED.** A user-Keychain broker/state
-store for the root extension needs design and live lifecycle tests. These gaps remain
-open; owner-only filesystem permissions do not satisfy user-Keychain storage.
+## 16. SSH signing in the app and system extension — KEEP SEPARATE WITH SHARED SIGNING
 
-## 16. SSH signing in the app and system extension ⚠️ KEEP SEPARATE WITH AN OPEN GAP
+App SSH supports user `.ssh` files, selected agents (including 1Password) and imported
+Keychain PEMs. Reverse/jump subprocess modes retain their file/agent boundary and refuse
+Keychain PEM rather than writing a temporary key. Apple Passwords supplies passwords;
+it does not expose arbitrary PEM storage through its picker.
 
-`SSHTunnelEngine` can use a selected `.ssh` key file, the user's SSH agent (including
-1Password), or an imported Keychain PEM. The subprocess path supports file/agent
-signing for reverse forwards and jump hosts; it refuses Keychain PEM mode instead of
-writing a temporary private key. The probe uses the same file/PEM distinction and
-the existing file-key probe rules; password probes require account-level opt-in.
+SSH Network Tunnel authenticates its own root-owned SSH session through
+`SSHAgentSigningBroker`: a provider-local socketpair and private NE session messages
+carry only key-list and signing frames. The user app opens the selected user agent;
+no root filesystem relay, agent mutation, private-key extraction or signature reuse
+between SSH sessions occurs. Host-key verification precedes authentication. Cancellation
+closes the broker, bounded frames use exact request IDs, and the app must stay running
+for reconnect signing. A real ssh-agent/sshd test authenticates through this broker and
+checks that libssh releases its borrowed agent descriptor. Interactive 1Password approval
+and installed-extension signing still need platform verification.
 
-`PacketTunnel/Engines/SSHNetworkTunnelEngine.swift` runs as root and takes PEM/password
-material through transient start options. It has no user-agent channel. **KEEP SEPARATE**
-for the process boundary; **the agent capability gap remains open**. It needs an authenticated
-app-to-extension signing broker or relocation of session ownership. A signature made for
-the app's SSH session cannot be reused for the extension's session. See `Docs/AuthSecSSHAgent.md`.
+## 17. Mediator apply loops and live editor saves — COLLAPSED
 
-Apple Passwords' picker is a password source; the new private-key mode is macOS Keychain.
-Do not label it as private-key access through Apple Passwords.
+Route/DNS/proxy use `MediatorApplyLoop` to serialize and coalesce the latest plan.
+Completed partial writes update applied caches; failures cannot masquerade as success.
+Forced drift writes bypass idempotency. Slow/failing host tests exercise suspensions,
+failed demotion, supersession and restoration after partial proxy failure.
 
-## 17. Mediator apply loops and live editor saves ⚠️ NOT YET DECIDED
+Proxy, Tailscale and SSH Network editors use `LatestSettingsSave` with captured drafts;
+a blur or close during an earlier save queues the latest valid state. The shared list
+field keeps its editing text separately from normalized stored values. Tests cover held
+saves and external updates. A disposable imported profile now exercises actual
+comma-list typing and focus changes in the running app.
 
-Routes, DNS and proxies each launch an asynchronous reconciliation task and cache applied
-state. They still need a common serialized/latest-plan application contract: the task
-handles do not themselves serialize operations across suspension points, and unchanged
-plan caches can suppress an external-drift reassert. The source-path risks and affected
-functions are listed in `Docs/AppReview.md`; pure arbiter tests do not exercise them.
+Manage VPNs uses separate native `ToolbarItem`s for reorder commands, with the same
+button renderer as inline `ReorderButtons`. A custom HStack and Image-only controls
+produced unnamed AppKit overflow items at narrow widths. Real button titles and
+independent native items preserve remove/reorder/search names in that menu. The
+actions now belong to the whole window's primary toolbar, rather than inheriting
+sidebar placement. Native regular remove/reorder/search controls size their own
+symbol and padding. Add has a circular 36pt target with its indicator hidden;
+a hosted menu prevents AppKit's toolbar extraction from rebuilding its label
+as an oval. It remains a native menu, using the same Add actions as before.
+The UI list-entry regression checks actual control widths and handles overflow
+without activating an unverified menu item.
 
-`ProxyTunnelView`, `TailscaleView` and `SSHNetworkTunnelView` also each suppress saves
-while an earlier asynchronous save is active, without retaining a pending latest draft.
-**NOT YET DECIDED:** add slow-host tests and a shared queued-save mechanism, then retire
-these findings. Neither disabling the audit nor claiming UI state equals saved state is
-a resolution.
+The shared setting row's accessibility availability value now belongs to its
+containing row. Applying an empty value to the control replaced the actual text
+field value, hiding entered settings from VoiceOver and UI assertions. Child
+fields retain their own value/validation without switching view identity while
+typing. Testing notices start concise; expanded details remain an explicit,
+remembered choice under the versioned presentation preference.
+
+Native personal-VPN mutations use a FIFO `AsyncOperationGate`, deliberately separate
+from coalesced plan application: remove must wait for pending credential/settings writes.
+A lifecycle revision cancels stale connects, including disconnect during an OS save.
+Successful saves record installed identity before any cancellation can skip starting.
+Native removal refuses an unverified legacy or externally changed OS identity rather
+than deleting another configuration or its credentials.
+
+WireGuard and virtual-composition starts reserve their profile IDs before any OS
+write suspends. Cancelling a member invalidates the whole pending composition, but
+retains the reservation until its write drains. A shared FIFO gate makes removal wait
+for these writes. Independent starts cannot compete for an active or reserved member.
+
+## 18. Routing preview and execution plus virtual interface ownership — COLLAPSED WITH EXPLICIT COMPATIBILITY
+
+The filtered `RoutePlan` now drives inspection and execution, including edited prefixes.
+One `NetworkSettingsWriter` owns all OS writes, including the OpenVPN/OpenConnect bridge
+paths. Confirmation precedes published ownership; timeout poisons the writer and ends
+the provider. OpenVPN's adapter retains its four-byte family framing.
+Telemetry begun before an acknowledged mutation is discarded; older confirmed settings
+revisions cannot overwrite new ownership. CLI pause/resume/gateway replies report a
+failed acknowledgement as failure.
+
+The explicit **Connect Through One Virtual Interface** composition action currently
+supports two to sixteen single-peer WireGuard members. `VirtualRoutingEngine` owns one
+capture pump; Go instance handles and generations isolate ports and late callbacks.
+The whole virtual route plan is one OS transaction followed by one versioned Go commit.
+Stopped ports retain capture of private prefixes. Loss of default egress retains default
+capture and drops traffic; explicit Direct releases it. Physical UDP sockets are bound
+to a real underlay before bind and blackhole when no physical path exists.
+
+**KEEP SEPARATE:** other engines retain independent provider sessions. They use scoped
+Go APIs where applicable, but are not virtual routing ports yet. Distinct scoped DNS,
+custom proxies/local exclusions, chained transports, per-app/fake-IP/L7/Tcl routing and
+native VPN packet ports are refused or unavailable in virtual mode. The capability gate
+and `NetworkArchitectureBoundaryTests` must be changed together when these boundaries
+end. Do not infer provider-crash kill-switch guarantees from core packet tests: signed,
+notarized capture, sleep/wake/crash and macOS 26/27 verification remain required.
+Restarting a stopped virtual member requires reconnecting the composition; the ordinary
+WireGuard start is guarded so it cannot create a competing independent interface.
+
+Installed-extension acceptance has a separate launch contract:
+`Tools/test-installed-app.sh` explicitly sets Xcode's `UITargetAppPath`, and the UI
+tests use the configured target rather than Launch Services bundle lookup. They compare
+the visible app build and the exact enabled OS registration. About does not display
+the extension version, so its contents cannot prove provider IPC. Build 307 is now
+notarized, installed and registered as enabled; live capture/crash/sleep checks above
+remain open.
 
 ## Adding to this file
 

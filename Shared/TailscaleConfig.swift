@@ -348,6 +348,8 @@ nonisolated struct TailscaleStartConfig: Codable, Sendable, Equatable {
     /// straight to the engine, and is never persisted or logged.
     var authKey: String
     var stateDir: String
+    var userKeychainState: Bool = true
+    var nodeState: String = ""
     var acceptRoutes: Bool
     var acceptDNS: Bool
     var useExitNode: Bool
@@ -390,6 +392,7 @@ nonisolated struct TailscaleStartConfig: Codable, Sendable, Equatable {
     func redactedJSONString() -> String {
         var copy = self
         copy.authKey = authKey.isEmpty ? "" : "<redacted>"
+        copy.nodeState = nodeState.isEmpty ? "" : "<redacted>"
         return copy.jsonString()
     }
 }

@@ -354,21 +354,21 @@ struct WorldMapModelTests {
 
     // MARK: Egress attribution
 
-    @Test func egressIsAttributedToTheGatewayInThatCountry() {
+    @Test func egressIsAttributedToTheConfirmedOwner() {
         let r = WorldMapModel.build(vantage: vantage(egressCC: "GB"),
                                     stats: ["p1": stats("p1", serverIP: "81.2.69.142")],
-                                    locate: locator(["81.2.69.142": gbPlace]),
+                                    defaultOwner: "p1", locate: locator(["81.2.69.142": gbPlace]),
                                     name: { $0 })
         #expect(link(r, from: "vpn.p1", to: "egress")?.kind == .tunnel)
         #expect(link(r, from: "home", to: "egress") == nil)
     }
 
-    @Test func egressIsAttributedToTheOnlyUnplaceableTunnel() {
+    @Test func unplaceableConfirmedOwnerStillGetsItsEgressArc() {
         // Egress moved off home's country and the private-gateway tunnel is the only
         // thing that could have moved it — so it gets the credit, solid.
         let r = WorldMapModel.build(vantage: vantage(egressCC: "GB"),
                                     stats: ["p1": stats("p1", serverIP: "192.168.32.137")],
-                                    locate: locator([:]),
+                                    defaultOwner: "p1", locate: locator([:]),
                                     name: { $0 })
         #expect(link(r, from: "vpn.p1", to: "egress")?.kind == .tunnel)
         #expect(!r.connections.contains { $0.kind == MapConnection.Kind.bypass })
@@ -429,10 +429,10 @@ struct WorldMapModelTests {
                  "p1": stats("p1", serverIP: "81.2.69.143")]
         let places = ["81.2.69.142": gbPlace, "81.2.69.143": gbPlace]
         let first = WorldMapModel.build(vantage: vantage(egressCC: "GB"), stats: s,
-                                        locate: locator(places), name: { $0 })
+                                        defaultOwner: "p1", locate: locator(places), name: { $0 })
         for _ in 0..<5 {
             let again = WorldMapModel.build(vantage: vantage(egressCC: "GB"), stats: s,
-                                            locate: locator(places), name: { $0 })
+                                            defaultOwner: "p1", locate: locator(places), name: { $0 })
             #expect(again == first)
         }
         #expect(link(first, from: "vpn.p1", to: "egress")?.kind == .tunnel)
@@ -647,31 +647,31 @@ struct WorldMapModelTests {
             stats: ["p1": stats("p1", serverIP: "192.168.32.137")],
             hints: ["p1": WorldMapModel.GatewayHint(host: "vpn.example.com",
                                                     countryOverride: "GB")],
-            locate: locator([:]),
+            defaultOwner: "p1", locate: locator([:]),
             name: { $0 })
         #expect(link(r, from: "vpn.p1", to: "egress")?.kind == .tunnel)
         #expect(!r.connections.contains { $0.kind == MapConnection.Kind.bypass })
     }
 
-    @Test func anExactGatewayOutranksAnApproximateOneForTheEgressArc() {
+    @Test func theConfirmedOwnerGetsTheEgressArc() {
         let r = WorldMapModel.build(
             vantage: vantage(egressCC: "GB"),
             stats: ["p1": stats("p1", serverIP: "192.168.32.137"),
                     "p2": stats("p2", serverIP: "81.2.69.142")],
             hints: ["p1": WorldMapModel.GatewayHint(host: "vpn.example.com",
                                                     countryOverride: "GB")],
-            locate: locator(["81.2.69.142": gbPlace]),
+            defaultOwner: "p2", locate: locator(["81.2.69.142": gbPlace]),
             name: { $0 })
         #expect(link(r, from: "vpn.p2", to: "egress")?.kind == .tunnel)
         #expect(link(r, from: "vpn.p1", to: "egress") == nil)
     }
 
-    @Test func placedGatewayWinsOverAnUnplaceableOne() {
+    @Test func confirmedPlacedOwnerWinsOverAnotherTunnel() {
         let r = WorldMapModel.build(
             vantage: vantage(egressCC: "FR"),
             stats: ["p1": stats("p1", serverIP: "192.168.32.137"),
                     "p2": stats("p2", serverIP: "81.2.69.142")],
-            locate: locator(["81.2.69.142": frPlace]),
+            defaultOwner: "p2", locate: locator(["81.2.69.142": frPlace]),
             name: { $0 })
         #expect(link(r, from: "vpn.p2", to: "egress")?.kind == .tunnel)
         #expect(link(r, from: "vpn.p1", to: "egress") == nil)

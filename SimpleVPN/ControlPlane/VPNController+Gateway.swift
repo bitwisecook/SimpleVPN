@@ -52,13 +52,18 @@ extension VPNController {
             CustomRoutingFallbackStore().save(profile, for: id)
             return
         }
+        let previousProtocol = proto.copy() as? NETunnelProviderProtocol
         var conf = proto.providerConfiguration ?? [:]
         if let blob = profile.encodedBlob() { conf["customrouting"] = blob }
         else { conf.removeValue(forKey: "customrouting") }
         proto.providerConfiguration = conf
         mgr.protocolConfiguration = proto
-        try? await mgr.saveToPreferences()
-        try? await mgr.loadFromPreferences()
+        do { try await mgr.saveToPreferences() }
+        catch {
+            mgr.protocolConfiguration = previousProtocol
+            throw error
+        }
+        try await mgr.loadFromPreferences()
         customRoutingCache[id] = profile
         // The providerConfiguration blob is authoritative now — retire any fallback
         // entry a pre-manager save left behind.
@@ -79,8 +84,11 @@ extension VPNController {
         // connected set. `reassertNow` re-runs intent capture (through the hooks) then
         // reconciles + realizes.
         routes.reassertNow()
+        await routes.waitUntilIdle()
         dns.reassertNow()
         proxies.reassertNow()
+        await dns.waitUntilIdle()
+        await proxies.waitUntilIdle()
     }
 
     // MARK: Default gateway (PolicyRouting.md Tier 2 — the ≤1-default-owner invariant)
@@ -167,10 +175,12 @@ extension VPNController {
     /// per engine; empty when we can't enumerate them.
     func gatewaySubnets(for id: String) -> [String] {
         guard let p = profiles.first(where: { $0.id == id }) else { return [] }
+        if let prefixes = pushedNetworkStats[id]?.advertisedPrefixes {
+            return prefixes.filter { $0 != "0.0.0.0/0" && $0 != "::/0" }
+        }
         switch p.kind {
         case .proxyTunnel:
-            let c = proxyTunnelConfig(for: id)
-            return c.includeDefaultRoute ? [] : c.includedRoutes
+            return proxyTunnelConfig(for: id).includedRoutes
         case .tailscale:
             let routes = tailscaleStatuses[id]?.config?.subnetRoutes ?? []
             return routes.filter { $0 != "0.0.0.0/0" && $0 != "::/0" }
@@ -179,7 +189,7 @@ extension VPNController {
             return wireGuardConfig(for: id).allowedIPs.filter { $0 != "0.0.0.0/0" && $0 != "::/0" }
         case .sshNetworkTunnel:
             let c = sshNetworkTunnelConfig(for: id)
-            return c.includeDefaultRoute ? [] : c.includedRoutes
+            return c.includedRoutes
         default:
             return []
         }
@@ -294,6 +304,12 @@ extension VPNController: RouteMediatorHost {
         await sendMessage(full ? "gateway:full" : "gateway:split", to: id)
     }
 
+    func routeApplyPrefixes(_ request: RouteApplyRequest, to id: String) async -> String? {
+        guard let json = try? JSONEncoder().encode(request),
+              let text = String(data: json, encoding: .utf8) else { return "error: invalid routes" }
+        return await sendMessage("routes:apply:\(text)", to: id)
+    }
+
     /// Apply gateway ownership to a Tailscale profile via its exit-node prefs path —
     /// the exact patch the inline code built.
     func routeApplyTailscaleGateway(full: Bool, to id: String) async -> String? {
@@ -320,6 +336,21 @@ extension VPNController: RouteMediatorHost {
     }
 
     func routeWantsFullTunnel(id: String) -> Bool { profileWantsFullTunnel(id) }
+    func routeCanCarryDefault(id: String) -> Bool {
+        guard let kind = profiles.first(where: { $0.id == id })?.kind else { return false }
+        switch kind {
+        case .wireGuard: return wireGuardConfig(for: id).isFullTunnel
+        case .proxyTunnel: return proxyTunnelConfig(for: id).includeDefaultRoute
+        case .sshNetworkTunnel: return sshNetworkTunnelConfig(for: id).includeDefaultRoute
+        case .tailscale: return !tailscaleExitNode(for: id).isEmpty
+        case .openVPN, .fortinet, .f5apm, .ciscoAnyConnect, .globalProtect, .juniper, .pulse, .arrayNetworks:
+            if let pushed = pushedNetworkStats[id], pushed.defaultRouteV4 != nil || pushed.defaultRouteV6 != nil {
+                return pushed.defaultRouteV4 == true || pushed.defaultRouteV6 == true
+            }
+            return profileWantsFullTunnel(id)
+        case .ikev2, .ipsec, .l2tp, .ssh: return false
+        }
+    }
     func routeAdvertisedPrefixes(id: String) -> [String] { gatewaySubnets(for: id) }
 }
 
@@ -336,9 +367,11 @@ extension VPNController: DNSMediatorHost {
             var resolvers: [String] = []
             var matchDomains: [String] = []
             var wantsCatchAll = false
+            var searchDomains: [String] = []
             if p.kind == .proxyTunnel {
                 let c = proxyTunnelConfig(for: p.id)
                 resolvers = c.dnsServers
+                searchDomains = c.searchDomains
                 wantsCatchAll = c.includeDefaultRoute && !c.dnsServers.isEmpty
                 matchDomains = wantsCatchAll ? [""] : []
             }
@@ -348,6 +381,7 @@ extension VPNController: DNSMediatorHost {
                 // contributes nothing.
                 let c = wireGuardConfig(for: p.id)
                 resolvers = c.dns
+                searchDomains = c.searchDomains
                 wantsCatchAll = !c.dns.isEmpty
                 matchDomains = wantsCatchAll ? [""] : []
             }
@@ -358,20 +392,36 @@ extension VPNController: DNSMediatorHost {
                 // what this VPN is asserting.
                 let c = sshNetworkTunnelConfig(for: p.id)
                 resolvers = SSHNetworkTunnelNetworkSettings.resolvers(for: c)
+                searchDomains = c.searchDomains
                 wantsCatchAll = c.includeDefaultRoute && !resolvers.isEmpty
                 matchDomains = wantsCatchAll ? [""] : []
             }
+            if let pushed = pushedNetworkStats[p.id] {
+                resolvers = pushed.dnsServers
+                searchDomains = pushed.searchDomains ?? searchDomains
+                matchDomains = pushed.dnsMatchDomains ?? []
+                wantsCatchAll = !resolvers.isEmpty && (matchDomains.isEmpty || matchDomains.contains(""))
+            } else if p.kind == .tailscale, let dns = tailscaleStatuses[p.id]?.config?.dns {
+                resolvers = dns.nameservers
+                searchDomains = dns.searchDomains
+                matchDomains = dns.matchDomains
+                wantsCatchAll = !resolvers.isEmpty && (matchDomains.isEmpty || matchDomains.contains(""))
+            }
+            if matchDomains.isEmpty, !wantsCatchAll { matchDomains = searchDomains }
             return DNSProfileInfo(
                 id: p.id, name: p.name, kind: p.kind,
                 connected: p.status == .connected,
                 engaged: isEngaged(id: p.id),
                 lastConnectedAt: lastConnectedAt[p.id],
-                resolvers: resolvers, searchDomains: [],
+                resolvers: resolvers, searchDomains: searchDomains,
                 matchDomains: matchDomains, wantsCatchAll: wantsCatchAll)
         }
     }
 
-    var dnsDefaultOwner: String? { routes.effectiveGatewayOwner }
+    var dnsDefaultOwner: String? {
+        if let applied = routes.appliedPlan { return applied.owner }
+        return routes.displayedGatewayOwner
+    }
 
     /// SOLE-WRITER DNS apply: send ONE participant's arbitrated `NEDNSSettings` slice to
     /// its live session via the `dns:apply:` IPC (nil/empty ⇒ `dns:clear`), the same
@@ -380,7 +430,7 @@ extension VPNController: DNSMediatorHost {
     /// proxy-tunnel / Tailscale engines reply nil because they can't hot-swap DNS) — the
     /// realizer reads that nil as "fall back to reconnect".
     func dnsApply(_ request: DNSApplyRequest?, to id: String) async -> String? {
-        guard let request, !request.isEmpty else { return await sendMessage("dns:clear", to: id) }
+        guard let request else { return await sendMessage("dns:clear", to: id) }
         guard let json = try? JSONEncoder().encode(request),
               let text = String(data: json, encoding: .utf8) else { return nil }
         return await sendMessage("dns:apply:\(text)", to: id)
@@ -416,7 +466,10 @@ extension VPNController: ProxyMediatorHost {
         }
     }
 
-    var proxyDefaultOwner: String? { routes.effectiveGatewayOwner }
+    var proxyDefaultOwner: String? {
+        if let applied = routes.appliedPlan { return applied.owner }
+        return routes.displayedGatewayOwner
+    }
 
     func proxyReassert(owner: String) async { await reconnect(id: owner) }
 

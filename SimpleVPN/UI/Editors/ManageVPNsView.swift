@@ -118,70 +118,13 @@ struct ManageVPNsView: View {
     private var splitViewContent: some View {
         NavigationSplitView {
             sidebarList
-            .navigationSplitViewColumnWidth(min: 200, ideal: 240)
+            // A persisted narrow split must not override the usable row width.
+            .frame(minWidth: 240)
+            .navigationSplitViewColumnWidth(min: 240, ideal: 260, max: 400)
             // One focus section per column (Tab: sidebar → editor), and the
             // list takes initial focus so arrow keys pick a VPN immediately.
             .focusSection()
             .focused($sidebarFocused)
-            .toolbar {
-                ToolbarItemGroup {
-                    Menu { addMenu } label: {
-                        Image(systemName: "plus").frame(width: 22, height: 22).contentShape(Rectangle())
-                    }
-                        .help("Add a connection, or import a config file (any supported type)")
-                        .accessibilityLabel("Add VPN")
-                    // A bare "minus" Image is a ~2pt-tall hairline, so its intrinsic
-                    // hit area is nearly unclickable; a fixed square frame + rectangular
-                    // content shape gives it a real target (the "plus" Menu above gets
-                    // the same frame for parity).
-                    Button { removeSelection() } label: {
-                        Image(systemName: "minus").frame(width: 22, height: 22).contentShape(Rectangle())
-                    }
-                        .disabled(!canRemoveSelection)
-                        .help("Remove the selected VPN")
-                        .accessibilityLabel("Remove the selected VPN")
-                    // MOVE UP / MOVE DOWN, beside + and − — the System Settings idiom,
-                    // and the reason the drag is allowed to exist at all: a drag-only
-                    // order is unusable without a pointer (Docs/Accessibility.md rule
-                    // 7). Same words, same refusals and same announcement as the
-                    // context-menu items and as the drag, because all three are this
-                    // one `ReorderCommands`.
-                    //
-                    // NO KEY EQUIVALENT, and that is deliberate rather than an
-                    // oversight: the editor pane in THIS window shows the servers
-                    // table, whose own pair already claims ⌘⌥↑/⌘⌥↓, and
-                    // `Reorder.swift` states the rule — at most one pair per window may,
-                    // because two make the shortcut ambiguous. These stay Tab-reachable,
-                    // which is what rule 7 actually asks for; the main window's sidebar
-                    // has no servers table and is free to take the shortcut.
-                    ReorderButtons(commands: order.commands(for: selection))
-                        .help(ConnectOrderCopy.scopeHelp)
-                    // "Export .ovpn…" USED TO BE HERE, on every selection regardless
-                    // of kind — including F5 BIG-IP APM, which has no `.ovpn`
-                    // representation at all (`.ovpn` is OpenVPN's format; OpenConnect
-                    // takes command-line arguments and has no config file). So the
-                    // item either did nothing or wrote a file that is not a real
-                    // thing, on a control whose subject was ambiguous anyway: a
-                    // toolbar acts on the WINDOW, and this window has a sidebar.
-                    //
-                    // It is a right-click on the row now — unambiguous by
-                    // construction — and offered only where a format exists
-                    // (`exportItems`). Never a DISABLED item either: for an export
-                    // that can never exist for a kind, absence is correct; disabled
-                    // is for something that could work once configured.
-                    //
-                    // Discoverable AND keyboard-reachable: a toolbar button here
-                    // and ⌘⇧F in the VPN menu, both opening the same sheet.
-                    Button {
-                        showFindSetting = true
-                    } label: {
-                        Image(systemName: "text.magnifyingglass")
-                            .frame(width: 22, height: 22).contentShape(Rectangle())
-                    }
-                    .help("Find a setting in any VPN editor (\u{2318}\u{21E7}F)")
-                    .accessibilityLabel("Find a setting")
-                }
-            }
         } detail: {
             // Every editor gets the same split-view width contract. Some editors
             // already happened to declare a minimum frame; the F5/OpenConnect
@@ -190,6 +133,79 @@ struct ManageVPNsView: View {
             detailPane.editorPaneWidthFloor()
         }
         .frame(minWidth: 760, minHeight: 560)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                // A hosted container keeps NSToolbar from extracting the menu's
+                // symbol and rebuilding it as a fixed-height oval menu button.
+                HStack(spacing: 0) {
+                    Menu { addMenu } label: {
+                        Label("Add VPN", systemImage: "plus")
+                            .labelStyle(.iconOnly)
+                            .frame(width: 36, height: 36)
+                    }
+                        .menuStyle(.button)
+                        .menuIndicator(.hidden)
+                        .controlSize(.regular)
+                        .buttonStyle(.plain)
+                        .frame(width: 36, height: 36)
+                        .contentShape(Circle())
+                        .glassEffect(.regular.interactive(), in: Circle())
+                        .help("Add a connection, or import a config file (any supported type)")
+                        .accessibilityLabel("Add VPN")
+                }
+            }
+            .sharedBackgroundVisibility(.hidden)
+            ToolbarItem(placement: .primaryAction) {
+                // Let AppKit size the complete button and its padding. A frame
+                // on the whole control squeezes the symbol against its bezel.
+                Button("Remove the selected VPN", systemImage: "minus") { removeSelection() }
+                    .labelStyle(.iconOnly)
+                    .controlSize(.regular)
+                    .disabled(!canRemoveSelection)
+                    .help("Remove the selected VPN")
+                    .accessibilityLabel("Remove the selected VPN")
+            }
+            // MOVE UP / MOVE DOWN, beside + and − — the System Settings idiom,
+            // and the reason the drag is allowed to exist at all: a drag-only
+            // order is unusable without a pointer (Docs/Accessibility.md rule
+            // 7). Same words, same refusals and same announcement as the
+            // context-menu items and as the drag, because all three are this
+            // one `ReorderCommands`.
+            //
+            // NO KEY EQUIVALENT, and that is deliberate rather than an
+            // oversight: the editor pane in THIS window shows the servers
+            // table, whose own pair already claims ⌘⌥↑/⌘⌥↓, and
+            // `Reorder.swift` states the rule — at most one pair per window may,
+            // because two make the shortcut ambiguous. These stay Tab-reachable,
+            // which is what rule 7 actually asks for; the main window's sidebar
+            // has no servers table and is free to take the shortcut.
+            // Separate native items retain titles in AppKit's overflow
+            // menu; a custom HStack becomes one unnamed overflow action.
+            ReorderToolbarItems(commands: order.commands(for: selection))
+            // "Export .ovpn…" USED TO BE HERE, on every selection regardless
+            // of kind — including F5 BIG-IP APM, which has no `.ovpn`
+            // representation at all (`.ovpn` is OpenVPN's format; OpenConnect
+            // takes command-line arguments and has no config file). So the
+            // item either did nothing or wrote a file that is not a real
+            // thing, on a control whose subject was ambiguous anyway: a
+            // toolbar acts on the WINDOW, and this window has a sidebar.
+            //
+            // It is a right-click on the row now — unambiguous by
+            // construction — and offered only where a format exists
+            // (`exportItems`). Never a DISABLED item either: for an export
+            // that can never exist for a kind, absence is correct; disabled
+            // is for something that could work once configured.
+            //
+            // Discoverable AND keyboard-reachable: a toolbar button here
+            // and ⌘⇧F in the VPN menu, both opening the same sheet.
+            ToolbarItem(placement: .primaryAction) {
+                Button("Find a setting", systemImage: "text.magnifyingglass") { showFindSetting = true }
+                .labelStyle(.iconOnly)
+                .controlSize(.regular)
+                .help("Find a setting in any VPN editor (\u{2318}\u{21E7}F)")
+                .accessibilityLabel("Find a setting")
+            }
+        }
         // Note for anyone looking for this window by title (tests, scripting):
         // an embedded editor's own `.navigationTitle` REPLACES the window's on
         // macOS, so selecting a VPN retitles this window to that VPN's name —
@@ -620,6 +636,12 @@ struct ManageVPNsView: View {
             // Edit/Remove used to live only in the context menu, which plain
             // keyboard can't open — this menu is the Tab-reachable path.
             Menu {
+                Button("Connect Through One Virtual Interface") {
+                    Task { await vpn.connectThroughVirtualInterface(comp) }
+                }
+                .disabled(vpn.virtualCompositionProblem(comp) != nil)
+                .help(vpn.virtualCompositionProblem(comp) ?? "Keep one connection to this Mac and route traffic internally between the VPNs.")
+                .accessibilityValue(vpn.virtualCompositionProblem(comp) ?? "Available")
                 Button("Edit…") { editingComposition = comp }
                 Button("Remove", role: .destructive) { requestRemoval(.composition(id: comp.id, name: comp.name)) }
             } label: {
@@ -631,6 +653,12 @@ struct ManageVPNsView: View {
         .padding(.vertical, ConnectionRowMetrics.verticalPadding)
         .frame(minHeight: ConnectionRowMetrics.minHeight)
         .contextMenu {
+            Button("Connect Through One Virtual Interface") {
+                Task { await vpn.connectThroughVirtualInterface(comp) }
+            }
+            .disabled(vpn.virtualCompositionProblem(comp) != nil)
+            .help(vpn.virtualCompositionProblem(comp) ?? "Route this composition through one virtual interface.")
+            .accessibilityValue(vpn.virtualCompositionProblem(comp) ?? "Available")
             Button(active ? "Disconnect All" : "Connect All") {
                 if active { vpn.disconnectComposition(comp) } else { Task { await vpn.connectComposition(comp) } }
             }
@@ -768,11 +796,16 @@ struct ManageVPNsView: View {
         case let .tunnel(id, _):
             tunnelManager.disconnect(id); tunnels.remove(id)
         case let .native(id, _):
-            nativeVPN.remove(id)
+            Task {
+                if !(await nativeVPN.remove(id)) { vpn.lastError = nativeVPN.lastError }
+            }
         case let .profile(id, _):
             Task { try? await vpn.remove(id: id) }
         case let .composition(id, _):
-            compositions.remove(id)
+            Task {
+                do { try await vpn.removeVirtualComposition(id); compositions.remove(id) }
+                catch { vpn.lastError = error.localizedDescription }
+            }
         }
     }
 

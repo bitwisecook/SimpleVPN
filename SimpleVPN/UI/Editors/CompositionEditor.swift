@@ -58,7 +58,7 @@ struct CompositionEditor: View {
                               systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
                     } else {
-                        Text("Full tunnels carry everything; split tunnels carry only their own networks and can sit beside a full tunnel. A member set to run “over” another connects after it, so its traffic rides the lower tunnel.")
+                        Text("Full tunnels carry everything; split tunnels carry their own networks. Chained VPN connections are unavailable in this connection mode.")
                     }
                 }
             }
@@ -94,6 +94,9 @@ struct CompositionEditor: View {
     private var saveDisabledReason: String? {
         if draft.name.trimmingCharacters(in: .whitespaces).isEmpty { return "Give the composition a name first." }
         if draft.members.count < 2 { return "Add at least two VPNs first." }
+        if let problem = draft.validationProblem { return problem }
+        if draft.fullTunnelConflict { return "Choose one full tunnel." }
+        if draft.members.contains(where: { $0.dependsOn != nil }) { return "Use parallel connections; chained VPNs are unavailable in this connection mode." }
         return nil
     }
 

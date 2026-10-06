@@ -134,6 +134,8 @@ type startConfig struct {
 	Hostname               string   `json:"hostname"`
 	AuthKey                string   `json:"authKey"`
 	StateDir               string   `json:"stateDir"`
+	UserKeychainState      bool     `json:"userKeychainState"`
+	NodeState              string   `json:"nodeState"`
 	AcceptRoutes           bool     `json:"acceptRoutes"`
 	AcceptDNS              bool     `json:"acceptDNS"`
 	UseExitNode            bool     `json:"useExitNode"`
@@ -434,14 +436,18 @@ func (t *callbackTUN) push(pkt []byte) bool {
 // ---- Engine state -----------------------------------------------------------
 
 type engineState struct {
-	sys      *tsd.System
-	lb       *ipnlocal.LocalBackend
-	tundev   *callbackTUN
-	netMon   *netmon.Monitor
-	dialer   *tsdial.Dialer
-	netstack *netstack.Impl
-	cancel   context.CancelFunc
-	watchWG  sync.WaitGroup
+	callbacks  tsCallbacks
+	operations sync.Mutex
+	closed     bool // operations guards lifecycle/control requests
+	identity   *keychainState
+	sys        *tsd.System
+	lb         *ipnlocal.LocalBackend
+	tundev     *callbackTUN
+	netMon     *netmon.Monitor
+	dialer     *tsdial.Dialer
+	netstack   *netstack.Impl
+	cancel     context.CancelFunc
+	watchWG    sync.WaitGroup
 
 	// lastConfig is the most recent router+DNS config, kept so TSStatus can
 	// report what the tunnel is actually configured with even between
@@ -595,7 +601,27 @@ func kindOf(err error) string {
 }
 
 func buildEngine(cfg startConfig, controlURL string, advRoutes []netip.Prefix, mtu int) (*engineState, error) {
-	st := &engineState{}
+	return buildEngineWithCallbacks(cfg, controlURL, advRoutes, mtu, legacyTSCallbacks())
+}
+
+type tsCallbacks struct {
+	packet func([]byte)
+	state  func(statePayload)
+	browse func(string)
+	netmap func(*tunnelConfig)
+	logf   func(string, ...any)
+}
+
+func legacyTSCallbacks() tsCallbacks {
+	return tsCallbacks{packet: emitTSPacket, logf: logf,
+		state:  func(s statePayload) { emitJSON(&cbState, s) },
+		browse: func(s string) { emitString(&cbBrowse, s) },
+		netmap: func(c *tunnelConfig) { emitJSON(&cbNetmap, c) }}
+}
+
+func buildEngineWithCallbacks(cfg startConfig, controlURL string, advRoutes []netip.Prefix, mtu int, callbacks tsCallbacks) (*engineState, error) {
+	st := &engineState{callbacks: callbacks}
+	logf := callbacks.logf
 	// Anything created before the first error return has to be torn down by
 	// hand — there is no defer-until-success helper worth the indirection for
 	// five objects, but every early return below MUST unwind.
@@ -613,7 +639,7 @@ func buildEngine(cfg startConfig, controlURL string, advRoutes []netip.Prefix, m
 	dialer.SetBus(sys.Bus.Get())
 	st.dialer = dialer
 
-	tundev := newCallbackTUN(mtu, emitTSPacket)
+	tundev := newCallbackTUN(mtu, callbacks.packet)
 	st.tundev = tundev
 
 	// One object is both Router and dns.OSConfigurator: Tailscale hands us the
@@ -681,7 +707,19 @@ func buildEngine(cfg startConfig, controlURL string, advRoutes []netip.Prefix, m
 	sys.Tun.Get().Start()
 
 	stateFile := filepath.Join(cfg.StateDir, "tailscaled.state")
-	stateStore, err := store.New(logf, stateFile)
+	var stateStore ipn.StateStore
+	if cfg.UserKeychainState {
+		st.identity, err = newKeychainState(cfg.NodeState, stateFile, func() {
+			if callbacks.state != nil {
+				callbacks.state(statePayload{State: "StatePersistenceFailed", Message: "The user's Keychain did not save the VPN identity. The connection must stop."})
+			}
+		})
+		stateStore = st.identity
+	} else {
+		// Retained only for the legacy C contract. Shipping Swift always selects
+		// the user-Keychain broker; a source guard pins that boundary.
+		stateStore, err = store.New(logf, stateFile)
+	}
 	if err != nil {
 		unwind()
 		return nil, startError{"stateDir", fmt.Errorf("state store %s: %w", stateFile, err)}
@@ -753,14 +791,14 @@ func (st *engineState) startWatch(ctx context.Context, interactive bool) {
 		mask := ipn.NotifyInitialState | ipn.NotifyInitialPrefs | ipn.NotifyInitialHealthState
 		st.lb.WatchNotifications(ctx, mask, func() {}, func(n *ipn.Notify) bool {
 			if n.BrowseToURL != nil && *n.BrowseToURL != "" {
-				emitString(&cbBrowse, *n.BrowseToURL)
+				st.callbacks.browse(*n.BrowseToURL)
 			}
 			if n.ErrMessage != nil && *n.ErrMessage != "" {
-				emitJSON(&cbState, statePayload{State: st.backendState(), Message: *n.ErrMessage})
+				st.callbacks.state(statePayload{State: st.backendState(), Message: *n.ErrMessage})
 			}
 			if n.State != nil {
 				s := *n.State
-				emitJSON(&cbState, statePayload{State: s.String(), AuthURL: st.authURL()})
+				st.callbacks.state(statePayload{State: s.String(), AuthURL: st.authURL()})
 				// No auth key ⇒ the node has to be authorized in a browser.
 				// LocalBackend does not start that itself: it waits for a
 				// client to ask, which is what a `tailscale up` would do.
@@ -768,7 +806,7 @@ func (st *engineState) startWatch(ctx context.Context, interactive bool) {
 					loginStarted = true
 					go func() {
 						if err := st.lb.StartLoginInteractive(ctx); err != nil {
-							logf("interactive login failed: %v", err)
+							st.callbacks.logf("interactive login failed: %v", err)
 						}
 					}()
 				}
@@ -819,7 +857,9 @@ func (st *engineState) publishConfig(rcfg *router.Config, dcfg *dns.OSConfig, fa
 	st.cfgMu.Lock()
 	st.lastConfig = tc
 	st.cfgMu.Unlock()
-	emitJSON(&cbNetmap, tc)
+	if st.callbacks.netmap != nil {
+		st.callbacks.netmap(tc)
+	}
 }
 
 func prefixStrings(in []netip.Prefix) []string {
@@ -851,7 +891,16 @@ func fqdnStrings(in []dnsname.FQDN) []string {
 //export TSStatus
 func TSStatus() *C.char {
 	st := current.Load()
+	return tsStatusState(st)
+}
+
+func tsStatusState(st *engineState) *C.char {
 	if st == nil {
+		return cJSON(statusPayload{State: ipn.NoState.String(), SelfIPs: []string{}, ExitNodes: []peerSummary{}})
+	}
+	st.operations.Lock()
+	defer st.operations.Unlock()
+	if st.closed {
 		return cJSON(statusPayload{State: ipn.NoState.String(), SelfIPs: []string{}, ExitNodes: []peerSummary{}})
 	}
 	s := st.lb.Status()
@@ -936,8 +985,17 @@ func TSUpdatePrefs(patchJSON *C.char) *C.char {
 	mu.Lock()
 	defer mu.Unlock()
 	st := current.Load()
+	return tsUpdateStatePrefs(st, patchJSON)
+}
+
+func tsUpdateStatePrefs(st *engineState, patchJSON *C.char) *C.char {
 	if st == nil {
 		return fail("badRequest", "no Tailscale session is running")
+	}
+	st.operations.Lock()
+	defer st.operations.Unlock()
+	if st.closed {
+		return fail("badRequest", "this Tailscale session stopped")
 	}
 	if patchJSON == nil {
 		return fail("badRequest", "missing prefs")
@@ -998,7 +1056,22 @@ func TSStop() *C.char {
 		return cJSON(okResponse{OK: true}) // idempotent
 	}
 	current.Store(nil)
+	stopTSState(st)
+	return cJSON(okResponse{OK: true})
+}
 
+func stopTSState(st *engineState) {
+	// Release a backend write awaiting Keychain acknowledgement before waiting
+	// for the operation that owns it. Stop must not wait for the broker timeout.
+	if st.identity != nil {
+		st.identity.close()
+	}
+	st.operations.Lock()
+	defer st.operations.Unlock()
+	if st.closed {
+		return
+	}
+	st.closed = true
 	st.cancel()
 	// Order matters: stop the backend (which stops talking to control and
 	// tears the wg config down) before closing the engine that owns the TUN,
@@ -1026,9 +1099,8 @@ func TSStop() *C.char {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		logf("watch goroutine did not exit within 5s")
+		st.callbacks.logf("watch goroutine did not exit within 5s")
 	}
-	return cJSON(okResponse{OK: true})
 }
 
 // unused, but c-archive builds need a main.

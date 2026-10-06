@@ -106,6 +106,7 @@
 <nav aria-label="Table of contents">
   <h2>SimpleVPN</h2>
   <a href="#importing">Importing VPNs</a>
+  <a href="#virtual-routing-compositions">One Virtual Interface</a>
   <a href="#vpn-order">Your Own VPN Order</a>
   <a href="#endpoints-map">Servers &amp; the Map</a>
   <a href="#endpoints-order">Your Own Server Order</a>
@@ -298,6 +299,7 @@
   <a href="#sshnet-port">Port</a>
   <a href="#sshnet-username">Username</a>
   <a href="#sshnet-auth-method">Sign-In Method</a>
+  <a href="#sshnet-agent-socket-path">SSH Agent Socket</a>
   <a href="#sshnet-password">Password</a>
   <a href="#sshnet-private-key">Private Key</a>
   <a href="#sshnet-certificate">Certificate</a>
@@ -519,7 +521,7 @@
 <p><strong>Placeholders</strong> is the default. The file describes where a saved password or key belongs, without writing its value. Import leaves those instructions alone; enter the missing material in the new VPN's Sign-In settings. Public certificates and server keys remain available for comparison.</p>
 <p>Choose <strong>Include Secrets</strong> to copy the selected VPNs' saved Keychain credentials into the file. Protected credentials require your Mac's authentication. This file contains passwords and private keys in plain text and says so in its header. SimpleVPN creates it with owner-only permissions; a copy sent elsewhere has no Keychain protection.</p>
 <p>Manage VPNs also offers <strong>Export Settings</strong> on each VPN's context menu, with the same choices in JSON or YAML. OpenVPN and WireGuard have separate export actions for their original formats, including explicit actions that write their keys. L2TP's configuration-profile export offers placeholders or saved secrets too.</p>
-<p>An export copies credentials SimpleVPN stores for these VPNs. It does not extract keys from an SSH agent, copy an external password-manager vault, or back up Tailscale's node identity. Automatic recovery files continue to omit secrets.</p>
+<p>An export copies credentials SimpleVPN stores for these VPNs. It does not extract keys from an SSH agent, copy an external password-manager vault, or copy provider-wide password-manager unlocks. Tailscale node identity is included when you choose secrets. Automatic recovery files continue to omit secrets.</p>
 
 <h3 id="exporting-import">What importing does, and what it will not do</h3>
 <ul>
@@ -850,7 +852,7 @@
   <li><strong>The agent holds no keys.</strong> It answered, and offered nothing. Unlock the vault, turn the agent on for the key you want to use, or <code>ssh-add</code> a key to the built-in agent.</li>
   <li><strong>The server refused the keys.</strong> The agent offered keys and the server said no to all of them — the message names them. Add the matching public key to your account on the server, or check you're signing in as the right <a href="#ssh-username">username</a>.</li>
 </ul>
-<p><strong>Where it works.</strong> Agent sign-in is available to the SSH tunnel kinds that sign in inside SimpleVPN itself — the SOCKS proxy and port-forward modes. The <strong>SSH Network Tunnel</strong> kind cannot use it: that session is made by SimpleVPN's network extension, which runs outside your login session and so cannot reach your agent. Give that kind a key or a password instead.</p>
+<p><strong>Where it works.</strong> Agent sign-in is available to SSH SOCKS and port-forward modes and the <strong>SSH Network Tunnel</strong>. The network tunnel asks the running SimpleVPN app to forward signing requests to your chosen user agent; private keys stay with the agent. Keep SimpleVPN running so a reconnect can request another signature.</p>
 <div class="warn"><strong>Agent forwarding</strong> (OpenSSH's <code>ForwardAgent</code>) is deliberately not offered. It only means anything for a remote shell, which a tunnel never opens — and it would let anything running as root on the server use your keys for as long as you stay connected. There is nothing to forward here, so there is no switch for it.</div>
 
 <h2 id="ssh-agent-socket">SSH Agent Socket</h2>
@@ -1348,8 +1350,19 @@ who wants them.</p>
   <li><strong>Password</strong> — the account password on the server.</li>
   <li><strong>Private Key</strong> — a private key you paste in, which SimpleVPN keeps in your Keychain (see <a href="#sshnet-private-key">Private Key</a>).</li>
   <li><strong>Certificate</strong> — a key plus the certificate your organisation signed it with (see <a href="#sshnet-certificate">Certificate</a>).</li>
+  <li><strong>SSH Agent</strong> — keys loaded from <code>~/.ssh</code>, 1Password, or another OpenSSH-compatible agent. Private keys stay with the agent.</li>
 </ul>
-<div class="warn">There is no <strong>SSH agent</strong> and no <strong>Kerberos</strong> option here, and there cannot be. This tunnel runs as a system service, outside your login session, so it can reach neither your agent's socket nor your Kerberos ticket. Paste the key instead — SimpleVPN holds it for you. (The plain <a href="#ssh-auth-method">SSH</a> kind runs in your own session and does offer both.)</div>
+<div class="warn">Kerberos is unavailable in the system service because it cannot access your login session's ticket cache. SSH Agent uses SimpleVPN's authenticated signing relay.</div>
+
+<h2 id="virtual-routing-compositions">One Virtual Interface</h2>
+<p>In Manage VPNs, choose a composition&rsquo;s <strong>Connect Through One Virtual Interface</strong> action to connect two to sixteen single-peer WireGuard VPNs behind one stable interface. Your saved individual VPNs keep their settings and Keychain credentials.</p>
+<p>Custom destination routes choose the VPN carrying each new connection. Existing connections stay on their original VPN when you change the default. Stopping a member keeps its private routes captured; if no VPN can carry default traffic, the path display says <strong>Internet blocked</strong>. Choose <strong>Direct</strong> explicitly to release default capture.</p>
+<p>This action currently supports WireGuard members using one resolver configuration. Different scoped DNS servers, custom proxies, local network exclusions and chained VPNs require independent connections. The action explains an unavailable configuration before connecting.</p>
+<p>Tailscale node identity is saved in your user Keychain. Keep SimpleVPN running while connected so identity updates can be saved; an update that cannot be saved stops the connection and reports the problem. Legacy identity files are removed only after verified Keychain storage.</p>
+
+<h2 id="sshnet-agent-socket-path">SSH Agent Socket</h2>
+<p class="default">Default: empty (the agent in your login session).</p>
+<p>Used by SSH Agent sign-in. Choose “Use 1Password” when its agent is available, or enter the socket path your agent supplies. Keys from <code>~/.ssh</code> can be loaded into macOS's agent with <code>ssh-add</code>. The app relays only public-key listings and signing requests to the verified network extension. Private keys stay with your agent. Keep SimpleVPN running while this connection is active so reconnects can request another signature.</p>
 
 <h2 id="sshnet-password">Password</h2>
 <p class="default">Optional — required by password sign-in.</p>

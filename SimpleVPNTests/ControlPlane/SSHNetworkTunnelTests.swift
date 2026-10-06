@@ -223,7 +223,7 @@ import NetworkExtension
         // Not a style check: QUIC is the default for much of the web now, and
         // "some sites are slow" is a much worse way to discover this limit.
         #expect(SSHNetworkTunnelConfig.udpCaveat.contains("QUIC"))
-        #expect(SSHNetworkTunnelConfig.unavailableMethodReason.lowercased().contains("agent"))
+        #expect(SSHNetworkTunnelConfig.AuthMethod.allCases.contains(.agent))
         #expect(SSHNetworkTunnelConfig.unavailableMethodReason.contains("Kerberos"))
     }
 }

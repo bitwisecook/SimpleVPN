@@ -45,7 +45,7 @@ static void oc_setup_tun(void *priv);
 static void oc_stats(void *priv, const struct oc_stats *stats);
 
 @interface OpenConnectBridge () {
-    __weak NEPacketTunnelProvider *_provider;
+    __weak NEPacketTunnelProvider<SVPTunnelSettingsApplying> *_provider;
     __weak id<OpenConnectBridgeDelegate> _delegate;
     struct openconnect_info *_vpninfo;
     OCClientSettings *_cfg;
@@ -96,7 +96,7 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
 
 @implementation OpenConnectBridge
 
-- (instancetype)initWithProvider:(NEPacketTunnelProvider *)provider
+- (instancetype)initWithProvider:(NEPacketTunnelProvider<SVPTunnelSettingsApplying> *)provider
                         delegate:(id<OpenConnectBridgeDelegate>)delegate {
     if ((self = [super init])) {
         _provider = provider;
@@ -357,7 +357,7 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
     if (openconnect_get_ip_info(_vpninfo, &ip, NULL, NULL) != 0 || !ip) {
         [self fail:@"The gateway didn't provide an IP configuration."]; return;
     }
-    NEPacketTunnelProvider *provider = _provider;
+    NEPacketTunnelProvider<SVPTunnelSettingsApplying> *provider = _provider;
     if (!provider) return;
 
     // Snapshot the negotiated config into ivars so the tun settings can be rebuilt
@@ -629,16 +629,16 @@ static void oc_splitDests(NSArray<NSDictionary<NSString *, id> *> *dests,
 // Apply settings synchronously (callers are off the main thread). Returns YES on
 // success. Must NOT be called while holding _cfgMutex (it blocks on completion).
 - (BOOL)applySettings:(NEPacketTunnelNetworkSettings *)settings {
-    NEPacketTunnelProvider *provider = _provider;
+    NEPacketTunnelProvider<SVPTunnelSettingsApplying> *provider = _provider;
     if (!provider) return NO;
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
     __block BOOL ok = NO;
-    [provider setTunnelNetworkSettings:settings completionHandler:^(NSError *e) {
+    [provider applyNetworkSettings:settings completionHandler:^(NSError *e) {
         ok = (e == nil);
         if (e) OCLOG("setTunnelNetworkSettings failed: %{public}s", e.localizedDescription.UTF8String);
         dispatch_semaphore_signal(done);
     }];
-    dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC));
+    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
     return ok;
 }
 

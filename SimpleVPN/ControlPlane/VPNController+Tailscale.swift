@@ -127,11 +127,16 @@ extension VPNController {
     /// collect: either a stored auth key registers this Mac silently, or the
     /// engine asks for a browser sign-in and `watchTailscaleSignIn` surfaces it.
     func connectTailscale(id: String) async throws {
+        guard let existing = managers[id], existing.connection.status == .disconnected || existing.connection.status == .invalid else {
+            throw err("Disconnect this VPN before starting a new connection.")
+        }
+        await drainTailscaleStateBroker(id)
         guard let mgr = managers[id],
               mgr.protocolConfiguration is NETunnelProviderProtocol else { throw err("no such profile") }
         if let ensureExtensionReady, !(await ensureExtensionReady()) {
             throw err("SimpleVPN needs its network extension approved before it can connect. Open System Settings ▸ General ▸ Login Items & Extensions ▸ Network Extensions and allow SimpleVPN.")
         }
+        await migrateLegacyTailscaleIdentity(id)
         let config = tailscaleConfig(for: id)
         if let problem = config.controlURLProblem { throw err(problem) }
         // An exit node switched on with nothing chosen starts a tunnel that
@@ -143,6 +148,11 @@ extension VPNController {
         // The auth key is a credential: it goes through startTunnel options in
         // memory, never through providerConfiguration.
         var options: [String: NSObject] = [:]
+        options["tailscaleNodeStateBroker"] = true as NSNumber
+        let nodeState = try await Task.detached {
+            try KeychainCredentialStore.credentialsForExport(profile: Self.tailscaleNodeStateProfile(id))?.password
+        }.value
+        if let nodeState { options["tailscaleNodeState"] = nodeState as NSString }
         let key = tailscaleAuthKey(for: id)
         if !key.isEmpty { options["tailscaleAuthKey"] = key as NSString }
 
@@ -153,6 +163,7 @@ extension VPNController {
             throw err("The VPN configuration isn't ready — try removing and re-creating it.")
         }
         try session.startTunnel(options: options)
+        watchTailscaleNodeState(id, session: session)
         Self.log.log("tailscale startTunnel dispatched for \(id, privacy: .public)")
         resyncStatuses()
         watchTailscaleSignIn(id: id)

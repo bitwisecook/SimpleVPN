@@ -115,11 +115,28 @@ extension VPNController {
 
     func remove(id: String) async throws {
         guard !locallyRemovedProfileIDs.contains(id), let mgr = managers[id] else { return }
+        let kind = profiles.first(where: { $0.id == id })?.kind
+        connectionReservations.cancel(member: id)
+        if kind == .wireGuard { await wireGuardConfigurationOperations.acquire() }
+        defer { if kind == .wireGuard { wireGuardConfigurationOperations.release() } }
+        guard !locallyRemovedProfileIDs.contains(id), managers[id] === mgr else { return }
+        if virtualManager(for: id) != nil {
+            guard await sendMessage("router:stop-port", to: id) == "ok" else {
+                throw err("The virtual connection did not acknowledge stopping this VPN.")
+            }
+            virtualStoppedMembers.insert(id)
+        }
+        locallyRemovedProfileIDs.insert(id)
+        sshNetworkAgentEpochs[id] = nil
+        sshNetworkAgentBrokers.removeValue(forKey: id)?.cancel()
+        await tailscaleIdentityMigrations[id]?.value
+        await drainTailscaleStateBroker(id)
+        if kind == .tailscale { _ = await sendMessageData("tsforget", to: id, timeout: 4) }
+        mgr.connection.stopVPNTunnel()
         // NetworkExtension removes preferences asynchronously.  Hide this
         // profile before awaiting it so an unrelated refresh cannot put the
         // old manager back in the UI, then keep its tombstone until our own
         // confirming refresh has completed.
-        locallyRemovedProfileIDs.insert(id)
         hideProfileWhileRemoving(id: id)
         managers.removeValue(forKey: id)
         authConfigs.removeValue(forKey: id)
@@ -128,12 +145,7 @@ extension VPNController {
         customRoutingCache.removeValue(forKey: id)
         uiPrefsCache.removeValue(forKey: id)
 
-        // A Tailscale node key is this Mac's identity on that network and lives
-        // in the extension's root-owned tree, which the app cannot touch — ask
-        // the extension to shred it while there is still a session to ask.
-        if profiles.first(where: { $0.id == id })?.kind == .tailscale {
-            _ = await sendMessageData("tsforget", to: id, timeout: 4)
-        }
+        // Remove preferences before deleting their user-Keychain identity.
         do {
             try await mgr.removeFromPreferences()
         } catch {
@@ -148,6 +160,7 @@ extension VPNController {
         KeychainCredentialStore.deleteOVPNInlineSecrets(profile: id)
         KeychainCredentialStore.clearSession(profile: id)
         KeychainCredentialStore.deleteCredentials(profile: Self.tailscaleKeyProfile(id))
+        KeychainCredentialStore.deleteCredentials(profile: Self.tailscaleNodeStateProfile(id))
         KeychainCredentialStore.deleteCredentials(profile: Self.wireGuardKeyProfile(id))
         KeychainCredentialStore.deleteWireGuardPeerSecrets(profile: id)
         BiometricCredentialStore.delete(profile: id)
@@ -569,33 +582,9 @@ extension VPNController {
     /// the keychain) is the one outcome that would destroy a user's only copy of a
     /// client private key, and it is unreachable from here.
     ///
-    /// UNDER MDM `lockConfiguration` THE REWRITE IS SKIPPED, AND THE PROFILE IS
-    /// BADGED. Decided, not defaulted — `Docs/SecretsAndSync.md` §2 carries the
-    /// argument and the case against. In short:
-    ///
-    ///  • The inline key was delivered BY the organisation, INSIDE the profile the
-    ///    organisation pushed. The material is already within its own trust
-    ///    boundary, and the party who can actually fix it — by pushing a profile
-    ///    without the inline block, or by unlocking configuration — is that same
-    ///    organisation. That is what makes a managed profile different from a
-    ///    user's own, where nobody but us was ever going to fix it.
-    ///  • Every other `lockConfiguration` site in this app refuses to write. A
-    ///    single silent exception is how a policy stops meaning anything, and we
-    ///    cannot see why the lock was set: an administrator may be comparing the
-    ///    stored profile against a known-good baseline, in which case our rewrite
-    ///    reads as tampering.
-    ///  • A rewrite of managed state cannot be recalled, and a re-push would
-    ///    re-leak anyway.
-    ///
-    /// AND THE CASE AGAINST, which is real: moving a secret into the keychain is not
-    /// a *configuration* edit in the sense the policy means. The profile's meaning is
-    /// unchanged, the tunnel connects identically, and an administrator who locked
-    /// settings meant "the user must not change these values", not "the private key
-    /// must stay readable in the VPN preferences". Under that reading this preserves
-    /// a leak out of deference to a policy that never contemplated it. So the
-    /// outcome is not left silent: it is recorded in `inlineSecretMigrationFailures`
-    /// and badged in the VPN list exactly like a failed migration, because the one
-    /// thing this must not be is invisible.
+    /// Secret storage migration preserves the connection's exact values and
+    /// applies even when editing is locked. The OS may still reject its rewrite;
+    /// that failure retains the original and displays a migration notice.
     func migrateInlineOVPNSecrets() async {
         for profile in profiles where profile.kind == .openVPN {
             let id = profile.id
@@ -603,17 +592,6 @@ extension VPNController {
             let split = OVPNSecretMaterial.split(stored)
             guard !split.secrets.isEmpty else {
                 inlineSecretMigrationFailures.removeValue(forKey: id)
-                continue
-            }
-            if ManagedPolicy.lockConfiguration {
-                Self.log.log("inline secrets left in place for \(id, privacy: .public): configuration is locked by policy")
-                // Badged, not merely logged: nobody reads the log, and an unread
-                // private key in the VPN preferences is the entire problem this
-                // migration exists to fix. The copy names the material in house
-                // terms, says who can change it, and does NOT offer the user a fix
-                // they do not have — a badge that suggests unlocking the keychain
-                // would send them chasing something that is not the cause.
-                inlineSecretMigrationFailures[id] = OVPNSecretMaterial.managedInlineSecretNotice(split.secrets.keys)
                 continue
             }
             guard let mgr = managers[id],

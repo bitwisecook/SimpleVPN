@@ -557,6 +557,15 @@ static NSString *hexTail(NSString *s) {
     return YES;
 }
 
+- (BOOL)useAgentSocketDescriptor:(int)descriptor error:(NSError **)error {
+    if (!_session || descriptor < 0 || ssh_set_agent_socket(_session, descriptor) != SSH_OK) {
+        if (descriptor >= 0) close(descriptor);
+        if (error) *error = sshErr(@"The signing broker socket could not be used.");
+        return NO;
+    }
+    return YES;
+}
+
 - (BOOL)authAgentForUser:(NSString *)user error:(NSError **)error {
     if (!_session) { if (error) *error = sshErr(@"No SSH session to sign in to."); return NO; }
     // libssh contacts the agent itself (SSH_OPTIONS_IDENTITY_AGENT if set,

@@ -178,6 +178,7 @@ nonisolated struct RouteFilter: Codable, Sendable, Equatable {
         for rule in rules where rule.verb == .add { emit(rule.target) }
 
         var out = captured
+        out.prefixesRewritten = true
         out.advertisedPrefixes = outPrefixes
         out.wantsDefault = outDefault
         // Removing a pushed default forces split — drop ownership eligibility too.
@@ -445,8 +446,7 @@ nonisolated struct ProxyCustomization: Codable, Sendable, Equatable {
 
     /// The user's CUSTOM proxy as the tier-2 apply payload, for the kinds where the APP
     /// is the applier at connect time — the native NEVPNManager kinds carry it on
-    /// `NEVPNProtocol.proxySettings` (see `NativeVPNManager.connect`), with the sign-in
-    /// riding `NEProxyServer.username`/`password`, never the stored config. nil unless
+    /// `NEVPNProtocol.proxySettings` (see `NativeVPNManager.connect`), with authentication capability checked by the native manager before saving. nil unless
     /// the mode is `.custom` with a usable value; a SOCKS manual proxy maps to nil too
     /// (`NEProxySettings` has no SOCKS slot — http/https/PAC only, which the editor
     /// calls out for these kinds).
@@ -506,6 +506,16 @@ nonisolated struct CustomRoutingProfile: Codable, Sendable, Equatable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        if decoder.userInfo[.strictConfigImport] as? Bool == true {
+            schema = try c.decodeIfPresent(Int.self, forKey: .schema) ?? Self.currentSchema
+            guard schema <= Self.currentSchema, schema > 0 else {
+                throw DecodingError.dataCorruptedError(forKey: .schema, in: c, debugDescription: "Unsupported routing schema")
+            }
+            routes = try c.decodeIfPresent(RouteFilter.self, forKey: .routes) ?? RouteFilter()
+            dns = try c.decodeIfPresent(DNSCustomization.self, forKey: .dns) ?? DNSCustomization()
+            proxy = try c.decodeIfPresent(ProxyCustomization.self, forKey: .proxy) ?? ProxyCustomization()
+            return
+        }
         schema = (try? c.decodeIfPresent(Int.self, forKey: .schema)) ?? Self.currentSchema
         routes = ((try? c.decodeIfPresent(RouteFilter.self, forKey: .routes)) ?? nil) ?? RouteFilter()
         dns    = ((try? c.decodeIfPresent(DNSCustomization.self, forKey: .dns)) ?? nil) ?? DNSCustomization()

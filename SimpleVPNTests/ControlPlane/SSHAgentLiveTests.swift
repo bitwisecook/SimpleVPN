@@ -27,6 +27,7 @@
 
 import Testing
 import Foundation
+import Darwin
 @testable import SimpleVPN
 
 // MARK: - A real ssh-agent, owned by the test
@@ -218,6 +219,35 @@ struct SSHAgentLiveTests {
         // And the authenticated session really works: open a channel through it.
         session.enterDataMode()
         print("   agent sign-in succeeded against sshd on port \(server.port)")
+    }
+
+    @Test(.enabled(if: sshAgentLiveTestsEnabled))
+    func theSigningBrokerCarriesActualAgentSignaturesAndRejectsMutations() throws {
+        let fixture = try fixture()
+        let agent = try LiveSSHAgent(); defer { agent.stop() }
+        try agent.add(keyPath: fixture.clientKeyPath)
+        let broker = try SSHAgentSigningBroker(); defer { broker.stop() }
+        let transport = try SSHAgentSystemEnvironment(timeout:5).connect(toSocketAt:agent.socketPath)
+        defer { transport.close() }
+        let worker=Task.detached {
+            while !Task.isCancelled {
+                if let request=broker.snapshot() {
+                    let response=try transport.roundTrip(request.request)
+                    #expect(broker.reply(.init(id:request.id,response:response)))
+                }
+                try await Task.sleep(for:.milliseconds(10))
+            }
+        }
+        defer { worker.cancel() }
+        let server = try LiveSSHServer(fixture:fixture); defer { server.stop() }
+        let session = try connected(to:server,fixture); defer { session.disconnect() }
+        let fd=broker.descriptor()
+        try session.useAgentSocketDescriptor(fd)
+        try session.authAgent(forUser:fixture.user)
+        session.disconnect()
+        #expect(fcntl(fd,F_GETFD) == -1, "libssh must release its agent descriptor")
+        #expect(SSHAgentProbe().probe(configuredSocketPath:agent.socketPath).identities.count == 1)
+        #expect(!broker.reply(.init(id:UUID(),response:Data([0,0,0,1,5]))))
     }
 
     /// The engine's own path — the config field, the plan, the bridge call and the

@@ -70,6 +70,7 @@ final class ProxyRealizer: MediatorRealizer {
     /// The last plan this realizer wrote — so it can clear a previous owner's proxy
     /// when ownership moves, and skip an unchanged decision (idempotent).
     private var lastPlan: ProxyPlan?
+    private var appliedOwner: String?
 
     /// Resolve a plan's `authSource` keychain REF to the stored proxy sign-in, HERE
     /// (app-side, at realize time) — the intent/plan stay credential-free and the
@@ -91,31 +92,50 @@ final class ProxyRealizer: MediatorRealizer {
     }
 
     /// The session ended — forget what we wrote (a fresh connect re-applies).
-    func forget(id: String) { if lastPlan?.owner == id { lastPlan = nil } }
+    func forget(id: String) {
+        if appliedOwner == id { appliedOwner = nil; lastPlan = nil }
+    }
 
     /// SOLE WRITER: realize the arbitrated proxy on the OWNER egress via `proxy:apply:`.
     /// STRIP-old → SET-new when ownership moves, so a stale owner never keeps asserting
     /// a proxy the plan no longer wants. `previous` is unused (we track `lastPlan`),
     /// matching how `MultiTunnelRealizer` owns its applied-state cache.
     func realize(_ plan: ProxyPlan, from previous: ProxyPlan?) async {
+        _ = await apply(plan, force: false)
+    }
+
+    @discardableResult
+    func apply(_ plan: ProxyPlan, force: Bool, isCurrent: @MainActor () -> Bool = { true }) async -> Bool {
+        guard let host else { return false }
         let prior = lastPlan
-        guard plan != prior else { return }
-        lastPlan = plan
+        guard force || plan != prior else { return true }
 
         // Ownership moved (or dropped): clear the old owner's proxy first.
-        if let old = prior?.owner, old != plan.owner {
+        if let old = appliedOwner, old != plan.owner {
             log.log("proxy: clearing \(old, privacy: .public)'s system proxy (owner changed)")
-            _ = await host?.proxyApply(nil, to: old)
+            if host.proxyProfiles.contains(where: { $0.id == old && $0.engaged }) {
+                lastAck = await host.proxyApply(nil, to: old)
+                guard lastAck == "ok" else { return false }
+            }
+            appliedOwner = nil
+            lastPlan = nil
+            guard isCurrent() else { return false }
         }
         guard let owner = plan.owner, plan.providesProxy else {
             // No proxy wanted: clear the current owner too (if any).
-            if let owner = prior?.owner, prior?.owner == plan.owner {
-                _ = await host?.proxyApply(nil, to: owner)
+            if let owner = appliedOwner {
+                lastAck = await host.proxyApply(nil, to: owner)
+                guard lastAck == "ok" else { return false }
+                appliedOwner = nil
+                lastPlan = nil
             }
             lastAck = nil
             lastCredentialsFound = false
-            return
+            guard isCurrent() else { return false }
+            lastPlan = plan
+            return true
         }
+        guard isCurrent() else { return false }
         // Resolve the sign-in REF (if any) to real credentials now, and only now —
         // they live on the wire payload for the length of this one IPC. Never logged;
         // the log line carries a with-auth/no-auth flag at most.
@@ -126,7 +146,15 @@ final class ProxyRealizer: MediatorRealizer {
             request = plan.applyRequest(username: auth.username, password: auth.password)
         }
         log.log("proxy: applying \(owner, privacy: .public)'s proxy as the system proxy (\(request.isEmpty ? "clear" : "set", privacy: .public)\(plan.authSource != nil ? (self.lastCredentialsFound ? ", with auth" : ", auth MISSING") : "", privacy: .public))")
-        lastAck = await host?.proxyApply(request.isEmpty ? nil : request, to: owner)
+        lastAck = await host.proxyApply(request.isEmpty ? nil : request, to: owner)
+        guard lastAck == "ok" else { return false }
+        // Retain each acknowledged mutation even when a newer plan supersedes
+        // it. The next request must clear the proxy actually installed.
+        appliedOwner = request.isEmpty ? nil : owner
+        lastPlan = nil
+        guard isCurrent() else { return false }
+        lastPlan = plan
+        return true
     }
 }
 
@@ -213,7 +241,7 @@ final class ProxyMediator {
                           policy: ProxyPolicy(defaultOwner: host?.proxyDefaultOwner))
     }
 
-    var effectiveProxyOwner: String? { plan.owner }
+    var effectiveProxyOwner: String? { appliedPlan?.owner }
 
     /// Where the effective proxy's SIGN-IN landed (nil when it doesn't need one):
     /// applied with the proxy, or not injectable and why — PAC, missing keychain row,
@@ -249,27 +277,36 @@ final class ProxyMediator {
 
     // MARK: - Reconcile / re-assert
 
-    @ObservationIgnored private var reconcileTask: Task<Void, Never>?
-    func reconcile() {
+    @ObservationIgnored private let applyLoop = MediatorApplyLoop<ProxyPlan>()
+    private(set) var appliedPlan: ProxyPlan?
+    private(set) var lastApplyError: String?
+    func reconcile(force: Bool = false) {
         refreshIntents()
-        let plan = self.plan
-        lastApplyAt = Date()
-        reconcileTask = Task { [weak self] in
-            guard let self else { return }
-            await self.realizer.realize(plan, from: nil)
-            // Fold the realizer's report into the published auth advisory — a proxy
-            // that needs a sign-in we couldn't attach must be said, not dropped.
-            let advisory = ProxyAuthAdvisory.decide(plan: plan,
-                                                    credentialsFound: self.realizer.lastCredentialsFound,
-                                                    ack: self.realizer.lastAck)
-            if advisory != self.authAdvisory, let advisory, advisory != .applied {
-                Self.log.log("proxy auth: \(String(describing: advisory), privacy: .public)")
+        applyLoop.enqueue(plan, force: force) { [weak self] next, forced, revision in
+            guard let self else { return false }
+            self.lastApplyAt = Date()
+            let success = await self.realizer.apply(next, force: forced) {
+                self.applyLoop.isCurrent(revision)
             }
-            self.authAdvisory = advisory
+            guard self.applyLoop.isCurrent(revision) else { return false }
+            self.lastApplyAt = Date()
+            self.lastApplyError = success ? nil : "Proxy change was not acknowledged."
+            self.authAdvisory = ProxyAuthAdvisory.decide(plan: next,
+                credentialsFound: self.realizer.lastCredentialsFound, ack: self.realizer.lastAck)
+            if success {
+                self.appliedPlan = next
+                if let drift = self.lastDrift, !drift.reasserted, forced {
+                    let confirmed = MediatorDriftEvent(summary: drift.summary, reasserted: true, at: drift.at)
+                    self.lastDrift = confirmed
+                    self.driftHook?(confirmed)
+                }
+            }
+            return success
         }
     }
 
-    func reassertNow() { reconcile() }
+    func reassertNow() { reconcile(force: true) }
+    func waitUntilIdle() async { await applyLoop.waitUntilIdle() }
 
     // MARK: - Status hooks
 
@@ -318,11 +355,11 @@ final class ProxyMediator {
         let action = ProxyDriftDecision.action(expected: plan, observed: obs,
                                                withinSuppressWindow: suppressed)
         guard action == .reassert else { return }
-        let event = MediatorDriftEvent(summary: driftSummary(obs), reasserted: plan.providesProxy)
+        let event = MediatorDriftEvent(summary: driftSummary(obs), reasserted: false)
         lastDrift = event
         driftHook?(event)
         Self.log.log("external proxy drift: \(event.summary, privacy: .public)")
-        if plan.providesProxy { reconcile() }
+        if plan.providesProxy { reconcile(force: true) }
     }
 
     private func driftSummary(_ obs: ProxyObservation) -> String {

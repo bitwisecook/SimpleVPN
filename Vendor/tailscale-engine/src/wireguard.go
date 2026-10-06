@@ -68,6 +68,7 @@ package main
 /*
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 // Callback types crossing to Swift. `packetOut` borrows its buffer for the
 // duration of the call only — Swift must copy before returning.
@@ -78,6 +79,10 @@ typedef void (*WGStringCallback)(const char *text);
 // check in one place.
 static void wgCallPacket(WGPacketCallback f, const unsigned char *b, int n) { if (f != NULL) f(b, n); }
 static void wgCallString(WGStringCallback f, const char *s) { if (f != NULL) f(s); }
+typedef void (*WGInstancePacketCallback)(uint64_t context, const unsigned char *bytes, int len);
+typedef void (*WGInstanceStringCallback)(uint64_t context, const char *text);
+static void wgInstancePacket(WGInstancePacketCallback f, uint64_t c, const unsigned char *b, int n) { if (f) f(c,b,n); }
+static void wgInstanceString(WGInstanceStringCallback f, uint64_t c, const char *s) { if (f) f(c,s); }
 */
 import "C"
 
@@ -96,6 +101,7 @@ import (
 
 	"github.com/tailscale/wireguard-go/conn"
 	"github.com/tailscale/wireguard-go/device"
+	"pxengine/instance"
 )
 
 // wgDefaultMTU is the wg-quick default: 1500 minus WireGuard's 80-byte
@@ -123,6 +129,7 @@ type wgStartConfig struct {
 // the server is routed around the tunnel it carries.
 type wgStartResponse struct {
 	OK       bool       `json:"ok,omitempty"`
+	Handle   uint64     `json:"handle,omitempty"`
 	Endpoint string     `json:"endpoint,omitempty"`
 	Error    *shimError `json:"error,omitempty"`
 }
@@ -309,34 +316,100 @@ func WGStart(cfgJSON *C.char) *C.char {
 	if err := json.Unmarshal([]byte(C.GoString(cfgJSON)), &cfg); err != nil {
 		return wgFail("badRequest", "configuration is not valid JSON: %v", err)
 	}
+	st, problem := createWGState(cfg, conn.NewDefaultBind(), emitWGPacket, wgLogf)
+	if problem != nil {
+		return cJSON(wgStartResponse{Error: problem})
+	}
+	wgCurrent.Store(st)
+	return cJSON(wgStartResponse{OK: true, Endpoint: st.endpoint})
+}
+
+// createWGState is the production constructor used by both the scoped API and
+// legacy compatibility entry. Tests inject a loopback-only Bind, not a fake engine.
+func createWGState(cfg wgStartConfig, bind conn.Bind, emit func([]byte), logf func(string, ...any)) (*wgState, *shimError) {
 	endpoint, err := wgResolveEndpoint(cfg.Endpoint)
 	if err != nil {
-		return wgFail("endpoint", "%v", err)
+		return nil, &shimError{Kind: "endpoint", Message: err.Error()}
 	}
 	uapi, err := renderWGUAPI(cfg, endpoint)
 	if err != nil {
-		return wgFail("badRequest", "%v", err)
+		return nil, &shimError{Kind: "badRequest", Message: err.Error()}
 	}
 	mtu := cfg.MTU
 	if mtu <= 0 {
 		mtu = wgDefaultMTU
 	}
-
-	tundev := newCallbackTUN(mtu, emitWGPacket)
-	logger := &device.Logger{Verbosef: wgLogf, Errorf: wgLogf}
-	dev := device.NewDevice(tundev, conn.NewDefaultBind(), logger)
+	tundev := newCallbackTUN(mtu, emit)
+	logger := &device.Logger{Verbosef: logf, Errorf: logf}
+	dev := device.NewDevice(tundev, bind, logger)
 	if err := dev.IpcSet(uapi); err != nil {
-		dev.Close() // closes the tun too
-		return wgFail("engine", "configuration was refused: %v", err)
+		dev.Close()
+		return nil, &shimError{Kind: "engine", Message: "configuration was refused: " + err.Error()}
 	}
 	if err := dev.Up(); err != nil {
 		dev.Close()
-		return wgFail("engine", "device would not come up: %v", err)
+		return nil, &shimError{Kind: "engine", Message: "device would not come up: " + err.Error()}
 	}
+	logf("wireguard up: endpoint=%s mtu=%d", endpoint, mtu)
+	return &wgState{dev: dev, tundev: tundev, endpoint: endpoint}, nil
+}
 
-	wgCurrent.Store(&wgState{dev: dev, tundev: tundev, endpoint: endpoint})
-	wgLogf("wireguard up: endpoint=%s mtu=%d", endpoint, mtu)
-	return cJSON(wgStartResponse{OK: true, Endpoint: endpoint})
+var wgInstances instance.Registry[*wgState]
+
+//export WGCreateInstance
+func WGCreateInstance(cfgJSON *C.char, context C.uint64_t, packet C.WGInstancePacketCallback, logLine C.WGInstanceStringCallback) *C.char {
+	if cfgJSON == nil {
+		return wgFail("badRequest", "missing configuration")
+	}
+	var cfg wgStartConfig
+	if err := json.Unmarshal([]byte(C.GoString(cfgJSON)), &cfg); err != nil {
+		return wgFail("badRequest", "invalid configuration")
+	}
+	emit := func(p []byte) {
+		if len(p) > 0 {
+			C.wgInstancePacket(packet, context, (*C.uchar)(unsafe.Pointer(&p[0])), C.int(len(p)))
+		}
+	}
+	logf := func(format string, args ...any) {
+		text := C.CString(fmt.Sprintf(format, args...))
+		defer C.free(unsafe.Pointer(text))
+		C.wgInstanceString(logLine, context, text)
+	}
+	st, problem := createWGState(cfg, conn.NewDefaultBind(), emit, logf)
+	if problem != nil {
+		return cJSON(wgStartResponse{Error: problem})
+	}
+	return cJSON(wgStartResponse{OK: true, Handle: wgInstances.Add(st), Endpoint: st.endpoint})
+}
+
+//export WGPacketInInstance
+func WGPacketInInstance(handle C.uint64_t, bytes unsafe.Pointer, length C.int) C.int {
+	if bytes == nil || length <= 0 || length > maxPacketSize {
+		return 0
+	}
+	st, ok := wgInstances.Get(uint64(handle))
+	if ok && st.tundev.push(C.GoBytes(bytes, length)) {
+		return 1
+	}
+	return 0
+}
+
+//export WGStatusInstance
+func WGStatusInstance(handle C.uint64_t) *C.char {
+	st, ok := wgInstances.Get(uint64(handle))
+	if !ok {
+		return cJSON(wgStatusPayload{State: "stopped"})
+	}
+	return cJSON(statusWGState(st))
+}
+
+//export WGStopInstance
+func WGStopInstance(handle C.uint64_t) *C.char {
+	if st, ok := wgInstances.Remove(uint64(handle)); ok {
+		st.dev.Close()
+		st.tundev.Close()
+	}
+	return cJSON(okResponse{OK: true})
 }
 
 // ---- Packet ingress -----------------------------------------------------------
@@ -401,17 +474,21 @@ func WGStatus() *C.char {
 	if st == nil {
 		return cJSON(wgStatusPayload{State: "stopped"})
 	}
+	return cJSON(statusWGState(st))
+}
+
+func statusWGState(st *wgState) wgStatusPayload {
 	ipc, err := st.dev.IpcGet()
 	if err != nil {
-		return cJSON(wgStatusPayload{State: "running", Endpoint: st.endpoint,
-			PacketsDropped: st.tundev.dropped.Load()})
+		return wgStatusPayload{State: "running", Endpoint: st.endpoint,
+			PacketsDropped: st.tundev.dropped.Load()}
 	}
 	out := parseWGIpcStatus(ipc)
 	if out.Endpoint == "" {
 		out.Endpoint = st.endpoint
 	}
 	out.PacketsDropped = st.tundev.dropped.Load()
-	return cJSON(out)
+	return out
 }
 
 // ---- Stop -----------------------------------------------------------------------

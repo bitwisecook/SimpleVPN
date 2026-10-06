@@ -14,8 +14,7 @@
 //  the root(sysext) ↔ app boundary, the mapping is identical on both sides, and the
 //  split is unit-testable from the app target.
 //
-//  This is the DNS parallel of `ProxyApply.swift`: `nil`/empty ⇒ clear (restore the
-//  engine's captured/pushed DNS). No credentials or secrets ever ride this wire —
+//  nil restores engine DNS; an empty request suppresses it. No credentials or secrets ever ride this wire —
 //  only resolver IPs, search domains and the match-domain scoping.
 //
 
@@ -23,11 +22,11 @@ import Foundation
 import NetworkExtension
 
 /// One engine's slice of the arbitrated split-DNS decision, reduced to what
-/// `NEDNSSettings` needs. An empty `servers` list clears the override (the bridge
-/// restores whatever DNS it captured from the push). Codable for the `dns:apply:`
+/// `NEDNSSettings` needs. An empty `servers` list suppresses DNS. `dns:clear`
+/// restores engine intent. Codable for the `dns:apply:`
 /// IPC; Equatable so the realizer can skip re-applying an unchanged decision.
 nonisolated struct DNSApplyRequest: Codable, Sendable, Equatable {
-    /// Resolver IPs this engine should serve. Empty ⇒ clear (nil settings).
+    /// Resolver IPs this engine should serve. Empty suppresses its resolvers.
     var servers: [String]
     /// DNS search-list domains → `NEDNSSettings.searchDomains`.
     var searchDomains: [String]

@@ -762,6 +762,12 @@ struct MenuBarView: View {
         // with the rest of the app (`Docs/Drift.md`).
         .accessibilityLabel("\(comp.name), \((active ? DotState.connected : .off).accessibilityDescription), \(comp.members.count) VPNs")
         .accessibilityHint(active ? "Disconnects the whole group." : "Connects the whole group.")
+        .contextMenu {
+            Button("Connect Through One Virtual Interface") { Task { await vpn.connectThroughVirtualInterface(comp) } }
+                .disabled(vpn.virtualCompositionProblem(comp) != nil)
+                .help(vpn.virtualCompositionProblem(comp) ?? "Route this composition through one virtual interface.")
+                .accessibilityValue(vpn.virtualCompositionProblem(comp) ?? "Available")
+        }
     }
 }
 

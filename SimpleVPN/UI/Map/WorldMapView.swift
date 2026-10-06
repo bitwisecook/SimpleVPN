@@ -81,6 +81,7 @@ struct WorldMapView: View {
             stats: stats,
             device: devicePlacement,
             hints: hints(for: stats),
+            defaultOwner: vpn.routes.displayedGatewayOwner,
             name: { id in vpn.profiles.first { $0.id == id }?.name ?? "VPN" })
     }
 

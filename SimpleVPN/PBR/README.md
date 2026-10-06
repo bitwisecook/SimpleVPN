@@ -4,6 +4,13 @@ Tier-3 of the routing architecture: the Tcl-9 iRules-style policy engine — ful
 single utun, gVisor netstack, routing-as-a-switch, egress DAG, NAT/SNAT/DNAT, fake-IP
 overlap handling, named DNS listeners, per-egress proxies + PAC via JavaScriptCore.
 
+**Read the 2026-10-05 [network architecture review](../../Docs/NetworkArchitectureReview.md)
+first.** The requested core model is one stable virtual interface selecting between VPN
+egresses. It needs engine ports, instance handles, translation, transport routing and a
+confirmed policy/status contract before Tcl. The review also identifies platform assumptions
+and current mediator gaps that must be resolved before treating the older proposal as an
+implementation contract. No shared router is built yet.
+
 The **design is the contract** — read it before writing code here:
 
 - `Docs/PolicyRouting.md` — the engine design, GUI sketches, example Tcl scripts

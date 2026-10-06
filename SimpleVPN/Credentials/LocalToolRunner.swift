@@ -35,6 +35,7 @@
 
 import Foundation
 import os
+import Darwin
 
 /// The outcome of one tool run. `stdout` is secret-bearing; `stderr` is not
 /// (and is pre-scrubbed for anything that looks like a secret anyway).
@@ -215,82 +216,103 @@ nonisolated enum LocalToolRunner {
                                    stderr: "not an approved tool location", timedOut: false)
         }
         let environment = environment ?? childEnvironment()
-        let processBox = OSAllocatedUnfairLock<Process?>(initialState: nil)
-        let timedOutBox = OSAllocatedUnfairLock<Bool>(initialState: false)
+        let cancelled = OSAllocatedUnfairLock<Bool>(initialState: false)
         return await withTaskCancellationHandler {
             await withCheckedContinuation { (cont: CheckedContinuation<LocalToolResult, Never>) in
                 queue.async {
+                    guard !cancelled.withLock({ $0 }) else {
+                        cont.resume(returning: LocalToolResult(exitCode: -1, stdout: Data(), stderr: "cancelled", timedOut: false))
+                        return
+                    }
                     let process = Process()
                     process.executableURL = URL(fileURLWithPath: executable)
                     process.arguments = arguments
-                    // A vendor CLI that wants to prompt gets EOF instead — unless the
-                    // caller has an answer for it, in which case it gets exactly that
-                    // and then EOF.
-                    let inPipe: Pipe? = stdin == nil ? nil : Pipe()
-                    process.standardInput = inPipe ?? FileHandle.nullDevice
-                    let outPipe = Pipe(), errPipe = Pipe()
-                    process.standardOutput = outPipe
-                    process.standardError = errPipe
-                    // Built, never inherited — see childEnvironment().
+                    let input = stdin == nil ? nil : Pipe()
+                    let output = Pipe(), errors = Pipe()
+                    process.standardInput = input ?? FileHandle.nullDevice
+                    process.standardOutput = output
+                    process.standardError = errors
                     process.environment = environment
-                    processBox.withLock { $0 = process }
-                    do {
-                        try process.run()
-                    } catch {
-                        processBox.withLock { $0 = nil }
-                        cont.resume(returning: LocalToolResult(
-                            exitCode: -1, stdout: Data(),
-                            stderr: "couldn\u{2019}t start", timedOut: false))
+                    do { try process.run() }
+                    catch {
+                        cont.resume(returning: LocalToolResult(exitCode: -1, stdout: Data(), stderr: "couldn’t start", timedOut: false))
                         return
                     }
-                    DispatchQueue.global().asyncAfter(deadline: .now() + deadline) {
-                        processBox.withLock {
-                            guard $0 === process, process.isRunning else { return }
-                            timedOutBox.withLock { $0 = true }
-                            process.terminate()
-                            // A tool ignoring SIGTERM must not outlive the wait.
-                            DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-                                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+                    try? output.fileHandleForWriting.close()
+                    try? errors.fileHandleForWriting.close()
+                    try? input?.fileHandleForReading.close()
+                    let outFD = output.fileHandleForReading.fileDescriptor
+                    let errFD = errors.fileHandleForReading.fileDescriptor
+                    let inFD = input?.fileHandleForWriting.fileDescriptor
+                    for fd in [outFD, errFD] + (inFD.map { [$0] } ?? []) {
+                        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+                    }
+                    // Pipes can reject input after a child exits. Suppress SIGPIPE
+                    // on this descriptor only, without changing the app's signals.
+                    let canWriteInput = inFD.map { fcntl($0, F_SETNOSIGPIPE, 1) == 0 } ?? true
+                    let started = ProcessInfo.processInfo.systemUptime
+                    let limit = started + max(0.01, min(deadline, 300))
+                    var terminatedAt: TimeInterval?
+                    var out = Data(), err = Data(), buffer = [UInt8](repeating: 0, count: 16384)
+                    var outEOF = false, errEOF = false, inputOffset = 0
+                    var inputClosed = inFD == nil
+                    var timedOut = false, exceeded = !canWriteInput
+                    func drain(_ fd: Int32, into data: inout Data, maximum: Int, eof: inout Bool) {
+                        guard !eof else { return }
+                        // A flood on one pipe must not starve the other or its deadline.
+                        for _ in 0..<16 {
+                            let count = Darwin.read(fd, &buffer, buffer.count)
+                            if count > 0 {
+                                let room = maximum - data.count
+                                data.append(contentsOf: buffer.prefix(min(count, max(0, room))))
+                                if count > room { exceeded = true }
+                            } else if count == 0 { eof = true; return }
+                            else if errno != EINTR { if errno != EAGAIN && errno != EWOULDBLOCK { eof = true }; return }
+                        }
+                    }
+                    while true {
+                        drain(outFD, into: &out, maximum: 4 * 1024 * 1024, eof: &outEOF)
+                        drain(errFD, into: &err, maximum: 64 * 1024, eof: &errEOF)
+                        let now = ProcessInfo.processInfo.systemUptime
+                        let isCancelled = cancelled.withLock { $0 }
+                        if now >= limit { timedOut = true }
+                        if (timedOut || isCancelled || exceeded), terminatedAt == nil {
+                            terminatedAt = now
+                            if process.isRunning { process.terminate() }
+                        }
+                        if let terminatedAt, now - terminatedAt >= 2 {
+                            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+                            break // descendants holding a pipe cannot keep this task alive
+                        }
+                        if !inputClosed, let input, let inFD {
+                            if terminatedAt != nil || inputOffset == stdin!.count {
+                                try? input.fileHandleForWriting.close(); inputClosed = true
+                            } else {
+                                let count = stdin!.withUnsafeBytes { bytes in
+                                    Darwin.write(inFD, bytes.baseAddress!.advanced(by: inputOffset), min(16384, bytes.count - inputOffset))
+                                }
+                                if count > 0 { inputOffset += count }
+                                else if count < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK {
+                                    try? input.fileHandleForWriting.close(); inputClosed = true
+                                }
                             }
                         }
+                        if !process.isRunning && outEOF && errEOF { break }
+                        Thread.sleep(forTimeInterval: 0.005)
                     }
-                    // Feed stdin on another queue and CLOSE it. On this queue the
-                    // write could block for ever against a child that never reads —
-                    // and closing is what turns "waiting for a password" into EOF for
-                    // a tool that wants a second line.
-                    if let inPipe, let stdin {
-                        DispatchQueue.global().async {
-                            let handle = inPipe.fileHandleForWriting
-                            // A child that exits before reading gives us EPIPE/SIGPIPE
-                            // as an error rather than a crash — Foundation raises, and
-                            // it is nothing to report: the exit code already says what
-                            // happened.
-                            try? handle.write(contentsOf: stdin)
-                            try? handle.close()
-                        }
-                    }
-                    // Drain stderr on another queue: a chatty tool that fills the
-                    // stderr pipe while we read stdout would deadlock otherwise.
-                    let errBox = OSAllocatedUnfairLock<Data>(initialState: Data())
-                    let drained = DispatchSemaphore(value: 0)
-                    DispatchQueue.global().async {
-                        let data = errPipe.fileHandleForReading.readDataToEndOfFile()
-                        errBox.withLock { $0 = data }
-                        drained.signal()
-                    }
-                    let out = outPipe.fileHandleForReading.readDataToEndOfFile()
-                    process.waitUntilExit()
-                    drained.wait()
-                    processBox.withLock { $0 = nil }
-                    let errText = scrub(String(decoding: errBox.withLock { $0 }, as: UTF8.self))
+                    try? output.fileHandleForReading.close()
+                    try? errors.fileHandleForReading.close()
+                    if !inputClosed { try? input?.fileHandleForWriting.close() }
+                    let wasCancelled = cancelled.withLock { $0 }
+                    let exit = process.isRunning ? -1 : process.terminationStatus
                     cont.resume(returning: LocalToolResult(
-                        exitCode: process.terminationStatus, stdout: out,
-                        stderr: errText, timedOut: timedOutBox.withLock { $0 }))
+                        exitCode: exceeded || wasCancelled ? -1 : exit,
+                        stdout: exceeded || wasCancelled ? Data() : out,
+                        stderr: exceeded ? "tool output exceeded its limit" : wasCancelled ? "cancelled" : scrub(String(decoding: err, as: UTF8.self)),
+                        timedOut: timedOut))
                 }
             }
-        } onCancel: {
-            processBox.withLock { $0?.terminate() }
-        }
+        } onCancel: { cancelled.withLock { $0 = true } }
     }
 
     /// What a failure may say out loud: the first line of stderr, shortened, with

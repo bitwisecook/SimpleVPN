@@ -26,6 +26,144 @@ final class SimpleVPNUITests: XCTestCase {
         continueAfterFailure = false
     }
 
+    /// A disposable, disconnected profile exercises the actual shared list field.
+    /// Teardown removes only the profile this test creates; no real VPN connects.
+    @MainActor
+    func testCommaListPreservesTypingAcrossFocusChanges() throws {
+        let app = try launchOrSkip()
+        addTeardownBlock { @MainActor in app.terminate() }
+        app.menuBarItems["VPN"].click()
+        app.menuBarItems["VPN"].menuItems["Manage VPNs…"].click()
+        let manage = app.windows["manage"]
+        XCTAssertTrue(manage.waitForExistence(timeout: 10))
+        if manage.frame.width > 1_000 {
+            manage.buttons["_XCUI:ZoomWindow"].click()
+        }
+        let toolbar = XCTAttachment(screenshot: manage.screenshot())
+        toolbar.name = "Manage VPNs native toolbar"
+        toolbar.lifetime = .keepAlways
+        add(toolbar)
+        for title in ["Add VPN", "Remove the selected VPN", "Move Up", "Move Down", "Find a setting"] {
+            let control = manage.descendants(matching: .any)[title].firstMatch
+            XCTAssertTrue(control.waitForExistence(timeout: 5), "Missing native toolbar control \(title).")
+            XCTAssertGreaterThanOrEqual(control.frame.width, 32,
+                                       "The \(title) control must have room for its glyph and native padding.")
+        }
+        let addButton = manage.descendants(matching: .any)["Add VPN"].firstMatch
+        XCTAssertEqual(addButton.frame.width, addButton.frame.height, accuracy: 1,
+                       "The Add menu must have a square target for its circular button.")
+        let fixtureName = "SimpleVPN-UI-List-\(UUID().uuidString)"
+        let fixture = FileManager.default.temporaryDirectory.appendingPathComponent(fixtureName + ".conf")
+        // A public-only, disconnected fixture. Never import an actual private key
+        // or choose an existing profile as the test's editing/removal target.
+        try """
+        [Interface]
+        Address = 192.0.2.2/32
+        [Peer]
+        PublicKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+        AllowedIPs = 198.51.100.0/24
+        Endpoint = 127.0.0.1:9
+        """.write(to: fixture, atomically: true, encoding: .utf8)
+        addTeardownBlock { try? FileManager.default.removeItem(at: fixture) }
+        addTeardownBlock { @MainActor in
+            try self.removeFixture(fixtureName, in: manage, app: app)
+        }
+        try clickManageToolbarControl("Add VPN", in: manage, app: app)
+        app.menuItems["Import…"].click()
+        let panel = manage.sheets.firstMatch
+        XCTAssertTrue(panel.waitForExistence(timeout: 5), "The configuration file panel did not appear.")
+        XCTAssertTrue(panel.buttons["Open"].waitForExistence(timeout: 5),
+                      "Import must open a file picker before any text is entered.")
+        app.typeKey("g", modifierFlags: [.command, .shift])
+        let path = panel.textFields["PathTextField"]
+        XCTAssertTrue(path.waitForExistence(timeout: 5))
+        path.typeKey("a", modifierFlags: .command)
+        path.typeText(fixture.path + "\r")
+        let open = panel.buttons["Open"]
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        open.click()
+        let selectedFixture = NSPredicate(format: "value == %@", fixtureName)
+        let name = manage.textFields.matching(selectedFixture).firstMatch
+        XCTAssertTrue(name.waitForExistence(timeout: 15), "The disposable WireGuard editor did not appear.")
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: selectedFixture, object: name)],
+                                     timeout: 15), .completed,
+                      "The editor must select the uniquely named test fixture before any edits.")
+        let sidebar = manage.outlines["Sidebar"]
+        XCTAssertGreaterThanOrEqual(sidebar.frame.width, 238,
+                                   "The sidebar must enforce a usable width after importing a long profile name.")
+        let longRow = manage.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", fixtureName + ", WireGuard,")).firstMatch
+        XCTAssertLessThanOrEqual(longRow.frame.maxX, sidebar.frame.maxX + 1,
+                                 "A long name and its testing badge must remain inside the sidebar.")
+        XCTAssertTrue(manage.buttons["maturity-disclose-kind.wireguard"].exists)
+        XCTAssertFalse(manage.buttons["maturity-report-kind.wireguard"].exists,
+                       "The testing notice should start concise, with details available on request.")
+        let imported = XCTAttachment(screenshot: manage.screenshot())
+        imported.name = "Long profile name and concise testing notice"
+        imported.lifetime = .keepAlways
+        add(imported)
+        let dns = manage.textFields["DNS Servers"]
+        XCTAssertTrue(dns.waitForExistence(timeout: 5))
+        dns.click()
+        dns.typeText("10.0.0.53, ")
+        XCTAssertTrue((dns.value as? String)?.contains("10.0.0.53,") == true,
+                      "Normalization removed the separator while the user was typing.")
+        dns.typeText("10.0.1.53")
+        let endpoint = manage.textFields["Server Address"]
+        if endpoint.exists { endpoint.click() } else { dns.typeKey(.tab, modifierFlags: []) }
+        dns.click()
+        let value = dns.value as? String ?? ""
+        XCTAssertTrue(value.contains("10.0.0.53") && value.contains("10.0.1.53"),
+                      "Focus changes lost a list value: \(value)")
+    }
+
+    @MainActor
+    private func removeFixture(_ name: String, in window: XCUIElement, app: XCUIApplication) throws {
+        guard window.exists else { return }
+        let row = window.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", name + ", WireGuard,")).firstMatch
+        guard row.exists else { return } // Import may have failed before creating it.
+        row.click()
+        guard window.textFields.matching(NSPredicate(format: "value == %@", name)).firstMatch
+            .waitForExistence(timeout: 5) else {
+            XCTFail("Fixture cleanup refused: selection did not match \(name).")
+            return
+        }
+        try clickManageToolbarControl("Remove the selected VPN", in: window, app: app)
+        guard app.staticTexts["Remove \(name)?"].waitForExistence(timeout: 5) else {
+            if window.sheets.firstMatch.buttons["Cancel"].exists { window.sheets.firstMatch.buttons["Cancel"].click() }
+            XCTFail("Fixture cleanup refused: removal confirmation names another profile.")
+            return
+        }
+        window.sheets.firstMatch.buttons["Remove"].click()
+        XCTAssertTrue(row.waitForNonExistence(timeout: 10))
+    }
+
+    /// AppKit moves these controls into its overflow menu at narrow widths.
+    /// Menu controls are not necessarily exposed as XCUIElementTypeButton.
+    @MainActor
+    private func clickManageToolbarControl(_ label: String, in window: XCUIElement,
+                                           app: XCUIApplication) throws {
+        let control = app.descendants(matching: .any)[label].firstMatch
+        if !control.exists {
+            let overflow = window.popUpButtons["more toolbar items"]
+            XCTAssertTrue(overflow.waitForExistence(timeout: 5), "Missing toolbar control \(label) and overflow menu.")
+            overflow.click()
+            for title in ["Remove the selected VPN", "Move Up", "Move Down", "Find a setting"] {
+                XCTAssertTrue(app.menuItems[title].exists,
+                              "The native toolbar overflow must retain the action title: \(title).")
+            }
+            // Xcode cannot reliably traverse flattened native toolbar overflow.
+            // Verify its titles, dismiss it, then use AppKit's own zoom action
+            // to reveal the toolbar controls before performing a mutation.
+            app.typeKey(.escape, modifierFlags: [])
+            let zoom = window.buttons["_XCUI:ZoomWindow"]
+            XCTAssertTrue(zoom.exists)
+            zoom.click()
+        }
+        XCTAssertTrue(control.waitForExistence(timeout: 5), "Missing toolbar control \(label).")
+        XCTAssertTrue(control.isEnabled)
+        control.click()
+    }
+
     /// The audit gate. Audits everything the macOS audit supports EXCEPT:
     ///  • .contrast — the app's status language rides on Liquid Glass materials
     ///    whose effective background is composited at draw time; the audit

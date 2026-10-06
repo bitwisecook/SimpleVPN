@@ -30,7 +30,8 @@ struct ProxyTunnelView: View {
     @State private var dnsText = ""
     @State private var searchDomainsText = ""
     @State private var loaded = false
-    @State private var saving = false
+    @State private var saves = LatestSettingsSave()
+    private var saving: Bool { saves.isApplying }
     @State private var status: ProxyTunnelStatus?
     @State private var customRouting = CustomRoutingProfile()
     @State private var crProxyAuthUsername = ""
@@ -364,8 +365,9 @@ struct ProxyTunnelView: View {
         return SettingNeeds(byID: [id: fault.sentence])
     }
 
-    private var saveDisabledReason: String? {
-        if saving { return "Saving…" }
+    private var saveDisabledReason: String? { saving ? "Saving…" : validationProblem }
+
+    private var validationProblem: String? {
         if name.trimmingCharacters(in: .whitespaces).isEmpty { return "Give this VPN a name first." }
         if address.trimmingCharacters(in: .whitespaces).isEmpty { return "Enter the proxy address." }
         if let p = upstreamProblem { return p }
@@ -418,9 +420,7 @@ struct ProxyTunnelView: View {
     /// and not stored.
     private func save() async {
         guard !ManagedPolicy.lockConfiguration else { return }
-        guard saveDisabledReason == nil else { return }
-        saving = true
-        defer { saving = false }
+        guard validationProblem == nil else { return }
         draft.upstream = composedUpstream
         draft.includedRoutes = ProxyTunnelConfig.splitRoutes(includedText)
         draft.excludedRoutes = ProxyTunnelConfig.splitRoutes(excludedText)
@@ -428,25 +428,36 @@ struct ProxyTunnelView: View {
         draft.searchDomains = ProxyTunnelConfig.splitRoutes(searchDomainsText)
         // normalized() on every save path (the OpenVPNOverrides rule).
         draft = draft.normalized()
-        do {
-            try await vpn.rename(id: profileID, to: name)
-            try await vpn.setProxyTunnelConfig(draft, for: profileID)
-            // Credentials only when the proxy needs them; clearing the toggle
-            // clears the stored secret so it does not linger.
-            if draft.requiresAuth {
-                vpn.setProxyTunnelCredentials(username: username, password: password, for: profileID)
-            } else {
-                vpn.setProxyTunnelCredentials(username: "", password: "", for: profileID)
+        let saved_profileID = profileID
+        let saved_name = name
+        let saved_draft = draft
+        let saved_customRouting = customRouting
+        let saved_crProxyAuthUsername = crProxyAuthUsername
+        let saved_crProxyAuthPassword = crProxyAuthPassword
+        let saved_username = username
+        let saved_password = password
+        await saves.submit { isCurrent in
+            do {
+                try await vpn.rename(id: saved_profileID, to: saved_name)
+                try await vpn.setProxyTunnelConfig(saved_draft, for: saved_profileID)
+                // Credentials only when the proxy needs them; clearing the toggle
+                // clears the stored secret so it does not linger.
+                if saved_draft.requiresAuth {
+                    vpn.setProxyTunnelCredentials(username: saved_username, password: saved_password, for: saved_profileID)
+                } else {
+                    vpn.setProxyTunnelCredentials(username: "", password: "", for: saved_profileID)
+                }
+                let committedRouting = await commitCustomRouting(vpn, profileID: saved_profileID, profile: saved_customRouting,
+                                                          proxyAuthUsername: saved_crProxyAuthUsername,
+                                                          proxyAuthPassword: saved_crProxyAuthPassword)
+                if isCurrent() { customRouting = committedRouting }
+                // No "Saved" transient: it reused the SAME `checkmark` glyph as "Save"
+                // in an icon-only toolbar, so a successful save was invisible to a
+                // sighted user while VoiceOver heard "Saved". Deleting the button
+                // deleted the bug.
+            } catch {
+                vpn.report(error, profile: saved_profileID)
             }
-            customRouting = await commitCustomRouting(vpn, profileID: profileID, profile: customRouting,
-                                                      proxyAuthUsername: crProxyAuthUsername,
-                                                      proxyAuthPassword: crProxyAuthPassword)
-            // No "Saved" transient: it reused the SAME `checkmark` glyph as "Save"
-            // in an icon-only toolbar, so a successful save was invisible to a
-            // sighted user while VoiceOver heard "Saved". Deleting the button
-            // deleted the bug.
-        } catch {
-            vpn.report(error, profile: profileID)
         }
     }
 

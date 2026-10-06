@@ -89,6 +89,8 @@ nonisolated struct DNSPlan: Sendable, Equatable {
     /// Split-DNS: specific-domain assignments, deterministically ordered. Never
     /// includes the catch-all (that is `catchAllOwner`/`systemResolvers`).
     var perDomain: [DNSResolverAssignment]
+    var participants: [String] = []
+    var searchDomainsByEngine: [String: [String]] = [:]
 
     /// Every domain that resolves somewhere other than the catch-all.
     var splitDomains: [String] { perDomain.flatMap(\.domains).sorted() }
@@ -105,16 +107,18 @@ nonisolated struct DNSPlan: Sendable, Equatable {
     /// The owner, if it also won specific domains, is still emitted once as the
     /// catch-all (`[""]` already covers those). PURE + testable.
     func applyRequests() -> [String: DNSApplyRequest] {
-        var out: [String: DNSApplyRequest] = [:]
+        // Empty requests intentionally suppress DNS on participants that lost all
+        // scopes; clearing their override would restore an unwanted catch-all push.
+        var out = Dictionary(uniqueKeysWithValues: participants.map { ($0, DNSApplyRequest()) })
         for a in perDomain where a.engine != catchAllOwner {
             out[a.engine] = DNSApplyRequest(servers: a.resolvers,
-                                            searchDomains: [],
+                                            searchDomains: searchDomainsByEngine[a.engine] ?? [],
                                             matchDomains: a.domains,
                                             matchDomainsNoSearch: true)
         }
         if let owner = catchAllOwner {
             out[owner] = DNSApplyRequest(servers: systemResolvers,
-                                         searchDomains: [],
+                                         searchDomains: searchDomainsByEngine[owner] ?? [],
                                          matchDomains: [""],
                                          matchDomainsNoSearch: false)
         }
@@ -171,7 +175,10 @@ nonisolated enum DNSArbiter: MediatorArbiter {
         }
 
         return DNSPlan(catchAllOwner: catchAllOwner, systemResolvers: systemResolvers,
-                       perDomain: assignments)
+                       perDomain: assignments,
+                       participants: intents.map(\.engine).sorted(),
+                       searchDomainsByEngine: Dictionary(uniqueKeysWithValues:
+                        intents.map { ($0.engine, DNSSearchDomains.normalized($0.searchDomains)) }))
     }
 }
 
@@ -182,6 +189,7 @@ nonisolated enum DNSArbiter: MediatorArbiter {
 nonisolated struct DNSObservation: Sendable, Equatable {
     var resolvers: [String]
     var searchDomains: [String]
+    var scoped: [DNSApplyRequest] = []
 }
 
 nonisolated enum DNSDriftAction: Sendable, Equatable {
@@ -190,6 +198,26 @@ nonisolated enum DNSDriftAction: Sendable, Equatable {
 }
 
 nonisolated enum DNSDriftDecision {
+    static func action(expected: DNSPlan, observed: DNSObservation,
+                       withinSuppressWindow: Bool) -> DNSDriftAction {
+        guard !withinSuppressWindow else { return .none }
+        for request in expected.applyRequests().values where !request.servers.isEmpty {
+            let scopes = Set(request.matchDomains.map(DNSSearchDomains.normalized(one:)))
+            let candidates = observed.scoped.filter {
+                let domains = Set($0.matchDomains.map(DNSSearchDomains.normalized(one:)))
+                return scopes.isSubset(of: domains)
+            }
+            let global = scopes == [""] ? [DNSApplyRequest(servers: observed.resolvers,
+                searchDomains: observed.searchDomains, matchDomains: [""])] : []
+            let matches = (candidates + global).contains {
+                Set(request.servers).isSubset(of: Set($0.servers)) &&
+                    Set(request.searchDomains.map(DNSSearchDomains.normalized(one:)))
+                    .isSubset(of: Set($0.searchDomains.map(DNSSearchDomains.normalized(one:))))
+            }
+            if !matches { return .reassert }
+        }
+        return .none
+    }
     /// Decide what to do about an observed system-resolver change.
     ///
     /// - `withinSuppressWindow`: we applied a DNS change moments ago, so this

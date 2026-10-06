@@ -18,10 +18,8 @@
 //  version nibble is what tells us which protocol number to hand
 //  NEPacketTunnelFlow.
 //
-//  CALLBACK CONTEXT — the engine's callbacks are plain C function pointers,
-//  which by construction cannot capture Swift context. Exactly one tunnel runs
-//  per provider process, so the callbacks route through a single lock-guarded
-//  static reference, exactly like TailscaleEngine.
+//  CALLBACK CONTEXT — C callbacks carry a scoped registry ID. Removing a stopped
+//  context fences late callbacks without disturbing another engine instance.
 //
 
 import Foundation
@@ -46,18 +44,17 @@ final class ProxyTunnelEngine: @unchecked Sendable {
     private var pumpRunning = false
     private var stopped = false
 
-    /// The engine currently wired to the C callbacks.
-    private static let currentLock = NSLock()
-    nonisolated(unsafe) private static var current: ProxyTunnelEngine?
+    private static let callbacks = EngineCallbackRegistry<ProxyTunnelEngine>()
+    private var handle: UInt64 = 0
+    private var callbackContext: UInt64 = 0
+    private var starting = false
+    private let packetOutput: (@Sendable (Data) -> Void)?
 
-    private static func active() -> ProxyTunnelEngine? {
-        currentLock.lock(); defer { currentLock.unlock() }
-        return current
-    }
-
-    init(provider: NEPacketTunnelProvider, delegate: any ProxyTunnelEngineDelegate) {
+    init(provider: NEPacketTunnelProvider? = nil, delegate: any ProxyTunnelEngineDelegate,
+         packetOutput: (@Sendable (Data) -> Void)? = nil) {
         self.provider = provider
         self.delegate = delegate
+        self.packetOutput = packetOutput
     }
 
     // MARK: - Lifecycle
@@ -67,31 +64,49 @@ final class ProxyTunnelEngine: @unchecked Sendable {
     /// failure, or nil once the netstack is up. The caller then applies the
     /// tunnel network settings and calls `startPump()`.
     func start(config: ProxyTunnelStartConfig) -> Error? {
-        Self.currentLock.lock(); Self.current = self; Self.currentLock.unlock()
-        PXSetCallbacks(Self.packetOut, Self.stateChanged, Self.logLine)
+        let context: UInt64? = lock.withLock {
+            guard !starting, !stopped, handle == 0 else { return nil }
+            starting = true
+            let context = Self.callbacks.register(self)
+            callbackContext = context
+            return context
+        }
+        guard let context else { return ProxyTunnelEngineError.engine(kind: "alreadyRunning", message: "") }
 
         Self.log.log("proxy tunnel start: \(config.redactedJSONString(), privacy: .public)")
 
-        let reply = config.jsonString().withCString { PXStart($0) }
+        let reply = config.jsonString().withCString {
+            PXCreateInstance($0, context, Self.packetOut, Self.stateChanged, Self.logLine, nil)
+        }
         let response = Self.takeString(reply)
-        return Self.engineError(from: response, fallback: "The proxy tunnel could not start.")
+        let error = Self.engineError(from: response, fallback: "The proxy tunnel could not start.")
+        let created = EngineCallbackRegistry<ProxyTunnelEngine>.handle(from: response)
+        let accepted = lock.withLock {
+            starting = false
+            guard error == nil, created != 0, !stopped else { return false }
+            handle = created
+            return true
+        }
+        if !accepted {
+            Self.callbacks.remove(context)
+            if created != 0 { _ = Self.takeString(PXStopInstance(created)) }
+            return error ?? ProxyTunnelEngineError.engine(kind: "other", message: "The proxy tunnel start was cancelled.")
+        }
+        return nil
     }
 
     /// Tear the stack down. Safe to call more than once, and safe after a failed
     /// start.
     func stop() {
-        lock.lock()
-        if stopped { lock.unlock(); return }
-        stopped = true
-        lock.unlock()
-
-        _ = Self.takeString(PXStop())
-        Self.currentLock.lock()
-        if Self.current === self { Self.current = nil }
-        Self.currentLock.unlock()
-        // Drop the callbacks last: a packet already inside the Go writer would
-        // otherwise land on a torn-down flow.
-        PXSetCallbacks(nil, nil, nil)
+        let (current, context) = lock.withLock {
+            stopped = true
+            pumpRunning = false
+            let pair = (handle, callbackContext)
+            handle = 0; callbackContext = 0
+            return pair
+        }
+        Self.callbacks.remove(context)
+        if current != 0 { _ = Self.takeString(PXStopInstance(current)) }
         Self.log.log("proxy tunnel stopped")
     }
 
@@ -99,7 +114,7 @@ final class ProxyTunnelEngine: @unchecked Sendable {
 
     /// Current engine status, or an empty status when the engine is not up.
     func status() -> ProxyTunnelStatus {
-        guard let json = Self.takeString(PXStatus()), let s = ProxyTunnelStatus.decode(json: json) else {
+        guard let json = Self.takeString(PXStatusInstance(lock.withLock { handle })), let s = ProxyTunnelStatus.decode(json: json) else {
             return ProxyTunnelStatus()
         }
         return s
@@ -150,10 +165,7 @@ final class ProxyTunnelEngine: @unchecked Sendable {
                 // Raw IP packet straight in — no PF header on this boundary. A
                 // full queue drops (PXPacketIn returns 0), which is correct: a
                 // VPN must shed load, never stall the flow reader.
-                packet.withUnsafeBytes { raw in
-                    guard let base = raw.baseAddress, !raw.isEmpty else { return }
-                    _ = PXPacketIn(base, Int32(raw.count))
-                }
+                _ = self.send(packet)
             }
             self.lock.lock(); let running = self.pumpRunning && !self.stopped; self.lock.unlock()
             if running { self.readMore() }
@@ -164,9 +176,21 @@ final class ProxyTunnelEngine: @unchecked Sendable {
     /// thread-safe, so no hop is needed (and a hop would add latency to every
     /// packet).
     fileprivate func deliver(_ packet: Data) {
+        guard !lock.withLock({ stopped }) else { return }
+        if let packetOutput { packetOutput(packet); return }
         guard let flow = provider?.packetFlow, let first = packet.first else { return }
         let proto: Int32 = (first >> 4) == 6 ? AF_INET6 : AF_INET
         flow.writePackets([packet], withProtocols: [NSNumber(value: proto)])
+    }
+
+    @discardableResult
+    func send(_ packet: Data) -> Bool {
+        let current = lock.withLock { stopped ? 0 : handle }
+        guard current != 0 else { return false }
+        return packet.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress, !raw.isEmpty, raw.count <= 65_535 else { return false }
+            return PXPacketInInstance(current, base, Int32(raw.count)) == 1
+        }
     }
 
     // MARK: - Engine events
@@ -212,20 +236,20 @@ final class ProxyTunnelEngine: @unchecked Sendable {
     // `@convention(c)` by inference: none captures anything, which is what lets
     // them be handed to the Go side as function pointers.
 
-    private static let packetOut: PXPacketCallback = { bytes, length in
+    private static let packetOut: PXInstancePacketCallback = { context, bytes, length in
         guard let bytes, length > 0 else { return }
         let data = Data(bytes: bytes, count: Int(length))
-        active()?.deliver(data)
+        callbacks.lookup(context)?.deliver(data)
     }
 
-    private static let stateChanged: PXStringCallback = { text in
+    private static let stateChanged: PXInstanceStringCallback = { context, text in
         guard let text else { return }
-        active()?.handleState(String(cString: text))
+        callbacks.lookup(context)?.handleState(String(cString: text))
     }
 
-    private static let logLine: PXStringCallback = { text in
+    private static let logLine: PXInstanceStringCallback = { context, text in
         guard let text else { return }
-        active()?.handleLog(String(cString: text))
+        callbacks.lookup(context)?.handleLog(String(cString: text))
     }
 }
 

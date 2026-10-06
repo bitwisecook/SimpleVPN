@@ -31,26 +31,9 @@ nonisolated extension EndpointDiscovery {
     struct ProcOut: Sendable { var status: Int32; var stdout: String; var stderr: String }
 
     static func runProcess(_ path: String, _ args: [String], timeout: TimeInterval) async -> ProcOut {
-        await Task.detached(priority: .userInitiated) {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: path)
-            p.arguments = args
-            let out = Pipe(), err = Pipe()
-            p.standardOutput = out
-            p.standardError = err
-            p.standardInput = FileHandle.nullDevice
-            do { try p.run() } catch { return ProcOut(status: -1, stdout: "", stderr: "\(error)") }
-            // Bound the wait — kill a hung connect.
-            let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
-            let o = out.fileHandleForReading.readDataToEndOfFile()
-            let e = err.fileHandleForReading.readDataToEndOfFile()
-            p.waitUntilExit()
-            killer.cancel()
-            return ProcOut(status: p.terminationStatus,
-                           stdout: String(data: o, encoding: .utf8) ?? "",
-                           stderr: String(data: e, encoding: .utf8) ?? "")
-        }.value
+        let result = await LocalToolRunner.run(executable: path, arguments: args, deadline: timeout)
+        return ProcOut(status: result.timedOut ? -124 : result.exitCode,
+                       stdout: String(decoding: result.stdout, as: UTF8.self), stderr: result.stderr)
     }
 }
 

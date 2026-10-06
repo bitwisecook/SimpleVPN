@@ -117,6 +117,7 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
 
     private let lock = NSLock()
     private var start: SSHNetworkTunnelStartConfig?
+    private var signingBroker: SSHAgentSigningBroker?
     private var session: SSHSession?          // touched ONLY on sshQueue
     private var sessionUp = false             // guarded by `lock`
     private var stopping = false              // guarded by `lock`
@@ -128,16 +129,11 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
     private var openedFlows: Int64 = 0        // guarded by `lock`
     private var lastSessionError = ""         // guarded by `lock`
 
-    /// The engine currently wired to the C callbacks. Same single-static pattern
-    /// as the other in-process engines: a C function pointer cannot capture, and
-    /// exactly one tunnel runs per provider process.
-    private static let currentLock = NSLock()
-    nonisolated(unsafe) private static var current: SSHNetworkTunnelEngine?
-
-    private static func active() -> SSHNetworkTunnelEngine? {
-        currentLock.lock(); defer { currentLock.unlock() }
-        return current
-    }
+    /// Scoped callback contexts fence late calls without disturbing another engine.
+    private static let callbacks = EngineCallbackRegistry<SSHNetworkTunnelEngine>()
+    private var handle: UInt64 = 0
+    private var callbackContext: UInt64 = 0
+    private var starting = false
 
     init(provider: NEPacketTunnelProvider, delegate: any SSHNetworkTunnelEngineDelegate) {
         self.provider = provider
@@ -194,7 +190,24 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
         if let problem = config.problem {
             return SSHNetworkTunnelEngineError.engine(kind: "badRequest", message: problem)
         }
-        lock.lock(); start = config; stopping = false; lock.unlock()
+        let canStart = lock.withLock {
+            guard !starting, !stopping, handle == 0 else { return false }
+            starting = true
+            start = config
+            return true
+        }
+        guard canStart else { return SSHNetworkTunnelEngineError.engine(kind: "alreadyRunning", message: "This SSH tunnel is already connected.") }
+        defer { lock.withLock { starting = false } }
+
+        if config.usesAgent {
+            do {
+                let broker = try SSHAgentSigningBroker()
+                let accepted = lock.withLock { () -> Bool in
+                    guard !stopping else { return false }; signingBroker=broker; return true
+                }
+                if !accepted { broker.stop(); return SSHNetworkTunnelEngineError.engine(kind: "other", message:"The connection was cancelled.") }
+            } catch { return error }
+        }
 
         Self.log.log("sshnet start: \(config.redactedDescription(), privacy: .public)")
 
@@ -213,17 +226,32 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
         // Register the dialler BEFORE PXStart — PXStart refuses an ssh:// upstream
         // without one, which is the guard that turns "every flow refuses and
         // nobody knows why" into one settings error.
-        Self.currentLock.lock(); Self.current = self; Self.currentLock.unlock()
-        PXSetFlowDialCallback(Self.flowDial)
-        PXSetCallbacks(Self.packetOut, Self.stateChanged, Self.logLine)
+        let context = Self.callbacks.register(self)
+        lock.withLock { callbackContext = context }
 
-        let reply = config.engineJSONString().withCString { PXStart($0) }
-        if let error = Self.engineError(from: Self.takeString(reply),
+        let reply = config.engineJSONString().withCString {
+            PXCreateInstance($0, context, Self.packetOut, Self.stateChanged, Self.logLine, Self.flowDial)
+        }
+        let response = Self.takeString(reply)
+        if let error = Self.engineError(from: response,
                                        fallback: "The SSH tunnel's network stack could not start.") {
+            Self.callbacks.remove(context)
             teardownSession(reason: "netstack failed to start")
             return error
         }
 
+        let created = EngineCallbackRegistry<SSHNetworkTunnelEngine>.handle(from: response)
+        let accepted = lock.withLock {
+            guard !stopping, created != 0 else { return false }
+            handle = created
+            return true
+        }
+        guard accepted else {
+            Self.callbacks.remove(context)
+            if created != 0 { _ = Self.takeString(PXStopInstance(created)) }
+            teardownSession(reason: "start cancelled")
+            return SSHNetworkTunnelEngineError.engine(kind: "other", message: "The SSH tunnel start was cancelled.")
+        }
         startReaderLoop()
         return nil
     }
@@ -231,25 +259,27 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
     /// Tear everything down. Safe to call more than once, and safe after a failed
     /// start.
     func stop() {
-        lock.lock()
-        if stopping { lock.unlock(); return }
-        stopping = true
-        lock.unlock()
-
-        _ = Self.takeString(PXStop())
+        let (current, context) = lock.withLock {
+            stopping = true
+            pumpRunning = false
+            let pair = (handle, callbackContext)
+            handle = 0; callbackContext = 0
+            return pair
+        }
+        lock.withLock { signingBroker }?.stop()
+        Self.callbacks.remove(context)
+        if current != 0 { _ = Self.takeString(PXStopInstance(current)) }
         teardownSession(reason: "stopping")
 
-        Self.currentLock.lock()
-        if Self.current === self { Self.current = nil }
-        Self.currentLock.unlock()
         // Callbacks last: a packet already inside the Go writer would otherwise
         // land on a torn-down flow.
-        PXSetFlowDialCallback(nil)
-        PXSetCallbacks(nil, nil, nil)
         Self.log.log("sshnet stopped")
     }
 
     /// Open and authenticate. MUST run on sshQueue.
+    func agentRequest() -> SSHAgentSigningRequest? { lock.withLock { signingBroker }?.snapshot() }
+    func agentReply(_ response: SSHAgentSigningResponse) -> Bool { lock.withLock { signingBroker }?.reply(response) == true }
+
     private func openSession(_ config: SSHNetworkTunnelStartConfig) -> Error? {
         let s = SSHSession()
         guard let (host, port) = Self.hostAndPort(from: config.upstream) else {
@@ -302,7 +332,11 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
         // work from here (SSH_AUTH_SOCK and the ticket cache belong to the user's
         // session), which is why the editor offers neither and says why.
         do {
-            if !config.privateKeyPEM.isEmpty {
+            if config.usesAgent {
+                guard let broker=lock.withLock({ signingBroker }) else { throw NSError(domain:"SimpleVPN.SSHAgent",code:1) }
+                try s.useAgentSocketDescriptor(broker.descriptor())
+                try s.authAgent(forUser: config.username)
+            } else if !config.privateKeyPEM.isEmpty {
                 try s.authKey(forUser: config.username,
                               privateKeyPEM: config.privateKeyPEM,
                               certificatePEM: config.certificatePEM.isEmpty ? nil : config.certificatePEM,
@@ -742,7 +776,7 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
     /// The netstack's own counters, plus this file's session facts.
     func status() -> SSHNetworkTunnelStatus {
         var s = SSHNetworkTunnelStatus()
-        if let json = Self.takeString(PXStatus()),
+        if let json = Self.takeString(PXStatusInstance(lock.withLock { handle })),
            let px = ProxyTunnelStatus.decode(json: json) {
             s.netstack = px
         }
@@ -796,8 +830,9 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
                 // queue drops (PXPacketIn returns 0), which is correct: a VPN must
                 // shed load, never stall the flow reader.
                 packet.withUnsafeBytes { raw in
-                    guard let base = raw.baseAddress, !raw.isEmpty else { return }
-                    _ = PXPacketIn(base, Int32(raw.count))
+                    guard let base = raw.baseAddress, !raw.isEmpty, raw.count <= 65_535 else { return }
+                    let current = self.lock.withLock { self.stopping ? 0 : self.handle }
+                    _ = PXPacketInInstance(current, base, Int32(raw.count))
                 }
             }
             self.lock.lock(); let running = !self.stopping; self.lock.unlock()
@@ -808,6 +843,7 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
     /// engine → flow. Called from a Go goroutine; NEPacketTunnelFlow's write is
     /// thread-safe, so no hop is needed (and a hop would add latency per packet).
     fileprivate func deliver(_ packet: Data) {
+        guard !lock.withLock({ stopping }) else { return }
         guard let flow = provider?.packetFlow, let first = packet.first else { return }
         let proto: Int32 = (first >> 4) == 6 ? AF_INET6 : AF_INET
         flow.writePackets([packet], withProtocols: [NSNumber(value: proto)])
@@ -852,25 +888,25 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
     // `@convention(c)` by inference: none captures anything, which is what lets
     // them be handed to the Go side as function pointers.
 
-    private static let flowDial: PXFlowDialCallback = { host, port in
-        guard let host, let engine = active() else { return FlowRefusal.noSession.rawValue }
+    private static let flowDial: PXInstanceFlowDialCallback = { context, host, port in
+        guard let host, let engine = callbacks.lookup(context) else { return FlowRefusal.noSession.rawValue }
         return engine.dialFlow(host: String(cString: host), port: port)
     }
 
-    private static let packetOut: PXPacketCallback = { bytes, length in
+    private static let packetOut: PXInstancePacketCallback = { context, bytes, length in
         guard let bytes, length > 0 else { return }
         let data = Data(bytes: bytes, count: Int(length))
-        active()?.deliver(data)
+        callbacks.lookup(context)?.deliver(data)
     }
 
-    private static let stateChanged: PXStringCallback = { text in
-        guard let text else { return }
+    private static let stateChanged: PXInstanceStringCallback = { context, text in
+        guard let text, callbacks.lookup(context) != nil else { return }
         log.log("sshnet netstack state: \(String(cString: text), privacy: .public)")
     }
 
-    private static let logLine: PXStringCallback = { text in
+    private static let logLine: PXInstanceStringCallback = { context, text in
         guard let text else { return }
-        active()?.handleLog(String(cString: text))
+        callbacks.lookup(context)?.handleLog(String(cString: text))
     }
 }
 

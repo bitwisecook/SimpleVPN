@@ -39,6 +39,10 @@
 import Foundation
 import CryptoKit
 
+extension CodingUserInfoKey {
+    nonisolated static let strictConfigImport = CodingUserInfoKey(rawValue: "SimpleVPN.strictConfigImport")!
+}
+
 // MARK: - What the file is refused for
 
 /// The configurations SimpleVPN will not accept from a file, and why.
@@ -323,6 +327,13 @@ enum ConfigImport {
     }
 
     private static func planVPN(_ map: ConfigMap) -> VPNResult {
+        for key in [ConfigDocumentKeys.name, ConfigDocumentKeys.kind, ConfigDocumentKeys.server, ConfigDocumentKeys.openVPNConfiguration] {
+            if let value = map[key], !isText(value) { return .failure("\(key) must be text.") }
+        }
+        for key in [ConfigDocumentKeys.settings, ConfigDocumentKeys.signIn, ConfigDocumentKeys.customRouting,
+                    ConfigDocumentKeys.endpoints, ConfigDocumentKeys.interfacePrefs] {
+            if let value = map[key], value.mapValue == nil { return .failure("\(key) must be a settings section.") }
+        }
         let name = (map[ConfigDocumentKeys.name]?.stringValue ?? "").trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else {
             return .failure("it has no name, and an unnamed VPN can\u{2019}t be found again.")
@@ -392,17 +403,21 @@ enum ConfigImport {
         }
 
         if let signIn = map[ConfigDocumentKeys.signIn]?.mapValue {
-            vpn.auth = try? apply(signIn, onto: VPNAuthConfig(), namespace: "signin.")
+            do { vpn.auth = try apply(signIn, onto: VPNAuthConfig(), namespace: "signin.") }
+            catch { return .failure("its sign-in settings contain an invalid value.") }
             if let source = signIn["signin.source"] { vpn.credentialSourceJSON = source }
         }
         if let routing = map[ConfigDocumentKeys.customRouting]?.mapValue {
-            vpn.customRouting = decode(CustomRoutingProfile.self, from: routing)
+            guard let value = decode(CustomRoutingProfile.self, from: routing) else { return .failure("its custom routing settings contain an invalid value.") }
+            vpn.customRouting = value
         }
         if let endpoints = map[ConfigDocumentKeys.endpoints]?.mapValue {
-            vpn.endpoints = decode(VPNEndpointList.self, from: endpoints)
+            guard let value = decode(VPNEndpointList.self, from: endpoints) else { return .failure("its endpoint list contains an invalid value.") }
+            vpn.endpoints = value
         }
         if let prefs = map[ConfigDocumentKeys.interfacePrefs]?.mapValue {
-            vpn.uiPrefs = decode(VPNUIPrefs.self, from: prefs)
+            guard let value = decode(VPNUIPrefs.self, from: prefs) else { return .failure("its interface settings contain an invalid value.") }
+            vpn.uiPrefs = value
         }
 
         return .success(.init(vpn: vpn, addedName: name,
@@ -480,21 +495,66 @@ enum ConfigImport {
                                   namespace: String) throws -> T {
         var json = ConfigDocument.jsonObject(template)
         let fields = ConfigDocument.fields(of: template)
+        let defaults = Dictionary(Mirror(reflecting: template).children.compactMap { child in
+            child.label.map { ($0, child.value) }
+        }, uniquingKeysWith: { first, _ in first })
         for e in settings.entries {
             guard let field = ConfigFieldNaming.field(forID: e.key, fields: fields, namespace: namespace),
                   !ConfigFieldNaming.skipped.contains(field),
                   !ConfigSecrets.isSecret(field) else { continue }
+            if let expected = defaults[field], !hasExpectedType(e.value, expected: expected, encoded: json[field]) {
+                throw NSError(domain: "SimpleVPN.ConfigImport", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "\(e.key) has the wrong value type."])
+            }
             json[field] = e.value.jsonObject
         }
         let data = try JSONSerialization.data(withJSONObject: json)
         return try JSONDecoder().decode(T.self, from: data)
     }
 
+    /// Check before permissive legacy decoders can turn malformed input into
+    /// defaults. Exported scalars and homogeneous lists keep their exact types.
+    private static func hasExpectedType(_ value: ConfigValue, expected: Any, encoded: Any?) -> Bool {
+        let type = Swift.type(of: expected)
+        if let cases = type as? any CaseIterable.Type {
+            let strings = Mirror(reflecting: cases.allCases).children.compactMap {
+                ($0.value as? any RawRepresentable)?.rawValue as? String
+            }
+            if !strings.isEmpty { return isText(value) && strings.contains(value.stringValue ?? "") }
+        }
+        if type == Bool.self || type == Optional<Bool>.self { if case .bool = value { return true }; return false }
+        if type == Int.self || type == Optional<Int>.self { if case .int = value { return true }; return false }
+        if type == Double.self || type == Optional<Double>.self {
+            switch value { case .int, .double: return true; default: return false }
+        }
+        if type == String.self || type == Optional<String>.self || encoded is String { return isText(value) }
+        if type == [String].self || type == Optional<[String]>.self {
+            guard let list = value.listValue else { return false }
+            return list.allSatisfy(isText)
+        }
+        if Mirror(reflecting: expected).displayStyle == .collection { return value.listValue != nil }
+        if encoded is [String: Any], let map = value.mapValue {
+            let fields = Dictionary(Mirror(reflecting: expected).children.compactMap { child in child.label.map { ($0, child.value) } }, uniquingKeysWith: { first, _ in first })
+            return map.entries.allSatisfy { entry in
+                guard let field = fields[entry.key] else { return false }
+                return hasExpectedType(entry.value, expected: field, encoded: (encoded as? [String: Any])?[entry.key])
+            }
+        }
+        if encoded is [String: Any] { return false }
+        return true
+    }
+
+    private static func isText(_ value: ConfigValue) -> Bool {
+        switch value { case .string, .text: return true; default: return false }
+    }
+
     /// A structural section back into its type, through the app's own decoder.
     static func decode<T: Decodable>(_ type: T.Type, from map: ConfigMap) -> T? {
         let clean = ConfigDocument.redact(map).map   // a file cannot smuggle a secret in either
         guard let data = try? JSONSerialization.data(withJSONObject: clean.jsonRepresentation) else { return nil }
-        return try? JSONDecoder().decode(type, from: data)
+        let decoder = JSONDecoder()
+        decoder.userInfo[.strictConfigImport] = true
+        return try? decoder.decode(type, from: data)
     }
 }
 
