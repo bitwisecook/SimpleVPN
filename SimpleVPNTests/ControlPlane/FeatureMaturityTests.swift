@@ -290,19 +290,19 @@ struct MaturityNoticeCopyTests {
         }
     }
 
-    /// Honest, and not alarming. Every notice must: name the subject, say the code
-    /// is written, admit it might work, and ask for a report — and must NOT read as
+    /// Honest, and not alarming. Every notice must name the subject, state the
+    /// testing limit, allow use, and ask for a report — and must NOT read as
     /// a defect ("broken", "don't use", "unsupported", "at your own risk").
     @Test func everyNoticeIsHonestWithoutBeingAlarming() {
         for kind in FeatureMaturityRegistry.noticedKinds {
             let notice = MaturityNotice.forKind(kind)!
             let text = notice.spokenSummary
             #expect(text.contains(kind.displayName), "\(kind.rawValue) notice doesn't name itself")
-            #expect(text.contains("written and reviewed"),
-                    "\(kind.rawValue) notice doesn't say the code exists and was reviewed")
-            #expect(text.contains("may well work"),
+            #expect(text.lowercased().contains("tested") || text.lowercased().contains("testing"),
+                    "\(kind.rawValue) notice doesn't state its testing limit")
+            #expect(text.contains("may well work") || text.contains("You can use this VPN"),
                     "\(kind.rawValue) notice doesn't admit it may work")
-            #expect(text.lowercased().contains("telling us"),
+            #expect(text.lowercased().contains("telling us") || text.contains("report your results"),
                     "\(kind.rawValue) notice doesn't ask for the report that clears it")
             for scare in ["broken", "unsupported", "do not use", "don\u{2019}t use",
                           "at your own risk", "unsafe", "dangerous"] {

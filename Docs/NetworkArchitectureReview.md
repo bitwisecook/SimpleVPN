@@ -563,6 +563,56 @@ virtual routing session can become the normal connection model while the advance
 editor remains optional. The older "PBR always off" rule concerns the unbuilt
 power feature; it should not indefinitely prevent the user's requested core model.
 
+## App and command attribution — required flow-layer capability
+
+The user wants policies to distinguish a `.app` and a CLI executable. The existing
+whole-Mac `readPackets` ingress carries bytes and IP families, not process identity.
+Capture source identity before packet forwarding and preserve it in each flow decision.
+Apple's [flow metadata](https://developer.apple.com/documentation/networkextension/neflowmetadata)
+provides source app signing identity and an audit token for app-proxy flows;
+[filter flow audit tokens](https://developer.apple.com/documentation/networkextension/nefilterflow/sourceprocessaudittoken)
+distinguish the responsible app from the actual process opening the socket.
+
+The proposed policy input has responsible application identity, actual executable
+identity and an optional explicit invocation tag. Resolve identity from audit tokens
+and verified code-signing information; a PID or executable basename alone is not a
+trusted, stable identity. Pin the source identity and chosen tunnel for the flow's
+lifetime. Missing attribution follows a visible configured default, never a guessed
+app. Flow-provider correlation must use flow identity and provider generations; a
+late five-tuple observation cannot safely distinguish reused ports.
+
+CLI binary rules can distinguish `curl` from `ssh`. An interpreter's identity does
+not establish the script or command arguments that caused the traffic. Exact command
+policies need explicit invocation tagging, such as a wrapper, rather than collecting
+command lines that may contain credentials. Helper/system-process attribution and
+shared sockets need explicit tests and documented semantics.
+
+The agreed invocation surface is `vpn a -- python script.py`, with
+`vpn a "python script.py"` as an explicitly shell-evaluated convenience. The first
+form passes an argument vector directly, without reconstructing a shell command.
+`a` resolves a configured VPN identity, not a temporary global gateway selection.
+The wrapper registers an invocation scope before permitting the child to run, binds
+the verified process identity and descendants to that scope, forwards interrupts
+and preserves the child's exit status. Keep scope/flow lifetimes explicit through
+fork/exec, parent exit and cleanup; reused PIDs must not inherit a previous command's
+policy. Failure to establish the requested routing scope refuses launch rather than
+running the command with the ordinary route. Tunnel loss follows the configured
+failure behavior. Do not log argv or command text. Proxy environment variables alone
+cannot implement this contract for arbitrary CLI sockets or UDP.
+
+This is an implementation contract, not a shipped command: the wrapper cannot tag
+ordinary TUN packets without the source-flow association described above. Actual
+descendant coverage, detached children, inherited/shared sockets and process-to-flow
+binding need platform proof before claiming command-scoped routing.
+
+This requires a flow-attribution/handling provider, appropriate entitlements and
+adapters into the virtual router. A transparent proxy handles TCP/UDP flows; a content
+filter identifies/allows/blocks flows and does not itself choose a WireGuard egress.
+DNS, provider-generated traffic, nil metadata, unsigned/ad-hoc CLI tools, helper
+processes, PID/port reuse and filter/proxy correlation must be proved on the installed
+build. Current virtual-mode app/process policies remain unavailable until this seam
+exists; the existing capability gate must not be widened based on packet parsing alone.
+
 ## Required architecture tests
 
 - Drive live mediators with delayed, out-of-order, missing and failed acknowledgements.
@@ -601,11 +651,17 @@ intentional for routing observation, engine bridges and local IPC. Their presenc
 alone is not a defect. Manual DNS and socket scheduling need to be interpreted in
 their actual engine/bootstrap context, not mechanically replaced.
 
-`go test -race ./...` passed for `Vendor/proxy-engine/src` (`pxengine`, 2.773 seconds)
-and `Vendor/tailscale-engine/src` (`tsengine`, 6.218 seconds). These cover current
-engine mechanisms, including loopback tests; they do not establish the proposed
-router's correctness or prove macOS capture behavior. No new virtual interface was
-installed, no user's VPN was connected, and no production throughput/crash-leak or
-provider-composition experiment was performed. Swift mediator findings are source
-review, not a claim that a new failing integration test was executed. Prior app/UI
-validation and the missing Metal toolchain limit remain in [AppReview.md](AppReview.md).
+The findings above describe the reviewed baseline; implemented repairs and current
+test evidence are recorded in [AppReview.md](AppReview.md). The latest signed build
+includes the Metal compiler test, and 2,833 Swift tests passed, including delayed
+mediator acknowledgements and disposable live SSH sessions. Go race suites and
+repeated encrypted two-member WireGuard fixtures cover the implemented virtual
+router's packet translation and flow pinning.
+
+Release 307 was notarized, installed and its exact system-extension build activated.
+Installed UI checks verify that app identity and OS registration; they do not prove
+live provider IPC or virtual packet capture. No user's production VPN was connected
+for this review. Mixed-backend composition, throughput, provider crash, sleep/wake,
+and app/command attribution still require the explicit platform tests above. The
+WireGuard-only capability gate stays in place for unsupported virtual backends and
+advanced policies.

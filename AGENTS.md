@@ -141,6 +141,13 @@ Then launch **/Applications/SimpleVPN.app** and:
 Logs: `log stream --predicate 'subsystem == "com.bragi0.SimpleVPN.PacketTunnel"' --level debug`
 (or Console.app). The provider logs every openvpn3 event/log line and errors.
 
+Installed-app UI checks require an explicit test target path. Build the runner with
+`xcodebuild ... build-for-testing`, then run
+`./Tools/test-installed-app.sh <DerivedData/Build/Products/SimpleVPN_*.xctestrun>`.
+The script selects `/Applications/SimpleVPN.app`; bundle-identifier lookup can silently
+launch a development copy. These checks verify the visible app build and the exact
+enabled extension registration. They do **not** prove live provider IPC or packet capture.
+
 ## Notarization
 
 `notarytool` keychain profile **`SimpleVPN-Notary`** (backed by the ASC API key). Notarize the signed

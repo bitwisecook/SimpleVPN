@@ -93,7 +93,7 @@ extension View {
 /// anywhere: a field is required because the thing that refuses to connect said so.
 ///
 /// Colour is never the only signal (`Docs/Accessibility.md`): the row renders the
-/// sentence as text and the control's accessibility value says it too.
+/// sentence as text and the containing row's accessibility value says it too.
 nonisolated struct SettingNeeds: Equatable, Sendable {
     /// setting id → what is missing and what clears it, in the user's words.
     var byID: [String: String] = [:]
@@ -191,7 +191,7 @@ extension View {
 }
 
 /// The red "this has to be filled in" caption. TEXT plus colour plus (on the
-/// control) an accessibility value — three channels, because colour alone is not a
+/// containing row) an accessibility value — three channels, because colour alone is not a
 /// signal (`Docs/Accessibility.md`).
 struct SettingNeedLabel: View {
     let reason: String
@@ -223,7 +223,7 @@ struct SettingNeedLabel: View {
 struct SettingRowLayout<Control: View, Caveat: View>: View {
     let setting: any SearchableSetting
     /// Non-nil disables the control and says why — the reason replaces the summary
-    /// and rides `.help` plus the control's `accessibilityValue`.
+    /// and rides `.help` plus the containing row's `accessibilityValue`.
     var disabledReason: String?
     @ViewBuilder let control: Control
     @ViewBuilder let caveat: Caveat
@@ -259,10 +259,6 @@ struct SettingRowLayout<Control: View, Caveat: View>: View {
             HStack(alignment: .center, spacing: 8) {
                 control
                     .disabled(disabledReason != nil)
-                    // A dead control says why in all three channels: the visible
-                    // summary below, the tooltip, and its own accessibility value.
-                    // A required-and-empty one says that instead.
-                    .accessibilityValue(spokenState ?? "")
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .settingRevealFocus(setting.id, focused: $controlFocused)
                 ManualLink(setting: setting)
@@ -285,6 +281,10 @@ struct SettingRowLayout<Control: View, Caveat: View>: View {
         // Group the control with its summary so the explanation is the element
         // VoiceOver reaches next.
         .accessibilityElement(children: .contain)
+        // State belongs to the containing row. Applying even an empty value
+        // to `control` overrides its child's typed value; the field must keep
+        // its own value and validation while this row announces availability.
+        .accessibilityValue(spokenState ?? "")
         // LIVE SAVE, on the ONE transition that means "I've finished with this
         // field". Not `onChange(of: value)` — that is per keystroke, which is how a
         // half-typed server address gets stored (see `SettingCommit`).
@@ -293,8 +293,8 @@ struct SettingRowLayout<Control: View, Caveat: View>: View {
         }
     }
 
-    /// What the control's accessibility value says about its own state, or nil when
-    /// there is nothing to add (the control's real value then speaks for itself).
+    /// What the containing row says about availability, or nil when there is
+    /// nothing to add. Child controls always keep their actual value/validation.
     private var spokenState: String? {
         if let disabledReason { return "unavailable \u{2014} \(disabledReason)" }
         if let needReason { return "needed \u{2014} \(needReason)" }

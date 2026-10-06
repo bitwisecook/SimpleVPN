@@ -11,9 +11,10 @@ import XCTest
 /// own or dismiss, so the app never becomes idle and the useful assertions never
 /// run. The privacy prompt itself remains a clean-TCC, human verification.
 @MainActor
-func makeSimpleVPNTestApplication(bundleIdentifier: String? = nil) -> XCUIApplication {
-    let app = bundleIdentifier.map(XCUIApplication.init(bundleIdentifier:))
-        ?? XCUIApplication()
+func makeSimpleVPNTestApplication() -> XCUIApplication {
+    // Honor the test configuration's UITargetAppPath, including installed-app
+    // checks. Bundle-identifier lookup can select a different development copy.
+    let app = XCUIApplication()
     app.launchEnvironment["SIMPLEVPN_UI_TEST_SUPPRESS_PROTECTED_FILE_SCAN"] = "1"
     // Do not resurrect a file panel or secondary window left by a previous run.
     app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]

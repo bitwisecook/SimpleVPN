@@ -85,10 +85,14 @@ user-selected storage. These boundaries are registered in `Docs/Drift.md`.
 | Incorrect map egress attribution | Confirmed route owner determines the arc; blocked virtual capture has no egress arc. |
 | Old telemetry restores a superseded gateway | Revision fence rejects samples begun before acknowledged changes or older confirmed settings; CLI rejects failed pause/resume/gateway acknowledgements. |
 | Comma-list editing desync | A separate editing buffer preserves trailing separators while storage remains normalized. |
+| Narrow Manage VPNs controls | Independent titled toolbar actions retain native padding; Add has a circular menu button with a centered plus. |
+| Imported names escaping the sidebar | A 240pt minimum sidebar and vertically placed maturity badge leave room for a truncating name inside the row. |
+| Excessive testing notice text | Notices start collapsed with Show Details; partly tested notices use shorter wording and retain the checked evidence. |
+| Typed settings invisible to accessibility | Availability belongs to the containing row; child fields retain their actual typed value and validation. |
 
 The remaining checks concern external platform behavior, not silently skipped code:
 interactive 1Password approval, locked-Keychain/OS-managed migration failures, live
-Tailscale enrollment/restart, actual focus/blur list entry, and notarized virtual capture
+Tailscale enrollment/restart, and notarized virtual capture
 on macOS 26 and 27 including provider crash and sleep/wake. The explicit virtual mode
 currently supports WireGuard; other backends and advanced routing are visibly gated and
 registered in `Docs/Drift.md` §18 with a source guard.
@@ -122,27 +126,42 @@ This UI audit remains failing on this machine, with its existing checks intact.
 Other executed UI tests passed; profile-dependent walkthroughs skipped when their
 required screen was absent. A fully green UI result is not claimed.
 
-Latest follow-up validation: the complete signed run executed **2,833 Swift tests /
-320 suites in 52.460 seconds**. The only failing test was the existing Data Protection
-Keychain probe: `SecItemAdd` returned `errSecInteractionNotAllowed` (-25308), followed
-by its dependent read assertions. It was not disabled or weakened. An earlier full
-signed run passed 2,829 tests before the final telemetry/reservation regressions were
-added; a fully green final run still requires a usable interactive Keychain session.
+Latest follow-up validation: the complete signed run passed **2,833 Swift tests /
+320 suites in 52.162 seconds**, including the Data Protection Keychain probe and the
+disposable live SSH integration suite. A prior session returned
+`errSecInteractionNotAllowed` (-25308); the unchanged probe passed individually and
+in the complete rerun with a usable interactive Keychain session.
+
+The focused Manage VPNs UI run passed **both tests in 52.081 seconds**. It verifies
+toolbar target widths and Add's equal dimensions, imports a unique public-only
+disconnected profile, checks sidebar row bounds and the collapsed testing notice,
+then types a two-value DNS list through focus changes. It removes only its own
+fixture. Exported app screenshots confirm Add's circular glass background and
+centered plus. The window accessibility audit also passed; this does not clear
+the separate broad system-Siri audit failure above. XCTest still logs a transient
+negative-width geometry diagnostic while opening the split window; passing final
+row/control bounds do not diagnose that runtime message.
 
 TS/WG and proxy/router Go race suites passed. Two repeated real encrypted virtual-session
 runs covered IPv4/IPv6 TCP/UDP, overlapping member addresses, return translation, policy
 pinning and independent member stop. Packet-parser fuzzing executed 5,393,226 cases in
 15 seconds. Structural parser and connection cancellation guards passed in the final run.
 
-The new focus/blur XCUITest did not begin: the runner timed out enabling automation
-mode. Direct computer-use validation was also blocked awaiting Accessibility and Screen
-Recording permission. These checks are open, not counted as passing. Notarization/upload
-and replacement of `/Applications/SimpleVPN.app` were rejected by automatic approval
-review pending explicit user authorization; no new installed extension acceptance test
-has run. No production VPN or external Tailscale connection was changed for these checks.
+The original installed-extension UI checks could falsely pass: bundle-identifier lookup
+selected a development copy, and About never rendered the extension version claimed by
+the IPC assertion. `Tools/test-installed-app.sh` now explicitly sets Xcode's installed
+target path. Tests require the installed app's visible build and the OS's exact enabled
+extension build. The corrected run passed **all three installed UI tests** in
+31.515 seconds on build 307; the wrapper's OS registration check also passed. Registration is
+not live provider IPC or packet-capture evidence.
 
-The clean Release build **279** passed with no compiler warnings (only the documented
+The clean Release build **307** passed with no compiler warnings (only the documented
 PacketTunnel App Intents metadata notice). After signing Sparkle's nested helpers,
 `codesign --verify --deep --strict` passed outside the filesystem sandbox. Both app and
 system extension carry the expected Developer ID/system-extension entitlements and
-neither contains `get-task-allow`. This is a local build, not a notarized installation.
+neither contains `get-task-allow`. With explicit user authorization, Apple accepted
+notarization submission `87cf6765-8cc1-47ee-9241-f4f2b0bdbb68`; the ticket was stapled
+and the app installed in `/Applications`. Installed signatures pass strict verification
+and Gatekeeper accepts it as Notarized Developer ID. macOS reports the **0.5/307**
+extension activated and enabled; the old **0.5/279** and **0.4/220** copies await cleanup on reboot.
+The external Tailscale connection stayed connected.

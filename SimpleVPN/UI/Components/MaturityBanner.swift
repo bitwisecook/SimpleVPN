@@ -144,7 +144,10 @@ struct MaturityBanner: View {
         self.notice = notice
         self.request = request
         // Per-subject, so collapsing one banner says nothing about any other.
-        _collapsed = AppStorage(wrappedValue: false, "maturityBannerCollapsed.\(notice.key)")
+        // A short notice is enough until someone asks for the evidence. Version
+        // the presentation preference so old automatic expansions do not keep a
+        // wall of text open after this change; explicit new choices persist.
+        _collapsed = AppStorage(wrappedValue: true, "maturityBannerCollapsed.v2.\(notice.key)")
     }
 
     /// The button titles, written once, so the on-screen sentence that says what each

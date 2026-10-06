@@ -214,21 +214,16 @@ struct ConnectionRowLayout<Accessory: View>: View {
                     if !labels.isEmpty {
                         LabelPills(labels: labels)
                     }
+                    // The badge shares the text column vertically. Keeping it
+                    // beside a long name could reduce that name to zero width
+                    // and push the badge outside a persisted narrow sidebar.
+                    if let maturityNotice {
+                        MaturityBadge(notice: maturityNotice).fixedSize()
+                    }
                 }
-
-                Spacer(minLength: ConnectionRowMetrics.gutter)
-
-                // `.fixedSize()` IS THE FIX FOR "Untest…". Both the name and the chip hold
-                // flexible `Text`, so in a 200pt sidebar SwiftUI compressed whichever it
-                // liked and it chose the chip — leaving a five-character stub of a word
-                // whose entire job is to invite a report on a VPN kind nobody has tried.
-                // The name truncates instead (it has `.truncationMode(.tail)` and a person
-                // can still recognise their own VPN from its first characters); the chip
-                // never does.
-                if let maturityNotice {
-                    MaturityBadge(notice: maturityNotice).fixedSize()
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             // One element, one sentence — the badge and the chip are hidden, so this is
             // where everything they show reaches VoiceOver.
             .accessibilityElement(children: .combine)

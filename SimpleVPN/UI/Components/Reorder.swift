@@ -333,31 +333,30 @@ struct ReorderButtons: View {
 
     var body: some View {
         HStack(spacing: 2) {
-            button(systemImage: "chevron.up",
-                   label: ReorderCopy.moveUp(commands.subject),
-                   title: ReorderCopy.moveUpTitle,
-                   reason: commands.upReason,
-                   shortcut: shortcuts ? KeyEquivalent.upArrow : nil,
-                   action: commands.moveUp)
-            button(systemImage: "chevron.down",
-                   label: ReorderCopy.moveDown(commands.subject),
-                   title: ReorderCopy.moveDownTitle,
-                   reason: commands.downReason,
-                   shortcut: shortcuts ? KeyEquivalent.downArrow : nil,
-                   action: commands.moveDown)
+            directionalButton(-1)
+            directionalButton(1)
         }
+    }
+
+    fileprivate func directionalButton(_ delta: Int) -> some View {
+        let up = delta < 0
+        return button(systemImage: up ? "chevron.up" : "chevron.down",
+                      label: up ? ReorderCopy.moveUp(commands.subject) : ReorderCopy.moveDown(commands.subject),
+                      title: up ? ReorderCopy.moveUpTitle : ReorderCopy.moveDownTitle,
+                      reason: up ? commands.upReason : commands.downReason,
+                      shortcut: shortcuts ? (up ? KeyEquivalent.upArrow : KeyEquivalent.downArrow) : nil,
+                      action: up ? commands.moveUp : commands.moveDown)
     }
 
     @ViewBuilder
     private func button(systemImage: String, label: String, title: String,
                         reason: String?, shortcut: KeyEquivalent?,
                         action: @escaping () -> Void) -> some View {
-        let b = Button(action: action) {
-            Image(systemName: systemImage)
-                // The app-wide 22×22 minimum for a glyph target.
-                .frame(width: 22, height: 22)
-                .contentShape(Rectangle())
-        }
+        let b = Button(title, systemImage: systemImage, action: action)
+        .labelStyle(.iconOnly)
+        // A real title also survives AppKit toolbar overflow; an Image-only
+        // button's accessibilityLabel does not name the generated menu item.
+        .controlSize(.regular)
         .disabled(reason != nil)
         // The same sentence to the pointer and to VoiceOver — a disabled control
         // says why, and never only on hover.
@@ -379,6 +378,18 @@ struct ReorderButtons: View {
             return ReorderCopy.position(commands.index ?? 0, of: commands.count)
         }
         return "to \(ReorderCopy.position(to, of: commands.count))"
+    }
+}
+
+/// Native toolbar items need independent titles when AppKit moves them into
+/// overflow. Inline rows keep ReorderButtons' HStack; both use the same renderer
+/// and command state, including disabled reasons and position announcements.
+struct ReorderToolbarItems: ToolbarContent {
+    let commands: ReorderCommands
+
+    var body: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) { ReorderButtons(commands: commands).directionalButton(-1) }
+        ToolbarItem(placement: .primaryAction) { ReorderButtons(commands: commands).directionalButton(1) }
     }
 }
 

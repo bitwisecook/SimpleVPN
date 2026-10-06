@@ -112,6 +112,13 @@ Used by Manage VPNs' three row builders (which now pass in only what differs: wh
 answers, the caption's extra fact, the context menu) and by the main window's
 `otherConnectionRow`. `VPNRow` is deleted.
 
+The shared row now places the maturity badge below the name/caption, in the same
+text column. A fixed badge beside the name consumed the entire text width in a
+persisted 144pt sidebar, hiding the name and overflowing the column. Manage VPNs
+also enforces a 240pt minimum on both its list content and split-view column.
+The live UI regression imports a long public-only profile name and checks the
+row's bounds against the sidebar before removing only that fixture.
+
 **`VPNSidebarRow` keeps its own layout, with a stated reason** — its middle column is
 INTERACTIVE (a destination picker replaces the caption for a multi-endpoint VPN, and an
 interactive control cannot live inside the `.combine` element a one-sentence row is made
@@ -378,7 +385,27 @@ failed demotion, supersession and restoration after partial proxy failure.
 Proxy, Tailscale and SSH Network editors use `LatestSettingsSave` with captured drafts;
 a blur or close during an earlier save queues the latest valid state. The shared list
 field keeps its editing text separately from normalized stored values. Tests cover held
-saves and external updates; actual focus/blur list entry remains a UI verification item.
+saves and external updates. A disposable imported profile now exercises actual
+comma-list typing and focus changes in the running app.
+
+Manage VPNs uses separate native `ToolbarItem`s for reorder commands, with the same
+button renderer as inline `ReorderButtons`. A custom HStack and Image-only controls
+produced unnamed AppKit overflow items at narrow widths. Real button titles and
+independent native items preserve remove/reorder/search names in that menu. The
+actions now belong to the whole window's primary toolbar, rather than inheriting
+sidebar placement. Native regular remove/reorder/search controls size their own
+symbol and padding. Add has a circular 36pt target with its indicator hidden;
+a hosted menu prevents AppKit's toolbar extraction from rebuilding its label
+as an oval. It remains a native menu, using the same Add actions as before.
+The UI list-entry regression checks actual control widths and handles overflow
+without activating an unverified menu item.
+
+The shared setting row's accessibility availability value now belongs to its
+containing row. Applying an empty value to the control replaced the actual text
+field value, hiding entered settings from VoiceOver and UI assertions. Child
+fields retain their own value/validation without switching view identity while
+typing. Testing notices start concise; expanded details remain an explicit,
+remembered choice under the versioned presentation preference.
 
 Native personal-VPN mutations use a FIFO `AsyncOperationGate`, deliberately separate
 from coalesced plan application: remove must wait for pending credential/settings writes.
@@ -419,6 +446,14 @@ end. Do not infer provider-crash kill-switch guarantees from core packet tests: 
 notarized capture, sleep/wake/crash and macOS 26/27 verification remain required.
 Restarting a stopped virtual member requires reconnecting the composition; the ordinary
 WireGuard start is guarded so it cannot create a competing independent interface.
+
+Installed-extension acceptance has a separate launch contract:
+`Tools/test-installed-app.sh` explicitly sets Xcode's `UITargetAppPath`, and the UI
+tests use the configured target rather than Launch Services bundle lookup. They compare
+the visible app build and the exact enabled OS registration. About does not display
+the extension version, so its contents cannot prove provider IPC. Build 307 is now
+notarized, installed and registered as enabled; live capture/crash/sleep checks above
+remain open.
 
 ## Adding to this file
 
