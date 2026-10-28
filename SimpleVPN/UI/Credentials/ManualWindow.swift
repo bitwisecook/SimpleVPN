@@ -50,6 +50,7 @@ nonisolated enum ManualScroll {
             .flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
         return """
             (function () {
+              window.simpleVPNHelp?.prepareForReading();
               var el = document.getElementById(\(id));
               if (el) { el.scrollIntoView({ block: 'center' }); }
             })();
@@ -59,12 +60,47 @@ nonisolated enum ManualScroll {
 
 struct ManualWindow: View {
     @Environment(ManualRouter.self) private var router
+    @State private var loading = true
+    @State private var loadProblem: String?
+    @State private var attempt = 0
 
     var body: some View {
         if let url = Bundle.main.url(forResource: "manual", withExtension: "html") {
-            ManualWebView(url: url, anchor: router.anchor, generation: router.generation)
-                .navigationTitle("SimpleVPN Help")
-                .ignoresSafeArea(edges: .bottom)
+            VStack(spacing: 0) {
+                if loading {
+                    ProgressView("Opening the bundled manual…").padding()
+                }
+                if let loadProblem {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label(loadProblem, systemImage: "exclamationmark.triangle")
+                        Button("Reload Help") {
+                            loading = true; self.loadProblem = nil; attempt += 1
+                        }
+                        Button("Open the Bundled Manual in Browser") { NSWorkspace.shared.open(url) }
+                            .help("Opens the local manual file. No internet connection is needed.")
+                    }
+                    .padding()
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel("Help could not open")
+                }
+                ManualWebView(url: url, anchor: router.anchor, generation: router.generation) { problem in
+                    loading = false
+                    loadProblem = problem
+                    if problem != nil { AccessibilityAnnouncer.sayNow("Help could not open. Reload it or open the bundled manual in your browser.") }
+                }
+                .id(attempt)
+            }
+            .task(id: attempt) {
+                do { try await Task.sleep(for: .seconds(12)) } catch { return }
+                guard loading else { return }
+                loading = false
+                loadProblem = "The bundled manual is taking longer than expected to open."
+                AccessibilityAnnouncer.sayNow("Help is taking longer than expected to open. Reload it or open the bundled manual in your browser.")
+            }
+            .frame(minWidth: 280, minHeight: 200)
+            .keepWindowOnScreen()
+            .navigationTitle("SimpleVPN Help")
+            .ignoresSafeArea(edges: .bottom)
         } else {
             ContentUnavailableView("Manual Missing", systemImage: "book.closed",
                                    description: Text("The bundled manual could not be found."))
@@ -76,8 +112,9 @@ private struct ManualWebView: NSViewRepresentable {
     let url: URL
     let anchor: String?
     let generation: Int
+    let onLoad: (String?) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(onLoad: onLoad) }
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
@@ -91,6 +128,7 @@ private struct ManualWebView: NSViewRepresentable {
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.onLoad = onLoad
         guard let anchor, context.coordinator.shownGeneration != generation else { return }
         if context.coordinator.loaded {
             context.coordinator.shownGeneration = generation
@@ -101,6 +139,8 @@ private struct ManualWebView: NSViewRepresentable {
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate {
+        var onLoad: (String?) -> Void
+        init(onLoad: @escaping (String?) -> Void) { self.onLoad = onLoad }
         var loaded = false
         var pendingAnchor: String?
         var shownGeneration = 0
@@ -111,10 +151,28 @@ private struct ManualWebView: NSViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             loaded = true
+            onLoad(nil)
             if let anchor = pendingAnchor {
                 pendingAnchor = nil
                 scroll(webView, to: anchor)
             }
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            failed(error)
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            failed(error)
+        }
+
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            onLoad("Help stopped responding. Reload the bundled manual to try again.")
+        }
+
+        private func failed(_ error: Error) {
+            guard (error as NSError).code != NSURLErrorCancelled else { return }
+            onLoad("The bundled manual could not open. Try reloading it.")
         }
 
         // Keep navigation inside the bundle; external links open in the browser.

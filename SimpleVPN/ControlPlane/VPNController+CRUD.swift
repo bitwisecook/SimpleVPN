@@ -162,6 +162,7 @@ extension VPNController {
         KeychainCredentialStore.deleteCredentials(profile: Self.tailscaleKeyProfile(id))
         KeychainCredentialStore.deleteCredentials(profile: Self.tailscaleNodeStateProfile(id))
         KeychainCredentialStore.deleteCredentials(profile: Self.wireGuardKeyProfile(id))
+        KeychainCredentialStore.deleteCredentials(profile: Self.teleportKeyProfile(id))
         KeychainCredentialStore.deleteWireGuardPeerSecrets(profile: id)
         BiometricCredentialStore.delete(profile: id)
         FirstSuccessfulConnectionStore.clear(profile: id)

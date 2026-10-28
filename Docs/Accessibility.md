@@ -92,17 +92,19 @@ actually on.
 9. **The regression gate is real, and it is two gates.** SimpleVPNUITests runs
    `performAccessibilityAudit()` over the **main, Routes, Settings (all three panes —
    General, Sign-In Sources, Labels — driven in turn, not whichever tab was last used),
-   Manage VPNs, Network Tools and Report a Problem** windows with one shared exclusion
+   Manage VPNs, Network Tools, Report a Problem, About and Help** windows and the
+   **Find a Setting** sheet. Separate page cases also audit all seven OpenVPN tabs,
+   including expanded Sign-In and certificate details. All use one shared exclusion
    list (SimpleVPNUITests.swift documents each exclusion and why it is a framework
    artifact) — the audit answers "is anything unnamed or unreachable?".
    `VoiceOverWalkthroughTests` answers the different question "does what VoiceOver would
    SAY match what this document promises?", step by step (see "The walkthrough,
    automated" below). New failures in either are build-breaking, same as warnings.
 
-   **Still unaudited, and known to be:** SimpleVPN Help (the manual window), About
-   SimpleVPN, the VPN Sign-In (SSO) window, and every sheet — Find a Setting, Discover a
-   VPN, the composition editor, Map 1Password Fields, the crash/issue/UI report sheets
-   and the traffic log. Listed rather than left implicit, because "the audit is green"
+   **Still unaudited, and known to be:** the VPN Sign-In (SSO) window, Discover a
+   VPN, the composition editor, Map 1Password Fields, the crash/issue/UI report sheets,
+   certificate-password/import and server-import sheets, the configuration-paste and
+   region/host pickers, and the traffic log. Listed rather than left implicit, because "the audit is green"
    must not be read as "everything was audited".
 
    **One exclusion earns its own warning.** The shape-based excusal for an anonymous,
@@ -269,3 +271,17 @@ Two notes on the gate's own limits, both measured rather than assumed:
   focus/typing half is human.
 - SwiftUI's Settings scene does not reliably answer the bare ⌘, in a test session, so
   step 12 opens the window by menu and falls back to the shortcut.
+
+
+## 2026-10-28 workflow review
+
+[UIWorkflowReview.md](UIWorkflowReview.md) records the page-by-page scope, fixes,
+actual runs, skipped states and runtime warnings. All editor name inputs share a
+visible/spoken blank-name explanation. Help and VPN Sign-In now expose loading,
+failure and retry paths; import protects its apply state from dismissal. Secret
+save failures are surfaced instead of silently closing or connecting.
+
+Disclosure/reveal and credential-entry animations honor Reduce Motion. This source
+change is not a substitute for the visual accommodation walkthrough or hearing
+announcements with VoiceOver enabled. The automated audit still has the documented
+framework/contrast exclusions above.

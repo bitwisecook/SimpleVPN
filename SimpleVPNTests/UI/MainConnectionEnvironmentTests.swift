@@ -48,8 +48,13 @@ struct MainConnectionEnvironmentTests {
             .dropFirst().first?.components(separatedBy: "\n    /// Keeping the selection lookup").first)
         #expect(seed.contains("guard !seeded else { return }"))
         let route = try #require(seed.range(of: "settingsRouter?.route?.profileID"))
-        let fallback = try #require(seed.range(of: "vpn.selectedID ?? vpn.profiles.first?.id"))
+        let fallback = try #require(seed.range(of: "initial = vpn.selectedID.flatMap"))
         #expect(route.lowerBound < fallback.lowerBound)
+        #expect(manage.contains(".onChange(of: order.allTags) { seedInitialSelection() }"))
+        #expect(seed.contains("if selection != nil { seeded = true; return }"))
+        let available = try #require(seed.range(of: "guard let initial else { return }"))
+        let commit = try #require(seed.range(of: "selection = initial"))
+        #expect(available.lowerBound < commit.lowerBound)
     }
 
     @Test("an active transient-password session does not retain a sign-in repair banner")

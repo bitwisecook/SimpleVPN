@@ -52,7 +52,7 @@ struct ProxyTunnelView: View {
         Form {
             SettingsSearchSection(search: search)
             Section("Connection") {
-                TextField("Name", text: $name)
+                ConfigurationNameField(name: $name)
                 EngineSettingRow(spec: Self.specs["px.kind"], value: preset) {
                     SettingPicker(selection: $preset) {
                         ForEach(ProxyTunnelConfig.Preset.allCases, id: \.self) {
@@ -368,7 +368,7 @@ struct ProxyTunnelView: View {
     private var saveDisabledReason: String? { saving ? "Saving…" : validationProblem }
 
     private var validationProblem: String? {
-        if name.trimmingCharacters(in: .whitespaces).isEmpty { return "Give this VPN a name first." }
+        if let problem = ConfigurationNameField.problem(name) { return problem }
         if address.trimmingCharacters(in: .whitespaces).isEmpty { return "Enter the proxy address." }
         if let p = upstreamProblem { return p }
         if !draft.includeDefaultRoute, ProxyTunnelConfig.splitRoutes(includedText).isEmpty {
@@ -443,9 +443,9 @@ struct ProxyTunnelView: View {
                 // Credentials only when the proxy needs them; clearing the toggle
                 // clears the stored secret so it does not linger.
                 if saved_draft.requiresAuth {
-                    vpn.setProxyTunnelCredentials(username: saved_username, password: saved_password, for: saved_profileID)
+                    try vpn.setProxyTunnelCredentials(username: saved_username, password: saved_password, for: saved_profileID)
                 } else {
-                    vpn.setProxyTunnelCredentials(username: "", password: "", for: saved_profileID)
+                    try vpn.setProxyTunnelCredentials(username: "", password: "", for: saved_profileID)
                 }
                 let committedRouting = await commitCustomRouting(vpn, profileID: saved_profileID, profile: saved_customRouting,
                                                           proxyAuthUsername: saved_crProxyAuthUsername,

@@ -233,10 +233,10 @@ nonisolated enum NativeVPNSecrets {
     /// persistent-reference copy `connect()` made from it — leaving either
     /// behind is a stale-secret leak (the rule `NativeVPNManager.remove(_:)`
     /// already follows).
-    @MainActor static func apply(_ plan: Plan, id: String, username: String) {
+    @MainActor static func apply(_ plan: Plan, id: String, username: String) throws {
         switch plan.base {
         case .write(let secret):
-            try? KeychainCredentialStore.saveCredentials(
+            try KeychainCredentialStore.saveCredentials(
                 profile: baseProfile(id), .init(username: username, password: secret))
         case .delete:
             KeychainCredentialStore.deleteCredentials(profile: baseProfile(id))
@@ -251,7 +251,7 @@ nonisolated enum NativeVPNSecrets {
         }
         switch plan.groupPSK {
         case .write(let psk):
-            try? KeychainCredentialStore.saveCredentials(
+            try KeychainCredentialStore.saveCredentials(
                 profile: groupPSKProfile(id), .init(username: "", password: psk))
         case .delete:
             KeychainCredentialStore.deleteCredentials(profile: groupPSKProfile(id))
@@ -264,7 +264,7 @@ nonisolated enum NativeVPNSecrets {
         // exporter reads.
         switch plan.pppPassword {
         case .write(let pw):
-            try? KeychainCredentialStore.saveCredentials(
+            try KeychainCredentialStore.saveCredentials(
                 profile: pppPasswordProfile(id), .init(username: username, password: pw))
         case .delete:
             KeychainCredentialStore.deleteCredentials(profile: pppPasswordProfile(id))

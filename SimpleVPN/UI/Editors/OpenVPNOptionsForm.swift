@@ -26,6 +26,7 @@
 import SwiftUI
 
 struct OpenVPNOptionsForm: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var draft: OpenVPNOverrides
     /// Engine secrets live in the keychain, never in the overrides blob — the
     /// editor owns these strings and persists them on save.
@@ -325,7 +326,7 @@ struct OpenVPNOptionsForm: View {
                               default: OpenVPNOverrides.EngineDefaults.enableNonPreferredDCAlgorithms)
             }
 
-            DisclosureGroup(isExpanded: $cipherStringsExpanded) {
+            DisclosureGroup(isExpanded: $cipherStringsExpanded.animation(reduceMotion ? nil : .snappy)) {
                 // The two strings govern DIFFERENT halves of TLS and neither can
                 // do the other's job: OpenSSL takes this one through
                 // SSL_CTX_set_cipher_list, which only names TLS 1.2-and-below
@@ -354,8 +355,8 @@ struct OpenVPNOptionsForm: View {
                 Text("Custom TLS Cipher Strings")
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
-                    .onTapGesture { withAnimation(.snappy) { cipherStringsExpanded.toggle() } }
             }
+            .disclosureGroupStyle(AccessibleSettingsDisclosureStyle())
             // A disclosure NESTED inside a section: the section's group says nothing
             // about it, so it names the two ids it holds. Same shared mechanism the
             // collapsible sections use, so a reveal never lands on a shut container

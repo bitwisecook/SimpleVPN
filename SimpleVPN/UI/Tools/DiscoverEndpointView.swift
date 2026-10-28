@@ -18,6 +18,7 @@ struct DiscoverEndpointView: View {
 
     @State private var address = ""
     @State private var scanning = false
+    @State private var scanTask: Task<Void, Never>?
     @State private var scanned = false
     @State private var candidates: [DiscoveryCandidate] = []
     @FocusState private var addressFocused: Bool
@@ -32,9 +33,9 @@ struct DiscoverEndpointView: View {
                             .textFieldStyle(.roundedBorder)
                             .autocorrectionDisabled()
                             .focused($addressFocused)
-                            .onSubmit { Task { await scan() } }
+                            .onSubmit { startScan() }
                         Button {
-                            Task { await scan() }
+                            startScan()
                         } label: {
                             // The spinner replaces the TEXT, never the name — a
                             // button whose AX label vanishes mid-scan reads as
@@ -44,7 +45,8 @@ struct DiscoverEndpointView: View {
                         .disabled(scanning || address.trimmingCharacters(in: .whitespaces).isEmpty)
                         .keyboardShortcut(.defaultAction)
                         .accessibilityLabel("Scan")
-                        .accessibilityValue(scanning ? "scanning" : "")
+                        .accessibilityValue(scanning ? "Scanning." : address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Unavailable. Enter a server address first." : "Ready to scan.")
+                        .help(scanning ? "A scan is already in progress." : "Enter a server address, then scan it.")
                     }
                     Text("SimpleVPN sends probe traffic to this address to work out what kind of VPN it is and how it signs in. Only scan servers you're allowed to.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -75,11 +77,12 @@ struct DiscoverEndpointView: View {
             .frame(minWidth: 520, minHeight: 460)
             // ESC closes (explicitly — the placement alone isn't a key binding).
             .toolbar { ToolbarItem(placement: .cancellationAction) {
-                Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Done") { scanTask?.cancel(); dismiss() }.keyboardShortcut(.cancelAction)
             } }
         }
         // The address is the only thing to type — the cursor starts in it.
         .onAppear { addressFocused = true }
+        .onDisappear { scanTask?.cancel(); scanTask = nil }
     }
 
     @ViewBuilder private func candidateRow(_ c: DiscoveryCandidate) -> some View {
@@ -147,12 +150,20 @@ struct DiscoverEndpointView: View {
         }
     }
 
+    private func startScan() {
+        guard !scanning, !address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        scanTask?.cancel()
+        scanning = true
+        scanTask = Task { await scan() }
+    }
+
     private func scan() async {
         let raw = address
         scanning = true; scanned = false; candidates = []
         let host = EndpointDiscovery.normalizedHost(raw)
         let hint = EndpointDiscovery.portHint(from: raw)
         let results = await EndpointDiscovery.discover(host: host, hintPort: hint)
+        guard !Task.isCancelled else { scanning = false; return }
         candidates = results
         scanning = false; scanned = true
         // The list changed under a reader who last heard "Probing…" — say how it

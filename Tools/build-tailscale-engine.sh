@@ -30,7 +30,7 @@ export CGO_LDFLAGS="-mmacosx-version-min=26.0 ${CGO_LDFLAGS:-}"
 # Pin exactly, never float — bump deliberately (must match go.mod). Even minor
 # versions are Tailscale's stable releases.
 TS_MODULE="tailscale.com"
-TS_VERSION="v1.102.5"
+TS_VERSION="v1.104.4"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$REPO/Vendor/tailscale-engine/src"
@@ -53,11 +53,13 @@ fi
 # pxengine is a LOCAL directory replace (its source is tracked right here), so it
 # has no module zip to hash — go reports a benign "missing ziphash" for it. Fail
 # on any OTHER verification error, but never on that one expected line.
-verify_out="$(go mod verify 2>&1 || true)"
-if printf '%s\n' "$verify_out" | grep -v 'pxengine .*missing ziphash' | grep -qiE 'mismatch|not verified|SECURITY ERROR'; then
-  echo "error: go mod verify reported a problem:" >&2
-  printf '%s\n' "$verify_out" >&2
-  exit 1
+if ! verify_out="$(go mod verify 2>&1)"; then
+  unexpected="$(printf '%s\n' "$verify_out" | grep -v '^pxengine v0.0.0: missing ziphash:' || true)"
+  if [ -n "$unexpected" ] || [ -z "$verify_out" ]; then
+    echo "error: go mod verify failed:" >&2
+    printf '%s\n' "$verify_out" >&2
+    exit 1
+  fi
 fi
 
 # Style + correctness gates. gofmt is checked rather than applied: a build
@@ -86,9 +88,12 @@ if [ -d "$PXSRC" ]; then
       echo "error: pxengine not gofmt-clean:" >&2; echo "$px_unformatted" >&2; exit 1
     fi
     go vet ./...
-    go test ./... )
+    go test ./...
+    go vet -tags pxcgotest ./...
+    go test -tags pxcgotest ./... )
 else
-  echo "warning: $PXSRC not found — proxy engine will not be in this archive" >&2
+  echo "error: required proxy engine missing at $PXSRC" >&2
+  exit 1
 fi
 
 # c-archive: Go runtime + Tailscale stack + the proxy-tunnel engine + shim in one
@@ -102,15 +107,18 @@ mv "$OUT/libtsengine.h" "$INCLUDE/libtsengine.h"
 # The stable headers must declare exactly what the archive exports — BOTH engines
 # now live in this one archive (Tailscale's own symbols and the folded-in proxy
 # engine's), so both symbol sets are cross-checked against their stable headers.
+# Read nm completely before matching: grep -q in a pipe can make nm fail
+# with SIGPIPE under pipefail even when the required symbol exists.
+symbols="$(nm -gU "$OUT/libtsengine.a" 2>/dev/null)"
 for sym in _TSSetCallbacks _TSStart _TSStop _TSStatus _TSUpdatePrefs _TSPacketIn _TSFree _TSCreateInstance _TSStopInstance _TSStatusInstance _TSUpdatePrefsInstance _TSPacketInInstance _TSNodeState _TSAckNodeState; do
-  nm -gU "$OUT/libtsengine.a" 2>/dev/null | grep -q " T $sym\$" \
+  grep -q " T $sym\$" <<< "$symbols" \
     || { echo "error: $sym missing from libtsengine.a" >&2; exit 1; }
   grep -q "${sym#_}" "$INCLUDE/tsengine.h" \
     || { echo "error: ${sym#_} not declared in include/tsengine.h" >&2; exit 1; }
 done
 PXHEADER="$REPO/Vendor/proxy-engine/include/pxengine.h"
 for sym in _PXSetCallbacks _PXSetFlowDialCallback _PXStart _PXStop _PXStatus _PXPacketIn _PXFree _PXCreateInstance _PXStopInstance _PXStatusInstance _PXPacketInInstance; do
-  nm -gU "$OUT/libtsengine.a" 2>/dev/null | grep -q " T $sym\$" \
+  grep -q " T $sym\$" <<< "$symbols" \
     || { echo "error: folded-in $sym missing from libtsengine.a" >&2; exit 1; }
   grep -q "${sym#_}" "$PXHEADER" \
     || { echo "error: ${sym#_} not declared in $PXHEADER" >&2; exit 1; }
@@ -118,14 +126,14 @@ done
 # Third family in the same archive: the plain-WireGuard engine (wireguard.go),
 # declared by its own stable header next to tsengine.h.
 for sym in _WGSetCallbacks _WGStart _WGStop _WGStatus _WGPacketIn _WGFree _WGCreateInstance _WGStopInstance _WGStatusInstance _WGPacketInInstance; do
-  nm -gU "$OUT/libtsengine.a" 2>/dev/null | grep -q " T $sym\$" \
+  grep -q " T $sym\$" <<< "$symbols" \
     || { echo "error: $sym missing from libtsengine.a" >&2; exit 1; }
   grep -q "${sym#_}" "$INCLUDE/wgengine.h" \
     || { echo "error: ${sym#_} not declared in include/wgengine.h" >&2; exit 1; }
 done
 
 for sym in _VRCreateInstance _VRSetUnderlayInterface _VRPacketIn _VRApplyPolicy _VRCheckPolicy _VRStatus _VRStopPort _VRStopInstance _VRFree; do
-  nm -gU "$OUT/libtsengine.a" 2>/dev/null | grep -q " T $sym\$" \
+  grep -q " T $sym\$" <<< "$symbols" \
     || { echo "error: $sym missing from libtsengine.a" >&2; exit 1; }
   grep -q "${sym#_}" "$INCLUDE/virtualrouter.h" \
     || { echo "error: ${sym#_} not declared in include/virtualrouter.h" >&2; exit 1; }

@@ -26,6 +26,7 @@ struct NativeVPNView: View {
     @State private var pppPassword = ""
     @State private var exportSecretMode: ConfigSecretMode = .placeholders
     @State private var exportProblem: String?
+    @State private var saveProblem: String?
     @State private var loaded = false
     @State private var customRouting = CustomRoutingProfile()
     @State private var crProxyAuthUsername = ""
@@ -97,7 +98,7 @@ struct NativeVPNView: View {
 
     /// Why Save is unavailable, in the user's language, or nil.
     private var saveDisabledReason: String? {
-        if draft.name.trimmingCharacters(in: .whitespaces).isEmpty { return "Give this VPN a name first." }
+        if let problem = ConfigurationNameField.problem(draft.name) { return problem }
         if let p = draft.serverProblem { return p }
         return nil
     }
@@ -106,9 +107,10 @@ struct NativeVPNView: View {
     /// "Config surfaces") — Connection → Sign-In → Traffic → Security → Advanced.
     private var configForm: some View {
         Form {
+            if let saveProblem { SettingProblemLabel(saveProblem) }
             SettingsSearchSection(search: search)
             Section("Connection") {
-                TextField("Name", text: $draft.name)
+                ConfigurationNameField(name: $draft.name)
                 EngineSettingRow(spec: Self.specs["native.protocol"], value: draft.kind) {
                     SettingPicker(selection: $draft.kind) {
                         Text("IKEv2").tag(VPNKind.ikev2)
@@ -699,19 +701,27 @@ struct NativeVPNView: View {
     /// Store what the editor holds. Called on field blur, on submit, and on close
     /// (`savesSettingsLive`), and still directly by the L2TP export — which is why it
     /// has to be idempotent. Validity-gated: an invalid draft is HELD, not stored.
-    private func save() {
-        guard !ManagedPolicy.lockConfiguration else { return }
-        guard saveDisabledReason == nil else { return }
+    @discardableResult
+    private func save() -> Bool {
+        guard !ManagedPolicy.lockConfiguration else { return false }
+        guard saveDisabledReason == nil else { return false }
         if draft.kind == .ipsec { draft.usesSharedSecret = true }
-        manager.save(draft)
         // Emptying a secret field REMOVES the stored secret (SubprocessTunnelView's
         // rule for every one of its secrets): writing only when non-empty left the
         // previous password in the keychain, so the next Connect still signed in
         // with a password the user believed they had deleted.
-        NativeVPNSecrets.apply(
-            NativeVPNSecrets.plan(kind: draft.kind, secret: secret, sharedSecret: sharedSecret,
-                                  pppPassword: pppPassword, xauth: draft.usesXAuth),
-            id: draft.id, username: draft.username)
+        do {
+            try NativeVPNSecrets.apply(
+                NativeVPNSecrets.plan(kind: draft.kind, secret: secret, sharedSecret: sharedSecret,
+                                      pppPassword: pppPassword, xauth: draft.usesXAuth),
+                id: draft.id, username: draft.username)
+        } catch {
+            saveProblem = error.localizedDescription
+            AccessibilityAnnouncer.sayNow("The VPN could not be saved. " + error.localizedDescription)
+            return false
+        }
+        saveProblem = nil
+        manager.save(draft)
         // save() is synchronous (called inline from several button actions, incl.
         // Export), so the commit runs in the background — harmless since it's
         // idempotent and CustomRoutingTabView's own onDisappear covers "left before
@@ -726,10 +736,11 @@ struct NativeVPNView: View {
         // No "Saved" transient: it reused the SAME `checkmark` glyph as "Save" in an
         // icon-only toolbar, so a successful save was invisible to a sighted user
         // while VoiceOver heard "Saved". Deleting the button deleted the bug.
+        return true
     }
 
     private func exportMobileconfig() {
-        save()
+        if !ManagedPolicy.lockConfiguration, !save() { return }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "\(draft.name).mobileconfig"
         panel.message = exportSecretMode == .include ? "This file will contain secrets in plain text. Keep it private."

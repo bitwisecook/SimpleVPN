@@ -339,7 +339,7 @@ struct SimpleVPNApp: App {
             ManualWindow()
                 .environment(manualRouter)
         }
-        .defaultSize(width: 720, height: 640)
+        .defaultSize(width: 1_000, height: 700)
         .commandsRemoved()
 
         Window("Crash Reports", id: "crash-reports") {
@@ -655,7 +655,7 @@ private struct SSOWindowOpener: ViewModifier {
 
     func body(content: Content) -> some View {
         content.onChange(of: sso.generation) {
-            if sso.pending != nil { openWindow(id: "sso") }
+            if sso.pending != nil || sso.problem != nil { openWindow(id: "sso") }
         }
     }
 }

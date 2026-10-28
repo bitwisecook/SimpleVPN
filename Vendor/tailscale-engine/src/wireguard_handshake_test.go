@@ -87,13 +87,12 @@ func (b *loopbackBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 	}
 	b.sock = sock
 	actual := uint16(sock.LocalAddr().(*net.UDPAddr).Port)
-	recv := func(packets [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
-		n, ap, err := sock.ReadFromUDPAddrPort(packets[0])
+	recv := func(slab []byte, packets []conn.ReceivedPacket) (int, error) {
+		n, ap, err := sock.ReadFromUDPAddrPort(slab)
 		if err != nil {
 			return 0, err
 		}
-		sizes[0] = n
-		eps[0] = &conn.StdNetEndpoint{AddrPort: ap}
+		packets[0] = conn.ReceivedPacket{Size: n, Endpoint: &conn.StdNetEndpoint{AddrPort: ap}}
 		return 1, nil
 	}
 	return []conn.ReceiveFunc{recv}, actual, nil

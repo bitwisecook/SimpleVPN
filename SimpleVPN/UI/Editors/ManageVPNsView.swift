@@ -301,6 +301,7 @@ struct ManageVPNsView: View {
         // documents for a cross-tab reveal. `selectProfileForRoute` acts at most once
         // per generation, so having two callers is free.
         .onAppear { selectProfileForRoute() }
+        .onChange(of: order.allTags) { seedInitialSelection() }
         .alert("No VPN for that setting", isPresented: unroutableAlertPresented) {
             Button("OK", role: .cancel) { settingsRouter?.unroutableMessage = nil }
         } message: { Text(settingsRouter?.unroutableMessage ?? "") }
@@ -336,22 +337,27 @@ struct ManageVPNsView: View {
     private func loadInitialState() async {
         await vpn.loadAll()
         compositions.prune(existingProfileIDs: Set(vpn.profiles.map(\.id)))
-        // Open on the VPN the user was looking at in the main window.
+        seedInitialSelection()
+    }
+
+    private func seedInitialSelection() {
         guard !seeded else { return }
-        seeded = true
-        // A route has stronger intent than the ordinary initial selection.
-        // `onAppear` can select its tunnel row before this async load returns;
-        // unconditionally applying the main-window selection here then quietly
-        // replaced it, leaving Fix This on the wrong VPN (and preventing the
-        // editor shell from ever seeing its requested row). Resolve the sticky
-        // destination against the now-loaded stores, or use the normal default
-        // only when nobody asked to go somewhere specific.
-        if let wanted = settingsRouter?.route?.profileID,
-           let tag = sidebarTag(for: wanted) {
-            selection = tag
+        // A route or a sidebar click can arrive while loadAll suspends. Never
+        // replace that explicit selection with a late initial default.
+        if selection != nil { seeded = true; return }
+        let initial: String?
+        if let wanted = settingsRouter?.route?.profileID {
+            initial = sidebarTag(for: wanted)
         } else {
-            selection = vpn.selectedID ?? vpn.profiles.first?.id
+            let tags = order.allTags
+            initial = vpn.selectedID.flatMap { tags.contains($0) ? $0 : nil } ?? tags.first
         }
+        // loadAll can be superseded by another load revision. The rows' change
+        // retries this initial choice when that newer load actually publishes.
+        // Empty installations stay unseeded until a connection is available.
+        guard let initial else { return }
+        selection = initial
+        seeded = true
         sidebarFocused = true
     }
 
@@ -523,7 +529,7 @@ struct ManageVPNsView: View {
             // Not disabled with a reason, because a reason on a context-menu item is
             // unreadable — the row simply doesn't offer what it can't write yet, and
             // the editor's own Peer Public Key row is where that gap is visible.
-            if !c.peerPublicKey.trimmingCharacters(in: .whitespaces).isEmpty {
+            if !c.usesTeleport, !c.peerPublicKey.trimmingCharacters(in: .whitespaces).isEmpty {
                 Button("Export .conf\u{2026}") { exportWireGuard(p.id, includingSecrets: false) }
                 if !c.presentSecretFields.isEmpty {
                     Button("Export .conf with Keys\u{2026}") { wgKeyExportTarget = p.id }
@@ -965,8 +971,16 @@ struct ManageVPNsView: View {
             ciscoNote = "Imported \(configs.count) Cisco AnyConnect server\(configs.count == 1 ? "" : "s"). Connect uses OpenConnect — install it with: brew install openconnect."
         case .pcf(let config, let secret, let note):
             nativeVPN.save(config)
-            if let secret { try? KeychainCredentialStore.saveCredentials(profile: "native.\(config.id)",
-                                                                         .init(username: config.username, password: secret)) }
+            if let secret {
+                do { try KeychainCredentialStore.saveCredentials(profile: "native.\(config.id)",
+                                                                 .init(username: config.username, password: secret)) }
+                catch {
+                    selection = Self.nativeTag + config.id
+                    ciscoNote = "The profile was imported, but its sign-in secret could not be stored. Enter it in Sign-In before connecting."
+                    vpn.report(error)
+                    return
+                }
+            }
             selection = Self.nativeTag + config.id
             ciscoNote = note ?? "Imported the Cisco IPsec profile “\(config.name)”. It uses the native IPsec transport."
         case .unrecognized:
@@ -974,14 +988,16 @@ struct ManageVPNsView: View {
         }
     }
 
-    private func newWireGuard() async {
+    private func newWireGuard(teleport: Bool = false) async {
         var c = WireGuardConfig()
         // Sensible defaults for a hand-built tunnel (imports keep their own values):
         // a 25s keepalive so the peer stays reachable through NAT, and an explicit
         // 1420 MTU that fits inside the common 1500 path once WireGuard's own
         // overhead is subtracted — heading off the MTU-blackhole stall.
         c.persistentKeepalive = 25
-        c.mtu = 1420
+        c.mtu = teleport ? 1280 : 1420
+        c.usesTeleport = teleport
+        if teleport { c.name = "UniFi Teleport" }
         do { selection = try await vpn.createWireGuard(from: c) }
         catch { vpn.lastError = error.localizedDescription }
     }
@@ -992,6 +1008,7 @@ struct ManageVPNsView: View {
     @ViewBuilder private var addMenu: some View {
         Button("OpenVPN") { Task { await newEmpty() } }
         Button("WireGuard") { Task { await newWireGuard() } }
+        Button("UniFi Teleport") { Task { await newWireGuard(teleport: true) } }
         Button("Tailscale / Headscale") { Task { await newTailscale() } }
         Button("Proxy Tunnel (SOCKS5 / HTTP)") { Task { await newProxyTunnel() } }
         Button("IKEv2") { newNative(.ikev2) }

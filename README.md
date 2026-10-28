@@ -19,16 +19,18 @@ Tunnelblick replacement. The tunnel runs in a Network Extension **system extensi
 ## Building
 
 Requires Xcode 26+, [XcodeGen](https://github.com/yonaskolb/XcodeGen), Homebrew
-(`cmake`, `openssl@3`, `lz4`) for the C engine builds, and Go 1.27.1+ for the two
+for native engine prerequisites (installed by the engine scripts), and Go 1.27.3+ for the two
 Go static archives (1Password SDK, Tailscale/Headscale engine).
 
 ```sh
+./Tools/build-openssl.sh               # verified static OpenSSL for macOS 26
 ./Tools/build-openvpn3-xcframework.sh   # one-time: builds Vendor/OpenVPNEngine.xcframework
 ./Tools/build-openconnect-xcframework.sh
 ./Tools/build-libssh-xcframework.sh
 ./Tools/build-onepassword-sdk.sh        # Go: Vendor/onepassword-native/libopnative.a
 ./Tools/build-tailscale-engine.sh       # Go: Vendor/tailscale-engine/libtsengine.a
 xcodegen generate                       # project.yml is the source of truth
+xcodebuild -resolvePackageDependencies -project SimpleVPN.xcodeproj -scheme SimpleVPN
 open SimpleVPN.xcodeproj
 ```
 
@@ -37,8 +39,8 @@ On Xcode 27, install the Metal compiler component with
 Native static libraries must support macOS 26. If Homebrew supplies bottles for
 a newer host OS, set `OPENSSL_ROOT_DIR`, `LZ4_ROOT_DIR`, and `LIBFIDO2_ROOT_DIR`
 to installations built for macOS 26 when running the three native engine scripts.
-Their versions must match the scripts' pins; all three engines must use the same
-OpenSSL installation. Go archives explicitly target macOS 26 regardless of the host SDK.
+Their versions must match the scripts' pins; all three engines default to the same
+repository-local OpenSSL installation built by `Tools/build-openssl.sh`. Go archives explicitly target macOS 26 regardless of the host SDK.
 See [Docs/Drift.md §14](Docs/Drift.md#14-engine-dependency-pins--coordinated-versions--keep-separate)
 for the WireGuard and gVisor compatibility constraints.
 

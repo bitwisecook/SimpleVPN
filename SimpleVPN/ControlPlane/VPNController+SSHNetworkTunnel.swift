@@ -117,7 +117,7 @@ extension VPNController {
     /// write-only fields send nil when untouched); a value — including "" —
     /// replaces it, so clearing a field really clears it. All empty deletes it.
     func setSSHNetworkTunnelSecrets(password: String?, privateKeyPEM: String?,
-                                    certificatePEM: String?, for id: String) {
+                                    certificatePEM: String?, for id: String) throws {
         let existing = sshNetworkTunnelSecrets(for: id)
         let newPassword = password ?? existing.password
         let newKey = privateKeyPEM.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -130,7 +130,7 @@ extension VPNController {
             KeychainCredentialStore.deleteCredentials(profile: Self.sshNetKeyProfile(id))
             return
         }
-        try? KeychainCredentialStore.saveCredentials(
+        try KeychainCredentialStore.saveCredentials(
             profile: Self.sshNetKeyProfile(id),
             .init(username: "sshnet", password: newPassword,
                   proxyPassword: newKey.isEmpty ? nil : newKey,

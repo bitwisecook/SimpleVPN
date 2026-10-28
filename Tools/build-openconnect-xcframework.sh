@@ -9,7 +9,8 @@
 #   Vendor/OpenConnectEngine.xcframework   — link into the OpenConnect provider target
 #   Vendor/openconnect-include/            — openconnect.h for the bridge
 #
-# Homebrew deps (auto-installed): autoconf automake libtool pkg-config openssl@3 lz4.
+# Homebrew deps (auto-installed): autoconf automake libtool pkg-config lz4.
+# OpenSSL is built from verified source by build-openssl.sh.
 # libxml2 + zlib + iconv are macOS *system* libraries — linked at app-link time
 # (-lxml2 -lz -liconv), not vendored (Homebrew ships no static libxml2.a, and the
 # system one is always present and notarization-safe).
@@ -22,7 +23,7 @@ PIN=v9.21                 # openconnect release tag — bump deliberately
 # against another's OpenSSL → ABI skew / corruption. Keep this constant IDENTICAL
 # across build-openvpn3 / build-openconnect / build-libssh, and bump all three
 # together. The guard below fails loudly if Homebrew drifts from the pin.
-OPENSSL_PIN="3.6.4"
+OPENSSL_PIN="3.6.5"
 MIN=26.0
 ARCH=arm64
 
@@ -32,21 +33,26 @@ BUILD="$REPO/build/openconnect"
 VENDOR="$REPO/Vendor"
 
 echo "==> Homebrew deps"
-for f in autoconf automake libtool pkg-config openssl@3 lz4; do
+for f in autoconf automake libtool pkg-config lz4; do
   brew list "$f" >/dev/null 2>&1 || brew install "$f"
 done
 # Use deployment-compatible static libraries on hosts with newer Homebrew bottles.
-O3="${OPENSSL_ROOT_DIR:-$(brew --prefix openssl@3)}"
+O3="${OPENSSL_ROOT_DIR:-$REPO/build/pinned-openssl}"
+if [ -z "${OPENSSL_ROOT_DIR:-}" ]; then
+  "$REPO/Tools/build-openssl.sh"
+fi
 LZ4="${LZ4_ROOT_DIR:-$(brew --prefix lz4)}"
 SDK="$(xcrun --show-sdk-path)"   # system libxml2 headers live here
 
 # Enforce the OpenSSL pin so this build is reproducible and stays byte-aligned
 # with the other two engine builds (see OPENSSL_PIN above).
-have_ssl="$("$O3/bin/openssl" version 2>/dev/null | awk '{print $2}')"
+have_ssl=""
+if [ -x "$O3/bin/openssl" ]; then
+  have_ssl="$("$O3/bin/openssl" version 2>/dev/null | awk '{print $2}')"
+fi
 if [ "$have_ssl" != "$OPENSSL_PIN" ]; then
-  echo "FATAL: openssl@3 is $have_ssl but the pin is $OPENSSL_PIN."
-  echo "       Align Homebrew (brew install/switch openssl@3) or bump OPENSSL_PIN"
-  echo "       in ALL THREE engine build scripts together, then rebuild all three."
+  echo "FATAL: OpenSSL is ${have_ssl:-missing} but the pin is $OPENSSL_PIN."
+  echo "       Run Tools/build-openssl.sh, then rebuild all three engines."
   exit 1
 fi
 

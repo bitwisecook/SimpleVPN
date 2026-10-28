@@ -315,28 +315,49 @@ The native engine scripts each statically bundle OpenSSL, so their `OPENSSL_PIN`
 values must agree. The proxy module is folded into the Tailscale archive, so its
 gVisor requirement and `build-proxy-engine.sh` must match the version selected by
 the Tailscale module. Sparkle's package version in `project.yml` and the release
-workflow's appcast tools must agree too; both now use 2.10.0.
+workflow's appcast tools must agree too; both now use 2.10.1.
 
-**Compatibility boundary (2026-09-30):** Tailscale 1.102.5 requires wireguard-go
-`v0.0.0-20260715223240-2e01ba5b00f0`. The newer Tailscale-branch revision
-`45a234e5a70d` changes `tun.Device.Read` and `tun.GSOSplit`, and Tailscale's own
-`net/tstun` no longer compiles against it. Keep the release's WireGuard pin until
-a stable Tailscale release adopts that API; update them together. The comment
-beside the requirement in `Vendor/tailscale-engine/src/go.mod` points here, and
-the existing real WireGuard handshake tests run before its archive is built.
+**Compatibility boundary (2026-10-28):** Tailscale 1.104.4 and its selected
+WireGuard revision `417aef361226` use slab-based `tun.Device.Read` and
+`conn.ReceiveFunc` APIs. The callback TUN and loopback handshake fixture reserve
+`tun.ReadPacketSpacing` before and after the packet; bounds tests verify both.
+Update Tailscale, WireGuard, and these adapters together.
 
-gVisor updates must resolve **`@go`**, not `@latest`: upstream's default branch
+gVisor updates resolve **`@go`**, not `@latest`: upstream's default branch
 requires Bazel and lacks the source layout needed by standard Go tooling. The
-2026-09-30 Go-branch revision is pinned in both modules and the proxy build script.
+2026-10-28 Go-branch revision is pinned in both modules and the proxy build script.
+
+OpenSSL 3.6.5 is built once from its SHA-256-verified upstream source with a macOS
+26 deployment target (`Tools/build-openssl.sh`). All three engines consume this
+repository-local installation. The CI installer uses the same script, avoiding
+Homebrew formula snapshots and host-only deployment targets. The native engine
+cache keys include this script. Other native inputs remain at their current
+upstream releases (OpenConnect 9.21, libssh 0.12.2, libfido2 1.17.0, libcbor 0.14.0,
+Asio 1.38.2, fmt 12.2.0, xxHash 0.8.4, LZ4 1.10.0).
 
 **Verdict: KEEP SEPARATE — each engine builds independently, with coordinated
 pins.** Verify all engine archives whenever a shared dependency changes.
 
-**Dependency build verification:** the official Metal component is installed and
-the signed app/extension build and full Swift suite include the actual shaders.
-Go engine builds, race suites and encrypted peer fixtures pass with these pins.
-Use macOS 26-compatible native libraries as described in `README.md` to avoid
-newer-host Homebrew deployment-target warnings. Platform checks remain in §18.
+**Dependency build verification (2026-10-28):** signed Debug and clean Release
+builds pass with the actual shaders and rebuilt native/Go archives. The Xcode MCP
+unit run reports 3,096 passes, zero failures and 22 explicit skips. Go engine,
+proxy C-boundary and race suites pass with these dependency pins. Release nested
+code signatures verify with `codesign --verify --deep --strict`.
+
+**UI verification (2026-10-28):** focused unlocked-session audits pass for main,
+Manage VPNs, Routes, all three Settings panes, Network Tools, Report a Problem,
+About, Help and Find a Setting. Full non-UI results and the per-workflow limits
+are recorded in [UIWorkflowReview.md](UIWorkflowReview.md). The earlier locked
+session is no longer the only evidence. Live provider/capture acceptance remains
+tracked in §18.
+
+**Unresolved runtime warnings:** instrumentation attributed negative width to
+AppKit's `NSTabViewSegmentedControl` initialization (`-22 × 24`) through
+`SwiftUI.AppKitTabView.updateNSView`. Width clamps and public tab styles did not
+prevent it. Security main-thread and QoS notices still need caller attribution;
+background probe code alone does not establish their origin. No production
+swizzling or warning suppression was retained. Keep these open until a verified
+fix or an upstream resolution removes the diagnostics.
 
 ## 15. Secret persistence across engines — KEEP SEPARATE AT THE PROCESS BOUNDARY
 
@@ -454,6 +475,79 @@ the visible app build and the exact enabled OS registration. About does not disp
 the extension version, so its contents cannot prove provider IPC. Build 307 is now
 notarized, installed and registered as enabled; live capture/crash/sleep checks above
 remain open.
+
+## 19. Teleport and plain WireGuard — ONE DEVICE IMPLEMENTATION
+
+Teleport is a managed WireGuard configuration (`WireGuardConfig.usesTeleport`),
+not a separate VPNKind or engine. `teleport/client.go` exchanges invites and
+negotiates ICE/CONNECT plus authenticated STUN. Both ordinary sessions and virtual
+ports call the same `createWGState` constructor, callback TUN and packet router.
+Negotiated addresses replace the member’s static addresses before router NAT is
+built; DNS comes from the session, with explicit routes through its owner.
+The virtual router’s physical sockets and interface-change send gate stay in use.
+
+The upstream protocol files are pinned and attributed in `teleport/README.md` and
+its MIT LICENSE. Its WireGuard device, netstack and SOCKS proxy are deliberately
+excluded: those would duplicate existing implementations. Its automatic echo-based
+endpoint recovery is also excluded; the shipped manual states that endpoint loss
+requires disconnect/reconnect. Future recovery must renegotiate through the shared
+constructor and router transaction, never add another device implementation.
+
+Pairing runs in the bundled `teleport-pair` helper using the same Go API code and
+private stdin/stdout pipes. The reusable identity is verified in the user’s
+`teleport.<profile>` Keychain account before success. It is supplied only through
+private start options, redacted from engine logs, deleted with the profile and
+included only in explicitly secret-bearing configuration exports.
+
+**Verdict: KEEP SEPARATE control plane, SHARE the WireGuard engine.** Protocol
+fixtures and Teleport configuration tests cover invite exchange, socket handoff,
+secret exclusion and routing configuration. Live UniFi interoperability requires
+a real console and invite; offline tests do not establish that claim.
+
+## 20. Required names and editor save failures — SHARED PRESENTATION, ENGINE PERSISTENCE
+
+All seven editor families render `ConfigurationNameField` from
+`SettingValueRow.swift` and use its whitespace policy for the editor save gate.
+The missing-name reason is visible and spoken beside the explicitly named input.
+`AccessibleSettingsDisclosureStyle` is shared by the Advanced/certificate headers:
+a real header Button owns activation while expanded fields keep their own roles.
+The shared settings-row containers also have explicit names. Keep this shared
+when adding an editor; a private name row would recreate inconsistent validation.
+
+Custom Routing has one throwing persistence operation (`persistCustomRouting`)
+and one reporting adapter (`commitCustomRouting`) for live-save call sites.
+OpenVPN's Done action uses the throwing operation so a failed save cannot dismiss
+the sheet. Proxy credential references are published only after Keychain accepts
+the secret. The failure-injection cases live in `ConfigurationWorkflowReviewTests`.
+
+**KEEP SEPARATE:** protocol configuration writes still belong to each engine's
+manager/controller; they do not share a transaction. Each must propagate secret
+write errors to its editor. Native/external-client local error text and the shared
+controller failure presentation are separate because those stores have different
+owners. Live-save failures do not provide rollback of earlier successful fields.
+
+The 2026-10-28 review's remaining runtime warnings, unaudited sheets, installed-app
+and live-server checks are explicit in [UIWorkflowReview.md](UIWorkflowReview.md).
+Do not interpret a green window audit as coverage of every state of that window.
+
+## 21. Help navigation and window fitting — KEEP SEPARATE WITH SHARED GEOMETRY
+
+The bundled HTML owns its responsive contents navigation: sidebar above 900 CSS
+pixels and a floating top panel below that. The floating panel always starts
+collapsed to a grab handle, including at medium widths; it must not obscure the
+article with an expanded contents list when Help opens.
+Pointer proximity reveals the compact panel; a real button, Escape, focus retention
+and a skip link provide keyboard/VoiceOver access. Following a topic or native
+manual deep link closes floating contents before scrolling. Tables scroll locally
+and long text wraps instead of widening the document.
+
+The native window preserves a useful saved size but fits on opening/refocus and
+display changes, outside SwiftUI's layout pass. It reuses
+`MainWindowSizingPolicy.fittedFrame`; auxiliary window containment does not inherit
+the main window's automatic size suggestions or its permanent manual-size opt-out.
+These lifecycle policies intentionally remain separate. `ManualResponsiveLayoutTests`
+loads the shipped HTML in WebKit at wide, narrow and short sizes and exercises
+compact reveal/dismissal; shared geometry tests cover offset and smaller screens.
 
 ## Adding to this file
 

@@ -33,6 +33,7 @@ final class VirtualRoutingEngine: @unchecked Sendable {
     private var pumping = false
     private var policy: VirtualRoutingPolicy
     private var prefixes: [String: [String]] = [:]
+    private var negotiatedDNS: [String: [String]] = [:]
     private var dns: [String: DNSApplyRequest] = [:]
     private var jobs: [Job] = []
     private var active: Job?
@@ -84,7 +85,7 @@ final class VirtualRoutingEngine: @unchecked Sendable {
             }
             monitor.start(queue: queue)
             queue.asyncAfter(deadline: .now() + 5) { [weak self] in
-                guard let self, self.startReply != nil else { return }
+                guard let self, self.startReply != nil, !self.began else { return }
                 self.stop(); self.finishStart(Self.error("A physical network is required for this virtual connection."))
             }
         }
@@ -99,8 +100,13 @@ final class VirtualRoutingEngine: @unchecked Sendable {
         guard config.problem == nil,
               start.members.map(\.id) == config.members.map(\.id), start.policy == config.policy,
               zip(start.members, config.members).allSatisfy({ live, stored in
-                  let expected = WireGuardStartConfig(config: stored.wireGuard, privateKey: live.wireGuard.privateKey,
+                  var expected = WireGuardStartConfig(config: stored.wireGuard, privateKey: live.wireGuard.privateKey,
                                                       presharedKey: live.wireGuard.presharedKey)
+                  if stored.wireGuard.usesTeleport {
+                      guard live.wireGuard.teleport?.isValid == true else { return false }
+                      expected.teleport = live.wireGuard.teleport
+                      expected.clientName = "SimpleVPN"
+                  }
                   return live.addresses == stored.wireGuard.addresses && live.wireGuard == expected
               }),
               start.captureAddresses == VirtualRoutingConfig.captureAddresses,
@@ -122,7 +128,25 @@ final class VirtualRoutingEngine: @unchecked Sendable {
             Self.callbacks.remove(registered); _ = Self.take(VRStopInstance(created))
             completion(Self.error("The virtual connection was cancelled.")); return
         }
-        guard let status = status(), let settings = settings(policy: policy, dns: dns, status: status) else {
+        guard let status = status() else {
+            stop(); completion(Self.error("The VPN ports could not be inspected.")); return
+        }
+        for member in config.members where member.wireGuard.usesTeleport {
+            negotiatedDNS[member.id] = status.ports[member.id]?.dns ?? []
+            if member.id == policy.defaultOwner {
+                dns[member.id] = .init(servers: negotiatedDNS[member.id] ?? [],
+                    searchDomains: member.wireGuard.searchDomains, matchDomains: [""])
+            }
+        }
+        if !negotiatedDNS.isEmpty {
+            policy.revision += 1
+            policy = compiled(policy, prefixes: prefixes, dns: dns, activePorts: Set(status.ports.keys))
+            guard let data = try? JSONEncoder().encode(policy), let text = String(data: data, encoding: .utf8),
+                  Self.problem(text.withCString { Self.take(VRApplyPolicy(created, $0)) }) == nil else {
+                stop(); completion(Self.error("The Teleport DNS routes could not be installed.")); return
+            }
+        }
+        guard let settings = settings(policy: policy, dns: dns, status: status) else {
             stop(); completion(Self.error("The VPN endpoints could not be kept outside the virtual connection.")); return
         }
         provider?.applyNetworkSettings(settings) { [weak self] error in
@@ -237,7 +261,7 @@ final class VirtualRoutingEngine: @unchecked Sendable {
                 nextPrefixes[id] = route.prefixes ?? config.members.first { $0.id == id }?.prefixes
             }
             if let owner = config.members.first(where: { $0.id == candidate.defaultOwner }) {
-                nextDNS = [owner.id: .init(servers: owner.wireGuard.dns.filter(WireGuardConfig.isIPLiteral),
+                nextDNS = [owner.id: .init(servers: negotiatedDNS[owner.id] ?? owner.wireGuard.dns.filter(WireGuardConfig.isIPLiteral),
                     searchDomains: owner.wireGuard.searchDomains, matchDomains: [""])]
             } else if !candidate.capturesDefault {
                 nextDNS = [:]
@@ -246,7 +270,7 @@ final class VirtualRoutingEngine: @unchecked Sendable {
             finish(job, "error:DNS remains captured while the default VPN is unavailable."); return
         } else if request.message == "dns:clear" {
             let member = config.members.first { $0.id == request.profile }!
-            nextDNS[request.profile] = request.profile == candidate.defaultOwner ? .init(servers: member.wireGuard.dns.filter(WireGuardConfig.isIPLiteral),
+            nextDNS[request.profile] = request.profile == candidate.defaultOwner ? .init(servers: negotiatedDNS[member.id] ?? member.wireGuard.dns.filter(WireGuardConfig.isIPLiteral),
                 searchDomains: member.wireGuard.searchDomains, matchDomains: [""])
                 : .init()
         } else if request.message.hasPrefix("dns:apply:"),
@@ -297,7 +321,7 @@ final class VirtualRoutingEngine: @unchecked Sendable {
         guard let status = status(), let port = status.ports[id], let member = config.members.first(where: { $0.id == id }) else { return nil }
         var sample = TunnelStats(profile: id, timestamp: Date().timeIntervalSince1970, connectedSince: since, reconnects: 0,
             bytesIn: port.rxBytes, bytesOut: port.txBytes, serverEndpoint: port.endpoint,
-            tunnelIPv4: VirtualRoutingConfig.captureAddresses[0], dnsServers: member.wireGuard.dns, proxies: [])
+            tunnelIPv4: VirtualRoutingConfig.captureAddresses[0], dnsServers: negotiatedDNS[id] ?? member.wireGuard.dns, proxies: [])
         sample.tunnelIPv6 = VirtualRoutingConfig.captureAddresses[1]
         sample.advertisedPrefixes = member.prefixes
         sample.searchDomains = member.wireGuard.searchDomains

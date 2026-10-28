@@ -651,3 +651,96 @@ final class SimpleVPNUITests: XCTestCase {
         }
     }
 }
+
+// Utility windows and sheets are held to the same audit as the primary windows.
+extension SimpleVPNUITests {
+    @MainActor
+    func testAboutWindowAccessibilityAudit() throws {
+        let app = try launchOrSkip()
+        addTeardownBlock { @MainActor in app.terminate() }
+        app.menuBars.menuBarItems["SimpleVPN"].click()
+        app.menuItems["About SimpleVPN"].click()
+        XCTAssertTrue(app.windows["about"].waitForExistence(timeout: 10))
+        try runAccessibilityAudit(on: app)
+    }
+
+    @MainActor
+    func testManualWindowAccessibilityAudit() throws {
+        let app = try launchOrSkip()
+        addTeardownBlock { @MainActor in app.terminate() }
+        app.menuBars.menuBarItems["Help"].click()
+        app.menuItems["SimpleVPN Help"].click()
+        XCTAssertTrue(app.windows["manual"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 10))
+        try runAccessibilityAudit(on: app)
+    }
+
+    @MainActor
+    func testFindASettingSheetIsAccessibleAndEscapable() throws {
+        let app = try launchOrSkip()
+        addTeardownBlock { @MainActor in app.terminate() }
+        app.menuBars.menuBarItems["VPN"].click()
+        app.menuItems["Find a Setting…"].click()
+        let sheet = app.sheets.firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 10))
+        try runAccessibilityAudit(on: app)
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5))
+    }
+}
+
+// Each OpenVPN page is a separate case so a slow platform audit cannot consume
+// the MCP timeout before the remaining pages receive a result.
+extension SimpleVPNUITests {
+    @MainActor
+    private func auditOpenVPNPage(_ title: String, inspect: ((XCUIElement) -> Void)? = nil) throws {
+        let app = try launchOrSkip()
+        addTeardownBlock { @MainActor in app.terminate() }
+        app.menuBars.menuBarItems["VPN"].click()
+        app.menuItems["Manage VPNs…"].click()
+        let manage = app.windows["manage"]
+        XCTAssertTrue(manage.waitForExistence(timeout: 10))
+        let general = manage.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "General")).firstMatch
+        try XCTSkipUnless(general.waitForExistence(timeout: 10),
+                          "No OpenVPN editor is selected on this machine.")
+        let tab = manage.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", title)).firstMatch
+        XCTAssertTrue(tab.waitForExistence(timeout: 5), "Missing editor tab: \(title)")
+        tab.click()
+        let selected = NSPredicate { _, _ in
+            String(describing: tab.value ?? "") == "1"
+        }
+        let selection = XCTNSPredicateExpectation(predicate: selected, object: tab)
+        XCTAssertEqual(XCTWaiter.wait(for: [selection], timeout: 5), .completed,
+                       "The editor did not select its \(title) page")
+        inspect?(manage)
+        try runAccessibilityAudit(on: app)
+    }
+
+    @MainActor func testOpenVPNGeneralPageAccessibilityAudit() throws { try auditOpenVPNPage("General") }
+    @MainActor func testOpenVPNServersPageAccessibilityAudit() throws { try auditOpenVPNPage("Servers") }
+    @MainActor func testOpenVPNSignInPageAccessibilityAudit() throws {
+        try auditOpenVPNPage("Sign-In") { manage in
+            let advanced = manage.buttons["Advanced"].firstMatch
+            if advanced.exists {
+                advanced.click()
+                XCTAssertTrue(manage.textFields["Password template"].waitForExistence(timeout: 5),
+                              "Expanding verification-code options must leave the template an editable, named field")
+            }
+        }
+    }
+    @MainActor func testOpenVPNOptionsPageAccessibilityAudit() throws { try auditOpenVPNPage("Options") }
+    @MainActor func testOpenVPNCertificatesPageAccessibilityAudit() throws {
+        try auditOpenVPNPage("Certificates") { manage in
+            let details = manage.buttons["Details"].firstMatch
+            if details.exists {
+                details.click()
+                let serial = manage.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", "Serial", "Serial")).firstMatch
+                XCTAssertTrue(serial.waitForExistence(timeout: 5), "Certificate details did not expand")
+            }
+        }
+    }
+    @MainActor func testOpenVPNConfigurationPageAccessibilityAudit() throws { try auditOpenVPNPage("Configuration") }
+    @MainActor func testOpenVPNCustomRoutingPageAccessibilityAudit() throws { try auditOpenVPNPage("Custom Routing") }
+}

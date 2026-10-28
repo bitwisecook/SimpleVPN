@@ -245,7 +245,7 @@ extension VPNController {
             // choice when moving it back to the ordinary keychain.
             auth.rememberCredentials = true
             if allowsPasswordSave(id: id) {
-                try? KeychainCredentialStore.saveCredentials(profile: id, .init(
+                try KeychainCredentialStore.saveCredentials(profile: id, .init(
                     username: raw.username ?? "", password: raw.password ?? ""))
             }
             var live = transientCredentials(for: id)
@@ -366,7 +366,7 @@ extension VPNController {
         }
 
         if remember, !engine.username.isEmpty {
-            try? KeychainCredentialStore.saveCredentials(profile: id, .init(username: engine.username, password: raw.password ?? ""))
+            try KeychainCredentialStore.saveCredentials(profile: id, .init(username: engine.username, password: raw.password ?? ""))
         }
         // Session secrets ride startTunnel options — in-memory through the NE
         // session. The extension runs as root in the system context and cannot
@@ -560,7 +560,8 @@ extension VPNController {
         }
         if inputs.kind == .wireGuard {
             inputs.wireGuardHasProblem = wireGuardConfig(for: id).connectProblem != nil
-            inputs.wireGuardHasKey = wireGuardHasPrivateKey(id)
+            inputs.wireGuardHasKey = wireGuardConfig(for: id).usesTeleport
+                ? teleportSession(for: id) != nil : wireGuardHasPrivateKey(id)
             return inputs
         }
         if inputs.kind == .sshNetworkTunnel {

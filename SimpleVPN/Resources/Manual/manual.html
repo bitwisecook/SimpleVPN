@@ -44,6 +44,9 @@
   }
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
+  main { min-width: 0; overflow-wrap: anywhere; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .table-scroll { max-width: 100%; overflow-x: auto; }
   body {
     margin: 0;
     background: var(--bg);
@@ -55,6 +58,7 @@
     position: sticky; top: 0;
     width: 240px; min-width: 240px;
     height: 100vh;
+    flex-shrink: 0;
     overflow-y: auto;
     padding: 20px 14px 40px;
     border-right: 1px solid var(--border);
@@ -99,11 +103,52 @@
   a { color: var(--accent); }
   table { border-collapse: collapse; margin: 10px 0; }
   td, th { border: 1px solid var(--border); padding: 6px 10px; font-size: 14px; text-align: left; }
+
+  .skip-link { position: fixed; left: 12px; top: -100px; z-index: 20;
+    background: var(--bg); padding: 8px 12px; border: 2px solid var(--accent); }
+  .skip-link:focus { top: 8px; }
+  #contents-toggle { display: none; }
+  #contents-list { height: 100%; overflow-y: auto; }
+  button { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media (max-width: 900px) {
+    body { display: block; }
+    main { width: 100%; max-width: 860px; margin: 0 auto;
+      padding: 82px clamp(16px, 4vw, 32px) 48px; }
+    h1 { font-size: clamp(23px, 5vw, 28px); }
+    h2[id], h3[id], main[id] { scroll-margin-top: 76px; }
+    #help-contents { position: fixed; z-index: 10; top: 8px; left: 12px; right: 12px;
+      width: auto; min-width: 0; height: auto; padding: 0;
+      border: 1px solid var(--border); border-radius: 12px;
+      box-shadow: 0 4px 18px #0002; overflow: hidden; }
+    #contents-toggle { display: flex; align-items: center; justify-content: center;
+      gap: 8px; width: 100%; min-height: 38px; padding: 8px 12px;
+      border: 0; border-radius: 11px; background: var(--panel); cursor: pointer; }
+    #contents-toggle::before { content: ''; width: 28px; height: 4px;
+      border-radius: 4px; background: var(--muted); }
+    #contents-list { height: auto; max-height: min(48vh, 360px); overflow-y: auto;
+      padding: 0 10px 12px; border-top: 1px solid var(--border);
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr)); }
+    #contents-list h2 { grid-column: 1 / -1; border: 0; padding: 0; }
+    #contents-list a { padding: 6px 8px; overflow-wrap: anywhere; }
+    #help-contents[data-open="false"] #contents-list { display: none; }
+    #help-contents[data-open="false"] { left: 50%; right: auto;
+      transform: translateX(-50%); width: 76px; }
+    #help-contents[data-open="false"] #contents-toggle { min-height: 24px; padding: 8px; }
+    #help-contents[data-open="false"] .contents-title { display: none; }
+    main { padding-top: 60px; }
+  }
 </style>
 </head>
 <body>
 
-<nav aria-label="Table of contents">
+<a class="skip-link" href="#importing">Skip to help content</a>
+<nav id="help-contents" aria-label="Table of contents" data-open="false">
+  <button id="contents-toggle" type="button" aria-label="Table of contents"
+    aria-controls="contents-list" aria-expanded="false" title="Show or hide the table of contents">
+    <span class="contents-title">Contents</span>
+  </button>
+  <div id="contents-list">
   <h2>SimpleVPN</h2>
   <a href="#importing">Importing VPNs</a>
   <a href="#virtual-routing-compositions">One Virtual Interface</a>
@@ -170,6 +215,7 @@
   <h2>WireGuard</h2>
   <a href="#wg-endpoint">Server Address</a>
   <a href="#wg-listen-port">Listen Port</a>
+  <a href="#wg-teleport-invite">Teleport Invite</a>
   <a href="#wg-private-key">Private Key</a>
   <a href="#wg-public-key">Peer Public Key</a>
   <a href="#wg-preshared-key">Pre-shared Key</a>
@@ -394,9 +440,10 @@
   <a href="#vm-guest-names">Which Guests, By Name</a>
   <a href="#vm-through-or-around">Through the VPN, or Around It</a>
   <a href="#vm-guest-traffic">Guests on the Traffic Graph</a>
+  </div>
 </nav>
 
-<main>
+<main id="manual-content" tabindex="-1">
 <h1>SimpleVPN Help</h1>
 <p class="muted">Every option explained in plain language: what it does, when to change it, and what can go wrong. Options apply per-VPN and take effect the next time that VPN connects. An option you never change follows the OpenVPN engine's default — including when a future update improves that default.</p>
 
@@ -706,6 +753,23 @@
 <p>Configurations using an extra HMAC key (<code>tls-auth</code>) have a "direction" that must complement the server's — 0 on one side, 1 on the other, or bidirectional on both. If the configuration file doesn't say and the server uses a direction, connecting fails with authentication-format errors. Only change on an administrator's instruction.</p>
 
 <!-- ══════════════════ WireGuard ══════════════════ -->
+<h2 id="wg-teleport-invite">Teleport Invite</h2>
+<p class="default">Default: not paired.</p>
+<p>Add <strong>UniFi Teleport</strong> from Manage VPNs, then enter a fresh
+<code>https://teleport.ui.link/&lt;UUID&gt;</code> invite or its UUID and choose
+<strong>Pair Teleport</strong>. The invite is exchanged once. The reusable session
+is saved in your Keychain; subsequent connections use that session automatically.</p>
+<p>Teleport uses SimpleVPN’s shared WireGuard engine and supports the same virtual
+connection and Custom Routing controls. Addresses, peer keys, endpoints and DNS
+are negotiated each time. Allowed IPs controls which destinations the VPN carries.
+To combine Teleport with another WireGuard VPN, add both to a composition and
+connect through its virtual interface. Choose one full tunnel to carry DNS.</p>
+<p>This uses an unofficial Teleport protocol implementation. If the console changes
+its endpoint or revokes access, disconnect and reconnect; if access is revoked,
+create a fresh invite and choose Replace Teleport Access. Automatic Teleport endpoint
+renegotiation is not available. Teleport access is included only in configuration
+exports that explicitly include secrets; an ordinary export requires pairing again.</p>
+
 
 <h2 id="wg-address">Addresses</h2>
 <p class="default">Required. From your provider.</p>
@@ -1933,5 +1997,87 @@ who wants them.</p>
 <hr style="border: none; border-top: 1px solid var(--border); margin-top: 48px">
 <p class="muted" style="font-size: 13px">SimpleVPN uses the OpenVPN 3, OpenConnect, libssh and Tailscale engines, the gVisor network stack, Sparkle for app updates, and the 1Password Go SDK for item lookup. <a href="https://db-ip.com">IP Geolocation by DB-IP</a>, licensed CC BY 4.0. Coastlines from Natural Earth. Every component and its licence is listed in <strong>SimpleVPN &#9656; About SimpleVPN</strong>.</p>
 </main>
+
+<script>
+(() => {
+  const nav = document.getElementById('help-contents');
+  const toggle = document.getElementById('contents-toggle');
+  const list = document.getElementById('contents-list');
+  const floating = matchMedia('(max-width: 900px)');
+  let pinned = false, hovering = false, focused = false, dismissed = false, closeTimer;
+  const compact = () => floating.matches;
+  const isOpen = () => !floating.matches || pinned || hovering || focused;
+  function render() {
+    const open = isOpen();
+    nav.dataset.open = String(open);
+    toggle.setAttribute('aria-expanded', String(open));
+    list.inert = !open;
+  }
+  function close() {
+    pinned = hovering = focused = false; dismissed = true; render();
+  }
+  function approach(event) {
+    if (!compact() || event.pointerType === 'touch') return;
+    const r = nav.getBoundingClientRect();
+    const near = event.clientY >= 0 && event.clientY <= r.bottom + 28
+      && event.clientX >= r.left - 28 && event.clientX <= r.right + 28;
+    clearTimeout(closeTimer);
+    if (near && !dismissed) { hovering = true; render(); }
+    else if (!near) {
+      dismissed = false;
+      closeTimer = setTimeout(() => { hovering = false; render(); }, 400);
+    }
+  }
+  toggle.addEventListener('click', () => {
+    if (isOpen()) close(); else { pinned = true; dismissed = false; render(); }
+  });
+  document.addEventListener('pointermove', approach, { passive: true });
+  nav.addEventListener('pointerenter', () => {
+    if (compact() && !dismissed) { clearTimeout(closeTimer); hovering = true; render(); }
+  });
+  nav.addEventListener('pointerleave', () => {
+    closeTimer = setTimeout(() => { hovering = false; render(); }, 400);
+  });
+  nav.addEventListener('focusin', event => {
+    if (event.target !== toggle) { focused = true; dismissed = false; render(); }
+  });
+  nav.addEventListener('focusout', event => {
+    if (!nav.contains(event.relatedTarget)) { focused = false; render(); }
+  });
+  nav.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && floating.matches) {
+      event.preventDefault(); close(); toggle.focus();
+    }
+  });
+  list.addEventListener('click', event => {
+    const link = event.target.closest('a[href^="#"]');
+    if (!link || !floating.matches) return;
+    close();
+    const target = document.getElementById(link.hash.slice(1));
+    if (target) { target.setAttribute('tabindex', '-1'); target.focus({ preventScroll: true }); }
+  });
+  document.addEventListener('pointerdown', event => {
+    if (floating.matches && !nav.contains(event.target)) {
+      if (nav.contains(document.activeElement)) document.activeElement.blur();
+      close();
+    }
+  });
+  function resized() { dismissed = false; hovering = false; render(); }
+  floating.addEventListener('change', resized);
+  window.addEventListener('blur', () => { hovering = false; render(); });
+  window.simpleVPNHelp = { prepareForReading: () => { if (floating.matches) close(); } };
+  document.querySelectorAll('main table').forEach(table => {
+    const wrapper = document.createElement('div'); wrapper.className = 'table-scroll';
+    table.before(wrapper); wrapper.append(table);
+    wrapper.setAttribute('role', 'region');
+    wrapper.setAttribute('aria-label', 'Reference table');
+    const sizeObserver = new ResizeObserver(() => {
+      wrapper.tabIndex = wrapper.scrollWidth > wrapper.clientWidth + 1 ? 0 : -1;
+    });
+    sizeObserver.observe(wrapper);
+  });
+  render();
+})();
+</script>
 </body>
 </html>

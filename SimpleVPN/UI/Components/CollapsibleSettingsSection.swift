@@ -20,6 +20,35 @@
 
 import SwiftUI
 
+/// Keep the header a real, keyboard-operable Button. On macOS 27 the native
+/// disclosure triangle can omit its accessibility action. Applying an action to
+/// the entire group also changes descendant field roles; this style scopes the
+/// action to the header and leaves the expanded controls independent.
+struct AccessibleSettingsDisclosureStyle: DisclosureGroupStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(reduceMotion ? nil : .snappy) {
+                    configuration.isExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: configuration.isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .accessibilityHidden(true)
+                    configuration.label.frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(configuration.isExpanded ? "Expanded" : "Collapsed")
+            if configuration.isExpanded { configuration.content }
+        }
+    }
+}
+
 struct CollapsibleSettingsSection<Content: View, Footer: View>: View {
     /// Canonical taxonomy group (AGENTS.md "Config surfaces") — supplies the
     /// title AND the identity the search-reveal matches against.
@@ -30,6 +59,7 @@ struct CollapsibleSettingsSection<Content: View, Footer: View>: View {
     @ViewBuilder let content: Content
     @ViewBuilder let footer: Footer
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var expanded: Bool
     @Environment(SettingsSearch.self) private var search: SettingsSearch?
 
@@ -45,7 +75,7 @@ struct CollapsibleSettingsSection<Content: View, Footer: View>: View {
 
     var body: some View {
         Section {
-            DisclosureGroup(isExpanded: $expanded) {
+            DisclosureGroup(isExpanded: $expanded.animation(reduceMotion ? nil : .snappy)) {
                 content
                     .padding(.top, 4)
             } label: {
@@ -56,8 +86,8 @@ struct CollapsibleSettingsSection<Content: View, Footer: View>: View {
                 }
                 .padding(.vertical, 4)
                 .contentShape(Rectangle())
-                .onTapGesture { withAnimation(.snappy) { expanded.toggle() } }
             }
+            .disclosureGroupStyle(AccessibleSettingsDisclosureStyle())
         } footer: {
             footer.font(.callout).foregroundStyle(.secondary)
         }
@@ -68,6 +98,7 @@ struct CollapsibleSettingsSection<Content: View, Footer: View>: View {
         // to a row inside a shut disclosure.
         .expandsForReveal($expanded, holding: .group(group))
     }
+
 }
 
 extension CollapsibleSettingsSection where Footer == EmptyView {

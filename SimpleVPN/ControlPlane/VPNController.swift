@@ -619,6 +619,7 @@ final class VPNController {
 
     /// Observable mirror of the persisted (REDACTED — keys live in the
     /// keychain) WireGuard settings.
+    var teleportAccessRevision: UInt64 = 0
     var wireGuardConfigs: [String: WireGuardConfig] = [:]
     /// Latest engine status per profile, refreshed while connected — the
     /// last-handshake time is WireGuard's one health signal.

@@ -144,7 +144,7 @@ jobs:
             Vendor/openvpn3-include
             Vendor/openconnect-include
             Vendor/libssh-include
-          key: engines-${{ runner.os }}-${{ runner.arch }}-xcode${{ steps.xc.outputs.version }}-${{ hashFiles('Tools/build-openvpn3-xcframework.sh', 'Tools/build-openconnect-xcframework.sh', 'Tools/build-libssh-xcframework.sh') }}
+          key: engines-${{ runner.os }}-${{ runner.arch }}-xcode${{ steps.xc.outputs.version }}-${{ hashFiles('Tools/build-openvpn3-xcframework.sh', 'Tools/build-openconnect-xcframework.sh', 'Tools/build-libssh-xcframework.sh', 'Tools/build-openssl.sh') }}
 
       - name: Install pinned OpenSSL (cache miss only)
         if: steps.cache.outputs.cache-hit != 'true'
@@ -171,7 +171,7 @@ jobs:
             if [ ! -e "$p" ]; then echo "FATAL: missing $p"; exit 1; fi
           done
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: engines
           path: |
@@ -207,7 +207,7 @@ jobs:
       - name: Install xcodegen
         run: brew install xcodegen
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: engines
           path: Vendor
@@ -295,8 +295,8 @@ jobs:
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          SPARKLE_VER=2.10.0
-          SPARKLE_SHA256=c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c
+          SPARKLE_VER=2.10.1
+          SPARKLE_SHA256=1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27
           curl -sL -o /tmp/sparkle.tar.xz \
             "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VER}/Sparkle-${SPARKLE_VER}.tar.xz"
           echo "${SPARKLE_SHA256}  /tmp/sparkle.tar.xz" | shasum -a 256 -c -
@@ -330,7 +330,7 @@ jobs:
       # inspect rather than losing the whole run's output.
       - name: Upload DMG artifact
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: SimpleVPN-dmg
           path: |

@@ -43,6 +43,7 @@ struct SubprocessTunnelView: View {
     // this on only when this tunnel already has a keychain item.
     @State private var remember = false
     @State private var loaded = false
+    @State private var saveProblem: String?
     // Shown when a saved "sso" was migrated back to password (unsupported kind).
     @State private var authNote: String?
     // SSH import (drop well) state.
@@ -76,23 +77,8 @@ struct SubprocessTunnelView: View {
         Form {
             SettingsSearchSection(search: search)
             Section("Connection") {
-                // A BLANK NAME HOLDS EVERY OTHER EDIT IN THE EDITOR. It is the first
-                // check in `saveDisabledReason`, so with the name cleared `save()`
-                // refuses the whole draft — clear it, turn "Run In-Process" off, close
-                // the window, and NOTHING is written. That is the original report
-                // ("the toggle did not persist") reached through a second gate, and
-                // live save alone did not close it.
-                //
-                // `needs` cannot say so: it is keyed by SETTING ID, and this row is a
-                // bare TextField with no spec and no `SettingRowLayout`. So the row
-                // says it itself, in the three channels the shared row uses — the
-                // words, the red, and the field's own accessibility value
-                // (`Docs/Accessibility.md`: validation rides the value).
-                VStack(alignment: .leading, spacing: 6) {
-                    TextField("Name", text: $draft.name)
-                        .accessibilityValue(nameNeed.map { "needed \u{2014} \($0)" } ?? "")
-                    if let reason = nameNeed { SettingNeedLabel(reason: reason) }
-                }
+                SettingProblemLabel(saveProblem)
+                ConfigurationNameField(name: $draft.name)
                 Picker("Kind", selection: $draft.kind) {
                     ForEach([VPNKind.ssh, .fortinet, .f5apm, .ciscoAnyConnect,
                              .globalProtect, .juniper, .pulse, .arrayNetworks], id: \.self) {
@@ -246,17 +232,6 @@ struct SubprocessTunnelView: View {
     private var deferredSignInNeed: ConnectNeed? {
         guard let need = readinessNeed, need.isDeferredUntilConnect else { return nil }
         return need
-    }
-
-    /// Why the Name row is holding every edit in this editor, or nil.
-    ///
-    /// Separate from `needs` because the two are keyed differently, not because the
-    /// rule is different: `needs` reaches rows by setting id, and Name has none.
-    /// The sentence is `saveDisabledReason`'s own, so the row cannot drift from the
-    /// gate it is explaining.
-    private var nameNeed: String? {
-        draft.name.trimmingCharacters(in: .whitespaces).isEmpty
-            ? "Give this tunnel a name first." : nil
     }
 
     // MARK: Sections
@@ -751,12 +726,12 @@ struct SubprocessTunnelView: View {
     }
 
     private func showFeedback(_ text: String, ok: Bool) {
-        withAnimation(.snappy(duration: 0.25)) { importFeedback = (text, ok) }
+        withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { importFeedback = (text, ok) }
         feedbackClearTask?.cancel()
         feedbackClearTask = Task {
             try? await Task.sleep(for: .seconds(ok ? 12 : 8))
             guard !Task.isCancelled else { return }
-            withAnimation(.easeOut(duration: 0.4)) { importFeedback = nil }
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.4)) { importFeedback = nil }
         }
     }
 
@@ -1509,7 +1484,7 @@ struct SubprocessTunnelView: View {
     /// "hold the value with the reason" or "silently move it to 1080 and break
     /// them". This is the hold.
     private var saveDisabledReason: String? {
-        if draft.name.trimmingCharacters(in: .whitespaces).isEmpty { return "Give this tunnel a name first." }
+        if let problem = ConfigurationNameField.problem(draft.name) { return problem }
         if draft.server.isEmpty { return "Enter the server address first." }
         if draft.kind.isSSLVPN, let problem = SubprocessTunnelConfig.sslServerAddressProblem(draft.server) {
             return problem
@@ -1739,43 +1714,53 @@ struct SubprocessTunnelView: View {
     /// here rather than stored or silently rewritten. What is being held is said on
     /// the row at fault by `needs` above — holding without saying so is what made the
     /// old disabled Save button read as "the toggle did nothing".
-    private func save() {
-        guard !ManagedPolicy.lockConfiguration else { return }
-        guard saveDisabledReason == nil else { return }
+    @discardableResult
+    private func save() -> Bool {
+        guard !ManagedPolicy.lockConfiguration else { return false }
+        guard saveDisabledReason == nil else { return false }
+        saveProblem = nil
+        do {
+            if remember, !password.isEmpty {
+                try KeychainCredentialStore.saveCredentials(profile: "tunnel." + draft.id,
+                                                             .init(username: draft.username, password: password))
+            } else if !remember {
+                KeychainCredentialStore.deleteCredentials(profile: "tunnel." + draft.id)
+            }
+            // Proxy auth password (manual proxy) — its own keychain item.
+            if draft.proxyMode == .manual, !proxyPassword.isEmpty {
+                try KeychainCredentialStore.saveCredentials(profile: "tunnel.\(draft.id).proxy",
+                                                             .init(username: draft.proxyUsername, password: proxyPassword))
+            } else {
+                KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(draft.id).proxy")
+            }
+            // Jump-host password — independent keychain item.
+            if draft.useJumpHost, !jumpPassword.isEmpty {
+                try KeychainCredentialStore.saveCredentials(profile: "tunnel.\(draft.id).jump",
+                                                             .init(username: draft.jumpUsername, password: jumpPassword))
+            } else {
+                KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(draft.id).jump")
+            }
+            // NO `tunnel.<id>.token` AND NO `tunnel.<id>.pkcs11` WRITE OR DELETE HERE,
+            // and the DELETE is the deliberate half. Saving an unrelated change to a
+            // profile that once had a smartcard PIN or a token seed must not destroy it:
+            // a feature removal is not the user asking for their secret to be thrown
+            // away. Deleting the profile still cleans both up
+            // (`SubprocessTunnelStore.remove`), because that IS the user asking.
+            // Client private-key / PKCS#12 passphrase (--key-password).
+            if !draft.clientCertFile.isEmpty || !draft.clientKeyFile.isEmpty, !keyPassphrase.isEmpty {
+                try KeychainCredentialStore.saveCredentials(profile: "tunnel.\(draft.id).privateKey",
+                                                             .init(username: draft.username, password: keyPassphrase))
+            } else {
+                KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(draft.id).privateKey")
+            }
+        } catch {
+            saveProblem = "The sign-in settings could not be saved: \(error.localizedDescription)"
+            vpn.report(error, profile: draft.id)
+            AccessibilityAnnouncer.sayNow("The sign-in settings could not be saved.")
+            return false
+        }
+        // The running tunnel keeps its current settings until reconnect.
         store.save(draft)
-        if remember, !password.isEmpty {
-            try? KeychainCredentialStore.saveCredentials(profile: "tunnel." + draft.id,
-                                                         .init(username: draft.username, password: password))
-        } else if !remember {
-            KeychainCredentialStore.deleteCredentials(profile: "tunnel." + draft.id)
-        }
-        // Proxy auth password (manual proxy) — its own keychain item.
-        if draft.proxyMode == .manual, !proxyPassword.isEmpty {
-            try? KeychainCredentialStore.saveCredentials(profile: "tunnel.\(draft.id).proxy",
-                                                         .init(username: draft.proxyUsername, password: proxyPassword))
-        } else {
-            KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(draft.id).proxy")
-        }
-        // Jump-host password — independent keychain item.
-        if draft.useJumpHost, !jumpPassword.isEmpty {
-            try? KeychainCredentialStore.saveCredentials(profile: "tunnel.\(draft.id).jump",
-                                                         .init(username: draft.jumpUsername, password: jumpPassword))
-        } else {
-            KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(draft.id).jump")
-        }
-        // NO `tunnel.<id>.token` AND NO `tunnel.<id>.pkcs11` WRITE OR DELETE HERE,
-        // and the DELETE is the deliberate half. Saving an unrelated change to a
-        // profile that once had a smartcard PIN or a token seed must not destroy it:
-        // a feature removal is not the user asking for their secret to be thrown
-        // away. Deleting the profile still cleans both up
-        // (`SubprocessTunnelStore.remove`), because that IS the user asking.
-        // Client private-key / PKCS#12 passphrase (--key-password).
-        if !draft.clientCertFile.isEmpty || !draft.clientKeyFile.isEmpty, !keyPassphrase.isEmpty {
-            try? KeychainCredentialStore.saveCredentials(profile: "tunnel.\(draft.id).privateKey",
-                                                         .init(username: draft.username, password: keyPassphrase))
-        } else {
-            KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(draft.id).privateKey")
-        }
         // Fire-and-forget: save() is called synchronously (Save button, Connect);
         // commitCustomRouting is idempotent and CustomRoutingTabView's own
         // onDisappear covers the case where the view closes before this lands.
@@ -1789,10 +1774,11 @@ struct SubprocessTunnelView: View {
         // No "Saved" transient: it reused the SAME `checkmark` glyph as "Save" in an
         // icon-only toolbar, so a successful save was invisible to a sighted user
         // while VoiceOver heard "Saved". Deleting the button deleted the bug.
+        return true
     }
 
     private func connect() {
-        save()
+        guard save() else { return }
         manager.connect(draft, password: password.isEmpty ? nil : password,
                         oneTimeCode: oneTimeCode.isEmpty ? nil : oneTimeCode)
         oneTimeCode = ""

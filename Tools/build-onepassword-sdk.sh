@@ -58,8 +58,11 @@ CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
 mv "$OUT/libopnative.h" "$INCLUDE/libopnative.h"
 
 # The stable header must declare exactly what the archive exports.
+# Read nm completely before matching: grep -q in a pipe can make nm fail
+# with SIGPIPE under pipefail even when the required symbol exists.
+symbols="$(nm -gU "$OUT/libopnative.a" 2>/dev/null)"
 for sym in _OPNativeResolve _OPNativeGetItem _OPNativeList _OPNativeLookup _OPNativeProbe _OPNativeFree; do
-  nm -gU "$OUT/libopnative.a" 2>/dev/null | grep -q " T $sym\$" \
+  grep -q " T $sym\$" <<< "$symbols" \
     || { echo "error: $sym missing from libopnative.a" >&2; exit 1; }
   grep -q "${sym#_}" "$INCLUDE/opnative.h" \
     || { echo "error: ${sym#_} not declared in include/opnative.h" >&2; exit 1; }

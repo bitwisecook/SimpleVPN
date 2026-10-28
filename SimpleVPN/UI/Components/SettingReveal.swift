@@ -273,6 +273,7 @@ struct SettingRevealScrollState: Equatable, Sendable {
 /// modifier per form, in place of the hand-written `ScrollViewReader { proxy in …
 /// onChange … }` that once existed only in the OpenVPN options form.
 private struct SettingsRevealScroll<Content: View>: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(SettingsSearch.self) private var search: SettingsSearch?
     @ViewBuilder let content: Content
 
@@ -316,7 +317,7 @@ private struct SettingsRevealScroll<Content: View>: View {
                 // `anchor: .center` is "as near the centre as it can get" — SwiftUI
                 // clamps it, so a row near the top or the bottom of the form ends up
                 // as close as the content allows rather than refusing to move.
-                if index == 0 {
+                if index == 0, !reduceMotion {
                     withAnimation(.easeInOut(duration: 0.28)) { proxy.scrollTo(id, anchor: .center) }
                 } else {
                     // A correction, not a journey: unanimated, so a re-attempt that
@@ -354,6 +355,7 @@ enum RevealContainerScope: Equatable, Sendable {
 }
 
 private struct SettingRevealExpand: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var isExpanded: Bool
     let scope: RevealContainerScope
     @Environment(SettingsSearch.self) private var search: SettingsSearch?
@@ -372,7 +374,7 @@ private struct SettingRevealExpand: ViewModifier {
     private func open() {
         guard let search, let id = search.revealTargetID, !isExpanded,
               scope.holds(id, group: search.revealGroup) else { return }
-        withAnimation(.snappy) { isExpanded = true }
+        withAnimation(reduceMotion ? nil : .snappy) { isExpanded = true }
     }
 }
 

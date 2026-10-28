@@ -36,7 +36,7 @@ export CGO_LDFLAGS="-mmacosx-version-min=26.0 ${CGO_LDFLAGS:-}"
 # Resolve updates with gvisor.dev/gvisor@go: @latest selects the Bazel-only
 # master branch, which cannot be compiled with standard Go tooling.
 GVISOR_MODULE="gvisor.dev/gvisor"
-GVISOR_VERSION="v0.0.0-20260930000514-4c7ae5e19a78"
+GVISOR_VERSION="v0.0.0-20261028075530-24aa660e5805"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$REPO/Vendor/proxy-engine/src"
@@ -88,8 +88,11 @@ CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
   go build -trimpath -buildmode=c-archive -o "$OUT/libpxengine.a" ./carchive
 
 # The stable header must declare exactly what the archive exports.
+# Read nm completely before matching: grep -q in a pipe can make nm fail
+# with SIGPIPE under pipefail even when the required symbol exists.
+symbols="$(nm -gU "$OUT/libpxengine.a" 2>/dev/null)"
 for sym in _PXSetCallbacks _PXSetFlowDialCallback _PXStart _PXStop _PXStatus _PXPacketIn _PXFree; do
-  nm -gU "$OUT/libpxengine.a" 2>/dev/null | grep -q " T $sym\$" \
+  grep -q " T $sym\$" <<< "$symbols" \
     || { echo "error: $sym missing from libpxengine.a" >&2; exit 1; }
   grep -q "${sym#_}" "$INCLUDE/pxengine.h" \
     || { echo "error: ${sym#_} not declared in include/pxengine.h" >&2; exit 1; }

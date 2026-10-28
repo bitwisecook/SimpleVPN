@@ -8,14 +8,15 @@
 #   Vendor/OpenVPNEngine.xcframework   — link this into the PacketTunnel target
 #   Vendor/openvpn3-include/           — headers for #include <client/ovpncli.hpp> in the bridge
 #
-# Requires Homebrew deps: asio fmt lz4 xxhash openssl@3 (auto-installed if missing).
+# Requires Homebrew deps: asio fmt lz4 xxhash (auto-installed if missing).
+# OpenSSL is built from verified source by build-openssl.sh.
 set -euo pipefail
 
-PIN=c4bf84068cb0908da9d72687e0c7af96a016dbd8   # openvpn3 revision (core 3.12) — bump deliberately
+PIN=16eda831035ec44c3c809c7349ad63be7eaac1d0   # openvpn3 revision (core 3.12) — bump deliberately
 # Keep IDENTICAL across all three engine scripts (see build-openconnect for why:
 # three statically-bundled OpenSSL copies land in one binary; version skew between
 # them is a linker/ABI hazard). Bump all three together.
-OPENSSL_PIN="3.6.4"
+OPENSSL_PIN="3.6.5"
 # The other four Homebrew inputs are compiled INTO the shipped engine too (asio,
 # fmt and xxhash header-only, lz4 as a static archive), so a `brew upgrade`
 # between two rebuilds changed the shipped binary and nothing said so. They are
@@ -32,17 +33,23 @@ BUILD="$REPO/build/engine"
 VENDOR="$REPO/Vendor"
 
 echo "==> Homebrew deps"
-for f in asio fmt lz4 xxhash openssl@3; do brew list "$f" >/dev/null 2>&1 || brew install "$f"; done
+for f in asio fmt lz4 xxhash; do brew list "$f" >/dev/null 2>&1 || brew install "$f"; done
 # Optional roots support static libraries built for macOS 26 when the host's
 # Homebrew bottle targets a newer OS. Versions must still match the pins below.
-O3="${OPENSSL_ROOT_DIR:-$(brew --prefix openssl@3)}"
+O3="${OPENSSL_ROOT_DIR:-$REPO/build/pinned-openssl}"
+if [ -z "${OPENSSL_ROOT_DIR:-}" ]; then
+  "$REPO/Tools/build-openssl.sh"
+fi
 LZ4="${LZ4_ROOT_DIR:-$(brew --prefix lz4)}"
 BREW_INC="$(brew --prefix)/include"
 
-have_ssl="$("$O3/bin/openssl" version 2>/dev/null | awk '{print $2}')"
+have_ssl=""
+if [ -x "$O3/bin/openssl" ]; then
+  have_ssl="$("$O3/bin/openssl" version 2>/dev/null | awk '{print $2}')"
+fi
 if [ "$have_ssl" != "$OPENSSL_PIN" ]; then
-  echo "FATAL: openssl@3 is $have_ssl but the pin is $OPENSSL_PIN."
-  echo "       Align Homebrew or bump OPENSSL_PIN in ALL THREE engine scripts, then rebuild all three."
+  echo "FATAL: OpenSSL is ${have_ssl:-missing} but the pin is $OPENSSL_PIN."
+  echo "       Run Tools/build-openssl.sh, then rebuild all three engines."
   exit 1
 fi
 

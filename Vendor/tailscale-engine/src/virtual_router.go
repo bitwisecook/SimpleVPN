@@ -99,26 +99,6 @@ func createVRState(cfg vrConfig, output func([]byte), bind func(string) conn.Bin
 			st.stop()
 			return nil, errors.New("duplicate or empty VPN port")
 		}
-		var addresses []netip.Addr
-		for _, value := range member.Addresses {
-			if prefix, err := netip.ParsePrefix(value); err == nil {
-				addresses = append(addresses, prefix.Addr())
-			} else if address, err := netip.ParseAddr(value); err == nil {
-				addresses = append(addresses, address)
-			} else {
-				st.stop()
-				return nil, errors.New("invalid assigned VPN address")
-			}
-		}
-		var allowed []netip.Prefix
-		for _, value := range member.WireGuard.AllowedIPs {
-			prefix, err := netip.ParsePrefix(value)
-			if err != nil {
-				st.stop()
-				return nil, errors.New("invalid authorized VPN prefix")
-			}
-			allowed = append(allowed, prefix)
-		}
 		id := member.ID
 		var generation atomic.Uint64
 		engine, problem := createWGState(member.WireGuard, bind(id), func(p []byte) {
@@ -133,6 +113,29 @@ func createVRState(cfg vrConfig, output func([]byte), bind func(string) conn.Bin
 		handle := wgInstances.Add(engine)
 		generation.Store(handle)
 		st.engines[id] = handle
+		if engine.teleport != nil {
+			member.Addresses = engine.teleport.Addresses
+		}
+		var addresses []netip.Addr
+		for _, value := range member.Addresses {
+			if prefix, err := netip.ParsePrefix(value); err == nil {
+				addresses = append(addresses, prefix.Addr())
+			} else if address, err := netip.ParseAddr(value); err == nil {
+				addresses = append(addresses, address)
+			} else {
+				st.stop()
+				return nil, errors.New("invalid assigned VPN address")
+			}
+		}
+		var allowed []netip.Prefix
+		for _, value := range engine.allowedIPs {
+			prefix, err := netip.ParsePrefix(value)
+			if err != nil {
+				st.stop()
+				return nil, errors.New("invalid authorized VPN prefix")
+			}
+			allowed = append(allowed, prefix)
+		}
 		mtu := member.WireGuard.MTU
 		if mtu <= 0 {
 			mtu = wgDefaultMTU
@@ -166,8 +169,7 @@ func (st *vrState) stop() {
 	st.mu.Unlock()
 	for _, handle := range engines {
 		if engine, ok := wgInstances.Remove(handle); ok {
-			engine.dev.Close()
-			engine.tundev.Close()
+			engine.close()
 		}
 	}
 }
@@ -301,8 +303,7 @@ func VRStopPort(handle C.uint64_t, id *C.char) *C.char {
 	st.router.RemovePort(name)
 	st.mu.Unlock()
 	if engine, ok := wgInstances.Remove(port); ok {
-		engine.dev.Close()
-		engine.tundev.Close()
+		engine.close()
 	}
 	return cJSON(okResponse{OK: true})
 }

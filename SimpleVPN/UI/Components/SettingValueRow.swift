@@ -40,6 +40,27 @@
 
 import SwiftUI
 
+/// Every editor holds its draft when the name is blank. Keep that reason on
+/// the field so unrelated edits never appear to have been saved silently.
+struct ConfigurationNameField: View {
+    @Binding var name: String
+    var prompt: String = ""
+
+    nonisolated static func problem(_ name: String) -> String? {
+        name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Give this VPN a name first." : nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextField("Name", text: $name, prompt: Text(prompt))
+                .accessibilityLabel("Name")
+                .accessibilityValue(Self.problem(name).map { "Needed: \($0)" } ?? name)
+            if let reason = Self.problem(name) { SettingNeedLabel(reason: reason) }
+        }
+    }
+}
+
 // MARK: - The value column
 
 nonisolated enum SettingValueMetrics {
@@ -281,6 +302,7 @@ struct SettingRowLayout<Control: View, Caveat: View>: View {
         // Group the control with its summary so the explanation is the element
         // VoiceOver reaches next.
         .accessibilityElement(children: .contain)
+        .accessibilityLabel(setting.name)
         // State belongs to the containing row. Applying even an empty value
         // to `control` overrides its child's typed value; the field must keep
         // its own value and validation while this row announces availability.

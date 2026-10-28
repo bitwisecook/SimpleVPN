@@ -10,7 +10,8 @@
 #   Vendor/SSHEngine.xcframework   — link into the SSH engine
 #   Vendor/libssh-include/         — libssh public headers for the bridge
 #
-# Homebrew deps (auto-installed): cmake openssl@3 libfido2. zlib is a system library
+# Homebrew deps (auto-installed): cmake libfido2. OpenSSL is built by build-openssl.sh.
+# zlib is a system library
 # (-lz); GSSAPI comes from the macOS SDK (MIT-shim headers + libgssapi_krb5.tbd → GSS
 # framework), so the app links -lgssapi_krb5 — see project.yml.
 #
@@ -30,7 +31,7 @@ PIN=0.12.2                # libssh release — bump deliberately (update SHA256 
 # the build must stop rather than compile it.
 TARBALL_SHA256="49560f677d96e3706a904ac2de1116e25f3680937d51e5c92198fcba4a1c1e9f"
 # Keep IDENTICAL across all three engine scripts (see build-openconnect for why).
-OPENSSL_PIN="3.6.4"
+OPENSSL_PIN="3.6.5"
 # Homebrew formulae compiled INTO this engine — same policy as OPENSSL_PIN and
 # build-openvpn3-xcframework.sh's BREW_PINS: a `brew upgrade` between two rebuilds
 # must not change the shipped binary quietly.
@@ -53,15 +54,21 @@ CBOR_BUILD="$REPO/build/libcbor"
 CBOR_TARBALL="$REPO/build/libcbor-$CBOR_PIN.tar.gz"
 
 echo "==> Homebrew deps"
-for f in cmake openssl@3 libfido2; do brew list "$f" >/dev/null 2>&1 || brew install "$f"; done
+for f in cmake libfido2; do brew list "$f" >/dev/null 2>&1 || brew install "$f"; done
 # Use deployment-compatible static libraries on hosts with newer Homebrew bottles.
-O3="${OPENSSL_ROOT_DIR:-$(brew --prefix openssl@3)}"
+O3="${OPENSSL_ROOT_DIR:-$REPO/build/pinned-openssl}"
+if [ -z "${OPENSSL_ROOT_DIR:-}" ]; then
+  "$REPO/Tools/build-openssl.sh"
+fi
 FIDO2="${LIBFIDO2_ROOT_DIR:-$(brew --prefix libfido2)}"
 
-have_ssl="$("$O3/bin/openssl" version 2>/dev/null | awk '{print $2}')"
+have_ssl=""
+if [ -x "$O3/bin/openssl" ]; then
+  have_ssl="$("$O3/bin/openssl" version 2>/dev/null | awk '{print $2}')"
+fi
 if [ "$have_ssl" != "$OPENSSL_PIN" ]; then
-  echo "FATAL: openssl@3 is $have_ssl but the pin is $OPENSSL_PIN."
-  echo "       Align Homebrew or bump OPENSSL_PIN in ALL THREE engine scripts, then rebuild all three."
+  echo "FATAL: OpenSSL is ${have_ssl:-missing} but the pin is $OPENSSL_PIN."
+  echo "       Run Tools/build-openssl.sh, then rebuild all three engines."
   exit 1
 fi
 
@@ -141,6 +148,8 @@ cat >> "$WORK/src/channels.c" <<'EOF'
  * SSH_TUNMODE_POINTOPOINT(1)/ETHERNET(2); remote_unit is the server tun unit
  * or 0x7fffffff for "any". Reuses the file-local channel_open() above. */
 __attribute__((visibility("default")))
+int libsshx_channel_open_tun(ssh_channel channel, uint32_t tun_mode, uint32_t remote_unit);
+
 int libsshx_channel_open_tun(ssh_channel channel,
                              uint32_t tun_mode,
                              uint32_t remote_unit)
@@ -179,6 +188,8 @@ int libsshx_channel_open_tun(ssh_channel channel,
  * compile, and ssh_global_request() is not public API — so the wrapper lives
  * here for the same reason the tun one does. SSHBridge declares the prototype. */
 __attribute__((visibility("default")))
+int libsshx_send_keepalive(ssh_session session);
+
 int libsshx_send_keepalive(ssh_session session)
 {
     if (session == NULL) {

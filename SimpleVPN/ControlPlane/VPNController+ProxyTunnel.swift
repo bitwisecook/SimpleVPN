@@ -87,12 +87,12 @@ extension VPNController {
         return (c?.username ?? "", c?.password ?? "")
     }
 
-    func setProxyTunnelCredentials(username: String, password: String, for id: String) {
+    func setProxyTunnelCredentials(username: String, password: String, for id: String) throws {
         let u = username.trimmingCharacters(in: .whitespacesAndNewlines)
         if u.isEmpty && password.isEmpty {
             KeychainCredentialStore.deleteCredentials(profile: id)
         } else {
-            try? KeychainCredentialStore.saveCredentials(profile: id, .init(username: u, password: password))
+            try KeychainCredentialStore.saveCredentials(profile: id, .init(username: u, password: password))
         }
     }
 

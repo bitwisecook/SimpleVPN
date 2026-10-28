@@ -13,7 +13,7 @@ nonisolated enum ConfigSecretMode: String, CaseIterable, Sendable {
 /// derived from the newly assigned profile ID, never taken from an input file.
 enum ConfigSecretTransfer {
     static func accounts(id: String) -> [(String, String)] {
-        [("credentials", id), ("wireguard", "wg.\(id)"), ("tailscale", "tailscale.\(id)"),
+        [("teleport", "teleport.\(id)"), ("credentials", id), ("wireguard", "wg.\(id)"), ("tailscale", "tailscale.\(id)"),
          ("tailscale-state", "tailscale.state.\(id)"),
          ("native-http-proxy", "native.proxy.http.\(id)"),
          ("native-https-proxy", "native.proxy.https.\(id)"),

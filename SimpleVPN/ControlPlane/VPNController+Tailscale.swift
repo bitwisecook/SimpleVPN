@@ -112,12 +112,12 @@ extension VPNController {
         KeychainCredentialStore.loadCredentials(profile: Self.tailscaleKeyProfile(id))?.password ?? ""
     }
 
-    func setTailscaleAuthKey(_ key: String, for id: String) {
+    func setTailscaleAuthKey(_ key: String, for id: String) throws {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             KeychainCredentialStore.deleteCredentials(profile: Self.tailscaleKeyProfile(id))
         } else {
-            try? KeychainCredentialStore.saveCredentials(
+            try KeychainCredentialStore.saveCredentials(
                 profile: Self.tailscaleKeyProfile(id),
                 .init(username: "authkey", password: trimmed))
         }

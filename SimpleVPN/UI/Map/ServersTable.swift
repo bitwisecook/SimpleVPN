@@ -240,6 +240,7 @@ struct ServersTable: View {
             }
         }
         .tableStyle(.inset)
+        .accessibilityLabel("VPN servers")
         // The Mac convention for a bordered editable list: Delete removes the
         // selection. The button stays visible too — macOS renders no affordance
         // for a keyboard-only delete (Docs/Accessibility.md rule 7).

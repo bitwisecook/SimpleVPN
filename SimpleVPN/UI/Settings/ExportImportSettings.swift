@@ -43,6 +43,7 @@ struct ExportImportSettings: View {
     @State private var problem: String?
     @State private var secretMode: ConfigSecretMode = .placeholders
     @State private var exporting = false
+    @State private var exportResult: String?
 
     private var locked: String? { ConfigTransfer.policyRefusal }
 
@@ -66,6 +67,7 @@ struct ExportImportSettings: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .accessibilityElement(children: .contain)
+            .accessibilityLabel("Export all settings")
 
             VStack(alignment: .leading, spacing: 6) {
                 Button("Import Settings\u{2026}") { openFile() }
@@ -80,6 +82,12 @@ struct ExportImportSettings: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .accessibilityElement(children: .contain)
+            .accessibilityLabel("Import settings")
+
+            if let exportResult {
+                Label(exportResult, systemImage: "checkmark.circle")
+                    .font(.callout)
+            }
 
             if let locked {
                 Label(locked, systemImage: "lock.fill")
@@ -131,12 +139,16 @@ struct ExportImportSettings: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let format = ConfigFileFormat.forFileName(url.lastPathComponent)
         exporting = true
+        exportResult = nil
         Task {
             defer { exporting = false }
             do {
                 let snapshot = try await ConfigTransfer.exportSnapshot(vpn: vpn, tunnels: tunnels,
                     nativeVPN: nativeVPN, labels: labels, mode: mode)
                 try ConfigSecretTransfer.write(ConfigDocument.text(from: snapshot, format: format, secretMode: mode), to: url)
+                let message = "Exported settings to \(url.lastPathComponent)."
+                exportResult = message
+                AccessibilityAnnouncer.sayNow(message)
             } catch {
                 problem = "The file couldn't be written: \(error.localizedDescription)"
             }
@@ -174,7 +186,11 @@ struct ExportImportSettings: View {
             var done = current
             done.applying = false
             done.result = result
+            guard pending?.id == current.id else { return }
             pending = done
+            AccessibilityAnnouncer.sayNow(result.failures.isEmpty
+                ? "Settings imported. Review the results."
+                : "Settings import finished with \(result.failures.count) problems. Review the results.")
         }
     }
 }
@@ -207,6 +223,11 @@ private struct ImportConfirmationSheet: View {
         .padding(20)
         .resizablePanel(idealWidth: 640, idealHeight: 540,
                         minWidth: 480, minHeight: 360)
+        .interactiveDismissDisabled(pending?.applying == true)
+        .onExitCommand {
+            guard pending?.applying != true else { return }
+            pending = nil
+        }
     }
 
     private func header(_ pending: PendingConfigImport) -> some View {
@@ -336,6 +357,7 @@ private struct ImportConfirmationSheet: View {
                         }
                     }
                     .accessibilityElement(children: .contain)
+                    .accessibilityLabel("Settings recovery copy")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -357,10 +379,17 @@ private struct ImportConfirmationSheet: View {
             Spacer()
             Button("Cancel") { self.pending = nil }
                 .keyboardShortcut(.cancelAction)
+                .disabled(pending.applying)
+                .help(pending.applying ? "Wait for the import to finish." : "Leave these settings unchanged.")
+                .accessibilityValue(pending.applying ? "Unavailable while settings are being imported." : "")
             Button("Import") { onApply() }
                 .buttonStyle(.glassProminent)
                 .keyboardShortcut(.defaultAction)
                 .disabled(!pending.plan.isApplicable || pending.applying)
+                .help(pending.applying ? "Wait for the import to finish."
+                      : pending.plan.isApplicable ? "Apply the reviewed settings." : "Resolve the problems listed in this file first.")
+                .accessibilityValue(pending.applying ? "Import in progress."
+                                    : pending.plan.isApplicable ? "" : "Unavailable. Resolve the problems listed in this file first.")
                 // A disabled primary action must say why.
                 .help(pending.plan.isApplicable
                       ? "Apply everything listed above"

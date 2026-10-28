@@ -34,8 +34,12 @@ enum Acknowledgements {
               url: "https://www.libssh.org"),
         .init(name: "Tailscale", license: "BSD-3-Clause", role: "Tailscale / Headscale engine",
               url: "https://github.com/tailscale/tailscale"),
-        .init(name: "wireguard-go", license: "MIT", role: "WireGuard data plane inside the Tailscale engine",
+        .init(name: "wireguard-go", license: "MIT", role: "Shared WireGuard data plane for WireGuard, Teleport and Tailscale",
               url: "https://github.com/tailscale/wireguard-go"),
+        .init(name: "teleport-client", license: "MIT", role: "UniFi Teleport invite exchange and endpoint negotiation",
+              url: "https://github.com/sinnet3000/teleport-client"),
+        .init(name: "Pion STUN", license: "MIT", role: "Authenticated STUN for Teleport",
+              url: "https://github.com/pion/stun"),
         // gVisor's netstack is the userspace TCP/IP stack in BOTH Go engines: the
         // Tailscale client embeds it, and the Proxy Tunnel engine is built on it
         // directly (Vendor/proxy-engine pins the same version).

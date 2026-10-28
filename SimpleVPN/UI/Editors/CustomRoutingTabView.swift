@@ -112,14 +112,16 @@ func sanitizedCustomRoutingProfile(_ profile: CustomRoutingProfile) -> CustomRou
 /// keeps the stored secret (a mode flip shouldn't lose what was typed) but drops the
 /// ref — an unreferenced secret can never reach an apply.
 func syncCustomRoutingProxyAuth(username: String, password: String,
-                                profile: inout CustomRoutingProfile, profileID: String) {
+                                profile: inout CustomRoutingProfile, profileID: String,
+                                save: (String, KeychainCredentialStore.CustomRoutingProxyAuth) throws -> Void = {
+                                    try KeychainCredentialStore.saveCustomRoutingProxyAuth(profile: $0, $1)
+                                }) throws {
     guard !(username.isEmpty && password.isEmpty) else {
         KeychainCredentialStore.deleteCustomRoutingProxyAuth(profile: profileID)
         profile.proxy.authSource = nil
         return
     }
-    try? KeychainCredentialStore.saveCustomRoutingProxyAuth(
-        profile: profileID, .init(username: username, password: password))
+    try save(profileID, .init(username: username, password: password))
     profile.proxy.authSource = profile.proxy.mode == .ignore
         ? nil : ProxyAuthSourceRef.ref(forProfile: profileID)
 }
@@ -142,15 +144,25 @@ func loadCustomRoutingProxyAuthFields(profileID: String) -> (username: String, p
 @MainActor
 func commitCustomRouting(_ vpn: VPNController, profileID: String, profile: CustomRoutingProfile,
                          proxyAuthUsername: String, proxyAuthPassword: String) async -> CustomRoutingProfile {
-    // Under an MDM configuration lock nothing here may happen — not the persist,
-    // and NOT the keychain write `syncCustomRoutingProxyAuth` would do. Returning
-    // the profile untouched leaves the caller's state exactly as it was.
+    do {
+        return try await persistCustomRouting(vpn, profileID: profileID, profile: profile,
+                                              proxyAuthUsername: proxyAuthUsername,
+                                              proxyAuthPassword: proxyAuthPassword)
+    } catch {
+        vpn.report(error, profile: profileID)
+        return profile
+    }
+}
+
+/// Throwing variant for editors whose Done action must stay open on a failed save.
+@MainActor
+func persistCustomRouting(_ vpn: VPNController, profileID: String, profile: CustomRoutingProfile,
+                          proxyAuthUsername: String, proxyAuthPassword: String) async throws -> CustomRoutingProfile {
     guard !ManagedPolicy.lockConfiguration else { return profile }
     var p = profile
-    syncCustomRoutingProxyAuth(username: proxyAuthUsername, password: proxyAuthPassword,
-                              profile: &p, profileID: profileID)
-    do { try await vpn.setCustomRouting(sanitizedCustomRoutingProfile(p), for: profileID) }
-    catch { vpn.lastError = error.localizedDescription }
+    try syncCustomRoutingProxyAuth(username: proxyAuthUsername, password: proxyAuthPassword,
+                                  profile: &p, profileID: profileID)
+    try await vpn.setCustomRouting(sanitizedCustomRoutingProfile(p), for: profileID)
     return p
 }
 

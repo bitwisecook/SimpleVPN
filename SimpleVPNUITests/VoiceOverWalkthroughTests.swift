@@ -506,13 +506,18 @@ final class VoiceOverWalkthroughTests: XCTestCase {
             return
         }
         _ = manage.outlines["Sidebar"].waitForExistence(timeout: 10)
-        let nodes = flatten(try snapshot(of: manage, "the Manage VPNs window"))
 
         // Rows: one sentence, with a status word from DotState.
         let rowTexts = flatten(try snapshot(of: manage.outlines["Sidebar"], "the sidebar"))
-            .filter { $0.elementType == .staticText }
-            .compactMap { $0.value as? String }
-            .filter { $0.contains(",") }
+            .filter { $0.elementType == .outlineRow }
+            .compactMap { row -> String? in
+                // A VPN cell directly exposes its combined sentence. Section
+                // headings wrap their explanatory text in a separate group;
+                // that description is not a VPN's state.
+                let cellContent = row.children.flatMap(\.children)
+                guard let text = cellContent.first(where: { $0.elementType == .staticText }) else { return nil }
+                return text.label.isEmpty ? text.value as? String : text.label
+            }
         try XCTSkipIf(rowTexts.isEmpty, "No VPNs configured on this machine.")
         for sentence in rowTexts {
             XCTAssertNotNil(Self.phrase(in: sentence, from: Self.dotStatePhrases), """
@@ -521,12 +526,15 @@ final class VoiceOverWalkthroughTests: XCTestCase {
                 """)
         }
 
+        // Exercise the normal sidebar-to-editor journey explicitly. The main
+        // window can have no selected VPN when the development-copy gate is up.
+        manage.outlines["Sidebar"].staticTexts[rowTexts[0]].firstMatch.click()
+        let nodes = flatten(try snapshot(of: manage, "the selected VPN editor"))
+
         // Help buttons name their setting, and the setting names itself on screen.
         let helpButtons = nodes.filter { $0.elementType == .button && $0.label.hasPrefix("Help for ") }
-        XCTAssertFalse(helpButtons.isEmpty, """
-            The editor exposes no \u{201C}Help for …\u{201D} buttons — either no VPN is \
-            selected or the per-setting manual links have gone
-            """)
+        // General intentionally has no option-help links. Any links in the
+        // selected pane must still name a setting that is present.
         let spoken = nodes.compactMap { ($0.value as? String) ?? ($0.label.isEmpty ? nil : $0.label) }
         for help in helpButtons {
             let subject = String(help.label.dropFirst("Help for ".count))
@@ -537,15 +545,12 @@ final class VoiceOverWalkthroughTests: XCTestCase {
                 """)
         }
 
-        // Save: if it can't be used, it says why (Docs/Accessibility.md rule 5).
-        let save = manage.buttons["Save"]
-        XCTAssertTrue(save.waitForExistence(timeout: 5), "The editor has no Save button")
-        if !save.isEnabled {
-            XCTAssertFalse(((save.value as? String) ?? "").isEmpty, """
-                Save is disabled and says nothing about why — the reason belongs in .help \
-                AND .accessibilityValue
-                """)
-        }
+        // Editors save on blur now. The selected VPN's name remains a named,
+        // readable input; a removed Save button is no longer the contract.
+        let name = manage.textFields["Name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5), "The selected editor has no named Name field. " + manage.debugDescription)
+        XCTAssertFalse((name.value as? String ?? "").isEmpty, "The editor lost the selected VPN's name")
+
     }
 
     // MARK: - Step 11 — Custom Routing
@@ -571,7 +576,7 @@ final class VoiceOverWalkthroughTests: XCTestCase {
             XCTFail("⇧⌘M did not open the Manage VPNs window")
             return
         }
-        let tab = manage.radioButtons["Custom Routing"]
+        let tab = manage.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Custom Routing")).firstMatch
         guard tab.waitForExistence(timeout: 10) else {
             throw XCTSkip("""
                 No VPN is selected in Manage VPNs (this machine has none configured), so \
@@ -584,8 +589,9 @@ final class VoiceOverWalkthroughTests: XCTestCase {
         // files selects by default — leads with "General" and has five more tabs
         // besides. Demanding "Settings" alone failed on every OpenVPN selection, which
         // is the common case, not the rare one.
-        let siblingTitle = manage.radioButtons["Settings"].exists ? "Settings" : "General"
-        let sibling = manage.radioButtons[siblingTitle]
+        let settings = manage.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Settings")).firstMatch
+        let siblingTitle = settings.exists ? "Settings" : "General"
+        let sibling = manage.descendants(matching: .any).matching(NSPredicate(format: "label == %@", siblingTitle)).firstMatch
         XCTAssertTrue(sibling.exists, """
             The editor has a Custom Routing tab but neither a Settings tab (tunnel editors) \
             nor a General one (the OpenVPN editor) — the tabbed shape every editor shares \

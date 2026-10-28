@@ -56,7 +56,7 @@ struct SSHNetworkTunnelView: View {
             SettingsSearchSection(search: search)
 
             Section("Connection") {
-                TextField("Name", text: $name)
+                ConfigurationNameField(name: $name)
                 EngineSettingRow(spec: Self.specs["sshnet.server"], value: draft.server) {
                     labeledField(Self.specs["sshnet.server"], $draft.server,
                                  prompt: "gateway.example.com", problem: serverProblem)
@@ -439,7 +439,7 @@ struct SSHNetworkTunnelView: View {
     private var saveDisabledReason: String? { saving ? "Saving…" : validationProblem }
 
     private var validationProblem: String? {
-        if name.trimmingCharacters(in: .whitespaces).isEmpty { return "Give this VPN a name first." }
+        if let problem = ConfigurationNameField.problem(name) { return problem }
         if draft.server.trimmingCharacters(in: .whitespaces).isEmpty { return "Enter the SSH server address." }
         if let p = serverProblem { return p }
         if let p = portProblem { return p }
@@ -542,7 +542,7 @@ struct SSHNetworkTunnelView: View {
             do {
                 try await vpn.rename(id: saved_profileID, to: saved_name)
                 try await vpn.setSSHNetworkTunnelConfig(saved_draft, for: saved_profileID)
-                vpn.setSSHNetworkTunnelSecrets(password: saved_password,
+                try vpn.setSSHNetworkTunnelSecrets(password: saved_password,
                                                privateKeyPEM: saved_draft.needsPrivateKey ? saved_privateKeyPEM : "",
                                                certificatePEM: saved_draft.needsCertificate ? saved_certificatePEM : "",
                                                for: saved_profileID)

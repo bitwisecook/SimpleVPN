@@ -25,6 +25,8 @@ import Darwin
 nonisolated struct WireGuardConfig: Codable, Sendable, Equatable, Identifiable {
     var id = UUID().uuidString
     var name = "New WireGuard"
+    /// Teleport supplies the peer and interface configuration at each connection.
+    var usesTeleport = false
 
     // [Interface]
     var privateKey = ""
@@ -81,6 +83,7 @@ nonisolated struct WireGuardConfig: Codable, Sendable, Equatable, Identifiable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = (try? c.decodeIfPresent(String.self, forKey: .id)) ?? UUID().uuidString
         name = (try? c.decodeIfPresent(String.self, forKey: .name)) ?? "New WireGuard"
+        usesTeleport = (try? c.decodeIfPresent(Bool.self, forKey: .usesTeleport)) ?? false
         privateKey = (try? c.decodeIfPresent(String.self, forKey: .privateKey)) ?? ""
         addresses = (try? c.decodeIfPresent([String].self, forKey: .addresses)) ?? []
         dns = (try? c.decodeIfPresent([String].self, forKey: .dns)) ?? []
@@ -852,21 +855,23 @@ nonisolated extension WireGuardConfig {
     /// marking is driven from (`SettingNeeds`). The order is the order a person can
     /// act on: identify the peer, reach it, address yourself, then choose what to send.
     var connectFault: SettingFault? {
-        if peerPublicKey.trimmingCharacters(in: .whitespaces).isEmpty {
-            return SettingFault("wg.public-key", "Enter the server peer's public key.")
+        if !usesTeleport {
+            if peerPublicKey.trimmingCharacters(in: .whitespaces).isEmpty {
+                return SettingFault("wg.public-key", "Enter the server peer's public key.")
+            }
+            // A truncated key is accepted by every layer until the handshake, where
+            // it fails silently — so it's refused here, with the endpoint.
+            if let p = Self.keyProblem(peerPublicKey) { return SettingFault("wg.public-key", p) }
+            // `endpointProblem` answers for the EMPTY field too ("Enter the server's
+            // address as host:port…"), which is what makes the one field a WireGuard VPN
+            // cannot work without turn red before anything has been typed.
+            if let p = Self.endpointProblem(endpoint) { return SettingFault("wg.endpoint", p) }
+            if addresses.isEmpty {
+                return SettingFault("wg.address",
+                                    "Add this device's tunnel address (like 10.0.0.2/32) \u{2014} it's in the config your provider gave you.")
+            }
+            if let p = Self.addressesProblem(addresses) { return SettingFault("wg.address", p) }
         }
-        // A truncated key is accepted by every layer until the handshake, where
-        // it fails silently — so it's refused here, with the endpoint.
-        if let p = Self.keyProblem(peerPublicKey) { return SettingFault("wg.public-key", p) }
-        // `endpointProblem` answers for the EMPTY field too ("Enter the server's
-        // address as host:port…"), which is what makes the one field a WireGuard VPN
-        // cannot work without turn red before anything has been typed.
-        if let p = Self.endpointProblem(endpoint) { return SettingFault("wg.endpoint", p) }
-        if addresses.isEmpty {
-            return SettingFault("wg.address",
-                                "Add this device's tunnel address (like 10.0.0.2/32) \u{2014} it's in the config your provider gave you.")
-        }
-        if let p = Self.addressesProblem(addresses) { return SettingFault("wg.address", p) }
         if allowedIPs.isEmpty {
             return SettingFault("wg.allowed-ips",
                                 "Add at least one allowed network (0.0.0.0/0, ::/0 sends everything).")
@@ -940,6 +945,8 @@ nonisolated extension WireGuardConfig {
 nonisolated struct WireGuardStartConfig: Codable, Sendable, Equatable {
     /// Session-only. Reaches this struct from startTunnel options, is handed
     /// straight to the engine, and is never persisted or logged.
+    var teleport: TeleportSession? = nil
+    var clientName: String? = nil
     var privateKey: String
     var peerPublicKey: String
     /// Session-only, same as the private key. Empty ⇒ none.
@@ -977,6 +984,7 @@ nonisolated struct WireGuardStartConfig: Codable, Sendable, Equatable {
     /// diagnostic when a config points at the wrong server).
     func redactedJSONString() -> String {
         var copy = self
+        copy.teleport = nil
         copy.privateKey = privateKey.isEmpty ? "" : "<redacted>"
         copy.presharedKey = presharedKey.isEmpty ? "" : "<redacted>"
         return copy.jsonString()
@@ -988,6 +996,8 @@ nonisolated struct WireGuardStartConfig: Codable, Sendable, Equatable {
 /// The WGStatus payload. A strict whitelist on the Go side — never carries key
 /// material.
 nonisolated struct WireGuardEngineStatus: Codable, Sendable, Equatable {
+    var addresses: [String] = []
+    var dns: [String] = []
     var state: String = "stopped"
     var endpoint: String = ""
     var listenPort: Int = 0
@@ -1008,6 +1018,8 @@ nonisolated struct WireGuardEngineStatus: Codable, Sendable, Equatable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        addresses = (try? c.decodeIfPresent([String].self, forKey: .addresses)) ?? []
+        dns = (try? c.decodeIfPresent([String].self, forKey: .dns)) ?? []
         state = (try? c.decodeIfPresent(String.self, forKey: .state)) ?? "stopped"
         endpoint = (try? c.decodeIfPresent(String.self, forKey: .endpoint)) ?? ""
         listenPort = (try? c.decodeIfPresent(Int.self, forKey: .listenPort)) ?? 0

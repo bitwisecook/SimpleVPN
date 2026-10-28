@@ -18,6 +18,10 @@ struct WireGuardView: View {
     let profileID: String
     @State private var draft = WireGuardConfig()
 
+    @State private var teleportInvite = ""
+    @State private var teleportPairing = false
+    @State private var teleportPaired = false
+    @State private var teleportError: String?
     @State private var loaded = false
     @State private var showImporter = false
     @State private var pasteText = ""
@@ -58,149 +62,167 @@ struct WireGuardView: View {
         Form {
             SettingsSearchSection(search: search)
             Section("Connection") {
-                TextField("Name", text: $draft.name)
-                HStack {
-                    Button("Import .conf…") { showImporter = true }
-                    Button("Paste Configuration…") { pasteText = ""; showPaste = true }
-                }
-                EngineSettingRow(spec: Self.specs["wg.endpoint"], value: draft.endpoint) {
-                    textField(Self.specs["wg.endpoint"], $draft.endpoint, prompt: "host:51820",
-                              problem: endpointProblem)
-                }
-                problemLabel(endpointProblem)
-                EngineSettingRow(spec: Self.specs["wg.listen-port"], value: draft.listenPort) {
-                    ValidatedNumberField(
-                        label: { EngineSettingLabel(spec: Self.specs["wg.listen-port"], value: draft.listenPort) },
-                        prompt: "auto",
-                        value: $draft.listenPort,
-                        range: WireGuardConfig.listenPortRange,
-                        invalidMessage: "Enter a port between 0 and 65535 — 0 lets the system choose one.")
-                }
-                if let port = draft.listenPort, WireGuardConfig.privilegedPortRange.contains(port) {
-                    SettingCaveat("Ports below 1024 are reserved for system services, so \(port) can collide with something already on this Mac — and few networks forward it. WireGuard's own port is 51820; leave this empty to let the system choose.")
+                ConfigurationNameField(name: $draft.name)
+                if draft.usesTeleport {
+                    LabeledContent("Connection", value: "UniFi Teleport")
+                } else {
+                    HStack {
+                        Button("Import .conf…") { showImporter = true }
+                        Button("Paste Configuration…") { pasteText = ""; showPaste = true }
+                    }
+                    EngineSettingRow(spec: Self.specs["wg.endpoint"], value: draft.endpoint) {
+                        textField(Self.specs["wg.endpoint"], $draft.endpoint, prompt: "host:51820",
+                                  problem: endpointProblem)
+                    }
+                    problemLabel(endpointProblem)
+                    EngineSettingRow(spec: Self.specs["wg.listen-port"], value: draft.listenPort) {
+                        ValidatedNumberField(
+                            label: { EngineSettingLabel(spec: Self.specs["wg.listen-port"], value: draft.listenPort) },
+                            prompt: "auto",
+                            value: $draft.listenPort,
+                            range: WireGuardConfig.listenPortRange,
+                            invalidMessage: "Enter a port between 0 and 65535 — 0 lets the system choose one.")
+                    }
+                    if let port = draft.listenPort, WireGuardConfig.privilegedPortRange.contains(port) {
+                        SettingCaveat("Ports below 1024 are reserved for system services, so \(port) can collide with something already on this Mac — and few networks forward it. WireGuard's own port is 51820; leave this empty to let the system choose.")
+                    }
                 }
             }
 
             Section("Sign-In") {
-                // Descriptor-backed like every other row: the summary, the manual
-                // link and the a11y contract come from the spec, so the field the
-                // whole VPN depends on is finally findable and documented.
-                EngineSettingRow(spec: Self.specs["wg.private-key"], value: hasPrivateKey) {
-                    privateKeyRows
+                if draft.usesTeleport {
+                    teleportRows
+                } else {
+                    // Descriptor-backed like every other row: the summary, the manual
+                    // link and the a11y contract come from the spec, so the field the
+                    // whole VPN depends on is finally findable and documented.
+                    EngineSettingRow(spec: Self.specs["wg.private-key"], value: hasPrivateKey) {
+                        privateKeyRows
+                    }
+                    problemLabel(privateKeyProblem)
+                    EngineSettingRow(spec: Self.specs["wg.public-key"], value: draft.peerPublicKey) {
+                        monoField(Self.specs["wg.public-key"], $draft.peerPublicKey, prompt: "base64 public key",
+                                  problem: publicKeyProblem)
+                    }
+                    problemLabel(publicKeyProblem)
+                    EngineSettingRow(spec: Self.specs["wg.preshared-key"], value: hasPresharedKey) {
+                        presharedKeyRows
+                    }
+                    problemLabel(presharedKeyProblem)
                 }
-                problemLabel(privateKeyProblem)
-                EngineSettingRow(spec: Self.specs["wg.public-key"], value: draft.peerPublicKey) {
-                    monoField(Self.specs["wg.public-key"], $draft.peerPublicKey, prompt: "base64 public key",
-                              problem: publicKeyProblem)
-                }
-                problemLabel(publicKeyProblem)
-                EngineSettingRow(spec: Self.specs["wg.preshared-key"], value: hasPresharedKey) {
-                    presharedKeyRows
-                }
-                problemLabel(presharedKeyProblem)
             }
 
             Section("Traffic") {
-                EngineSettingRow(spec: Self.specs["wg.address"], value: draft.addresses) {
-                    listField(Self.specs["wg.address"], $draft.addresses, prompt: "10.0.0.2/32",
-                              problem: addressProblem)
-                }
-                problemLabel(addressProblem)
-                EngineSettingRow(spec: Self.specs["wg.allowed-ips"], value: draft.allowedIPs) {
-                    listField(Self.specs["wg.allowed-ips"], $draft.allowedIPs, prompt: "0.0.0.0/0",
-                              problem: allowedIPsProblem)
-                }
-                problemLabel(allowedIPsProblem)
-                if draft.isFullTunnel {
-                    // Says what the Custom Routing section further down can then
-                    // actually act on: one default route, not a list of networks.
-                    Label("Full tunnel — all traffic routes through this peer. The Custom Routing route rules below then apply to that single default route, not to individual networks.",
-                          systemImage: "globe")
-                        .font(.callout).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                EngineSettingRow(spec: Self.specs["wg.dns"], value: draft.dns) {
-                    listField(Self.specs["wg.dns"], $draft.dns, prompt: "1.1.1.1")
-                }
-                // One caveat per resolver the peer won't carry — the split-tunnel
-                // footgun that shows up as "the VPN works but nothing resolves".
-                ForEach(uncoveredDNS, id: \.self) { server in
-                    SettingCaveat(WireGuardConfig.dnsCoverageWarning(server))
-                }
-                // THE TWO ROWS THAT LANDED LAST. Both carve-outs shipped for every
-                // other packet-tunnel kind at once — config field, plumbing, manual
-                // page, portability id, CLI/MDM name — and could not get their rows
-                // because this file was owned by another change in flight. They sat
-                // behind `SettingRenderingTests.unrenderedByDesign`, whose reverse
-                // check fails the moment they appear; those two lines are deleted
-                // with this change.
-                //
-                // Neither has a wg-quick field, which is exactly why they need one
-                // here: a `.conf` cannot carry a search list (its `DNS=` line has no
-                // room for one) and has no concept of a local-network carve-out at
-                // all. Same shape and same order as SSHNetworkTunnelView's pair.
-                EngineSettingRow(spec: Self.specs["wg.search-domains"], value: draft.searchDomains) {
-                    listField(Self.specs["wg.search-domains"], $draft.searchDomains,
-                              prompt: "corp.example, example.com",
-                              problem: searchDomainsProblem)
-                }
-                problemLabel(searchDomainsProblem)
-                EngineSettingRow(spec: Self.specs["wg.local-lan"],
-                                 value: draft.allowLocalNetworkAccess) {
-                    Toggle(isOn: $draft.allowLocalNetworkAccess) {
-                        EngineSettingLabel(spec: Self.specs["wg.local-lan"],
-                                           value: draft.allowLocalNetworkAccess)
+                if !draft.usesTeleport {
+                        EngineSettingRow(spec: Self.specs["wg.address"], value: draft.addresses) {
+                            listField(Self.specs["wg.address"], $draft.addresses, prompt: "10.0.0.2/32",
+                                      problem: addressProblem)
+                        }
+                        problemLabel(addressProblem)
+                    } else {
+                        LabeledContent("Addresses", value: "Assigned when connecting")
                     }
+                    EngineSettingRow(spec: Self.specs["wg.allowed-ips"], value: draft.allowedIPs) {
+                        listField(Self.specs["wg.allowed-ips"], $draft.allowedIPs, prompt: "0.0.0.0/0",
+                                  problem: allowedIPsProblem)
+                    }
+                    problemLabel(allowedIPsProblem)
+                    if draft.isFullTunnel {
+                        // Says what the Custom Routing section further down can then
+                        // actually act on: one default route, not a list of networks.
+                        Label("Full tunnel — all traffic routes through this peer. The Custom Routing route rules below then apply to that single default route, not to individual networks.",
+                              systemImage: "globe")
+                            .font(.callout).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if !draft.usesTeleport {
+                        EngineSettingRow(spec: Self.specs["wg.dns"], value: draft.dns) {
+                            listField(Self.specs["wg.dns"], $draft.dns, prompt: "1.1.1.1")
+                        }
+                        // One caveat per resolver the peer won't carry — the split-tunnel
+                        // footgun that shows up as "the VPN works but nothing resolves".
+                        ForEach(uncoveredDNS, id: \.self) { server in
+                            SettingCaveat(WireGuardConfig.dnsCoverageWarning(server))
+                        }
+                        // THE TWO ROWS THAT LANDED LAST. Both carve-outs shipped for every
+                        // other packet-tunnel kind at once — config field, plumbing, manual
+                        // page, portability id, CLI/MDM name — and could not get their rows
+                        // because this file was owned by another change in flight. They sat
+                        // behind `SettingRenderingTests.unrenderedByDesign`, whose reverse
+                        // check fails the moment they appear; those two lines are deleted
+                        // with this change.
+                        //
+                        // Neither has a wg-quick field, which is exactly why they need one
+                        // here: a `.conf` cannot carry a search list (its `DNS=` line has no
+                        // room for one) and has no concept of a local-network carve-out at
+                        // all. Same shape and same order as SSHNetworkTunnelView's pair.
+                    } else {
+                        LabeledContent("DNS Servers", value: "Supplied by Teleport")
+                    }
+                    EngineSettingRow(spec: Self.specs["wg.search-domains"], value: draft.searchDomains) {
+                        listField(Self.specs["wg.search-domains"], $draft.searchDomains,
+                                  prompt: "corp.example, example.com",
+                                  problem: searchDomainsProblem)
+                    }
+                    problemLabel(searchDomainsProblem)
+                    EngineSettingRow(spec: Self.specs["wg.local-lan"],
+                                     value: draft.allowLocalNetworkAccess) {
+                        Toggle(isOn: $draft.allowLocalNetworkAccess) {
+                            EngineSettingLabel(spec: Self.specs["wg.local-lan"],
+                                               value: draft.allowLocalNetworkAccess)
+                        }
+                    }
+                    // ON means traffic leaves the tunnel, so the row says what leaves
+                    // rather than describing the mechanism (the SSH Network Tunnel row
+                    // says it the same way).
+                    if draft.allowLocalNetworkAccess {
+                        SettingCaveat("Traffic to the network you're on \u{2014} printers, file shares, your router \u{2014} leaves this Mac outside the tunnel while this is on. Anything watching that network can see it.")
+                    }
+                    // ONE MTU control across every engine that has one (MTUField).
+                    EngineSettingRow(spec: Self.specs["wg.mtu"], value: draft.mtu) {
+                        MTUField(spec: Self.specs["wg.mtu"], value: $draft.mtu,
+                                 range: WireGuardConfig.mtuRange, prompt: "1420",
+                                 invalidMessage: "Enter an MTU between \(WireGuardConfig.mtuRange.lowerBound) and \(WireGuardConfig.mtuRange.upperBound). Leave it empty for the engine's own 1420.")
+                    }
+                    // Below 1280 is LEGAL and sometimes the only thing that works
+                    // (PPPoE, double NAT) — a caveat, never a refusal.
+                    if let caveat = WireGuardConfig.mtuBelowIPv6MinimumCaveat(draft.mtu) {
+                        SettingCaveat(caveat)
+                    }
+                    TrafficCrossLinks(gatewayNote: gatewayNote)
                 }
-                // ON means traffic leaves the tunnel, so the row says what leaves
-                // rather than describing the mechanism (the SSH Network Tunnel row
-                // says it the same way).
-                if draft.allowLocalNetworkAccess {
-                    SettingCaveat("Traffic to the network you're on \u{2014} printers, file shares, your router \u{2014} leaves this Mac outside the tunnel while this is on. Anything watching that network can see it.")
-                }
-                // ONE MTU control across every engine that has one (MTUField).
-                EngineSettingRow(spec: Self.specs["wg.mtu"], value: draft.mtu) {
-                    MTUField(spec: Self.specs["wg.mtu"], value: $draft.mtu,
-                             range: WireGuardConfig.mtuRange, prompt: "1420",
-                             invalidMessage: "Enter an MTU between \(WireGuardConfig.mtuRange.lowerBound) and \(WireGuardConfig.mtuRange.upperBound). Leave it empty for the engine's own 1420.")
-                }
-                // Below 1280 is LEGAL and sometimes the only thing that works
-                // (PPPoE, double NAT) — a caveat, never a refusal.
-                if let caveat = WireGuardConfig.mtuBelowIPv6MinimumCaveat(draft.mtu) {
-                    SettingCaveat(caveat)
-                }
-                TrafficCrossLinks(gatewayNote: gatewayNote)
-            }
 
-            CollapsibleSettingsSection(group: .advanced, changedCount: advancedChangedCount) {
-                EngineSettingRow(spec: Self.specs["wg.keepalive"], value: draft.persistentKeepalive) {
-                    ValidatedNumberField(
-                        label: { EngineSettingLabel(spec: Self.specs["wg.keepalive"], value: draft.persistentKeepalive) },
-                        prompt: "off",
-                        value: $draft.persistentKeepalive,
-                        range: WireGuardConfig.keepaliveRange,
-                        invalidMessage: "Enter a number of seconds between 0 and 65535 — 0 turns keepalives off, 25 is typical behind NAT.")
+                if !draft.usesTeleport {
+                CollapsibleSettingsSection(group: .advanced, changedCount: advancedChangedCount) {
+                    EngineSettingRow(spec: Self.specs["wg.keepalive"], value: draft.persistentKeepalive) {
+                        ValidatedNumberField(
+                            label: { EngineSettingLabel(spec: Self.specs["wg.keepalive"], value: draft.persistentKeepalive) },
+                            prompt: "off",
+                            value: $draft.persistentKeepalive,
+                            range: WireGuardConfig.keepaliveRange,
+                            invalidMessage: "Enter a number of seconds between 0 and 65535 — 0 turns keepalives off, 25 is typical behind NAT.")
+                    }
+                    // Both are closed value sets, not free text: `Table` is
+                    // auto|off|<number> and `FwMark` is off|<uint32>. As TextFields
+                    // any typo round-tripped straight into an exported .conf that
+                    // wg-quick then refuses.
+                    EngineSettingRow(spec: Self.specs["wg.table"], value: draft.table) {
+                        tableRow
+                    }
+                    // Not disabled: the value is honoured — in the EXPORTED file. What
+                    // it does there is turn the Allowed IPs above into documentation,
+                    // which is worth saying beside them.
+                    if draft.table.trimmingCharacters(in: .whitespaces).lowercased() == "off" {
+                        SettingCaveat("In a configuration you export, \u{201C}off\u{201D} tells wg-quick to install no routes at all, so the Allowed IPs above route nothing there. SimpleVPN's own engine ignores this setting and still routes them.")
+                    }
+                    EngineSettingRow(spec: Self.specs["wg.fwmark"], value: draft.fwMark) {
+                        fwMarkRow
+                    }
+                } footer: {
+                    Text(Self.exportOnlyHelp)
                 }
-                // Both are closed value sets, not free text: `Table` is
-                // auto|off|<number> and `FwMark` is off|<uint32>. As TextFields
-                // any typo round-tripped straight into an exported .conf that
-                // wg-quick then refuses.
-                EngineSettingRow(spec: Self.specs["wg.table"], value: draft.table) {
-                    tableRow
-                }
-                // Not disabled: the value is honoured — in the EXPORTED file. What
-                // it does there is turn the Allowed IPs above into documentation,
-                // which is worth saying beside them.
-                if draft.table.trimmingCharacters(in: .whitespaces).lowercased() == "off" {
-                    SettingCaveat("In a configuration you export, \u{201C}off\u{201D} tells wg-quick to install no routes at all, so the Allowed IPs above route nothing there. SimpleVPN's own engine ignores this setting and still routes them.")
-                }
-                EngineSettingRow(spec: Self.specs["wg.fwmark"], value: draft.fwMark) {
-                    fwMarkRow
-                }
-            } footer: {
-                Text(Self.exportOnlyHelp)
-            }
 
+            }
             // EXPORT IS NOT HERE ANY MORE. It is a right-click on the VPN in the
             // sidebar (`ManageVPNsView.exportItems`), because a toolbar or a pane
             // acts on the WINDOW while a context menu acts on the OBJECT — and with
@@ -423,6 +445,45 @@ struct WireGuardView: View {
         }
     }
 
+    private var teleportRows: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(teleportPaired ? "Paired — session stored in Keychain" : "Pair with a fresh invite from your UniFi console.")
+                .accessibilityLabel("Teleport access")
+                .accessibilityValue(teleportPaired ? "Paired, stored in Keychain" : "Not paired")
+            EngineSettingRow(spec: Self.specs["wg.teleport-invite"], value: !teleportInvite.isEmpty) {
+                LabeledContent {
+                    SecureField("", text: $teleportInvite, prompt: Text("Teleport invite link or UUID"))
+                        .accessibilityLabel("Teleport invite")
+                        .accessibilityValue(teleportInvite.isEmpty ? "Empty" : TeleportSession.inviteProblem(teleportInvite) ?? "Invite entered")
+                        .autocorrectionDisabled()
+                } label: {
+                    EngineSettingLabel(spec: Self.specs["wg.teleport-invite"], value: !teleportInvite.isEmpty)
+                }
+            }
+            Button(teleportPairing ? "Pairing…" : teleportPaired ? "Replace Teleport Access" : "Pair Teleport") {
+                let invite = teleportInvite
+                teleportInvite = ""
+                teleportPairing = true
+                teleportError = nil
+                Task { @MainActor in
+                    defer { teleportPairing = false }
+                    do {
+                        try await vpn.pairTeleport(id: profileID, invite: invite)
+                        teleportPaired = true
+                        AccessibilityAnnouncer.sayNow("Teleport paired. Access stored in Keychain.")
+                    } catch {
+                        teleportError = error.localizedDescription
+                        AccessibilityAnnouncer.sayNow(error.localizedDescription)
+                    }
+                }
+            }
+            .disabled(teleportPairing || TeleportSession.inviteProblem(teleportInvite) != nil)
+            .help(TeleportSession.inviteProblem(teleportInvite) ?? "Exchange this invite once and save access in Keychain for future connections.")
+            .accessibilityValue(teleportPairing ? "Pairing in progress" : TeleportSession.inviteProblem(teleportInvite) ?? "Ready to pair")
+            SettingProblemLabel(teleportError)
+        }
+    }
+
     // MARK: Pre-shared key (write-only, like the private key)
 
     /// Status + write-only entry for the pre-shared key. Never a plain
@@ -518,7 +579,7 @@ struct WireGuardView: View {
     /// Was gated on an empty name alone, which let every validator above be
     /// written straight into providerConfiguration.
     private var saveDisabledReason: String? {
-        if draft.name.trimmingCharacters(in: .whitespaces).isEmpty { return "Give this VPN a name first." }
+        if let problem = ConfigurationNameField.problem(draft.name) { return problem }
         if let p = endpointProblem { return p }
         if let p = publicKeyProblem { return p }
         if let p = privateKeyProblem { return p }
@@ -550,7 +611,9 @@ struct WireGuardView: View {
     /// be the only one that never went red.
     private var needs: SettingNeeds {
         var out: [String: String] = [:]
-        if !hasPrivateKey {
+        if draft.usesTeleport {
+            if !teleportPaired { out["wg.teleport-invite"] = "Pair this VPN with a Teleport invite first." }
+        } else if !hasPrivateKey {
             out["wg.private-key"] = "This device's own private key isn't set yet \u{2014} paste the one from the config your provider gave you."
         }
         if let fault = draft.connectFault, let id = fault.settingID {
@@ -609,6 +672,7 @@ struct WireGuardView: View {
         // (the "wg.<id>" item VPNController+WireGuard maintains) so the export
         // works and the private-key row can say "set".
         draft = vpn.wireGuardConfig(for: profileID).withSecretsFromKeychain()
+        teleportPaired = vpn.teleportSession(for: profileID) != nil
         if draft.name.isEmpty { draft.name = vpn.displayName(for: profileID) }
         // Seed the remembered custom-table text from what is stored, so flipping
         // the picker to auto/off and back restores what was there.
@@ -687,4 +751,15 @@ struct WireGuardView: View {
         // bug; what the user sees now is the value staying put.
     }
 
+}
+
+#Preview("UniFi Teleport") {
+    let vpn = VPNController()
+    var config = WireGuardConfig(name: "UniFi Teleport")
+    config.id = "teleport-editor-preview"
+    config.usesTeleport = true
+    config.mtu = 1280
+    vpn.wireGuardConfigs[config.id] = config
+    return WireGuardView(vpn: vpn, profileID: config.id)
+        .frame(width: 660, height: 720)
 }

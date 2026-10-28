@@ -10,11 +10,15 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/netip"
 	"strings"
 	"testing"
 
+	"github.com/tailscale/wireguard-go/tun"
 	"tailscale.com/ipn"
 	"tailscale.com/net/dns"
 	"tailscale.com/util/dnsname"
@@ -157,14 +161,33 @@ func TestCallbackTUNBounds(t *testing.T) {
 	if !d.push([]byte{0x45, 0, 0, 20}) {
 		t.Fatal("push should have queued")
 	}
-	bufs := [][]byte{make([]byte, 100)}
-	sizes := make([]int, 1)
-	n, err := d.Read(bufs, sizes, 10)
-	if err != nil || n != 1 || sizes[0] != 4 {
-		t.Fatalf("expected the oversized packet dropped and the small one read: n=%d sizes=%v err=%v", n, sizes, err)
+	slab := bytes.Repeat([]byte{0xaa}, 2*tun.ReadPacketSpacing+100)
+	packets := make([]tun.ReadPacket, 1)
+	n, err := d.Read(slab, packets)
+	if err != nil || n != 1 || packets[0].Size != 4 || packets[0].Offset != tun.ReadPacketSpacing {
+		t.Fatalf("expected the oversized packet dropped and the small one read: n=%d packets=%v err=%v", n, packets, err)
+	}
+	if !bytes.Equal(slab[packets[0].Offset:packets[0].Offset+packets[0].Size], []byte{0x45, 0, 0, 20}) {
+		t.Fatal("packet bytes changed")
+	}
+	if !bytes.Equal(slab[:tun.ReadPacketSpacing], bytes.Repeat([]byte{0xaa}, tun.ReadPacketSpacing)) ||
+		!bytes.Equal(slab[len(slab)-tun.ReadPacketSpacing:], bytes.Repeat([]byte{0xaa}, tun.ReadPacketSpacing)) {
+		t.Fatal("packet copy overwrote WireGuard headroom or tailroom")
 	}
 	if d.dropped.Load() != 1 {
 		t.Fatalf("drop counter: %d", d.dropped.Load())
+	}
+}
+
+func TestCallbackTUNRejectsShortSlabWithoutConsumingPacket(t *testing.T) {
+	d := newCallbackTUN(1280, nil)
+	defer d.Close()
+	d.push([]byte{0x45})
+	if _, err := d.Read(make([]byte, 2*tun.ReadPacketSpacing-1), make([]tun.ReadPacket, 1)); !errors.Is(err, io.ErrShortBuffer) {
+		t.Fatalf("short slab should return ErrShortBuffer, got %v", err)
+	}
+	if len(d.inbound) != 1 {
+		t.Fatal("invalid reader buffer consumed a queued packet")
 	}
 }
 
@@ -189,7 +212,7 @@ func TestCallbackTUNClosedReadReturnsError(t *testing.T) {
 	d := newCallbackTUN(1280, nil)
 	d.Close()
 	d.Close() // idempotent — stopTunnel may race a failed start
-	if _, err := d.Read([][]byte{make([]byte, 100)}, make([]int, 1), 0); err == nil {
+	if _, err := d.Read(make([]byte, 2*tun.ReadPacketSpacing+100), make([]tun.ReadPacket, 1)); err == nil {
 		t.Fatal("read on a closed device must error so wireguard-go stops its reader")
 	}
 	if d.push([]byte{0x45}) {

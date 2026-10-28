@@ -334,6 +334,7 @@ private struct ChooseFileButton: View {
 // MARK: - Cards
 
 private struct CertificateCard: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let summary: CertificateSummary
     @State private var detailsExpanded = false
 
@@ -374,7 +375,7 @@ private struct CertificateCard: View {
             // A bare-string DisclosureGroup label leaves only the chevron and the
             // word clickable; the whole row is the target here, the same way the
             // OpenVPN form's disclosures and the SSH/SSL "Advanced" headers are.
-            DisclosureGroup(isExpanded: $detailsExpanded) {
+            DisclosureGroup(isExpanded: $detailsExpanded.animation(reduceMotion ? nil : .snappy)) {
                 VStack(alignment: .leading, spacing: 6) {
                     LabeledContent("Serial") { CopyableValue(value: summary.serialHex) }
                     LabeledContent("SHA-256") { CopyableValue(value: summary.sha256Fingerprint) }
@@ -393,12 +394,13 @@ private struct CertificateCard: View {
                 }
                 .padding(.vertical, 4)
                 .contentShape(Rectangle())
-                .onTapGesture { withAnimation(.snappy) { detailsExpanded.toggle() } }
             }
             .font(.callout)
+            .disclosureGroupStyle(AccessibleSettingsDisclosureStyle())
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .contain)
+        .accessibilityLabel("Certificate \(summary.displayName)")
     }
 
     private var subtitle: String {

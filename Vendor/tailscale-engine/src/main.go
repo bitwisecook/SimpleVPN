@@ -91,6 +91,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"net/url"
 	"os"
@@ -364,9 +365,14 @@ func (t *callbackTUN) Close() error {
 // Read blocks until Swift pushes a packet or the device closes. wireguard-go
 // treats a returned error as fatal for its reader goroutine, which is what we
 // want on close.
-func (t *callbackTUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
-	if len(bufs) == 0 || len(sizes) == 0 {
+func (t *callbackTUN) Read(slab []byte, packets []tun.ReadPacket) (int, error) {
+	if len(packets) == 0 {
 		return 0, nil
+	}
+	// WireGuard reserves headroom AND tailroom in its shared packet slab.
+	const offset = tun.ReadPacketSpacing
+	if len(slab) < 2*offset {
+		return 0, io.ErrShortBuffer
 	}
 	for {
 		select {
@@ -379,12 +385,12 @@ func (t *callbackTUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) 
 			// Bounds check before the copy: a packet that cannot fit is
 			// dropped rather than truncated — a truncated IP packet is
 			// worse than a missing one.
-			if offset < 0 || offset > len(bufs[0]) || len(pkt) > len(bufs[0])-offset {
+			if len(pkt) > len(slab)-2*offset {
 				t.dropped.Add(1)
 				continue
 			}
-			n := copy(bufs[0][offset:], pkt)
-			sizes[0] = n
+			n := copy(slab[offset:], pkt)
+			packets[0] = tun.ReadPacket{Offset: offset, Size: n}
 			return 1, nil
 		}
 	}

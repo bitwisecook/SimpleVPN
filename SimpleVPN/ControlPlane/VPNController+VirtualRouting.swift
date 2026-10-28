@@ -92,12 +92,9 @@ extension VPNController {
                 guard intent.canOwnDefault else { throw err("\(profile.name) cannot carry the full tunnel role with these custom routes.") }
                 owner = id
             }
-            let secrets = wireGuardSecrets(for: id)
-            guard !secrets.privateKey.isEmpty, WireGuardConfig.keyProblem(secrets.privateKey) == nil,
-                  WireGuardConfig.keyProblem(secrets.presharedKey) == nil else { throw err("Set a valid private key for \(profile.name).") }
+            let start = try wireGuardStartConfig(for: id, config: config)
             members.append(.init(id: id, wireGuard: config.redactedForStorage(), prefixes: intent.advertisedPrefixes))
-            startMembers.append(.init(id: id, addresses: config.addresses,
-                wireGuard: .init(config: config, privateKey: secrets.privateKey, presharedKey: secrets.presharedKey)))
+            startMembers.append(.init(id: id, addresses: config.addresses, wireGuard: start))
         }
         if ManagedPolicy.forceKeepInsideVPN, owner.isEmpty { throw err("Your organization requires a full tunnel for this connection.") }
         var policy = VirtualRoutingPolicy(defaultOwner: owner)

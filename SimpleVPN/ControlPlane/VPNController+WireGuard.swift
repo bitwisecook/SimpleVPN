@@ -166,25 +166,11 @@ extension VPNController {
               managers[id] === mgr else { throw CancellationError() }
         let config = wireGuardConfig(for: id)
         if let problem = config.connectProblem { throw err(problem) }
-        let secrets = wireGuardSecrets(for: id)
-        guard !secrets.privateKey.isEmpty else {
-            throw err("Set this tunnel's private key first — it's in the config your provider gave you (Manage VPNs ▸ this VPN ▸ Set / Replace Key).")
-        }
-        // The keys live in the keychain, so connectProblem can't see them: a
-        // truncated one (the classic 43-character paste) otherwise reached the
-        // engine and failed the handshake with nothing to look at.
-        if let problem = WireGuardConfig.keyProblem(secrets.privateKey) {
-            throw err("This tunnel's private key isn't usable. \(problem)")
-        }
-        if let problem = WireGuardConfig.keyProblem(secrets.presharedKey) {
-            throw err("This tunnel's pre-shared key isn't usable. \(problem)")
-        }
-
-        var options: [String: NSObject] = ["wgPrivateKey": secrets.privateKey as NSString]
+        let start = try wireGuardStartConfig(for: id, config: config)
+        var options: [String: NSObject] = ["wgPrivateKey": start.privateKey as NSString]
         options["wgExtraPeers"] = config.withSecretsFromKeychain().rawExtraPeers as NSArray
-        if !secrets.presharedKey.isEmpty {
-            options["wgPresharedKey"] = secrets.presharedKey as NSString
-        }
+        if !start.presharedKey.isEmpty { options["wgPresharedKey"] = start.presharedKey as NSString }
+        if let session = start.teleport { options["teleportSession"] = try JSONEncoder().encode(session) as NSData }
         // Org policy travels with EVERY session, not just OpenVPN's: the extension
         // gates the divert plan and the local-network carve-out on these, and this
         // path passed neither — so a WireGuard profile's `.outside` diverts escaped

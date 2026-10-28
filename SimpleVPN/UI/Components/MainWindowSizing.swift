@@ -221,3 +221,64 @@ private final class WindowProbeView: NSView {
 
     override var intrinsicContentSize: NSSize { .zero }
 }
+
+extension View {
+    /// Fit restored auxiliary windows on opening and after display changes, while
+    /// preserving a usable saved size. Geometry is shared with the main window.
+    func keepWindowOnScreen() -> some View {
+        background {
+            AuxiliaryWindowScreenFitBridge()
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+    }
+}
+
+private struct AuxiliaryWindowScreenFitBridge: NSViewRepresentable {
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> WindowProbeView {
+        let view = WindowProbeView()
+        view.windowChanged = { [weak coordinator = context.coordinator] in coordinator?.attach(to: $0) }
+        return view
+    }
+
+    func updateNSView(_ view: WindowProbeView, context: Context) {
+        context.coordinator.attach(to: view.window)
+    }
+
+    final class Coordinator: NSObject {
+        private weak var window: NSWindow?
+        private var scheduled = false
+
+        func attach(to window: NSWindow?) {
+            guard self.window !== window else { return }
+            NotificationCenter.default.removeObserver(self)
+            self.window = window
+            guard let window else { return }
+            for name in [NSWindow.didBecomeKeyNotification, NSWindow.didChangeScreenNotification] {
+                NotificationCenter.default.addObserver(self, selector: #selector(scheduleFit), name: name, object: window)
+            }
+            NotificationCenter.default.addObserver(self, selector: #selector(scheduleFit),
+                name: NSApplication.didChangeScreenParametersNotification, object: nil)
+            scheduleFit()
+        }
+
+        @objc private func scheduleFit() {
+            guard !scheduled else { return }
+            scheduled = true
+            // Frame mutation must leave SwiftUI's graph/layout pass (see above).
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.scheduled = false
+                guard let window = self.window, window.isVisible,
+                      !window.styleMask.contains(.fullScreen),
+                      let screen = window.screen ?? NSScreen.main else { return }
+                let fitted = MainWindowSizingPolicy.fittedFrame(frameSize: window.frame.size,
+                    currentFrame: window.frame, visibleFrame: screen.visibleFrame)
+                if fitted != window.frame { window.setFrame(fitted, display: true, animate: false) }
+            }
+        }
+    }
+}

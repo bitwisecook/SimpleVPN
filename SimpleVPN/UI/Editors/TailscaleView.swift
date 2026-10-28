@@ -49,7 +49,7 @@ struct TailscaleView: View {
         Form {
             SettingsSearchSection(search: search)
             Section("Connection") {
-                TextField("Name", text: $name)
+                ConfigurationNameField(name: $name)
                 EngineSettingRow(spec: Self.specs["ts.preset"], value: draft.preset) {
                     SettingPicker(selection: $draft.preset) {
                         ForEach(TailscaleConfig.Preset.allCases, id: \.self) {
@@ -419,7 +419,7 @@ struct TailscaleView: View {
     private var saveDisabledReason: String? { saving ? "Saving…" : validationProblem }
 
     private var validationProblem: String? {
-        if name.trimmingCharacters(in: .whitespaces).isEmpty { return "Give this VPN a name first." }
+        if let problem = ConfigurationNameField.problem(name) { return problem }
         if let p = draft.controlURLProblem { return p }
         // Ungated before: saving this produced a tunnel that silently sent
         // traffic nowhere.
@@ -472,7 +472,7 @@ struct TailscaleView: View {
             do {
                 try await vpn.rename(id: saved_profileID, to: saved_name)
                 try await vpn.setTailscaleConfig(saved_draft, for: saved_profileID)
-                vpn.setTailscaleAuthKey(saved_authKey, for: saved_profileID)
+                try vpn.setTailscaleAuthKey(saved_authKey, for: saved_profileID)
                 // A running session shouldn't need a reconnect just to change which
                 // machine carries the traffic — push what the engine can take live.
                 if vpn.profiles.first(where: { $0.id == saved_profileID })?.status == .connected {

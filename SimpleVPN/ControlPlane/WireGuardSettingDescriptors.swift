@@ -31,6 +31,9 @@ enum WireGuardSettings {
               group: .connection, default: Int?.none),
 
         // MARK: Sign-In
+        .init(id: "wg.teleport-invite", name: "Teleport Invite",
+              summary: "Pair once with a fresh UniFi Teleport invite link or UUID. Access is kept in Keychain for future connections.",
+              group: .signIn, default: false),
 
         // The single most important field in this editor, and the last one still
         // hand-rolled: no spec meant no manual anchor, no search hit, and no way

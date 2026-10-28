@@ -87,6 +87,7 @@ static void wgInstanceString(WGInstanceStringCallback f, uint64_t c, const char 
 import "C"
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -102,6 +103,8 @@ import (
 	"github.com/tailscale/wireguard-go/conn"
 	"github.com/tailscale/wireguard-go/device"
 	"pxengine/instance"
+	"time"
+	"tsengine/teleport"
 )
 
 // wgDefaultMTU is the wg-quick default: 1500 minus WireGuard's 80-byte
@@ -114,14 +117,16 @@ const wgDefaultMTU = 1420
 // WireGuardConfig.swift) encodes. Field names are load-bearing — pinned by
 // TestWGStartConfigKeys here and WireGuardConfigTests on the Swift side.
 type wgStartConfig struct {
-	PrivateKey          string   `json:"privateKey"`
-	PeerPublicKey       string   `json:"peerPublicKey"`
-	PresharedKey        string   `json:"presharedKey"`
-	Endpoint            string   `json:"endpoint"`
-	AllowedIPs          []string `json:"allowedIPs"`
-	PersistentKeepalive int      `json:"persistentKeepalive"`
-	ListenPort          int      `json:"listenPort"`
-	MTU                 int      `json:"mtu"`
+	Teleport            *teleport.Session `json:"teleport,omitempty"`
+	ClientName          string            `json:"clientName,omitempty"`
+	PrivateKey          string            `json:"privateKey"`
+	PeerPublicKey       string            `json:"peerPublicKey"`
+	PresharedKey        string            `json:"presharedKey"`
+	Endpoint            string            `json:"endpoint"`
+	AllowedIPs          []string          `json:"allowedIPs"`
+	PersistentKeepalive int               `json:"persistentKeepalive"`
+	ListenPort          int               `json:"listenPort"`
+	MTU                 int               `json:"mtu"`
 }
 
 // wgStartResponse is okResponse plus the resolved endpoint (ip:port) on
@@ -137,13 +142,15 @@ type wgStartResponse struct {
 // wgStatusPayload is what WGStatus returns. A strict whitelist over IpcGet —
 // key material never crosses here.
 type wgStatusPayload struct {
-	State          string `json:"state"`
-	Endpoint       string `json:"endpoint,omitempty"`
-	ListenPort     int    `json:"listenPort"`
-	RxBytes        int64  `json:"rxBytes"`
-	TxBytes        int64  `json:"txBytes"`
-	LastHandshake  int64  `json:"lastHandshake"` // unix seconds; 0 = never
-	PacketsDropped int64  `json:"packetsDropped"`
+	Addresses      []string `json:"addresses,omitempty"`
+	DNS            []string `json:"dns,omitempty"`
+	State          string   `json:"state"`
+	Endpoint       string   `json:"endpoint,omitempty"`
+	ListenPort     int      `json:"listenPort"`
+	RxBytes        int64    `json:"rxBytes"`
+	TxBytes        int64    `json:"txBytes"`
+	LastHandshake  int64    `json:"lastHandshake"` // unix seconds; 0 = never
+	PacketsDropped int64    `json:"packetsDropped"`
 }
 
 // ---- Callback registry ----------------------------------------------------
@@ -182,9 +189,11 @@ func WGSetCallbacks(packetOut C.WGPacketCallback, logLine C.WGStringCallback) {
 // ---- Engine state -----------------------------------------------------------
 
 type wgState struct {
-	dev      *device.Device
-	tundev   *callbackTUN
-	endpoint string // resolved ip:port, for status
+	teleport   *teleport.Connection
+	allowedIPs []string
+	dev        *device.Device
+	tundev     *callbackTUN
+	endpoint   string // resolved ip:port, for status
 }
 
 var (
@@ -327,6 +336,72 @@ func WGStart(cfgJSON *C.char) *C.char {
 // createWGState is the production constructor used by both the scoped API and
 // legacy compatibility entry. Tests inject a loopback-only Bind, not a fake engine.
 func createWGState(cfg wgStartConfig, bind conn.Bind, emit func([]byte), logf func(string, ...any)) (*wgState, *shimError) {
+	var negotiated *teleport.Connection
+	if cfg.Teleport != nil {
+		var err error
+		negotiated, err = prepareTeleport(cfg, bind)
+		if err != nil {
+			return nil, &shimError{Kind: "teleport", Message: "Teleport could not negotiate a connection. Check that the console is online and the saved access has not been revoked."}
+		}
+		succeeded := false
+		defer func() {
+			if !succeeded {
+				negotiated.Close()
+			}
+		}()
+		cfg.PrivateKey = negotiated.PrivateKey
+		cfg.PeerPublicKey = negotiated.PublicKey
+		cfg.PresharedKey = ""
+		cfg.Endpoint = negotiated.Endpoint
+		cfg.ListenPort = negotiated.Port
+		cfg.PersistentKeepalive = 25
+		for _, server := range negotiated.DNS {
+			if address, err := netip.ParseAddr(server); err == nil {
+				cfg.AllowedIPs = append(cfg.AllowedIPs, netip.PrefixFrom(address, address.BitLen()).String())
+			}
+		}
+		bind = negotiated.Bind
+		// Ownership transfers to wgState only after the shared constructor succeeds.
+		state, problem := createWGStateWithoutTeleport(cfg, bind, emit, logf)
+		if problem != nil {
+			return nil, problem
+		}
+		state.teleport = negotiated
+		succeeded = true
+		return state, nil
+	}
+	return createWGStateWithoutTeleport(cfg, bind, emit, logf)
+}
+
+func prepareTeleport(cfg wgStartConfig, bind conn.Bind) (*teleport.Connection, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+	defer cancel()
+	if physical, ok := bind.(*physicalBind); ok {
+		v4, v6, err := physical.teleportSockets()
+		if err != nil {
+			return nil, err
+		}
+		return teleport.Prepare(ctx, *cfg.Teleport, cfg.ClientName, v4, v6, physical)
+	}
+	// An independent connection has no virtual capture to avoid; sockets remain
+	// owned by the Teleport transport for the whole WireGuard device lifetime.
+	v4, err := net.ListenUDP("udp4", &net.UDPAddr{})
+	if err != nil {
+		return nil, err
+	}
+	v6, _ := net.ListenUDP("udp6", &net.UDPAddr{Port: v4.LocalAddr().(*net.UDPAddr).Port})
+	return teleport.Prepare(ctx, *cfg.Teleport, cfg.ClientName, v4, v6, nil)
+}
+
+func (st *wgState) close() {
+	st.dev.Close()
+	st.tundev.Close()
+	if st.teleport != nil {
+		st.teleport.Close()
+	}
+}
+
+func createWGStateWithoutTeleport(cfg wgStartConfig, bind conn.Bind, emit func([]byte), logf func(string, ...any)) (*wgState, *shimError) {
 	endpoint, err := wgResolveEndpoint(cfg.Endpoint)
 	if err != nil {
 		return nil, &shimError{Kind: "endpoint", Message: err.Error()}
@@ -351,7 +426,7 @@ func createWGState(cfg wgStartConfig, bind conn.Bind, emit func([]byte), logf fu
 		return nil, &shimError{Kind: "engine", Message: "device would not come up: " + err.Error()}
 	}
 	logf("wireguard up: endpoint=%s mtu=%d", endpoint, mtu)
-	return &wgState{dev: dev, tundev: tundev, endpoint: endpoint}, nil
+	return &wgState{dev: dev, tundev: tundev, endpoint: endpoint, allowedIPs: cfg.AllowedIPs}, nil
 }
 
 var wgInstances instance.Registry[*wgState]
@@ -406,8 +481,7 @@ func WGStatusInstance(handle C.uint64_t) *C.char {
 //export WGStopInstance
 func WGStopInstance(handle C.uint64_t) *C.char {
 	if st, ok := wgInstances.Remove(uint64(handle)); ok {
-		st.dev.Close()
-		st.tundev.Close()
+		st.close()
 	}
 	return cJSON(okResponse{OK: true})
 }
@@ -488,6 +562,10 @@ func statusWGState(st *wgState) wgStatusPayload {
 		out.Endpoint = st.endpoint
 	}
 	out.PacketsDropped = st.tundev.dropped.Load()
+	if st.teleport != nil {
+		out.Addresses = st.teleport.Addresses
+		out.DNS = st.teleport.DNS
+	}
 	return out
 }
 
@@ -506,8 +584,7 @@ func WGStop() *C.char {
 	// tun.Close itself); the extra Close is idempotent belt-and-braces so a
 	// future wireguard-go bump that stops closing the tun cannot leak our
 	// reader goroutine into this long-lived extension process.
-	st.dev.Close()
-	st.tundev.Close()
+	st.close()
 	wgLogf("wireguard stopped")
 	return cJSON(okResponse{OK: true})
 }

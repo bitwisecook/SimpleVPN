@@ -122,6 +122,39 @@ struct EditorPaneHeightTests {
         #expect(size.height <= Self.shortestPane, "F5 editor minimum height is \(size.height)pt")
     }
 
+    /// Measure each editor family and every external/native protocol at the same
+    /// minimum proposal that previously pushed the sidebar out of its window.
+    @Test func everyConfigurationEditorFitsTheManageWindow() {
+        let vpn = VPNController()
+        let id = "configuration-layout-review"
+        var editors: [(String, AnyView)] = [
+            ("OpenVPN", AnyView(EditVPNView(vpn: vpn, labels: LabelStore(), profileID: id, embedded: true).environment(ProfileEvaluator()))),
+            ("WireGuard", AnyView(WireGuardView(vpn: vpn, profileID: id))),
+            ("Tailscale", AnyView(TailscaleView(vpn: vpn, profileID: id))),
+            ("Proxy Tunnel", AnyView(ProxyTunnelView(vpn: vpn, profileID: id))),
+            ("SSH Network Tunnel", AnyView(SSHNetworkTunnelView(vpn: vpn, profileID: id)))
+        ]
+        for kind in [VPNKind.ikev2, .ipsec, .l2tp] {
+            var draft = NativeVPNConfig()
+            draft.kind = kind
+            editors.append((kind.displayName, AnyView(NativeVPNView(vpn: vpn, manager: NativeVPNManager(), draft: draft))))
+        }
+        for kind in VPNKind.allCases where kind.transport == .subprocess {
+            var draft = SubprocessTunnelConfig()
+            draft.id = id
+            draft.kind = kind
+            draft.name = "Configuration review"
+            editors.append((kind.displayName, AnyView(SubprocessTunnelView(
+                vpn: vpn, store: SubprocessTunnelStore(), manager: SubprocessTunnelManager(), draft: draft))))
+        }
+        for (name, editor) in editors {
+            let controller = NSHostingController(rootView: editor.editorPaneWidthFloor())
+            let size = controller.sizeThatFits(in: .zero)
+            #expect(size.height <= Self.shortestPane, "\(name) requires \(size.height)pt in a \(Self.shortestPane)pt pane")
+            #expect(size.width >= EditorPaneMetrics.minimumReadableWidth)
+        }
+    }
+
     /// THE PARAGRAPH IS THE PART THAT BREAKS, and it breaks by being measured at a
     /// width nobody will ever draw it at. Stated on its own so that a future edit
     /// reintroducing a bare `.fixedSize(horizontal: false, vertical: true)` on a long

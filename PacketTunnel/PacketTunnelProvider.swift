@@ -600,7 +600,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
         let privateKey = (options?["wgPrivateKey"] as? String)
             ?? (options?["password"] as? String) ?? ""
         let presharedKey = (options?["wgPresharedKey"] as? String) ?? ""
-        guard !privateKey.isEmpty else {
+        guard config.usesTeleport || !privateKey.isEmpty else {
             let error = WireGuardEngineError.engine(
                 kind: "badRequest", message: "No private key was provided — set one in the WireGuard editor.")
             writeWGIncident(profile: profile, error: error)
@@ -641,46 +641,71 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
         wgExtraExcluded = carveOuts
         startCompletion = completionHandler; lock.unlock()
 
-        let start = WireGuardStartConfig(config: config, privateKey: privateKey,
+        var start = WireGuardStartConfig(config: config, privateKey: privateKey,
                                          presharedKey: presharedKey)
-        if let error = engine.start(config: start) {
-            Self.log.error("wireguard start failed: \(error.localizedDescription, privacy: .public)")
-            writeWGIncident(profile: profile, error: error)
-            finishStart(with: error)
-            return
-        }
-
-        // Device is up: apply the utun addresses/routes/DNS the config
-        // describes, then start pumping (the flow has no addresses before this).
-        let px = lock.withLock { wgProxySettings }
-        guard let settings = WireGuardNetworkSettings.settings(for: config,
-                                                               resolvedEndpoint: engine.resolvedEndpoint,
-                                                               suppressDefaultRoute: !ownedAtEstablish,
-                                                               proxySettings: px,
-                                                               extraExcludedRoutes: carveOuts) else {
-            let error = WireGuardEngineError.engine(
-                kind: "badRequest", message: "None of this tunnel's addresses are usable.")
-            writeWGIncident(profile: profile, error: error)
-            engine.stop()
-            finishStart(with: error)
-            return
-        }
-        applyNetworkSettings(settings) { [weak self] error in
-            guard let self else { return }
-            if let error {
-                Self.log.error("wireguard settings failed: \(error.localizedDescription, privacy: .public)")
-                self.writeWGIncident(profile: profile, error: error)
-                engine.stop()
-                self.finishStart(with: error)
+        if config.usesTeleport {
+            guard let data = options?["teleportSession"] as? Data,
+                  let identity = try? JSONDecoder().decode(TeleportSession.self, from: data), identity.isValid else {
+                finishStart(with: WireGuardEngineError.engine(kind: "badRequest", message: "Pair this Teleport VPN with an invite first."))
                 return
             }
-            self.lock.lock()
-            if self.connectedSince == 0 { self.connectedSince = Date().timeIntervalSince1970 }
-            self.lock.unlock()
-            TunnelIncidentStore.clear(profile: profile)
-            engine.startPump()
-            Self.log.log("wireguard up: routes applied, pump started")
-            self.finishStart(with: nil)
+            start.teleport = identity
+            start.clientName = "SimpleVPN"
+        }
+        // Teleport performs cloud negotiation before creating the shared device.
+        // Keep the provider lifecycle queue available for stop requests meanwhile.
+        let payload = start
+        let configured = config
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            var config = configured
+            guard lock.withLock({ wgEngine === engine }) else { return }
+            let startError = engine.start(config: payload)
+            guard lock.withLock({ wgEngine === engine }) else { engine.stop(); return }
+            if let error = startError {
+                Self.log.error("wireguard start failed: \(error.localizedDescription, privacy: .public)")
+                writeWGIncident(profile: profile, error: error)
+                finishStart(with: error)
+                return
+            }
+
+            if config.usesTeleport {
+                let negotiated = engine.status()
+                config.addresses = negotiated.addresses
+                config.dns = negotiated.dns
+                lock.withLock { wgConfig = config }
+            }
+            // Device is up: apply the utun addresses/routes/DNS the config
+            // describes, then start pumping (the flow has no addresses before this).
+            let px = lock.withLock { wgProxySettings }
+            guard let settings = WireGuardNetworkSettings.settings(for: config,
+                                                                   resolvedEndpoint: engine.resolvedEndpoint,
+                                                                   suppressDefaultRoute: !ownedAtEstablish,
+                                                                   proxySettings: px,
+                                                                   extraExcludedRoutes: carveOuts) else {
+                let error = WireGuardEngineError.engine(
+                    kind: "badRequest", message: "None of this tunnel's addresses are usable.")
+                writeWGIncident(profile: profile, error: error)
+                engine.stop()
+                finishStart(with: error)
+                return
+            }
+            applyNetworkSettings(settings) { [weak self] error in
+                guard let self, self.lock.withLock({ self.wgEngine === engine }) else { engine.stop(); return }
+                if let error {
+                    Self.log.error("wireguard settings failed: \(error.localizedDescription, privacy: .public)")
+                    self.writeWGIncident(profile: profile, error: error)
+                    engine.stop()
+                    self.finishStart(with: error)
+                    return
+                }
+                self.lock.lock()
+                if self.connectedSince == 0 { self.connectedSince = Date().timeIntervalSince1970 }
+                self.lock.unlock()
+                TunnelIncidentStore.clear(profile: profile)
+                engine.startPump()
+                Self.log.log("wireguard up: routes applied, pump started")
+                self.finishStart(with: nil)
+            }
         }
     }
 
@@ -1022,7 +1047,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
         Self.log.log("stopTunnel reason=\(reason.rawValue)")
         settingsWriter.close()
         lock.lock(); let b = bridge; let oc = ocBridge; let ts = tsEngine; let px = pxEngine
-        let wg = wgEngine; let sn = snEngine; let p = profileID; lock.unlock()
+        let wg = wgEngine; let sn = snEngine; let p = profileID
+        wgEngine = nil; wgConfig = nil
+        lock.unlock()
         // System-initiated stops the user didn't ask for become incidents too —
         // notably .superceded: another VPN configuration took over.
         switch reason {
@@ -1042,6 +1069,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
         ts?.stop()
         px?.stop()
         wg?.stop()
+        if wg != nil { finishStart(with: CancellationError()) }
         sn?.stop()
         lock.withLock { virtualEngine }?.stop()
         completionHandler()

@@ -414,6 +414,7 @@ struct MenuBarSparkline: View {
 // MARK: - Dropdown
 
 struct MenuBarView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Bindable var vpn: VPNController
     @Bindable var labels: LabelStore
     @Environment(\.openWindow) private var openWindow
@@ -448,7 +449,7 @@ struct MenuBarView: View {
                     row(p)
                     if credentialEntryFor == p.id, !UI.isActive(p.status) {
                         MenuCredentialEntry(vpn: vpn, profile: p) {
-                            withAnimation(.snappy) { credentialEntryFor = nil }
+                            withAnimation(reduceMotion ? nil : .snappy) { credentialEntryFor = nil }
                         }
                         .transition(.asymmetric(insertion: .push(from: .top).combined(with: .opacity),
                                                 removal: .opacity))
@@ -572,7 +573,7 @@ struct MenuBarView: View {
                 // that need typing (fresh OTP, unsaved password…) slide out an
                 // inline entry right in the menu.
                 if await !vpn.connectWithSavedCredentials(id: p.id) {
-                    withAnimation(.snappy) {
+                    withAnimation(reduceMotion ? nil : .snappy) {
                         credentialEntryFor = credentialEntryFor == p.id ? nil : p.id
                     }
                 }

@@ -24,6 +24,7 @@ import SwiftUI
 import CoreGraphics
 
 struct EditVPNView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Bindable var vpn: VPNController
     @Bindable var labels: LabelStore
     let profileID: String
@@ -467,7 +468,7 @@ struct EditVPNView: View {
             // connects to live on the Servers tab, so renaming never changes
             // the connection and changing server never renames the VPN.
             Section("Name") {
-                TextField("Name", text: $name, prompt: Text("Work, Home, Mum's house…"))
+                ConfigurationNameField(name: $name, prompt: "Work, Home, Mum's house…")
                 Text("Just a name for you. The addresses this VPN connects to are on the Servers tab.")
                     .font(.callout).foregroundStyle(.secondary)
             }
@@ -499,9 +500,13 @@ struct EditVPNView: View {
             // simple — most people only ever connect and disconnect.
             Section("Optional Controls") {
                 Toggle("Show a Pause button", isOn: $allowPause)
+                    .accessibilityLabel("Show a Pause button")
+                    .accessibilityValue(allowPause ? "On" : "Off")
                 Text("Pause keeps the VPN signed in but sends traffic outside it (using your normal connection) until you resume.")
                     .font(.callout).foregroundStyle(.secondary)
                 Toggle("Show the Connection Manager", isOn: $showConnectionManager)
+                    .accessibilityLabel("Show the Connection Manager")
+                    .accessibilityValue(showConnectionManager ? "On" : "Off")
                 Text("An advanced panel on the connection page with health checks and connection toggles.")
                     .font(.callout).foregroundStyle(.secondary)
             }
@@ -636,9 +641,10 @@ struct EditVPNView: View {
 
                     if otpRequired {
                         managedOTPSourceRow
-                        DisclosureGroup(isExpanded: $otpAdvancedExpanded) {
+                        DisclosureGroup(isExpanded: $otpAdvancedExpanded.animation(reduceMotion ? nil : .snappy)) {
                             TextField("Password template", text: $passwordTemplate,
                                       prompt: Text(verbatim: VPNAuthConfig.defaultTemplate))
+                                .accessibilityLabel("Password template")
                                 .font(.body.monospaced())
                                 .autocorrectionDisabled()
                                 .padding(.top, 4)
@@ -667,10 +673,8 @@ struct EditVPNView: View {
                             Text("Advanced")
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .contentShape(Rectangle())
-                                .onTapGesture {
-                                    withAnimation(.snappy) { otpAdvancedExpanded.toggle() }
-                                }
                         }
+                        .disclosureGroupStyle(AccessibleSettingsDisclosureStyle())
                     }
                 }
 
@@ -1730,7 +1734,8 @@ struct EditVPNView: View {
         }
     }
 
-    private func saveCredentialSource() async {
+    @discardableResult
+    private func saveCredentialSource() async -> Bool {
         var source = CredentialSource()
         source.kind = credentialKind
         source.reference = sourceReference.trimmingCharacters(in: .whitespaces)
@@ -1764,7 +1769,14 @@ struct EditVPNView: View {
         } else {
             source.instanceID = ""
         }
-        try? await vpn.setCredentialSource(source, for: profileID)
+        guard !ManagedPolicy.lockConfiguration else { return true }
+        do {
+            try await vpn.setCredentialSource(source, for: profileID)
+            return true
+        } catch {
+            saveError = error.localizedDescription
+            return false
+        }
     }
 
     private var usernameLocked: Bool {
@@ -1805,7 +1817,7 @@ struct EditVPNView: View {
     /// either. The error still blocks connecting, and the banner still explains it.
     private var saveDisabledReason: String? {
         if saving { return "Saving…" }
-        if name.isEmpty { return "Give this VPN a name first." }
+        if let problem = ConfigurationNameField.problem(name) { return problem }
         return nil
     }
 
@@ -1822,11 +1834,12 @@ struct EditVPNView: View {
     /// is nothing unsaved for it to rescue, which is why there is no "Saved" state and
     /// no tick.
     private var doneButton: some View {
-        Button("Done") { Task { await commit(); dismiss() } }
+        Button("Done") { Task { if await commit() { dismiss() } } }
+            .disabled(saveDisabledReason != nil)
             .buttonStyle(.glassProminent)
             .keyboardShortcut(.defaultAction)
-            .help(saveWarning ?? "Close this window \u{2014} your changes are already saved")
-            .accessibilityValue(saveWarning ?? "changes are saved as you make them")
+            .help(saveDisabledReason ?? saveWarning ?? "Close this window \u{2014} your changes are already saved")
+            .accessibilityValue(saveDisabledReason ?? saveWarning ?? "changes are saved as you make them")
     }
 
     /// Touch ID protection toggle. The migration sources the secret from the
@@ -1910,10 +1923,15 @@ struct EditVPNView: View {
     /// half-fixed config could never be kept. Storage is live; validity is surfaced
     /// separately — by the banner below, by each row's own problem caption, and by
     /// `ConnectListing`, which lists the profile with Connect disabled and a reason.
-    private func commit() async {
-        guard saveDisabledReason == nil else { return }
+    @discardableResult
+    private func commit() async -> Bool {
+        guard saveDisabledReason == nil else { return false }
         saving = true; defer { saving = false }
-        if !name.isEmpty { try? await vpn.rename(id: profileID, to: name) }
+        saveError = nil
+        if !ManagedPolicy.lockConfiguration {
+            do { try await vpn.rename(id: profileID, to: name) }
+            catch { saveError = error.localizedDescription; return false }
+        }
 
         // Configuration/overrides/auth are what MDM LockConfiguration governs — skip
         // them under the lock (rather than calling and swallowing the thrown error),
@@ -1950,24 +1968,25 @@ struct EditVPNView: View {
                 loadedOVPN = ovpn; loadedOverrides = draft   // snapshots now match persisted
             } catch {
                 saveError = error.localizedDescription
-                return   // don't dismiss — the change didn't persist
+                return false   // don't dismiss — the change didn't persist
             }
         }
 
-        await saveCredentialSource()
+        guard await saveCredentialSource() else { return false }
 
         // A newly-entered authenticator secret goes into the Touch ID item
         // (one fingerprint prompt — changing what the fingerprint guards
         // should cost one). Empty input means "keep what's stored".
-        if vpn.authConfig(for: profileID).protectWithBiometrics, !totpSecretInput.isEmpty,
+        if !ManagedPolicy.lockConfiguration, vpn.authConfig(for: profileID).protectWithBiometrics, !totpSecretInput.isEmpty,
            let canonical = TOTPConfiguration.canonicalStorageString(from: totpSecretInput) {
             do {
                 try await vpn.updateProtectedTOTP(id: profileID, secret: canonical)
                 totpSecretInput = ""
             } catch is CancellationError {
+                return false
             } catch {
                 saveError = error.localizedDescription
-                return
+                return false
             }
         }
 
@@ -1987,21 +2006,29 @@ struct EditVPNView: View {
 
         // The profile's allow-password-save (auth-nocache) always wins over the toggle.
         let mayRemember = evaluation?.allowPasswordSave ?? true
-        if mayRemember && remember && !username.isEmpty {
-            try? KeychainCredentialStore.saveCredentials(profile: profileID, .init(username: username, password: password))
-        } else if !remember || !mayRemember {
-            KeychainCredentialStore.deleteCredentials(profile: profileID)
+        do {
+            if !ManagedPolicy.lockConfiguration {
+                if mayRemember && remember && !username.isEmpty {
+                    try KeychainCredentialStore.saveCredentials(profile: profileID, .init(username: username, password: password))
+                } else if !remember || !mayRemember {
+                    KeychainCredentialStore.deleteCredentials(profile: profileID)
+                }
+                try KeychainCredentialStore.saveProfileSecrets(profile: profileID, .init(
+                    proxyPassword: proxyPassword.isEmpty ? nil : proxyPassword,
+                    privateKeyPassword: privateKeyPassword.isEmpty ? nil : privateKeyPassword))
+            }
+            customRouting = try await persistCustomRouting(vpn, profileID: profileID, profile: customRouting,
+                                                          proxyAuthUsername: crProxyAuthUsername,
+                                                          proxyAuthPassword: crProxyAuthPassword)
+        } catch {
+            saveError = error.localizedDescription
+            return false
         }
-        try? KeychainCredentialStore.saveProfileSecrets(profile: profileID, .init(
-            proxyPassword: proxyPassword.isEmpty ? nil : proxyPassword,
-            privateKeyPassword: privateKeyPassword.isEmpty ? nil : privateKeyPassword))
-        customRouting = await commitCustomRouting(vpn, profileID: profileID, profile: customRouting,
-                                                  proxyAuthUsername: crProxyAuthUsername,
-                                                  proxyAuthPassword: crProxyAuthPassword)
         // NO DISMISS, and no "Saved" transient. Committing is not leaving — this runs
         // every time a field loses focus, so dismissing here would close the editor
         // out from under someone who merely pressed Tab. Closing is the window's own
         // affordance ("Done", or the close button).
+        return true
     }
 
     private func importLogo(_ result: Result<URL, Error>) { if case let .success(u) = result { importLogoFile(u) } }

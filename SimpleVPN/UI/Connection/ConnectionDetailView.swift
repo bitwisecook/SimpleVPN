@@ -731,7 +731,13 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     /// the sign-in, so there is nothing to type — only a pointer at the editor
     /// while the config still needs something.
     @ViewBuilder private var wireGuardPanel: some View {
-        if let problem = vpn.wireGuardConfig(for: profile.id).connectProblem {
+        if vpn.wireGuardConfig(for: profile.id).usesTeleport {
+            Label(vpn.teleportSession(for: profile.id) == nil
+                  ? "Pair this Teleport VPN with an invite in Manage VPNs first."
+                  : "This Teleport VPN uses its saved Keychain session.", systemImage: "key")
+                .font(.callout).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else if let problem = vpn.wireGuardConfig(for: profile.id).connectProblem {
             Label(problem, systemImage: "exclamationmark.triangle")
                 .font(.callout).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)

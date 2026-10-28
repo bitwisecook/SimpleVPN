@@ -5,6 +5,7 @@ import AppKit
 import ImageIO
 import SwiftUI
 import Testing
+import WebKit
 @testable import SimpleVPN
 
 /// Utility panels must have a useful opening size without becoming fixed-size
@@ -199,5 +200,121 @@ struct PanelLayoutTests {
         let source = try #require(CGImageSourceCreateWithURL(url as CFURL, nil))
         let image = try #require(CGImageSourceCreateImageAtIndex(source, 0, nil))
         return Image(decorative: image, scale: 1)
+    }
+}
+
+// Exercise the shipped HTML in WebKit, rather than only checking CSS strings.
+
+@MainActor
+@Suite(.serialized)
+struct ManualResponsiveLayoutTests {
+    @Test(arguments: [CGSize(width: 1180, height: 720), CGSize(width: 760, height: 640),
+                      CGSize(width: 430, height: 600), CGSize(width: 320, height: 260),
+                      CGSize(width: 760, height: 300)])
+    func helpReflowsWithoutHorizontalPageOverflow(_ size: CGSize) async throws {
+        let fixture = ManualWebFixture(size: size)
+        defer { fixture.window.close() }
+        try await fixture.load()
+        let state = try await fixture.web.evaluateJavaScript("""
+            (() => {
+              const n = document.getElementById('help-contents');
+              return { width: innerWidth, overflow: document.documentElement.scrollWidth > innerWidth + 1,
+                       position: getComputedStyle(n).position, open: n.dataset.open };
+            })()
+            """) as? [String: Any]
+        let values = try #require(state)
+        #expect(values["overflow"] as? Bool == false)
+        #expect(values["position"] as? String == (size.width > 900 ? "sticky" : "fixed"))
+        #expect(values["open"] as? String == (size.width <= 900 ? "false" : "true"))
+    }
+
+    @Test(arguments: [360.0, 760.0])
+    func compactContentsSupportsApproachKeyboardEscapeAndReadingLinks(_ width: Double) async throws {
+        let fixture = ManualWebFixture(size: CGSize(width: width, height: 520))
+        defer { fixture.window.close() }
+        try await fixture.load()
+        let outcome = try await fixture.web.evaluateJavaScript("""
+            (() => {
+              const nav = document.getElementById('help-contents');
+              const button = document.getElementById('contents-toggle');
+              const list = document.getElementById('contents-list');
+              const initiallyClosed = nav.dataset.open === 'false' && list.inert;
+              const r = nav.getBoundingClientRect();
+              document.dispatchEvent(new PointerEvent('pointermove', {clientX: r.left + 4, clientY: r.bottom + 16, pointerType: 'mouse'}));
+              const approached = nav.dataset.open === 'true' && !list.inert;
+              nav.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+              const escaped = nav.dataset.open === 'false';
+              button.click();
+              const clicked = button.getAttribute('aria-expanded') === 'true';
+              list.querySelector('a').click();
+              const reading = nav.dataset.open === 'false' && list.inert;
+              return initiallyClosed && approached && escaped && clicked && reading;
+            })()
+            """) as? Bool
+        #expect(outcome == true)
+    }
+
+    @Test func compactContentsAutomaticallyRetreatsAfterThePointerLeaves() async throws {
+        let fixture = ManualWebFixture(size: CGSize(width: 360, height: 520))
+        defer { fixture.window.close() }
+        try await fixture.load()
+        _ = try await fixture.web.evaluateJavaScript("""
+            const nav = document.getElementById('help-contents');
+            nav.dispatchEvent(new PointerEvent('pointerenter', {pointerType: 'mouse'}));
+            nav.dispatchEvent(new PointerEvent('pointerleave', {pointerType: 'mouse'}));
+            """)
+        try await Task.sleep(for: .milliseconds(500))
+        let closed = try await fixture.web.evaluateJavaScript("document.getElementById('help-contents').dataset.open === 'false'") as? Bool
+        #expect(closed == true)
+    }
+
+    @Test func restoredHelpFramesFitOffsetAndSmallerDisplays() {
+        for visible in [CGRect(x: 0, y: 40, width: 800, height: 560),
+                        CGRect(x: -1920, y: 80, width: 1920, height: 1000)] {
+            let fitted = MainWindowSizingPolicy.fittedFrame(frameSize: CGSize(width: 2200, height: 1400),
+                currentFrame: CGRect(x: 1600, y: -400, width: 2200, height: 1400), visibleFrame: visible)
+            #expect(visible.contains(fitted))
+        }
+    }
+}
+
+@MainActor
+private final class ManualWebFixture: NSObject, WKNavigationDelegate {
+    let web: WKWebView
+    let window: NSWindow
+    private var completion: CheckedContinuation<Void, Error>?
+    private var timeout: Task<Void, Never>?
+
+    init(size: CGSize) {
+        web = WKWebView(frame: CGRect(origin: .zero, size: size))
+        window = NSWindow(contentRect: CGRect(origin: .zero, size: size),
+                          styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = web
+        super.init()
+        web.navigationDelegate = self
+    }
+
+    func load() async throws {
+        let url = try #require(Bundle.main.url(forResource: "manual", withExtension: "html"))
+        try await withCheckedThrowingContinuation { continuation in
+            completion = continuation
+            web.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+            timeout = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: .seconds(10)) } catch { return }
+                self?.finish(NSError(domain: "ManualWebFixture", code: 1,
+                                     userInfo: [NSLocalizedDescriptionKey: "The bundled manual did not finish loading."]))
+            }
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finish(nil) }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { finish(error) }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { finish(error) }
+    private func finish(_ error: Error?) {
+        guard let completion else { return }
+        self.completion = nil
+        timeout?.cancel()
+        if let error { completion.resume(throwing: error) } else { completion.resume() }
     }
 }

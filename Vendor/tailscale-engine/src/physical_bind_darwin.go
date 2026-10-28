@@ -62,13 +62,12 @@ func (b *physicalBind) listen(network string, port uint16) (*net.UDPConn, error)
 	return pc.(*net.UDPConn), nil
 }
 func receiveUDP(c *net.UDPConn) conn.ReceiveFunc {
-	return func(packets [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
-		n, addr, err := c.ReadFromUDPAddrPort(packets[0])
+	return func(slab []byte, packets []conn.ReceivedPacket) (int, error) {
+		n, addr, err := c.ReadFromUDPAddrPort(slab)
 		if err != nil {
 			return 0, err
 		}
-		sizes[0] = n
-		eps[0] = &conn.StdNetEndpoint{AddrPort: addr}
+		packets[0] = conn.ReceivedPacket{Size: n, Endpoint: &conn.StdNetEndpoint{AddrPort: addr}}
 		return 1, nil
 	}
 }
@@ -106,6 +105,17 @@ func (b *physicalBind) Close() error {
 		b.ipv6 = nil
 	}
 	return nil
+}
+
+// Teleport negotiates on these sockets before WireGuard takes over their reads.
+// Keep them registered here so underlay changes and send gating remain shared.
+func (b *physicalBind) teleportSockets() (*net.UDPConn, *net.UDPConn, error) {
+	if _, _, err := b.Open(0); err != nil {
+		return nil, nil, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.ipv4, b.ipv6, nil
 }
 func (b *physicalBind) Send(bufs [][]byte, ep conn.Endpoint, offset int) error {
 	endpoint, ok := ep.(*conn.StdNetEndpoint)
