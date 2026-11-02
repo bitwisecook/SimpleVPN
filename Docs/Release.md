@@ -189,6 +189,25 @@ are re-exported and updated.
 
 ## Known risks (read before relying on this pipeline)
 
+### 0.6 distribution record
+
+Version 0.6 (build 458) was built locally from tag `v0.6` using Xcode 27.2 and
+macOS SDK 27.2. The hosted release run
+[`41486700545`](https://github.com/bitwisecook/SimpleVPN/actions/runs/41486700545)
+stopped before signing because its selected Xcode 26.6 only provided SDK 26.5.
+`Tools/build-release-dmg.sh 0.6` completed locally instead. Both the app and DMG
+were notarized, stapled, and accepted by Gatekeeper; both notary logs had no
+issues. The DMG's Sparkle signature was checked against the existing updater key.
+The DMG installation passed all three installed-app smoke tests, with the exact
+0.6/458 extension registered as activated and enabled. Optional DNS proxy query
+capture remains a separate live acceptance check; these smoke tests do not
+enable that proxy or establish live query forwarding.
+
+Hosted releases remain unavailable until a runner provides SDK 27.2 or later;
+the local distribution script remains the working release path.
+
+### Pipeline risks
+
 - **Runner SDK availability.** The `engines` and `release` jobs both run on
   `runs-on: macos-26` and hard-fail with an explicit message if
   `xcodebuild -showsdks` lacks a macOS 26 SDK. Whether GitHub's hosted image
