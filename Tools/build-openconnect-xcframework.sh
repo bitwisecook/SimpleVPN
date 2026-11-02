@@ -23,7 +23,7 @@ PIN=v9.21                 # openconnect release tag — bump deliberately
 # against another's OpenSSL → ABI skew / corruption. Keep this constant IDENTICAL
 # across build-openvpn3 / build-openconnect / build-libssh, and bump all three
 # together. The guard below fails loudly if Homebrew drifts from the pin.
-OPENSSL_PIN="3.6.5"
+OPENSSL_PIN="4.1.0"
 MIN=26.0
 ARCH=arm64
 

@@ -325,15 +325,42 @@ Update Tailscale, WireGuard, and these adapters together.
 
 gVisor updates resolve **`@go`**, not `@latest`: upstream's default branch
 requires Bazel and lacks the source layout needed by standard Go tooling. The
-2026-10-28 Go-branch revision is pinned in both modules and the proxy build script.
+2026-11-02 Go-branch revision (`1cea747efe8d`) is pinned in both modules and the
+proxy build script.
 
-OpenSSL 3.6.5 is built once from its SHA-256-verified upstream source with a macOS
+OpenSSL 4.1.0 is built once from its SHA-256-verified upstream source with a macOS
 26 deployment target (`Tools/build-openssl.sh`). All three engines consume this
 repository-local installation. The CI installer uses the same script, avoiding
 Homebrew formula snapshots and host-only deployment targets. The native engine
 cache keys include this script. Other native inputs remain at their current
 upstream releases (OpenConnect 9.21, libssh 0.12.2, libfido2 1.17.0, libcbor 0.14.0,
 Asio 1.38.2, fmt 12.2.0, xxHash 0.8.4, LZ4 1.10.0).
+
+**Dependency refresh (2026-11-02):** all three native engines now share OpenSSL
+4.1.0 (official source SHA-256 verified). OpenVPN core 3.12 advances to
+`0abc8313b8fe5f63dbebc10d53094952957845d9`. Both Go netstacks share gVisor's
+Go-compatible revision `v0.0.0-20261102110059-1cea747efe8d`; the standalone proxy
+build guard agrees. Reachable Go dependencies and test dependencies were
+updated with `go get -u -t ./...` and tidied in each module: CBOR 2.10.0,
+AWS config/credentials/signin/SSM/SSO/SSOOIDC patch releases, and glob 1.1.0.
+Tailscale's stable WireGuard fork remains `417aef361226`, matching its slab API.
+Sparkle 2.10.1, Tailscale 1.104.4, 1Password SDK 0.4.1, Teleport's adapted source,
+OpenConnect 9.21, libssh 0.12.2, the remaining native inputs, Go 1.27.3 and the
+SHA-pinned GitHub Actions already match their current upstream releases.
+
+**Verification (2026-11-02):** rebuilt OpenSSL, all three native xcframeworks,
+the 1Password archive and the combined Tailscale/proxy archive. Native symbol
+checks, Go vet/tests, proxy C-boundary tests and Tailscale/proxy race suites pass.
+Sparkle resolves at 2.10.1. The signed Debug app, extension and test targets build.
+The unit run reports **2,881 passes and one failure**:
+`SSHSettingDescriptorTests.groupsAreCanonicalAndOrdered()` still requires every
+`SettingGroup` to contain SSH options, but the pre-existing workspace DNS-tab
+changes add `.dns`, for which SSH has no options. This test and the DNS taxonomy
+were not changed by the dependency refresh. The live SSH integration suite passes
+with the local sshd fixture and OpenSSL 4.1.0. Full results are retained in
+`build/dependencies-20261102-tests.xcresult`; build and engine logs use the same
+`build/dependencies-20261102-` prefix. Installed-provider/live-VPN acceptance
+remains covered by the existing §18 register entry.
 
 **Verdict: KEEP SEPARATE — each engine builds independently, with coordinated
 pins.** Verify all engine archives whenever a shared dependency changes.

@@ -12,11 +12,11 @@
 # OpenSSL is built from verified source by build-openssl.sh.
 set -euo pipefail
 
-PIN=16eda831035ec44c3c809c7349ad63be7eaac1d0   # openvpn3 revision (core 3.12) — bump deliberately
+PIN=0abc8313b8fe5f63dbebc10d53094952957845d9   # openvpn3 revision (core 3.12) — bump deliberately
 # Keep IDENTICAL across all three engine scripts (see build-openconnect for why:
 # three statically-bundled OpenSSL copies land in one binary; version skew between
 # them is a linker/ABI hazard). Bump all three together.
-OPENSSL_PIN="3.6.5"
+OPENSSL_PIN="4.1.0"
 # The other four Homebrew inputs are compiled INTO the shipped engine too (asio,
 # fmt and xxhash header-only, lz4 as a static archive), so a `brew upgrade`
 # between two rebuilds changed the shipped binary and nothing said so. They are

@@ -65,7 +65,7 @@ struct AcknowledgementsTests {
     @Test func everyShippedComponentWithAnObligationIsCredited() {
         let names = Set(components.map(\.name))
         for required in ["OpenVPN 3 Core", "OpenConnect (libopenconnect)", "libssh",
-                         "Tailscale", "wireguard-go", "gVisor", "OpenSSL 3",
+                         "Tailscale", "wireguard-go", "gVisor", "OpenSSL 4",
                          "Sparkle", "1Password Go SDK",
                          "Go runtime & golang.org/x libraries"] {
             #expect(names.contains(required), "\(required) ships but isn't credited")

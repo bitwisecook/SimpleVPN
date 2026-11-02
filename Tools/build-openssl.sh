@@ -6,7 +6,7 @@
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 PIN="$(awk -F'"' '/^OPENSSL_PIN=/{print $2; exit}' "$REPO/Tools/build-openvpn3-xcframework.sh")"
-SHA256=a2157c2830efdec3788939b00c9b0638306d3f0bbb76dc4832ee503bb397df98
+SHA256=50c17baf54cb008f6ce42d50deb4b28050a1aad711636cabd4b241c7e90cc2fd
 PREFIX="$REPO/build/pinned-openssl"
 WORK="$REPO/build/pinned-openssl-src"
 TARBALL="$REPO/build/openssl-$PIN.tar.gz"

@@ -31,7 +31,7 @@ PIN=0.12.2                # libssh release — bump deliberately (update SHA256 
 # the build must stop rather than compile it.
 TARBALL_SHA256="49560f677d96e3706a904ac2de1116e25f3680937d51e5c92198fcba4a1c1e9f"
 # Keep IDENTICAL across all three engine scripts (see build-openconnect for why).
-OPENSSL_PIN="3.6.5"
+OPENSSL_PIN="4.1.0"
 # Homebrew formulae compiled INTO this engine — same policy as OPENSSL_PIN and
 # build-openvpn3-xcframework.sh's BREW_PINS: a `brew upgrade` between two rebuilds
 # must not change the shipped binary quietly.

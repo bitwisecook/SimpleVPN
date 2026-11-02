@@ -2,7 +2,7 @@ module pxengine
 
 go 1.27.3
 
-require gvisor.dev/gvisor v0.0.0-20261028075530-24aa660e5805
+require gvisor.dev/gvisor v0.0.0-20261102110059-1cea747efe8d
 
 require (
 	github.com/google/btree v1.1.3 // indirect

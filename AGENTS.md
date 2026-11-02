@@ -156,11 +156,11 @@ enabled extension registration. They do **not** prove live provider IPC or packe
 ## OpenVPN engine (`OpenVPNEngine.xcframework`)
 
 macOS ships no OpenVPN engine (native VPN = IKEv2/IPsec/L2TP only), so we vendor the **OpenVPN 3 client
-core** (pinned, currently core 3.12) with **OpenSSL 3** + lz4 statically linked, `USE_TUN_BUILDER` on,
+core** (pinned, currently core 3.12) with **OpenSSL 4** + lz4 statically linked, `USE_TUN_BUILDER` on,
 external-PKI dropped (no client-cert/smartcard use). **arm64 only** for now (Apple Silicon; add x86_64
 slices at distribution time if needed).
 
-- Rebuild: `./Tools/build-openvpn3-xcframework.sh` (needs Homebrew: asio fmt lz4 xxhash openssl@3).
+- Rebuild: `./Tools/build-openvpn3-xcframework.sh` (needs Homebrew: asio fmt lz4 xxhash; OpenSSL is built from verified source).
 - Outputs (gitignored): `Vendor/OpenVPNEngine.xcframework` (link) + `Vendor/openvpn3-include/` (bridge
   headers: openvpn3 + asio + openssl). **Run the script after a fresh clone before building in Xcode.**
 - The `PacketTunnel` target links the xcframework and sets `CLANG_CXX_LANGUAGE_STANDARD=c++20`,

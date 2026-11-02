@@ -196,13 +196,12 @@ are re-exported and updated.
   run — GitHub-hosted images have historically lagged new Xcode releases. If
   this check fails, the fallback is a self-hosted runner on a Mac that
   already has the right Xcode.
-- **The `OPENSSL_PIN` drift guard.** All three engine scripts hard-fail if
-  Homebrew's `openssl@3` isn't exactly the pinned version. On a cache miss,
-  CI runs `Tools/ci/install-pinned-openssl.sh` to force that version via a
-  local Homebrew tap — a workaround, not a first-class Homebrew feature, and
-  unverified beyond this repo's own reasoning until it's actually exercised
-  by a real cache-miss CI run. See that script's header comment for the
-  honest fallback if it proves fragile.
+- **The `OPENSSL_PIN` drift guard.** All three engine scripts require the same
+  OpenSSL version. On a cache miss, CI runs
+  `Tools/ci/install-pinned-openssl.sh`, which delegates to
+  `Tools/build-openssl.sh` to build SHA-256-verified upstream source for macOS 26.
+  Local builds use the same repository-local installation; no Homebrew tap is
+  needed. Changing OpenSSL requires rebuilding all three engine archives.
 - **Cache eviction is the default case, not the edge case.** Tags are cut far
   less often than the 7-day cache eviction window, so `engines-cache.yml`
   mitigates but does not eliminate the "next release pays for a cold engine

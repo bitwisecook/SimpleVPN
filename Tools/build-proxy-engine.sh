@@ -36,7 +36,7 @@ export CGO_LDFLAGS="-mmacosx-version-min=26.0 ${CGO_LDFLAGS:-}"
 # Resolve updates with gvisor.dev/gvisor@go: @latest selects the Bazel-only
 # master branch, which cannot be compiled with standard Go tooling.
 GVISOR_MODULE="gvisor.dev/gvisor"
-GVISOR_VERSION="v0.0.0-20261028075530-24aa660e5805"
+GVISOR_VERSION="v0.0.0-20261102110059-1cea747efe8d"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$REPO/Vendor/proxy-engine/src"

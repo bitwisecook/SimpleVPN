@@ -389,7 +389,7 @@ targets:
       # In-process SSH engine for the SSH Network Tunnel kind (one direct-tcpip
       # channel per netstack flow). Same artifact the app links, so the THIRD
       # OpenSSL-bearing static archive now co-links here: all three pin the same
-      # OpenSSL (OPENSSL_PIN=3.6.5 in every build script) so their object files
+      # OpenSSL (OPENSSL_PIN=4.1.0 in every build script) so their object files
       # are byte-identical and ld64's lazy archive loading pulls exactly one copy —
       # verified by linking all three together before this landed. If a pin ever
       # diverges, THIS is where the duplicate-symbol failure appears.

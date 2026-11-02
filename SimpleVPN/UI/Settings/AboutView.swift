@@ -59,7 +59,7 @@ enum Acknowledgements {
         // A bundled framework, signed and shipped inside the app (Tools/resign-sparkle.sh).
         .init(name: "Sparkle", license: "MIT", role: "App updates",
               url: "https://sparkle-project.org"),
-        .init(name: "OpenSSL 3", license: "Apache-2.0", role: "TLS / crypto for all engines",
+        .init(name: "OpenSSL 4", license: "Apache-2.0", role: "TLS / crypto for all engines",
               url: "https://www.openssl.org"),
         .init(name: "Asio", license: "BSL-1.0", role: "OpenVPN async I/O",
               url: "https://think-async.com/Asio/"),
