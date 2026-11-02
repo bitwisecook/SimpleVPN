@@ -292,7 +292,10 @@ struct EditVPNView: View {
             .settingsEditor(search: search, tab: $tab,
                             surfaces: [.openVPN, .securityKey, .customRouting],
                             profileID: profileID,
-                            kind: .openVPN)
+                            kind: .openVPN, vpn: vpn,
+                            routingDraft: .openVPN(draft, server: evaluation?.remoteHost ?? "",
+                                                   configurationChanged: ovpn != loadedOVPN,
+                                                   customRouting: customRouting))
             // WHICH of the security-key rows are on screen right now. They are
             // gated on the master switch and on what the key supplies, and every
             // one of them is a related-link target of one of those two — so

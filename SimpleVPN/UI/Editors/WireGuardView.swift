@@ -263,7 +263,8 @@ struct WireGuardView: View {
         }
         .settingsEditor(search: search, tab: $tab,
                         surfaces: [.wireGuard, .customRouting], profileID: profileID,
-                        kind: .wireGuard)
+                        kind: .wireGuard, vpn: vpn,
+                        routingDraft: .wireGuard(draft, customRouting: customRouting))
         .padding(.top, 10)
         .navigationTitle(draft.name)
         .task { loadOnce() }

@@ -466,3 +466,13 @@ facts and server-probe results are suggestions to review, never authority to cre
 connect. Probing is an explicit action on the address the person can see. Cancellation
 must leave no saved profile. Never turn free-form notes or model output into executable
 configuration. Keep full keyboard, menu and VoiceOver paths for this workflow.
+
+## Routing diagrams in editors
+
+Routing tabs in all seven editors receive a live railroad through the shared
+`SettingsEditorShell`. Use `EditorRoutingDraft` for public engine facts and the real
+filters/arbiters for projection. Reuse `RouteGraphView` for rendering, pan, zoom and
+topology watching; do not build another viewer or insert platform-backed controls
+inside its scaled subtree. Keep draft forecasts, acknowledged applied plans and
+macOS observations explicitly distinct. Never retain keys or whole engine configs
+in a diagram, or invoke apply/capture hooks just to draw a preview.

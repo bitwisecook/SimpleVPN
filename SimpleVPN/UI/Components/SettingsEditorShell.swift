@@ -25,11 +25,26 @@ private struct SettingsEditorShell: ViewModifier {
     /// The VPN this editor is editing, so a route naming a specific profile is
     /// only served by that profile's editor.
     let profileID: String?
+    let vpn: VPNController?
+    let routingDraft: EditorRoutingDraft?
 
     @Environment(SettingsRouter.self) private var router: SettingsRouter?
+    @Environment(TopologyMonitor.self) private var topology: TopologyMonitor?
+
+    private var railroad: RoutingRailroadDiagram? {
+        guard RoutingRailroadDiagram.includes(tab), let vpn, let profileID, let routingDraft else { return nil }
+        return RoutingRailroadProjection.make(profileID: profileID, tab: tab, draft: routingDraft,
+                                               vpn: vpn, topology: topology?.topology ?? NetworkTopology())
+    }
 
     func body(content: Content) -> some View {
-        content
+        VSplitView {
+            content.frame(minWidth: 0, maxWidth: .infinity, minHeight: 180)
+            if let railroad, let vpn {
+                RouteGraphView(vpn: vpn, editorGraph: railroad)
+                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 200, idealHeight: 270)
+            }
+        }
             .environment(search)
             .onAppear { search.activeTab = tab; consume() }
             // WHERE THE USER IS. The back button's history is (tab, row), and the tab
@@ -86,9 +101,11 @@ extension View {
     /// optional only so a host without one (previews) can still use the shell.
     func settingsEditor(search: SettingsSearch, tab: Binding<SettingsTab>,
                         surfaces: Set<SettingSurface>, profileID: String? = nil,
-                        kind: VPNKind? = nil) -> some View {
+                        kind: VPNKind? = nil, vpn: VPNController? = nil,
+                        routingDraft: EditorRoutingDraft? = nil) -> some View {
         modifier(SettingsEditorShell(search: search, tab: tab,
-                                     surfaces: surfaces, profileID: profileID))
+                                     surfaces: surfaces, profileID: profileID,
+                                     vpn: vpn, routingDraft: routingDraft))
             .modifier(MaturityBannerScaffold(kind: kind, profileID: profileID))
     }
 }

@@ -317,6 +317,7 @@ struct SimpleVPNApp: App {
         Window("Manage VPNs", id: "manage") {
             ManageVPNsView(vpn: vpn, labels: labels)
                 .opensSSOWindow()
+                .environment(topology)
                 .environment(evaluator)
                 .environment(endpointLocator)
                 .environment(endpointProbes)

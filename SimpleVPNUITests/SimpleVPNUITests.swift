@@ -117,6 +117,17 @@ final class SimpleVPNUITests: XCTestCase {
             .matching(NSPredicate(format: "label == %@", "DNS")).firstMatch
         XCTAssertTrue(dnsTab.waitForExistence(timeout: 5))
         dnsTab.click()
+        let graph = manage.descendants(matching: .any)["editor-routing-railroad"].firstMatch
+        XCTAssertTrue(graph.waitForExistence(timeout: 5), "DNS must include the shared routing viewer.")
+        let zoomReadout = manage.staticTexts.matching(NSPredicate(format: "value ENDSWITH %@", "%")).firstMatch
+        XCTAssertTrue(zoomReadout.waitForExistence(timeout: 5))
+        let originalZoom = zoomReadout.value as? String
+        manage.buttons["Zoom in"].click()
+        XCTAssertNotEqual(zoomReadout.value as? String, originalZoom, "The embedded graph must use the working zoom controls.")
+        // Pointer pan/pinch remain on the visible-desktop walkthrough, like
+        // the standalone Routes viewer (Docs/Accessibility.md). XCUITest's
+        // clipped text coordinates cannot reliably drive them after relaunch.
+        manage.buttons["Fit"].click()
         let dns = manage.textFields["DNS Servers"]
         XCTAssertTrue(dns.waitForExistence(timeout: 5))
         dns.click()
@@ -141,9 +152,16 @@ final class SimpleVPNUITests: XCTestCase {
         let settings = manage.descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@", "Settings")).firstMatch
         settings.click()
+        XCTAssertTrue(graph.waitForExistence(timeout: 5), "Settings must include routing and DNS paths.")
         dnsTab.click()
         XCTAssertTrue(matches.waitForExistence(timeout: 5), "Changed DNS routing must remain discoverable")
         XCTAssertEqual(matches.value as? String, "corp.example", "Switching tabs lost the DNS routing draft")
+        let assignment = graph.descendants(matching: .any)
+            .matching(NSPredicate(format: "value CONTAINS %@", "corp.example → 10.0.0.53")).firstMatch
+        XCTAssertTrue(assignment.waitForExistence(timeout: 5), "DNS edits must update resolver assignments in the live graph.")
+        let routingTab = manage.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Custom Routing")).firstMatch
+        routingTab.click()
+        XCTAssertTrue(graph.waitForExistence(timeout: 5), "Custom Routing must include the shared routing viewer.")
         try checkMainSidebarAddOpensManageImport(app: app)
     }
 

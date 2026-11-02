@@ -182,7 +182,8 @@ struct SubprocessTunnelView: View {
         .onChange(of: SettingVisibility.subprocess(draft)) { _, new in search.visibility = new }
         .settingsEditor(search: search, tab: $tab,
                         surfaces: [.ssh, .openConnect, .customRouting], profileID: draft.id,
-                        kind: draft.kind)
+                        kind: draft.kind, vpn: vpn,
+                        routingDraft: .subprocess(draft, customRouting: customRouting))
         // The Kind picker turns an SSH tunnel into a FortiGate one and back, so
         // which related links are reachable has to follow it.
         .onChange(of: draft.kind) { search.kind = draft.kind }

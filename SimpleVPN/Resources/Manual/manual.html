@@ -1522,6 +1522,20 @@ who wants them.</p>
 <!-- ══════════════════ Custom Routing ══════════════════ -->
 
 <h2 id="cr-what-is-it">What This Is</h2>
+<h3>Live routing diagrams</h3>
+<p>Tabs that change traffic routing have a live railroad diagram below their settings.
+Drag the divider to give either pane more room. Follow the draft paths from the
+configured or last supplied settings through your rules to the route, DNS or proxy
+choices. The preview updates while you edit; engine settings take effect on reconnect,
+and Custom Routing takes effect when committed.</p>
+<p>Applied paths show settings confirmed by SimpleVPN. Observed paths show the routes
+and DNS scopes reported by macOS, including other VPN apps. Server settings that have
+not been learned yet are labelled unknown. Moving lines reflect interface counters;
+they do not measure traffic through individual rules.</p>
+<p>Drag or use two-finger scrolling to pan. Pinch to zoom, use the Zoom buttons or
+press ⌘− and ⌘=. Fit (⌘0) shows the whole diagram. Focus the diagram to pan with the
+arrow keys. DNS has its own paths; Custom Routing shows route and proxy paths.</p>
+
 <p class="default">Every VPN kind has this tab. It changes nothing until you add a rule.</p>
 <p>Every VPN editor has a <strong>DNS</strong> tab. It holds the DNS controls and the last DNS settings supplied by the VPN. Expand <strong>Custom Routing</strong> on that tab to change resolver rules, search domains, or match domains. A changed group opens automatically; searching for a control opens it too. Route and proxy rules stay on the separate <strong>Custom Routing</strong> tab.</p>
 <p>When a VPN connects it <em>pushes</em> settings at your Mac: which networks it carries, which DNS servers to use, sometimes a proxy. Custom Routing is where you edit that push — accept it, ignore parts of it, replace a value, or add one the VPN never offered — per VPN.</p>

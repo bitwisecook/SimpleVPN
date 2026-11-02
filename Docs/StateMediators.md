@@ -212,3 +212,21 @@ silently no-op a kind — every kind resolves to one bucket, surfaced in the UI.
   with the kill switch (`PolicyRouting.md`). Not built yet — see P4.
 - The mediators are the *implementation* substrate; `PolicyRouting.md`/`PolicyEvents.md`
   describe the tier-3 policy that sits on top. Same plan objects flow through both.
+
+## Editor routing railroads
+
+Routing tabs share `SettingsEditorShell` → `RouteGraphView`, including its existing
+pan/zoom viewport, keyboard controls, accessibility structure and topology watcher.
+`EditorRoutingDraft` retains public routing facts, never an entire secret-bearing
+engine configuration. `RoutingRailroadProjection` runs the draft through the real
+Custom Routing transforms and route/DNS/proxy arbiters; `RouteMediator.preview`
+combines it with already-captured effective peer intents without invoking hooks or
+changing preferences, providers or applied plans.
+
+Draft paths are forecasts. Unknown server settings remain unknown until a connection
+reports them. Applied lanes require acknowledged mediator plans; observed lanes show
+macOS route-table entries and DNS scopes, including other VPN apps. Only observed
+interface counters animate edges; they do not attribute packets to particular rules.
+Engine-specific exclusions and protocol restrictions are labelled on the draft path.
+DNS gets DNS paths, Custom Routing gets route/proxy paths, and other routing tabs
+show both. Reconnection and Custom Routing commit semantics remain unchanged.

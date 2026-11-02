@@ -52,6 +52,8 @@ struct RouteGraphView: View {
     @Environment(TopologyMonitor.self) var topo: TopologyMonitor?   // was private — internal for the file split
     @Environment(ReachabilityMonitor.self) var reach: ReachabilityMonitor?   // was private — internal for the file split
     @Bindable var vpn: VPNController
+    /// The editor uses the same viewer with a configuration railroad layout.
+    var editorGraph: RoutingRailroadDiagram? = nil
     @Environment(\.accessibilityReduceMotion) var reduceMotion   // was private — internal for the file split
     @Environment(\.liveVisualPolicy) var liveVisuals   // shared Low Power Mode policy for graph drawing
     @Environment(\.accessibilityDifferentiateWithoutColor) var differentiateWithoutColor   // read by the edge Canvas (RouteGraphNodes)
@@ -112,7 +114,7 @@ struct RouteGraphView: View {
     let guestLineHeight: CGFloat = 14   // was private — internal for the file split
     let guestButtonHeight: CGFloat = 26   // was private — internal for the file split
 
-    private let minZoom: CGFloat = 0.5
+    private var minZoom: CGFloat { editorGraph == nil ? 0.5 : 0.15 }
     private let maxZoom: CGFloat = 3
 
     @State var zoom: CGFloat = 1   // was private — internal for the file split
@@ -165,14 +167,18 @@ struct RouteGraphView: View {
         // reading the same answer, and the resolver runs once per pass rather than
         // once per card.
         let outcome = searchOutcome
-        let layout = buildLayout(outcome)
+        let layout = editorGraph.map(editorLayout) ?? buildLayout(outcome)
         let content = CGSize(width: layout.canvas.width + canvasInset * 2,
                              height: layout.canvas.height + canvasInset * 2)
         VStack(spacing: 0) {
-            controlBar(outcome)
-            gatewayBar
-            driftBanner
-            if let outcome { answerPanel(outcome) }
+            if let editorGraph {
+                editorControlBar(editorGraph)
+            } else {
+                controlBar(outcome)
+                gatewayBar
+                driftBanner
+                if let outcome { answerPanel(outcome) }
+            }
             Divider()
             GeometryReader { geo in
                 // Direct manipulation, Apple Maps style: during a gesture every tick
@@ -275,14 +281,18 @@ struct RouteGraphView: View {
         // without walking the whole diagram. Entries are rebuilt from the same
         // layout the drawing uses, so the rotor can never list a card that
         // isn't on screen to land on.
-        .accessibilityRotor("VPNs") { rotorEntries(vpnRotorTargets(layout)) }
-        .accessibilityRotor("Guests") { rotorEntries(guestRotorTargets()) }
-        .accessibilityRotor("Problems") { rotorEntries(problemRotorTargets(layout)) }
+        .accessibilityRotor(editorGraph == nil ? "VPNs" : "Routing stages") {
+            rotorEntries(editorGraph == nil ? vpnRotorTargets(layout) : railroadRotorTargets(layout))
+        }
+        .accessibilityRotor("Guests") { rotorEntries(editorGraph == nil ? guestRotorTargets() : []) }
+        .accessibilityRotor("Problems") {
+            rotorEntries(editorGraph == nil ? problemRotorTargets(layout) : railroadRotorTargets(layout, warningsOnly: true))
+        }
         .background(Color(nsColor: .underPageBackgroundColor))
-        .navigationTitle("Routes")
+        .modifier(RouteGraphWindowTitle(isWindow: editorGraph == nil))
         // Initial focus: the search field — typing filters at once, and the
         // diagram (arrows/+/−) is one Tab away.
-        .onAppear { topo?.startWatching(); searchFocused = true }
+        .onAppear { topo?.startWatching(); searchFocused = editorGraph == nil }
         .onDisappear { topo?.stopWatching() }
         .overlay {
             if layout.nodes.count <= 1 {
@@ -370,7 +380,8 @@ struct RouteGraphView: View {
         // included — so pan and zoom move the AX frames with the pixels (the
         // UITest audit's hitRegion check is the regression net for this).
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Route diagram")
+        .accessibilityLabel(editorGraph == nil ? "Route diagram" : "Routing configuration railroad")
+        .accessibilityIdentifier(editorGraph == nil ? "route-diagram" : "editor-routing-railroad")
     }
 
     // MARK: Top bar — search on the left, zoom on the right, both in fixed homes
@@ -411,6 +422,12 @@ struct RouteGraphView: View {
 
             Spacer(minLength: 8)
 
+            zoomControls
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+    }
+
+    private var zoomControls: some View {
             HStack(spacing: 4) {
                 // Content-shaped frame so the hit target isn't the bare hairline glyph.
                 Button { setZoom(zoom / 1.25) } label: {
@@ -436,6 +453,18 @@ struct RouteGraphView: View {
             }
             .buttonStyle(.glass)
             .controlSize(.small)
+    }
+
+    private func editorControlBar(_ graph: RoutingRailroadDiagram) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(graph.title).font(.headline)
+                Spacer(minLength: 8)
+                zoomControls
+            }
+            Text("Preview updates as you edit. Engine settings take effect on reconnect; Custom Routing applies when committed. Applied paths are confirmed settings; observed paths come from this Mac.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
     }
@@ -500,7 +529,9 @@ struct RouteGraphView: View {
         lastContent = content
         guard !didInitialFit, hasGraph, viewport.width > 40, content.width > 40 else { return }
         didInitialFit = true
-        setZoom(fitScale, animated: false)
+        // Editors can have many observed lanes below their draft. Start with
+        // readable draft stations; Fit still provides the whole-system overview.
+        setZoom(editorGraph == nil ? fitScale : max(0.75, fitScale), animated: false)
     }
 
     /// Double-click on empty background: fit ⇄ 100%, the two views people want.
@@ -573,6 +604,14 @@ struct RouteGraphView: View {
         }
     }
 
+    func railroadRotorTargets(_ layout: Layout, warningsOnly: Bool = false) -> [RotorTarget] {
+        layout.nodes.compactMap { node in
+            guard case .railroadStation(let station) = node.kind,
+                  !warningsOnly || station.warning else { return nil }
+            return RotorTarget(id: "rotor-railroad-" + station.id, label: station.title)
+        }
+    }
+
     /// "Problems": everything on the diagram a user would want to FIX — a
     /// connection that exists but isn't carrying traffic (exactly the statuses
     /// that grow a mid-edge fix control), external drift a mediator saw, and
@@ -617,5 +656,13 @@ struct RouteGraphView: View {
                 label: "\(card.title) \u{2014} \(card.routing.edgeLabel)"))
         }
         return out
+    }
+}
+
+private struct RouteGraphWindowTitle: ViewModifier {
+    let isWindow: Bool
+    @ViewBuilder func body(content: Content) -> some View {
+        if isWindow { content.navigationTitle("Routes") }
+        else { content }
     }
 }

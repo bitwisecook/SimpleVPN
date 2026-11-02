@@ -41,6 +41,8 @@ struct GraphNode: Identifiable {   // was private — internal for the file spli
         /// this Mac, which then decides by which interface it leaves.
         /// `RouteGraphGuests.swift` has the argument in full.
         case guestNetwork(GuestGraphCard)
+        /// Editor previews reuse this viewer's renderer, hit testing, pan and zoom.
+        case railroadStation(RoutingRailroadStation)
     }
     /// A bucket of routes carried by one interface. `id` is stable across refreshes
     /// (interface BSD name + bucket), so expansion state and selection survive polls.

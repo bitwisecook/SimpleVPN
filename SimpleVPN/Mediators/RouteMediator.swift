@@ -419,6 +419,19 @@ final class RouteMediator {
                                               userChoseDirect: gatewayUserChoseDirect))
     }
 
+    /// Read-only editor preview: use the same policy and arbiter as a live apply.
+    /// The replacement is already filtered by the editor's draft; no hook, write,
+    /// reconnect, or preference mutation is allowed on this path.
+    func preview(replacing intent: RouteIntent) -> RoutePlan {
+        // These are already captured and filtered effective intents. Re-reading
+        // the host would invoke hooks during a supposedly read-only preview.
+        var projected = intents.values.filter { $0.engine != intent.engine }
+        projected.append(intent)
+        return RouteArbiter.plan(intents: projected,
+                                policy: RoutePolicy(storedOwner: defaultGatewayProfileID,
+                                                    userChoseDirect: gatewayUserChoseDirect))
+    }
+
     // MARK: - Establish-time prediction (RC3)
 
     /// Whether THIS profile should own the default once it connects, given the current

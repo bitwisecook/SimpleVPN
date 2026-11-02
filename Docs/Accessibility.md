@@ -285,3 +285,19 @@ Disclosure/reveal and credential-entry animations honor Reduce Motion. This sour
 change is not a substitute for the visual accommodation walkthrough or hearing
 announcements with VoiceOver enabled. The automated audit still has the documented
 framework/contrast exclusions above.
+
+### Routing diagrams in editors
+
+Settings/Options, DNS, Custom Routing, Configuration and Servers use the Routes
+viewer's existing viewport in a resizable bottom pane. Zoom in/out and Fit are named
+native controls outside the scaled drawing; ⌘−, ⌘= and ⌘0 remain available. Focus the
+diagram for arrow-key pan, or drag/two-finger scroll/pinch. Each station combines its
+name and full routing details into a readable accessibility element. Draft, applied
+and macOS-observed paths are named in text, without relying on colour or animation.
+The Routing stages rotor targets rendered stations; Problems targets draft warnings,
+without inheriting hidden entries from the standalone Routes window.
+
+The editor pointer walkthrough must run on the active desktop: pan with a precise
+scroll, drag the canvas, and pinch. The native editor test checks zoom, tab coverage
+and live DNS assignments. Synthetic pointer drags after relaunch were unreliable in
+this desktop session; they are not counted as automated pan coverage.

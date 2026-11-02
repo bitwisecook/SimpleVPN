@@ -503,6 +503,12 @@ the extension version, so its contents cannot prove provider IPC. Build 307 is n
 notarized, installed and registered as enabled; live capture/crash/sleep checks above
 remain open.
 
+Editor railroads also use `RouteGraphView`'s existing viewport, renderer and topology
+watcher. `RoutingRailroadProjection` adapts public engine facts to the same filters
+and arbiters; it does not implement another route resolver. Draft, confirmed and
+observed lanes remain distinct. `RoutingRailroadTests` checks transformations,
+read-only preview behavior, invalid/unknown state and layout bounds.
+
 ## 19. Teleport and plain WireGuard — ONE DEVICE IMPLEMENTATION
 
 Teleport is a managed WireGuard configuration (`WireGuardConfig.usesTeleport`),

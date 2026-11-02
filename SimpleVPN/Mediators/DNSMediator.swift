@@ -184,6 +184,9 @@ final class DNSMediator {
     /// The resolvers the OS is actually using right now (from SCDynamicStore). Published.
     private(set) var observedResolvers: [String] = []
     private(set) var observedSearchDomains: [String] = []
+    /// Includes resolvers installed by other VPN apps. Published by the existing
+    /// monitor; editor diagrams must not start a second DNS poller.
+    private(set) var observedScopes: [DNSApplyRequest] = []
     @ObservationIgnored private var lastApplyAt: Date?
     private let suppressWindow: TimeInterval = 3
 
@@ -325,11 +328,13 @@ final class DNSMediator {
         let obs = Self.readSystemDNS()
         observedResolvers = obs.resolvers
         observedSearchDomains = obs.searchDomains
+        observedScopes = obs.scoped
     }
 
     private func handleObserved(_ observed: DNSObservation) {
         observedResolvers = observed.resolvers
         observedSearchDomains = observed.searchDomains
+        observedScopes = observed.scoped
         let suppressed = lastApplyAt.map { Date().timeIntervalSince($0) < suppressWindow } ?? false
         let action = DNSDriftDecision.action(expected: appliedPlan ?? plan, observed: observed,
                                              withinSuppressWindow: suppressed)

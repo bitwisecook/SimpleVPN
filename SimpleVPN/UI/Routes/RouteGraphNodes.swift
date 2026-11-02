@@ -194,6 +194,32 @@ extension RouteGraphView {
             proxyCard(proxies)
         case .guestNetwork(let guest):
             guestNetworkCard(guest)
+        case .railroadStation(let station):
+            let expanded = expandedCards.contains(station.id)
+            let expandable = station.details.count > collapseThreshold
+            let visible = expandable && !expanded ? Array(station.details.prefix(collapsedRows)) : station.details
+            titledCard(title: station.title, symbol: station.symbol,
+                       tint: station.warning ? .orange : .accentColor, combined: false) {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(Array(visible.enumerated()), id: \.offset) { _, detail in
+                        Text(detail).font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if expandable {
+                        Button(expanded ? "Show less" : "Show all \(station.details.count)…") {
+                            if expanded { expandedCards.remove(station.id) }
+                            else { expandedCards.insert(station.id) }
+                        }
+                        .font(.caption).buttonStyle(.plain)
+                        .accessibilityLabel("\(expanded ? "Show fewer" : "Show all") details for \(station.title)")
+                    }
+                }
+            }
+            .accessibilityElement(children: expandable ? .contain : .combine)
+            .accessibilityLabel(station.title)
+            .accessibilityValue(station.details.joined(separator: ". "))
+            .accessibilityRotorEntry(id: "rotor-railroad-" + station.id, in: rotorNamespace)
         }
     }
 

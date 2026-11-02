@@ -265,7 +265,8 @@ struct ProxyTunnelView: View {
         .onChange(of: SettingVisibility.proxyTunnel(draft)) { _, new in search.visibility = new }
         .settingsEditor(search: search, tab: $tab,
                         surfaces: [.proxyTunnel, .customRouting], profileID: profileID,
-                        kind: .proxyTunnel)
+                        kind: .proxyTunnel, vpn: vpn,
+                        routingDraft: .proxy(draft, customRouting: customRouting))
         .padding(.top, 10)
         .navigationTitle(name.isEmpty ? "Proxy Tunnel" : name)
         .task { loadOnce() }
