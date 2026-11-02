@@ -24,7 +24,7 @@ func defaultsBool(_ key: String, initially: Bool) -> Bool {
     UserDefaults.standard.object(forKey: key) == nil ? initially : UserDefaults.standard.bool(forKey: key)
 }
 
-@main
+// SimpleVPNLauncher handles installation before any SwiftUI state is initialized.
 struct SimpleVPNApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var vpn = VPNController()

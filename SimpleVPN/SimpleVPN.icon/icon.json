@@ -1,0 +1,232 @@
+{
+  "features": [
+    "refractivity",
+    "specular-location"
+  ],
+  "fill-specializations": [
+    {
+      "value": {
+        "linear-gradient": [
+          "srgb:0.06,0.62,1,1",
+          "srgb:0.025,0.24,0.86,1"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.2,
+            "y": 0
+          },
+          "stop": {
+            "x": 0.8,
+            "y": 1
+          }
+        }
+      }
+    },
+    {
+      "appearance": "dark",
+      "value": {
+        "linear-gradient": [
+          "srgb:0.025,0.28,0.65,1",
+          "srgb:0.015,0.07,0.29,1"
+        ]
+      }
+    }
+  ],
+  "groups": [
+    {
+      "blur-material": 0,
+      "layers": [
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:0.98,0.995,1,1"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:1,1,1,1"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "body-front.svg",
+          "name": "White glass face"
+        }
+      ],
+      "lighting": "individual",
+      "name": "White glass face",
+      "position": {
+        "scale": 1,
+        "translation-in-points": [
+          -48,
+          -32
+        ]
+      },
+      "refractivity": {
+        "depth": 0.4,
+        "enabled": true,
+        "strength": 0.55
+      },
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.25
+      },
+      "specular": true,
+      "specular-highlight-placement": "outside",
+      "translucency-specializations": [
+        {
+          "value": {
+            "enabled": true,
+            "value": 0.52
+          }
+        },
+        {
+          "appearance": "tinted",
+          "value": {
+            "enabled": true,
+            "value": 0.35
+          }
+        }
+      ]
+    },
+    {
+      "blur-material": 0,
+      "layers": [
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:0.66,0.83,1,1"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:1,1,1,1"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "body-side.svg",
+          "name": "Glass body depth"
+        }
+      ],
+      "lighting": "individual",
+      "name": "Glass body depth",
+      "position": {
+        "scale": 1,
+        "translation-in-points": [
+          -48,
+          -32
+        ]
+      },
+      "refractivity": {
+        "depth": 0.6,
+        "enabled": false,
+        "strength": 0.9
+      },
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.1
+      },
+      "specular": true,
+      "specular-highlight-placement": "inside",
+      "translucency-specializations": [
+        {
+          "value": {
+            "enabled": true,
+            "value": 0.45
+          }
+        },
+        {
+          "appearance": "tinted",
+          "value": {
+            "enabled": true,
+            "value": 0.35
+          }
+        }
+      ]
+    },
+    {
+      "blur-material": 0,
+      "layers": [
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:1,1,1,0.65"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:1,1,1,1"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "shackle-front.svg",
+          "name": "Clear smooth shackle"
+        },
+        {
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:0.8,0.93,1,1"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:1,1,1,1"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "shackle-side.svg",
+          "name": "Shackle depth"
+        }
+      ],
+      "lighting": "individual",
+      "name": "Clear smooth shackle",
+      "position": {
+        "scale": 1,
+        "translation-in-points": [
+          -48,
+          -32
+        ]
+      },
+      "refractivity": {
+        "depth": 0.8,
+        "enabled": true,
+        "strength": 0.85
+      },
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.22
+      },
+      "specular": true,
+      "specular-highlight-placement": "outside",
+      "translucency-specializations": [
+        {
+          "value": {
+            "enabled": true,
+            "value": 1
+          }
+        },
+        {
+          "appearance": "tinted",
+          "value": {
+            "enabled": true,
+            "value": 0.35
+          }
+        }
+      ]
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}

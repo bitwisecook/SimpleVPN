@@ -32,17 +32,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Select Xcode + verify macOS 26 SDK
+      - name: Select Xcode + verify macOS SDK
         id: xc
         run: |
           set -euo pipefail
           sudo xcode-select -s /Applications/Xcode.app
-          xcodebuild -version
-          if ! xcodebuild -showsdks | grep -qi "macosx26"; then
-            echo "FATAL: no macOS 26 SDK found on this runner image."
-            xcodebuild -showsdks
-            exit 1
-          fi
+          bash Tools/check-xcode-toolchain.sh
           echo "version=$(xcodebuild -version | awk '/^Xcode/{print $2}')" >> "$GITHUB_OUTPUT"
 
       # IMPORTANT: this key expression must be kept byte-identical to the one

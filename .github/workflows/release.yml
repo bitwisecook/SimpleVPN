@@ -101,24 +101,13 @@ jobs:
             exit 1
           fi
 
-      # Fail fast and explicitly here rather than 20+ minutes later with a
-      # cryptic SDK-not-found compile error (this repo is developed against
-      # Xcode 26.6 — see the runner-choice comment above for the risk this
-      # step exists to catch).
-      - name: Select Xcode + verify macOS 26 SDK
+      # The app and helper icons require Icon Composer 2 (Xcode 27+).
+      - name: Select Xcode + verify macOS SDK
         id: xc
         run: |
           set -euo pipefail
           sudo xcode-select -s /Applications/Xcode.app
-          xcodebuild -version
-          if ! xcodebuild -showsdks | grep -qi "macosx26"; then
-            echo "FATAL: no macOS 26 SDK found on this runner image."
-            echo "       xcodebuild -showsdks output was:"
-            xcodebuild -showsdks
-            echo "SimpleVPN's deployment target is macOS 26.0 (project.yml) — see the"
-            echo "comment above this step in release.yml for what to do next."
-            exit 1
-          fi
+          bash Tools/check-xcode-toolchain.sh
           echo "version=$(xcodebuild -version | awk '/^Xcode/{print $2}')" >> "$GITHUB_OUTPUT"
 
       # Cache key deliberately has NO restore-keys fallback: a fuzzy restore
@@ -194,15 +183,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Select Xcode + verify macOS 26 SDK
+      - name: Select Xcode + verify Icon Composer toolchain
         run: |
           set -euo pipefail
           sudo xcode-select -s /Applications/Xcode.app
-          xcodebuild -version
-          if ! xcodebuild -showsdks | grep -qi "macosx26"; then
-            echo "FATAL: no macOS 26 SDK found on this runner image (see the engines job for detail)."
-            exit 1
-          fi
+          bash Tools/check-xcode-toolchain.sh --icon-composer
 
       - name: Install xcodegen
         run: brew install xcodegen

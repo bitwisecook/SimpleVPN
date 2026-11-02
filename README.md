@@ -18,7 +18,7 @@ Tunnelblick replacement. The tunnel runs in a Network Extension **system extensi
 
 ## Building
 
-Requires Xcode 26+, [XcodeGen](https://github.com/yonaskolb/XcodeGen), Homebrew
+Requires Xcode 27+ (for Icon Composer 2), [XcodeGen](https://github.com/yonaskolb/XcodeGen), Homebrew
 for native engine prerequisites (installed by the engine scripts), and Go 1.27.3+ for the two
 Go static archives (1Password SDK, Tailscale/Headscale engine).
 

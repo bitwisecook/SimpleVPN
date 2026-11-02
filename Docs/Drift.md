@@ -549,6 +549,22 @@ These lifecycle policies intentionally remain separate. `ManualResponsiveLayoutT
 loads the shipped HTML in WebKit at wide, narrow and short sizes and exercises
 compact reveal/dismissal; shared geometry tests cover offset and smaller screens.
 
+## 22. Initial installation and Sparkle updates — KEEP SEPARATE WITH SHARED INSTALLER CODE
+
+Opening a downloaded copy and checking for an update inside the installed app are
+different entry points. Sparkle retains in-app updates. Initial installation uses
+`SimpleVPNLauncher` and the separate signed `SimpleVPNInstaller` app.
+`InstallationModel`, `InstallationWorker` and `InstallationRunningApps` compile
+into both targets; version/discovery/copy policies have one implementation.
+`Tools/generate-installer-icon.py` derives the badged icon from the app's source;
+`Tools/test-installer.sh` guards that relationship and the replacement decisions.
+
+**Runtime acceptance remains a release gate:** signed/notarized DMG launch,
+live Dock handoff, VPN quit cancellation, ejection and Trash behavior require
+the acceptance matrix in [Installation.md](Installation.md). Builds and unit
+tests alone do not establish these checks. Recovery bundles are kept if rollback
+or Trash fails, rather than swept up with temporary helper sessions.
+
 ## Adding to this file
 
 Two occasions, and both are cheap:
