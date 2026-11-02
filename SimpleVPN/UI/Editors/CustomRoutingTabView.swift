@@ -98,6 +98,7 @@ func sanitizedCustomRoutingProfile(_ profile: CustomRoutingProfile) -> CustomRou
     out.dns.resolverRules = profile.dns.resolverRules
         .filter { !CustomRoutingValidator.validate($0).contains(where: \.isError) }
         .map { $0.clearingUnusedFields() }
+    out.dns.queryRules = profile.dns.queryRules.map { $0.clearingUnusedFields() }
     out.dns.addSearchDomains = profile.dns.addSearchDomains.filter(CustomRoutingValidator.isValidDomain)
     out.dns.addMatchDomains = profile.dns.addMatchDomains.filter(CustomRoutingValidator.isValidDomain)
     out.dns.ignoreSearchDomains = profile.dns.ignoreSearchDomains.filter(CustomRoutingValidator.isValidDomain)
@@ -159,6 +160,10 @@ func commitCustomRouting(_ vpn: VPNController, profileID: String, profile: Custo
 func persistCustomRouting(_ vpn: VPNController, profileID: String, profile: CustomRoutingProfile,
                           proxyAuthUsername: String, proxyAuthPassword: String) async throws -> CustomRoutingProfile {
     guard !ManagedPolicy.lockConfiguration else { return profile }
+    let errors = CustomRoutingValidator.validate(profile, against: vpn.lastPushedIntent(for: profileID)).filter(\.isError)
+    guard errors.isEmpty else {
+        throw DNSQueryRoutingController.error(errors.map(\.message).joined(separator: "\n"))
+    }
     var p = profile
     try syncCustomRoutingProxyAuth(username: proxyAuthUsername, password: proxyAuthPassword,
                                   profile: &p, profileID: profileID)
@@ -905,6 +910,11 @@ struct CustomRoutingTabView: View {
         CollapsibleSettingsSection(title: "Custom Routing",
                                    holding: .settings(Set(CustomRoutingSettings.specs(in: .dns).map(\.id))),
                                    changedCount: dnsChangedCount) {
+            DNSQueryRulesEditor(vpn: vpn, profileID: profileID, dns: $profile.dns)
+            Divider()
+            Text("DNS Server Filters").font(.headline)
+            Text("These rules edit the DNS server IPs supplied by the VPN. They do not match queried hostnames.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             EngineSettingRow(spec: Self.specs["cr.dns-default"],
                              value: profile.dns.defaultDisposition) {
                 SettingPicker(selection: $profile.dns.defaultDisposition) {
@@ -943,6 +953,7 @@ struct CustomRoutingTabView: View {
             }
 
             Divider()
+            Text("Search List Overrides").font(.headline)
             EngineSettingRow(spec: Self.specs["cr.ignore-pushed-search"],
                              value: profile.dns.ignorePushedSearchDomains) {
                 Toggle(isOn: $profile.dns.ignorePushedSearchDomains) {
@@ -953,16 +964,17 @@ struct CustomRoutingTabView: View {
             crHeader(Self.specs["cr.add-search-domains"],
                      changed: !profile.dns.addSearchDomains.isEmpty
                               || !profile.dns.ignoreSearchDomains.isEmpty)
-            domainListField("Add search domains", $profile.dns.addSearchDomains)
+            domainListField("Add search domains", $profile.dns.addSearchDomains, spec: Self.specs["cr.add-search-domains"])
             // Ignoring ALL of them subsumes any list: `editDomains` starts from an
             // empty set under ignore-all and never consults the subtraction list,
             // so the field is genuinely inert — disabled, with the reason.
-            domainListField("Ignore search domains", $profile.dns.ignoreSearchDomains,
+            domainListField("Remove search domains", $profile.dns.ignoreSearchDomains, spec: Self.specs["cr.add-search-domains"],
                             disabledReason: profile.dns.ignorePushedSearchDomains
                                 ? "\u{201C}Ignore all pushed search domains\u{201D} is on, which already drops every one."
                                 : nil)
 
             Divider()
+            Text("Native Resolver Scopes").font(.headline)
             EngineSettingRow(spec: Self.specs["cr.ignore-pushed-match"],
                              value: profile.dns.ignorePushedMatchDomains) {
                 Toggle(isOn: $profile.dns.ignorePushedMatchDomains) {
@@ -973,8 +985,8 @@ struct CustomRoutingTabView: View {
             crHeader(Self.specs["cr.match-domains"],
                      changed: !profile.dns.addMatchDomains.isEmpty
                               || !profile.dns.ignoreMatchDomains.isEmpty)
-            domainListField("Add match domains", $profile.dns.addMatchDomains)
-            domainListField("Ignore match domains", $profile.dns.ignoreMatchDomains,
+            domainListField("Add resolver scopes", $profile.dns.addMatchDomains, spec: Self.specs["cr.match-domains"])
+            domainListField("Remove resolver scopes", $profile.dns.ignoreMatchDomains, spec: Self.specs["cr.match-domains"],
                             disabledReason: profile.dns.ignorePushedMatchDomains
                                 ? "\u{201C}Ignore all pushed match domains\u{201D} is on, which already drops every one."
                                 : nil)
@@ -983,7 +995,8 @@ struct CustomRoutingTabView: View {
     }
 
     private var dnsChangedCount: Int {
-        [profile.dns.defaultDisposition != .accept,
+        [profile.dns.queryRoutingEnabled, !profile.dns.queryRules.isEmpty,
+         profile.dns.defaultDisposition != .accept,
          !profile.dns.resolverRules.isEmpty,
          profile.dns.ignorePushedSearchDomains,
          profile.dns.ignorePushedMatchDomains,
@@ -1099,25 +1112,15 @@ struct CustomRoutingTabView: View {
     }
 
     private func domainListField(_ title: String, _ binding: Binding<[String]>,
-                                 disabledReason: String? = nil) -> some View {
+                                 spec: EngineSettingSpec, disabledReason: String? = nil) -> some View {
         let bad = disabledReason == nil
             ? binding.wrappedValue.filter { !CustomRoutingValidator.isValidDomain($0) } : []
         return VStack(alignment: .leading, spacing: 2) {
-            LabeledContent(title) {
-                TextField("example.com, other.example", text: Binding(
-                    get: { binding.wrappedValue.joined(separator: ", ") },
-                    set: { binding.wrappedValue = $0.split(separator: ",")
-                        .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } }))
-                    .textFieldStyle(.roundedBorder)
-                    // A dead field says why, in the tooltip AND to VoiceOver.
-                    .disabled(disabledReason != nil)
-                    .help(disabledReason ?? title)
-                    .accessibilityLabel(title)
-                    .accessibilityValue(disabledReason.map { "unavailable — \($0)" }
-                        ?? (bad.isEmpty
-                            ? binding.wrappedValue.joined(separator: ", ")
-                            : "\(binding.wrappedValue.joined(separator: ", ")). Problem: not a valid domain: \(bad.joined(separator: ", "))"))
-            }
+            SettingValueField(spec: spec, list: binding, prompt: "example.com, other.example",
+                problem: bad.isEmpty ? nil : "Not a valid domain: " + bad.joined(separator: ", "),
+                spokenName: title, label: title, extraSpoken: disabledReason.map { "unavailable — " + $0 })
+                .disabled(disabledReason != nil)
+                .help(disabledReason ?? spec.summary)
             if let disabledReason {
                 Text(disabledReason)
                     .font(.caption2).foregroundStyle(.secondary)

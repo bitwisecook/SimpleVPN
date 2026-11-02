@@ -96,6 +96,20 @@ enum RoutingRailroadProjection {
             ]))
         }
         if tab != .customRouting {
+            if draft.customRouting.dns.queryRoutingEnabled || !draft.customRouting.dns.queryRules.isEmpty {
+                var queryDraft = draft.customRouting.dns
+                queryDraft.queryRoutingEnabled = true
+                let queryPolicy = vpn.dnsQueryPolicy(replacing: id, with: queryDraft, resolversOverride: dnsInput.resolvers)
+                let rules = queryPolicy.routes.map { route in
+                    "\(route.profileName): \(route.rule.match.kind.rawValue) \(route.rule.match.pattern) → "
+                        + (route.rule.target == .original ? "original resolver" : route.servers.isEmpty ? "SERVFAIL (no resolver)" : route.servers.joined(separator: ", "))
+                }
+                lanes.append(lane("dns-query-draft", [
+                    station("source", "Queried hostname — draft", ["UDP and TCP DNS; app-managed DoH/DoT is outside this path"], symbol: "magnifyingglass"),
+                    station("rules", "Query-name rules", rules.isEmpty ? ["No active query rules in this preview"] : rules),
+                    station("result", "DNS query proxy — preview", ["First match wins; unmatched queries retain the original resolver", "Matched resolver failure returns SERVFAIL", draft.customRouting.dns.queryRoutingEnabled ? "Enabled for this VPN when connected" : "Disabled for this VPN"], warning: queryPolicy.problem != nil)
+                ]))
+            }
             var assignments = dnsLines(dnsPlan)
             if draft.resolvers == nil && (!hasReport || draft.serverSettingsChanged) {
                 assignments.insert("Server DNS is unknown until connection", at: 0)
@@ -105,7 +119,7 @@ enum RoutingRailroadProjection {
             lanes.append(lane("dns-draft", [
                 station("source", "Name lookups — draft", [draft.dnsEnabled ? "Use this VPN's DNS when assigned" : "Network DNS is disabled"], symbol: "magnifyingglass"),
                 station("offered", draft.resolvers == nil ? "Last supplied DNS" : "Configured DNS", dnsInput.resolvers.isEmpty ? ["No resolver supplied"] : dnsInput.resolvers),
-                station("filter", "DNS Custom Routing", dnsRules(draft.customRouting.dns)),
+                station("filter", "Server filters + scopes", dnsRules(draft.customRouting.dns)),
                 station("result", "Resolver assignments — preview", assignments, warning: !issues.isEmpty)
             ]))
             lanes.append(lane("dns-applied", [

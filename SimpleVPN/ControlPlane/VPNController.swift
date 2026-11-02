@@ -157,6 +157,8 @@ final class VPNController {
     /// host's default route. VPNController delegates the gateway logic to it and serves
     /// as its live NE side (`RouteMediatorHost`). Kept as a stored child so the UI's
     /// `@Observable` tracking reaches through `vpn.routes.*`.
+    let dnsQueries = DNSQueryRoutingController()
+    var auxiliaryDNSQueryProfiles: [String: String] = [:]
     let routes = RouteMediator()
 
     /// The DNS mediator (Docs/StateMediators.md, P2): the single authority over the
@@ -243,6 +245,7 @@ final class VPNController {
         dns.host = self      // DNS + Proxy mediators observe/reconcile through us too
         proxies.host = self
         installCustomRoutingHooks()
+        dns.onIntentsChanged = { [weak self] in self?.syncDNSQueryRouting() }
     }
 
     /// Attach the per-profile Custom Routing filters at each mediator's single

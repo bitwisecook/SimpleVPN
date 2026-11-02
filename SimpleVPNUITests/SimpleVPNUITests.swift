@@ -145,20 +145,47 @@ final class SimpleVPNUITests: XCTestCase {
         XCTAssertTrue(routing.waitForExistence(timeout: 5))
         XCTAssertEqual(String(describing: routing.value ?? ""), "0")
         routing.click()
-        let matches = manage.textFields["Add match domains"]
+        let matches = manage.textFields["Add resolver scopes"]
         XCTAssertTrue(matches.waitForExistence(timeout: 5))
         matches.click()
-        matches.typeText("corp.example")
+        matches.typeText("corp.example, ")
+        XCTAssertTrue((matches.value as? String)?.contains(",") == true,
+                      "Advanced domain fields must preserve a typed separator.")
+        matches.typeText("lab.example")
         let settings = manage.descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@", "Settings")).firstMatch
         settings.click()
         XCTAssertTrue(graph.waitForExistence(timeout: 5), "Settings must include routing and DNS paths.")
         dnsTab.click()
         XCTAssertTrue(matches.waitForExistence(timeout: 5), "Changed DNS routing must remain discoverable")
-        XCTAssertEqual(matches.value as? String, "corp.example", "Switching tabs lost the DNS routing draft")
+        XCTAssertEqual(matches.value as? String, "corp.example, lab.example", "Switching tabs lost the DNS routing draft")
         let assignment = graph.descendants(matching: .any)
             .matching(NSPredicate(format: "value CONTAINS %@", "corp.example → 10.0.0.53")).firstMatch
         XCTAssertTrue(assignment.waitForExistence(timeout: 5), "DNS edits must update resolver assignments in the live graph.")
+        // Query rules are previewable while disabled: testing a name must not enable this Mac's proxy.
+        let addQuery = manage.buttons["Add DNS query rule"]
+        XCTAssertTrue(addQuery.waitForExistence(timeout: 5))
+        addQuery.click()
+        let pattern = manage.textFields["DNS query pattern"]
+        XCTAssertTrue(pattern.waitForExistence(timeout: 5))
+        pattern.click(); pattern.typeText("tig-portal.grlab.co.uk")
+        let testName = manage.textFields["Test Hostname"]
+        XCTAssertTrue(testName.waitForExistence(timeout: 5))
+        testName.click(); testName.typeText("tig-portal.grlab.co.uk")
+        let answer = manage.staticTexts["DNS query preview"]
+        XCTAssertTrue(answer.waitForExistence(timeout: 5))
+        XCTAssertTrue((answer.value as? String)?.contains("exact tig-portal.grlab.co.uk") == true)
+        testName.typeKey("a", modifierFlags: .command)
+        testName.typeText("child.tig-portal.grlab.co.uk")
+        XCTAssertTrue((answer.value as? String)?.contains("No query rule matches") == true)
+        let matchType = manage.popUpButtons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "dns-query-match-kind-")).firstMatch
+        XCTAssertTrue(matchType.waitForExistence(timeout: 5))
+        matchType.click(); app.menuItems["Glob"].click()
+        pattern.click(); pattern.typeKey("a", modifierFlags: .command); pattern.typeText("*.grlab.co.uk")
+        testName.click()
+        XCTAssertTrue((answer.value as? String)?.contains("glob *.grlab.co.uk") == true)
+        XCTAssertTrue((answer.value as? String)?.contains("Disabled draft") == true)
+        try runAccessibilityAudit(on: app)
         let routingTab = manage.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Custom Routing")).firstMatch
         routingTab.click()
         XCTAssertTrue(graph.waitForExistence(timeout: 5), "Custom Routing must include the shared routing viewer.")
@@ -841,7 +868,7 @@ extension SimpleVPNUITests {
             let routing = manage.disclosureTriangles.matching(NSPredicate(format: "label BEGINSWITH %@", "Custom Routing")).firstMatch
             XCTAssertTrue(routing.waitForExistence(timeout: 5), "DNS custom routing must have a named disclosure")
             if String(describing: routing.value ?? "") == "0" { routing.click() }
-            XCTAssertTrue(manage.textFields["Add match domains"].waitForExistence(timeout: 5))
+            XCTAssertTrue(manage.textFields["Add resolver scopes"].waitForExistence(timeout: 5))
         }
     }
     @MainActor func testOpenVPNCertificatesPageAccessibilityAudit() throws {

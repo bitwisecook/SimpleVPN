@@ -146,6 +146,21 @@ struct SimpleVPNApp: App {
                     let evaluator = self.evaluator
                     let tunnels = self.tunnels
                     let nativeVPN = self.nativeVPN
+                    let tunnelManager = self.tunnelManager
+                    let queryProfilesChanged: @MainActor () -> Void = { [weak vpn, weak nativeVPN, weak tunnelManager, weak tunnels] in
+                        guard let vpn, let nativeVPN, let tunnelManager, let tunnels else { return }
+                        var active: [String: String] = [:]
+                        if nativeVPN.status == .connected, let id = nativeVPN.activeConfigID {
+                            active[id] = nativeVPN.configs.first { $0.id == id }?.name ?? "Native VPN"
+                        }
+                        for config in tunnels.tunnels where tunnelManager.status(config.id) == .connected {
+                            active[config.id] = config.name
+                        }
+                        vpn.setAuxiliaryDNSQueryProfiles(active)
+                    }
+                    nativeVPN.dnsQueryStatusDidChange = queryProfilesChanged
+                    tunnelManager.dnsQueryStatusDidChange = queryProfilesChanged
+                    queryProfilesChanged()
                     // Home (pre-VPN) vs egress (while connected) hinges on this.
                     // "Engaged", not "connected": the tunnel owns the default
                     // route before it says it is up.

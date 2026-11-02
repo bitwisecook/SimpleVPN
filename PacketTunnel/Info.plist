@@ -3,13 +3,15 @@
 <plist version="1.0">
 <dict>
 	<key>NSSystemExtensionUsageDescription</key>
-	<string>SimpleVPN uses a system extension to run OpenVPN tunnels.</string>
+	<string>SimpleVPN uses a system extension to run VPN tunnels and optional DNS query routing.</string>
 	<key>NetworkExtension</key>
 	<dict>
 		<key>NEMachServiceName</key>
 		<string>group.com.bragi0.SimpleVPN</string>
 		<key>NEProviderClasses</key>
 		<dict>
+			<key>com.apple.networkextension.dns-proxy</key>
+			<string>$(PRODUCT_MODULE_NAME).DNSQueryProxyProvider</string>
 			<key>com.apple.networkextension.packet-tunnel</key>
 			<string>$(PRODUCT_MODULE_NAME).PacketTunnelProvider</string>
 		</dict>

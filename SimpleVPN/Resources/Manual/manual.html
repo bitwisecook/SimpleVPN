@@ -369,6 +369,10 @@
   <a href="#cr-routes-default">Unmatched Routes</a>
   <a href="#cr-route-rule">Route Rules</a>
   <a href="#cr-rule-order">Rule Order</a>
+  <a href="#cr-query-routing">Query-name Routing</a>
+  <a href="#cr-query-rule">Query Rules</a>
+  <a href="#cr-query-resolvers">Query Resolvers</a>
+  <a href="#cr-query-test">Test Hostname</a>
   <a href="#cr-dns-default">Unmatched Resolvers</a>
   <a href="#cr-dns-rule">Resolver Rules</a>
   <a href="#cr-ignore-pushed-search">Ignore Pushed Search Domains</a>
@@ -1568,6 +1572,21 @@ arrow keys. DNS has its own paths; Custom Routing shows route and proxy paths.</
 </ul>
 <p>A move is part of your draft exactly like any other edit here: <strong>Save</strong> keeps it, switching to another tab or closing the editor saves it too, and where the editor offers <strong>Revert</strong> that undoes it — the same as changing a rule&rsquo;s action or its network. A move is also its own undo: Move Down puts back what Move Up just did. The same applies to <a href="#cr-dns-rule">Resolver Rules</a>.</p>
 
+<h2 id="cr-query-routing">Query-name Routing</h2>
+<p class="default">Default: off.</p>
+<p>Advanced query-name routing uses a DNS proxy while this VPN is connected. Enabling it replaces another app&rsquo;s DNS proxy: macOS allows one active DNS proxy. It requires the installed SimpleVPN system extension with DNS proxy support and macOS approval. Normal DNS configuration does not activate this proxy.</p>
+<p>Policy changes restart only the DNS proxy. Active DNS transactions may retry. Configuration acknowledgement does not prove provider liveness; verify actual queries after installation. Standard single-question UDP/TCP DNS is supported; zone transfers and DSO are excluded. Application-managed DoH or DoT bypasses these rules.</p>
+<h2 id="cr-query-rule">Query Rules</h2>
+<p class="default">Default: no rules.</p>
+<p>Rules match the queried hostname, not a DNS server IP. First enabled match wins. Across connected VPNs, precedence is the default-route owner, newest connection, then profile ID. Rule order within a VPN is explicit and can be changed with Move Up / Move Down.</p>
+<p><strong>Exact</strong> matches one complete QNAME: <code>tig-portal.grlab.co.uk</code> does not match <code>x.tig-portal.grlab.co.uk</code>. <strong>Suffix</strong> includes the apex and descendants. <strong>Glob</strong> matches the complete name with <code>*</code>, <code>?</code>, bracket classes/ranges and negation (<code>[abc]</code>, <code>[a-z]</code>, <code>[!abc]</code>), plus backslash escapes. Wildcards may cross dots; <code>*.grlab.co.uk</code> excludes the apex but includes nested subdomains.</p>
+<p>Matching is case-insensitive, ignores one trailing root dot, and accepts ASCII/punycode. Unmatched queries retain the original resolver selected by macOS. Select Original resolver for an explicit exception before a broader rule. A matched resolver rule that cannot obtain an answer returns SERVFAIL, without falling back to the original resolver.</p>
+<h2 id="cr-query-resolvers">Resolvers</h2>
+<p class="default">Default: blank, using this VPN&rsquo;s filtered DNS servers.</p>
+<p>Enter up to 16 literal IPv4/IPv6 addresses to override the resolver list for a query rule. Queries use existing IP routes; name rules do not add routes or force a particular interface. Resolver IP filtering remains a separate operation. Native and subprocess VPNs can use explicit resolver IPs when supplied DNS is unavailable.</p>
+<h2 id="cr-query-test">Test Hostname</h2>
+<p class="default">Default: empty.</p>
+<p>Evaluates the same rule matcher as the DNS proxy without sending traffic or changing settings. The selected VPN&rsquo;s draft is included even when disconnected; other VPNs use their connected configuration. The result names the matching profile, match type, pattern and resolver target.</p>
 <h2 id="cr-dns-default">Unmatched Resolvers</h2>
 <p class="default">Default: Accept.</p>
 <p>The same choice as for routes, for the DNS servers this VPN offers: keep the ones no rule mentions, or drop them so only what a rule accepts is used.</p>
@@ -1592,7 +1611,7 @@ arrow keys. DNS has its own paths; Custom Routing shows route and proxy paths.</
 <p>Drops every match domain this VPN offers. Match domains are the name suffixes whose lookups go to <em>this VPN&rsquo;s</em> DNS servers; everything else keeps using your Mac&rsquo;s normal ones.</p>
 <p>Dropping them all usually means the VPN&rsquo;s DNS servers stop being consulted for anything — which is a large change disguised as a small switch.</p>
 
-<h2 id="cr-match-domains">Match Domains</h2>
+<h2 id="cr-match-domains">Resolver Scopes</h2>
 <p class="default">Optional.</p>
 <p>Two comma-separated lists: name suffixes to <strong>send</strong> to this VPN&rsquo;s DNS servers on top of whatever it offers, and individual ones to <strong>leave out</strong>. Adding a suffix is how you make one more part of the internal namespace resolve through the VPN; leaving one out keeps a suffix on your Mac&rsquo;s own DNS.</p>
 

@@ -16,6 +16,16 @@
 
 import SwiftUI
 
+private struct RoutingEditorDraftKey: EnvironmentKey {
+    nonisolated static var defaultValue: EditorRoutingDraft? { nil }
+}
+extension EnvironmentValues {
+    var routingEditorDraft: EditorRoutingDraft? {
+        get { self[RoutingEditorDraftKey.self] }
+        set { self[RoutingEditorDraftKey.self] = newValue }
+    }
+}
+
 private struct SettingsEditorShell: ViewModifier {
     @Bindable var search: SettingsSearch
     @Binding var tab: SettingsTab
@@ -45,6 +55,7 @@ private struct SettingsEditorShell: ViewModifier {
                     .frame(minWidth: 0, maxWidth: .infinity, minHeight: 200, idealHeight: 270)
             }
         }
+            .environment(\.routingEditorDraft, routingDraft)
             .environment(search)
             .onAppear { search.activeTab = tab; consume() }
             // WHERE THE USER IS. The back button's history is (tab, row), and the tab

@@ -264,6 +264,29 @@ nonisolated struct DNSCustomization: Codable, Sendable, Equatable {
     var addSearchDomains: [String] = []
     var addMatchDomains: [String] = []
 
+    // Query-name routing is separate from resolver-IP filtering and OS suffix scopes.
+    var queryRoutingEnabled = false
+    var queryRules: [DNSQueryRule] = []
+
+    enum CodingKeys: String, CodingKey {
+        case defaultDisposition, resolverRules, ignorePushedSearchDomains, ignorePushedMatchDomains
+        case ignoreSearchDomains, ignoreMatchDomains, addSearchDomains, addMatchDomains
+        case queryRoutingEnabled, queryRules
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        defaultDisposition = try c.decodeIfPresent(UnmatchedDisposition.self, forKey: .defaultDisposition) ?? .accept
+        resolverRules = try c.decodeIfPresent([ResolverRule].self, forKey: .resolverRules) ?? []
+        ignorePushedSearchDomains = try c.decodeIfPresent(Bool.self, forKey: .ignorePushedSearchDomains) ?? false
+        ignorePushedMatchDomains = try c.decodeIfPresent(Bool.self, forKey: .ignorePushedMatchDomains) ?? false
+        ignoreSearchDomains = try c.decodeIfPresent([String].self, forKey: .ignoreSearchDomains) ?? []
+        ignoreMatchDomains = try c.decodeIfPresent([String].self, forKey: .ignoreMatchDomains) ?? []
+        addSearchDomains = try c.decodeIfPresent([String].self, forKey: .addSearchDomains) ?? []
+        addMatchDomains = try c.decodeIfPresent([String].self, forKey: .addMatchDomains) ?? []
+        queryRoutingEnabled = try c.decodeIfPresent(Bool.self, forKey: .queryRoutingEnabled) ?? false
+        queryRules = try c.decodeIfPresent([DNSQueryRule].self, forKey: .queryRules) ?? []
+    }
+
     init() {}
 
     var isIdentity: Bool { self == DNSCustomization() }
@@ -326,15 +349,20 @@ nonisolated struct DNSCustomization: Codable, Sendable, Equatable {
 
     private func editDomains(_ pushed: [String], ignoreAll: Bool,
                              ignore: [String], add: [String]) -> [String] {
-        var out: [String] = ignoreAll ? [] : pushed
-        if !ignoreAll, !ignore.isEmpty {
-            let drop = Set(ignore.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
-            out = out.filter { !drop.contains($0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) }
+        // DNS suffixes are case-insensitive and an absolute trailing dot is equivalent.
+        // Preserve the empty catch-all sentinel; search-list normalisation drops it.
+        func canonical(_ value: String) -> String { DNSSearchDomains.normalized(one: value) }
+        let drop = Set(ignore.map(canonical))
+        var out: [String] = []
+        if !ignoreAll {
+            for raw in pushed {
+                let value = canonical(raw)
+                if !drop.contains(value), !out.contains(value) { out.append(value) }
+            }
         }
-        for d in add {
-            let t = d.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !t.isEmpty, !out.contains(t) else { continue }
-            out.append(t)
+        for raw in add {
+            let value = canonical(raw)
+            if !value.isEmpty, !out.contains(value) { out.append(value) }
         }
         return out
     }
@@ -938,6 +966,14 @@ nonisolated enum CustomRoutingValidator {
 
     static func validate(_ dns: DNSCustomization) -> [ValidationIssue] {
         var issues = dns.resolverRules.flatMap { validate($0) }
+        for (index, rule) in dns.queryRules.enumerated() {
+            if let problem = rule.problem {
+                issues.append(.init(.error, field: "queryRule", message: "Query rule \(index + 1): \(problem)"))
+            }
+        }
+        if dns.queryRules.count > 256 {
+            issues.append(.init(.error, field: "queryRule", message: "Use at most 256 query rules."))
+        }
         for d in dns.addSearchDomains + dns.ignoreSearchDomains where !isValidDomain(d) {
             issues.append(.init(.error, field: "searchDomain", message: "\"\(d)\" is not a valid domain."))
         }
@@ -1031,11 +1067,7 @@ nonisolated enum CustomRoutingValidator {
     static func isValidIP(_ s: String) -> Bool {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return false }
-        var v4 = [UInt8](repeating: 0, count: 4)
-        if t.withCString({ inet_pton(AF_INET, $0, &v4) }) == 1 { return true }
-        var v6 = [UInt8](repeating: 0, count: 16)
-        if t.withCString({ inet_pton(AF_INET6, $0, &v6) }) == 1 { return true }
-        return false
+        return DNSResolverAddress.isValid(t)
     }
 
     static func isValidWebURL(_ s: String) -> Bool {

@@ -81,7 +81,8 @@ final class SubprocessTunnelManager {
         var caution: String? = nil
     }
 
-    private(set) var live: [String: Live] = [:]
+    var dnsQueryStatusDidChange: (@MainActor () -> Void)?
+    private(set) var live: [String: Live] = [:] { didSet { dnsQueryStatusDidChange?() } }
 
     private var tasks: [String: TunnelProcess] = [:]
     private var sshEngines: [String: SSHTunnelEngine] = [:]   // in-process libssh (SOCKS)

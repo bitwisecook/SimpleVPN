@@ -398,18 +398,20 @@ struct SettingValueField: View {
     /// caption. It rides the VALUE rather than a hint because that is where
     /// `Docs/Accessibility.md` puts state.
     var extraSpoken: String?
-    /// Web-gateway fields accept a complete URL as well as a hostname.  This is
-    /// a keyboard/input hint only: the binding preserves exactly what was pasted.
+    /// Paired Add/Remove lists share a setting ID but name their own operation.
+    var label: String? = nil
+    /// Web-gateway fields accept a complete URL as well as a hostname. This is
+    /// an input hint only; the binding preserves exactly what was pasted.
     var acceptsURL = false
     private var list: Binding<[String]>? = nil
     @State private var listDraft = ""
 
     init(spec: EngineSettingSpec, text: Binding<String>, prompt: String, problem: String? = nil,
          secure: Bool = false, mono: Bool = false, spokenName: String? = nil, changed: Bool? = nil,
-         extraSpoken: String? = nil, acceptsURL: Bool = false) {
+         extraSpoken: String? = nil, acceptsURL: Bool = false, label: String? = nil) {
         self.spec = spec; self._text = text; self.prompt = prompt; self.problem = problem
         self.secure = secure; self.mono = mono; self.spokenName = spokenName; self.changed = changed
-        self.extraSpoken = extraSpoken; self.acceptsURL = acceptsURL
+        self.extraSpoken = extraSpoken; self.acceptsURL = acceptsURL; self.label = label
     }
 
     private static func values(_ draft: String) -> [String] {
@@ -433,10 +435,10 @@ struct SettingValueField: View {
                 .font(mono ? .callout.monospaced() : nil)
                 .settingValue()
                 .autocorrectionDisabled()
-                .accessibilityLabel(spokenName ?? spec.name)
+                .accessibilityLabel(spokenName ?? label ?? spec.name)
                 .accessibilityValue(spokenValue)
         } label: {
-            SettingNameLabel(settingID: spec.id, name: spec.name,
+            SettingNameLabel(settingID: spec.id, name: label ?? spec.name,
                              changed: changed ?? spec.isChanged(text))
         }
         .onChange(of: list?.wrappedValue) { _, value in
@@ -479,7 +481,7 @@ extension SettingValueField {
     /// not from the joined string — a `[String]` spec's default is `[]`, and asking
     /// it about a String always answered "unchanged".
     init(spec: EngineSettingSpec, list: Binding<[String]>, prompt: String,
-         problem: String? = nil, mono: Bool = false, spokenName: String? = nil) {
+         problem: String? = nil, mono: Bool = false, spokenName: String? = nil, label: String? = nil, extraSpoken: String? = nil) {
         self.init(spec: spec,
                   text: Binding(
                     get: { list.wrappedValue.joined(separator: ", ") },
@@ -490,7 +492,7 @@ extension SettingValueField {
                             .filter { !$0.isEmpty }
                     }),
                   prompt: prompt, problem: problem, secure: false, mono: mono,
-                  spokenName: spokenName, changed: spec.isChanged(list.wrappedValue))
+                  spokenName: spokenName, changed: spec.isChanged(list.wrappedValue), extraSpoken: extraSpoken, label: label)
         self.list = list
         self._listDraft = State(initialValue: list.wrappedValue.joined(separator: ", "))
     }

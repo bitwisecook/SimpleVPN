@@ -42,6 +42,9 @@ extension VPNController {
     /// shape `setWireGuardConfig`/`setOverrides` already had).
     func setCustomRouting(_ profile: CustomRoutingProfile, for id: String) async throws {
         guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
+        let errors = CustomRoutingValidator.validate(profile, against: lastPushedIntent(for: id)).filter(\.isError)
+        guard errors.isEmpty else { throw DNSQueryRoutingController.error(errors.map(\.message).joined(separator: "\n")) }
+        let previousRouting = customRouting(for: id)
         guard let mgr = managers[id],
               let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else {
             // No NE manager: the native NEVPNManager kinds live here permanently (their
@@ -50,6 +53,7 @@ extension VPNController {
             // transiently (the cache carries it until a real manager exists).
             customRoutingCache[id] = profile
             CustomRoutingFallbackStore().save(profile, for: id)
+            syncDNSQueryRouting()
             return
         }
         let previousProtocol = proto.copy() as? NETunnelProviderProtocol
@@ -68,27 +72,35 @@ extension VPNController {
         // The providerConfiguration blob is authoritative now — retire any fallback
         // entry a pre-manager save left behind.
         CustomRoutingFallbackStore().clear(id)
-        await applyCustomRouting(forProfile: id)
+        await applyCustomRouting(forProfile: id, previous: previousRouting)
     }
 
     /// Live-reconcile entry point the UI calls on commit (Save / navigate-away). Re-projects
     /// the FILTERED intent for the mediators (captured ∘ filter, via the intent hooks) and
-    /// drives all three to re-arbitrate + live-apply through the existing appliers — no
-    /// reconnect. When the profile isn't connected there is nothing live to re-project, so
+    /// applies changed resources through the existing appliers. Query-only edits do
+    /// not reassert native DNS, IP routes or system proxy settings. When the profile
+    /// isn't connected there is nothing live to re-project, so
     /// it is a no-op beyond the already-persisted config (which applies on next connect).
-    /// Idempotent: the arbiters are pure and the realizers skip an unchanged plan, so it is
-    /// safe to call repeatedly.
-    func applyCustomRouting(forProfile id: String) async {
-        // Arbitration is inherently cross-profile (≤1 default owner, one system proxy, one
-        // coherent split-DNS), so a single profile's filter change re-arbitrates the whole
-        // connected set. `reassertNow` re-runs intent capture (through the hooks) then
-        // reconciles + realizes.
-        routes.reassertNow()
-        await routes.waitUntilIdle()
-        dns.reassertNow()
-        proxies.reassertNow()
-        await dns.waitUntilIdle()
-        await proxies.waitUntilIdle()
+    /// Passing no previous profile explicitly reasserts all resources. The arbiters
+    /// are pure and the appliers serialize changes and require acknowledgement.
+    func applyCustomRouting(forProfile id: String, previous: CustomRoutingProfile? = nil) async {
+        let current = customRouting(for: id)
+        let routesChanged = previous.map { $0.routes != current.routes } ?? true
+        func nativeDNS(_ dns: DNSCustomization) -> DNSCustomization {
+            var value = dns; value.queryRoutingEnabled = false; value.queryRules = []; return value
+        }
+        let dnsChanged = routesChanged || (previous.map { nativeDNS($0.dns) != nativeDNS(current.dns) } ?? true)
+        let proxyChanged = routesChanged || (previous.map { $0.proxy != current.proxy } ?? true)
+        if routesChanged {
+            routes.reassertNow()
+            await routes.waitUntilIdle()
+        }
+        // A gateway change affects DNS/proxy ownership; query-only edits affect neither.
+        if dnsChanged { dns.reassertNow() }
+        if proxyChanged { proxies.reassertNow() }
+        syncDNSQueryRouting()
+        if dnsChanged { await dns.waitUntilIdle() }
+        if proxyChanged { await proxies.waitUntilIdle() }
     }
 
     // MARK: Default gateway (PolicyRouting.md Tier 2 — the ≤1-default-owner invariant)

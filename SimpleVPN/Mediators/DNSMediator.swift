@@ -169,6 +169,8 @@ final class DNSMediator {
     /// The tier-3 `DNS_CHANGED` seam — fired after the monitor confirms external drift.
     @ObservationIgnored var driftHook: MediatorDriftHook<MediatorDriftEvent>?
 
+    @ObservationIgnored var onIntentsChanged: (@MainActor () -> Void)?
+
     func submit(_ intent: DNSIntent, from engine: String) {
         var rewritten = intent
         intentHook?(&rewritten)
@@ -256,6 +258,7 @@ final class DNSMediator {
                              connectedAt: info.lastConnectedAt),
                    from: info.id)
         }
+        onIntentsChanged?()
     }
 
     // MARK: - Reconcile / re-assert

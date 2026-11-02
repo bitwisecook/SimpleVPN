@@ -113,7 +113,8 @@ provisioning profiles grant** — development profiles give plain `packet-tunnel
 
 - **Manual signing**, identity `Developer ID Application`, profiles `SimpleVPN App DirectDist` /
   `SimpleVPN Tunnel DirectDist` (one per App ID), hardened runtime on.
-- The `.entitlements` files must list **only** `packet-tunnel-provider-systemextension`. Do **not** let
+- The `.entitlements` files list `packet-tunnel-provider-systemextension` and
+  `dns-proxy-systemextension` (the opt-in query-name router). Both require Developer ID profiles. Do **not** let
   Xcode's *Signing & Capabilities → Network Extensions → Packet Tunnel* checkbox re-add the non-suffixed
   `packet-tunnel-provider` — it breaks the Developer ID profile match.
 - Creating a **Developer ID Application certificate** must be done by the **account holder** in

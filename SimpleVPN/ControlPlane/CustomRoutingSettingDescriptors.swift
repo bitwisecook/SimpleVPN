@@ -39,12 +39,21 @@ enum CustomRoutingSettings {
 
         // MARK: DNS
 
-        .init(id: "cr.dns-default", name: "Unmatched Resolvers",
-              summary: "What happens to the DNS servers this VPN offers that no rule below mentions: Accept keeps them, Ignore drops them so only what a rule accepts is used.",
+        .init(id: "cr.query-routing", name: "Query-name Routing",
+              summary: "Enable exact, suffix and glob matching of queried hostnames through the optional system DNS proxy while this VPN is connected.", group: .dns, default: false),
+        .init(id: "cr.query-rule", name: "Query Rules",
+              summary: "Ordered hostname rules. First match wins; unmatched queries retain their original resolver.", group: .dns, default: 0),
+        .init(id: "cr.query-resolvers", name: "Resolvers",
+              summary: "Explicit resolver IP addresses, or blank to use this VPN's filtered DNS servers. IP routes determine how those servers are reached.", group: .dns, default: [String]()),
+        .init(id: "cr.query-test", name: "Test Hostname",
+              summary: "Preview the query rule selected for a hostname without sending a DNS query or applying settings.", group: .dns, default: ""),
+
+        .init(id: "cr.dns-default", name: "Unmatched DNS Servers",
+              summary: "Default disposition for supplied DNS server IPs not matched by a filter.",
               group: .dns, default: UnmatchedDisposition.accept),
 
-        .init(id: "cr.dns-rule", name: "Resolver Rules",
-              summary: "An ordered list that edits the DNS servers this VPN offers: accept one, ignore one, replace one with another, or add a server of your own.",
+        .init(id: "cr.dns-rule", name: "DNS Server Filters",
+              summary: "Ordered accept/ignore/replace/add transforms over supplied resolver IPs. First match wins.",
               group: .dns, default: 0),
 
         .init(id: "cr.ignore-pushed-search", name: "Ignore All Pushed Search Domains",
@@ -55,12 +64,12 @@ enum CustomRoutingSettings {
               summary: "Drop every match domain this VPN offers. Match domains are the name suffixes whose lookups go to this VPN's DNS servers instead of your Mac's.",
               group: .dns, default: false),
 
-        .init(id: "cr.add-search-domains", name: "Search Domains",
+        .init(id: "cr.add-search-domains", name: "Search List Overrides",
               summary: "Search domains to add to whatever this VPN offers, and individual ones to leave out. Comma-separated.",
               group: .dns, default: [String]()),
 
-        .init(id: "cr.match-domains", name: "Match Domains",
-              summary: "Name suffixes to send to this VPN's DNS servers on top of whatever it offers, and individual ones to leave out. Comma-separated.",
+        .init(id: "cr.match-domains", name: "Resolver Scopes",
+              summary: "Native macOS suffix scopes, including subdomains. These are not exact or glob query rules. Add or remove domain suffixes.",
               group: .dns, default: [String]()),
 
         // MARK: Traffic — proxy

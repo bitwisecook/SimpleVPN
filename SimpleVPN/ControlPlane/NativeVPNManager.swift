@@ -279,8 +279,9 @@ nonisolated enum NativeVPNSecrets {
 final class NativeVPNManager {
     private static let log = Logger(subsystem: "com.bragi0.SimpleVPN", category: "native")
 
-    private(set) var status: NEVPNStatus = .invalid
-    private(set) var activeConfigID: String?
+    var dnsQueryStatusDidChange: (@MainActor () -> Void)?
+    private(set) var status: NEVPNStatus = .invalid { didSet { dnsQueryStatusDidChange?() } }
+    private(set) var activeConfigID: String? { didSet { dnsQueryStatusDidChange?() } }
     private(set) var lastError: String?
     /// Set when saveToPreferences fails for the missing Personal VPN capability.
     private(set) var needsEntitlement = false

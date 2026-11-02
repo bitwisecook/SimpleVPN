@@ -598,6 +598,22 @@ the acceptance matrix in [Installation.md](Installation.md). Builds and unit
 tests alone do not establish these checks. Recovery bundles are kept if rollback
 or Trash fails, rather than swept up with temporary helper sessions.
 
+## DNS query matching and OS suffix scopes — KEEP SEPARATE WITH SHARED PRECEDENCE
+
+`Shared/DNSQueryRouting.swift` is the sole exact/suffix/glob query matcher used by
+`DNSQueryProxyProvider`, the advanced hostname tester and routing diagram. Query
+rules inspect actual QNAMEs. Native `NEDNSSettings.matchDomains` remains a suffix
+scope, never represented as exact or arbitrary glob enforcement. Both use
+`DNSArbiter.ranked` for cross-profile precedence; native scopes are canonicalised
+before collision arbitration. IP literal validation delegates to
+`DNSResolverAddress`, rather than duplicating the resolver parser.
+
+The optional DNS proxy owns per-query forwarding only; `NetworkSettingsWriter`
+continues to own tunnel DNS settings. Normal configuration does not activate the
+proxy. Configuration acknowledgement is distinct from live provider verification.
+`DNSQueryRoutingTests`, `DNSWireMessageTests` and loopback UDP/TCP transport tests
+cover these boundaries. No Tcl/PBR/fake-IP or packet egress router is introduced.
+
 ## Adding to this file
 
 Two occasions, and both are cheap:

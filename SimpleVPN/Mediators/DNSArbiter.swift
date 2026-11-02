@@ -54,7 +54,7 @@ nonisolated struct DNSIntent: MediatorIntent {
     /// The engine's SPECIFIC (non catch-all) match domains — the ones eligible for a
     /// split-DNS assignment.
     var specificDomains: [String] {
-        matchDomains.filter { !$0.isEmpty }
+        DNSSearchDomains.normalized(matchDomains.filter { !$0.isEmpty })
     }
 }
 
@@ -141,7 +141,32 @@ nonisolated enum DNSArbiter: MediatorArbiter {
     /// resolves two ways.
     static func plan(intents: [DNSIntent], policy: DNSPolicy) -> DNSPlan {
         // Deterministic precedence order: owner first, then newest, then id.
-        let ranked = intents.sorted { a, b in
+        let ranked = ranked(intents: intents, policy: policy)
+
+        // Catch-all owner: only the route owner may claim all otherwise unmatched names.
+        let ownerIntent = ranked.first { $0.engine == policy.defaultOwner && !$0.resolvers.isEmpty }
+        let catchAllOwner = ownerIntent?.engine
+        let systemResolvers = ownerIntent?.resolvers ?? []
+        var claimed = Set<String>()
+        var assignments: [DNSResolverAssignment] = []
+        for intent in ranked where !intent.resolvers.isEmpty {
+            let won = intent.specificDomains.filter { claimed.insert($0).inserted }
+            guard !won.isEmpty else { continue }
+            assignments.append(DNSResolverAssignment(engine: intent.engine, resolvers: intent.resolvers, domains: won.sorted()))
+        }
+        assignments.sort { a, b in
+            let ao = a.engine == catchAllOwner, bo = b.engine == catchAllOwner
+            return ao != bo ? ao : a.engine < b.engine
+        }
+        return DNSPlan(catchAllOwner: catchAllOwner, systemResolvers: systemResolvers,
+            perDomain: assignments, participants: intents.map(\.engine).sorted(),
+            searchDomainsByEngine: Dictionary(uniqueKeysWithValues:
+                intents.map { ($0.engine, DNSSearchDomains.normalized($0.searchDomains)) }))
+    }
+
+    /// Shared precedence for native suffix scopes and query-name rules.
+    static func ranked(intents: [DNSIntent], policy: DNSPolicy) -> [DNSIntent] {
+        intents.sorted { a, b in
             let ao = a.engine == policy.defaultOwner
             let bo = b.engine == policy.defaultOwner
             if ao != bo { return ao }
@@ -151,36 +176,6 @@ nonisolated enum DNSArbiter: MediatorArbiter {
             return a.engine < b.engine
         }
 
-        // Catch-all owner: the route owner when it advertises resolvers; otherwise
-        // nobody (Direct DNS) — we deliberately do NOT let a non-owner's catch-all push
-        // become the system resolver, which is the clobber this mediator exists to stop.
-        let ownerIntent = ranked.first { $0.engine == policy.defaultOwner && !$0.resolvers.isEmpty }
-        let catchAllOwner = ownerIntent?.engine
-        let systemResolvers = ownerIntent?.resolvers ?? []
-
-        // Split-DNS: assign each specific domain to the highest-precedence engine that
-        // claims it. An engine keeps only the domains it actually WON.
-        var claimed = Set<String>()
-        var assignments: [DNSResolverAssignment] = []
-        for intent in ranked where !intent.resolvers.isEmpty {
-            let won = intent.specificDomains.filter { claimed.insert($0).inserted }
-            guard !won.isEmpty else { continue }
-            assignments.append(DNSResolverAssignment(engine: intent.engine,
-                                                     resolvers: intent.resolvers,
-                                                     domains: won.sorted()))
-        }
-        // Stable output order for the UI/tests: owner-ness then engine id.
-        assignments.sort { a, b in
-            let ao = a.engine == catchAllOwner, bo = b.engine == catchAllOwner
-            if ao != bo { return ao }
-            return a.engine < b.engine
-        }
-
-        return DNSPlan(catchAllOwner: catchAllOwner, systemResolvers: systemResolvers,
-                       perDomain: assignments,
-                       participants: intents.map(\.engine).sorted(),
-                       searchDomainsByEngine: Dictionary(uniqueKeysWithValues:
-                        intents.map { ($0.engine, DNSSearchDomains.normalized($0.searchDomains)) }))
     }
 }
 

@@ -16,6 +16,7 @@ func makeSimpleVPNTestApplication() -> XCUIApplication {
     // checks. Bundle-identifier lookup can select a different development copy.
     let app = XCUIApplication()
     app.launchEnvironment["SIMPLEVPN_UI_TEST_SUPPRESS_PROTECTED_FILE_SCAN"] = "1"
+    app.launchEnvironment["SIMPLEVPN_UI_TEST_SUPPRESS_DNS_PROXY_ACTIVATION"] = "1"
     // Do not resurrect a file panel or secondary window left by a previous run.
     app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
     return app
