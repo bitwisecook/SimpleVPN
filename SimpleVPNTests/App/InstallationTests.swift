@@ -156,6 +156,39 @@ struct InstallationTests {
         }
     }
 
+    @Test func explicitReleaseAllowsLaunchWhileAsyncCallerRetainsLease() throws {
+        try withDirectory { root in
+            let lock = root.appending(path: "installer.lock")
+            let retainedByAsyncCaller = try #require(try Installation.Lease(at: lock))
+            var installerReference: Installation.Lease? = retainedByAsyncCaller
+            installerReference = nil
+            #expect(installerReference == nil)
+            #expect(try Installation.Lease(at: lock) == nil)
+
+            retainedByAsyncCaller.release()
+            let installedAppProbe = try #require(try Installation.Lease(at: lock))
+            withExtendedLifetime((retainedByAsyncCaller, installedAppProbe)) {}
+        }
+    }
+
+    @Test func repeatedReleaseAndDeinitDoNotUnlockTheNextOwner() throws {
+        try withDirectory { root in
+            let lock = root.appending(path: "installer.lock")
+            var nextOwner: Installation.Lease?
+            do {
+                let original = try #require(try Installation.Lease(at: lock))
+                original.release()
+                let acquired = try #require(try Installation.Lease(at: lock))
+                nextOwner = acquired
+                original.release()
+                #expect(try Installation.Lease(at: lock) == nil)
+                withExtendedLifetime(original) {}
+            }
+            #expect(try Installation.Lease(at: lock) == nil)
+            withExtendedLifetime(nextOwner) {}
+        }
+    }
+
     private enum TestFailure: Error { case injected }
 
     private func withDirectory(_ body: (URL) throws -> Void) throws {

@@ -144,10 +144,15 @@ final class InstallerDelegate: NSObject, NSApplicationDelegate {
         if !cleanup.isEmpty { notice("SimpleVPN Is Installed", cleanup.joined(separator: "\n\n"), button: "Continue") }
         // Remove our Dock tile before the installed app gets its own tile.
         NSApp.setActivationPolicy(.accessory)
+        // applicationDidFinishLaunching's async frame can retain another reference to this lease.
+        // The installed launcher probes the same lock, so nil alone can make it exit immediately.
+        lease?.release()
         lease = nil
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         configuration.addsToRecentItems = false
+        // Other development/renamed copies share the bundle ID. Launch this exact installed URL.
+        configuration.createsNewApplicationInstance = true
         do { _ = try await NSWorkspace.shared.openApplication(at: destination, configuration: configuration) }
         catch {
             NSWorkspace.shared.activateFileViewerSelecting([destination])
@@ -248,6 +253,7 @@ final class InstallerDelegate: NSObject, NSApplicationDelegate {
         // macOS permits unlinking the running executable. There is no second cleanup process,
         // shell, delayed sleep, Dock tile, or dependency on the ejected volume.
         if let root { try? FileManager.default.removeItem(at: root) }
+        lease?.release()
         lease = nil
     }
 }

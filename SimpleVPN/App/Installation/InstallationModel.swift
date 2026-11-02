@@ -4,6 +4,7 @@
 import Foundation
 import Security
 import Darwin
+import Synchronization
 
 /// Compiled into both the app and its installer. No VPN state is created by this code.
 nonisolated enum Installation {
@@ -169,7 +170,7 @@ nonisolated enum Installation {
 
     /// The lock file stays in place: unlinking a held flock permits two independent lock owners.
     final class Lease {
-        private let descriptor: Int32
+        private let descriptor: Mutex<Int32?>
         init?(at url: URL) throws {
             let fd = Darwin.open(url.path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, S_IRUSR | S_IWUSR)
             guard fd >= 0 else { throw Failure.invalidSession }
@@ -184,8 +185,19 @@ nonisolated enum Installation {
                 if failure == EWOULDBLOCK { return nil }
                 throw Failure.invalidSession
             }
-            descriptor = fd
+            descriptor = Mutex(fd)
         }
-        deinit { close(descriptor) }
+
+        /// Handoff must release the OS lock even when an async caller still retains this lease.
+        /// Closing once also prevents a later deinit from closing a reused file descriptor.
+        func release() {
+            descriptor.withLock { descriptor in
+                guard let fd = descriptor else { return }
+                descriptor = nil
+                close(fd)
+            }
+        }
+
+        deinit { release() }
     }
 }

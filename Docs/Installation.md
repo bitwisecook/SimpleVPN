@@ -45,9 +45,11 @@ Its source/helper/finisher chain is replaced with one staged installer process.
    trash the downloaded image if selected. A writable original app is similarly
    trashed after installation. Cleanup failures produce a successful-install
    notice with manual instructions.
-10. Remove the helper's Dock tile, release its lease, and launch the installed
-    app by explicit URL. Quit and delete the helper's own temporary directory
-    in `applicationWillTerminate`. No second finisher, shell or delayed delete.
+10. Remove the helper's Dock tile, explicitly close its lease (independently of
+    retained references in async frames), and launch a new instance of the installed
+    app by explicit URL. Await Launch Services before quitting and deleting the
+    helper's own temporary directory in `applicationWillTerminate`. No second
+    finisher, shell or delayed delete.
     Subsequent helpers remove abandoned private sessions older than a day,
     excluding sessions with running helpers.
 
