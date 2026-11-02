@@ -208,6 +208,18 @@ struct NativeVPNView: View {
                 .tag(SettingsTab.settings)
                 .tabItem { Label("Settings", systemImage: "slider.horizontal.3") }
             Form {
+                VPNDNSServerSection(vpn: vpn, profileID: draft.id)
+                CustomRoutingTabView(vpn: vpn, profileID: draft.id, profile: $customRouting,
+                                    proxyAuthUsername: $crProxyAuthUsername,
+                                    proxyAuthPassword: $crProxyAuthPassword,
+                                    kind: draft.kind, scope: .dns)
+            }
+            .formStyle(.grouped)
+            .revealsSettings()
+            .disabled(ManagedPolicy.lockConfiguration)
+            .tag(SettingsTab.dns)
+            .tabItem { Label("DNS", systemImage: "network") }
+            Form {
                 CustomRoutingTabView(vpn: vpn, profileID: draft.id, profile: $customRouting,
                                     proxyAuthUsername: $crProxyAuthUsername,
                                     proxyAuthPassword: $crProxyAuthPassword,

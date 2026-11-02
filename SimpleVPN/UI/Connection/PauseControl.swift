@@ -30,9 +30,8 @@ struct PauseControl: View {
             .frame(height: height)
             .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(.orange)
-        .glassEffect(.regular.tint(.orange.opacity(0.22)).interactive(), in: .capsule)
+        .buttonStyle(.glass)
+        .tint(.orange)
         .help("Pause — the VPN stays signed in, but traffic uses your normal connection until you resume")
         .accessibilityLabel("Pause VPN")
         .accessibilityHint("Keeps the session signed in and sends traffic outside the tunnel until you resume.")

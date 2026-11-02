@@ -42,11 +42,11 @@ extension VPNController {
     /// shows in Network settings; the real control server rides the settings
     /// blob, because for the Tailscale preset there is nothing to show.
     @discardableResult
-    func createTailscale(name: String = "Tailscale") async throws -> String {
+    func createTailscale(name: String = "Tailscale", configuration: TailscaleConfig? = nil) async throws -> String {
         guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
         let id = UUID().uuidString
-        var config = TailscaleConfig()
-        config.hostname = Self.defaultTailscaleHostname()
+        var config = configuration?.normalized() ?? TailscaleConfig()
+        if config.hostname.isEmpty { config.hostname = Self.defaultTailscaleHostname() }
         let mgr = NETunnelProviderManager()
         let proto = NETunnelProviderProtocol()
         proto.providerBundleIdentifier = Self.providerBundleID

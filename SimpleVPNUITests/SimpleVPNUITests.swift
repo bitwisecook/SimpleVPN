@@ -40,18 +40,24 @@ final class SimpleVPNUITests: XCTestCase {
             manage.buttons["_XCUI:ZoomWindow"].click()
         }
         let toolbar = XCTAttachment(screenshot: manage.screenshot())
-        toolbar.name = "Manage VPNs native toolbar"
+        toolbar.name = "Manage VPNs sidebar actions"
         toolbar.lifetime = .keepAlways
         add(toolbar)
         for title in ["Add VPN", "Remove the selected VPN", "Move Up", "Move Down", "Find a setting"] {
             let control = manage.descendants(matching: .any)[title].firstMatch
-            XCTAssertTrue(control.waitForExistence(timeout: 5), "Missing native toolbar control \(title).")
+            XCTAssertTrue(control.waitForExistence(timeout: 5), "Missing VPN-management control \(title).")
             XCTAssertGreaterThanOrEqual(control.frame.width, 32,
                                        "The \(title) control must have room for its glyph and native padding.")
         }
         let addButton = manage.descendants(matching: .any)["Add VPN"].firstMatch
-        XCTAssertEqual(addButton.frame.width, addButton.frame.height, accuracy: 1,
-                       "The Add menu must have a square target for its circular button.")
+        let removeButton = manage.buttons["Remove the selected VPN"]
+        let sidebarFrame = manage.outlines["Sidebar"].frame
+        for control in [addButton, removeButton] {
+            XCTAssertLessThanOrEqual(control.frame.maxX, sidebarFrame.maxX + 1,
+                                     "List actions must remain in the sidebar at the default width.")
+            XCTAssertGreaterThanOrEqual(control.frame.minY, sidebarFrame.maxY - 1,
+                                        "List actions must sit below the scrolling rows.")
+        }
         let fixtureName = "SimpleVPN-UI-List-\(UUID().uuidString)"
         let fixture = FileManager.default.temporaryDirectory.appendingPathComponent(fixtureName + ".conf")
         // A public-only, disconnected fixture. Never import an actual private key
@@ -68,8 +74,10 @@ final class SimpleVPNUITests: XCTestCase {
         addTeardownBlock { @MainActor in
             try self.removeFixture(fixtureName, in: manage, app: app)
         }
-        try clickManageToolbarControl("Add VPN", in: manage, app: app)
-        app.menuItems["Import…"].click()
+        try clickManageSidebarControl("Add VPN", in: manage, app: app)
+        let choose = manage.buttons["Choose Configuration…"]
+        XCTAssertTrue(choose.waitForExistence(timeout: 5), "Add must open an unsaved VPN setup pane.")
+        choose.click()
         let panel = manage.sheets.firstMatch
         XCTAssertTrue(panel.waitForExistence(timeout: 5), "The configuration file panel did not appear.")
         XCTAssertTrue(panel.buttons["Open"].waitForExistence(timeout: 5),
@@ -82,6 +90,10 @@ final class SimpleVPNUITests: XCTestCase {
         let open = panel.buttons["Open"]
         XCTAssertTrue(open.waitForExistence(timeout: 5))
         open.click()
+        let confirm = manage.buttons["confirm-add-vpn"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 10))
+        XCTAssertTrue(confirm.isEnabled, "A recognised configuration should be ready to add.")
+        confirm.click()
         let selectedFixture = NSPredicate(format: "value == %@", fixtureName)
         let name = manage.textFields.matching(selectedFixture).firstMatch
         XCTAssertTrue(name.waitForExistence(timeout: 15), "The disposable WireGuard editor did not appear.")
@@ -101,6 +113,10 @@ final class SimpleVPNUITests: XCTestCase {
         imported.name = "Long profile name and concise testing notice"
         imported.lifetime = .keepAlways
         add(imported)
+        let dnsTab = manage.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "DNS")).firstMatch
+        XCTAssertTrue(dnsTab.waitForExistence(timeout: 5))
+        dnsTab.click()
         let dns = manage.textFields["DNS Servers"]
         XCTAssertTrue(dns.waitForExistence(timeout: 5))
         dns.click()
@@ -114,20 +130,104 @@ final class SimpleVPNUITests: XCTestCase {
         let value = dns.value as? String ?? ""
         XCTAssertTrue(value.contains("10.0.0.53") && value.contains("10.0.1.53"),
                       "Focus changes lost a list value: \(value)")
+        let routing = manage.disclosureTriangles.matching(NSPredicate(format: "label BEGINSWITH %@", "Custom Routing")).firstMatch
+        XCTAssertTrue(routing.waitForExistence(timeout: 5))
+        XCTAssertEqual(String(describing: routing.value ?? ""), "0")
+        routing.click()
+        let matches = manage.textFields["Add match domains"]
+        XCTAssertTrue(matches.waitForExistence(timeout: 5))
+        matches.click()
+        matches.typeText("corp.example")
+        let settings = manage.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Settings")).firstMatch
+        settings.click()
+        dnsTab.click()
+        XCTAssertTrue(matches.waitForExistence(timeout: 5), "Changed DNS routing must remain discoverable")
+        XCTAssertEqual(matches.value as? String, "corp.example", "Switching tabs lost the DNS routing draft")
+        try checkMainSidebarAddOpensManageImport(app: app)
+    }
+
+    /// The imported fixture ensures the main window has a sidebar even on a
+    /// clean installation. Exercise the request before reopening Manage VPNs.
+    @MainActor
+    private func checkMainSidebarAddOpensManageImport(app: XCUIApplication) throws {
+        let manage = app.windows["manage"]
+        manage.buttons[XCUIIdentifierCloseWindow].click()
+        let main = app.windows["SimpleVPN"]
+        XCTAssertTrue(main.waitForExistence(timeout: 10))
+        if main.buttons["Open Installed SimpleVPN"].exists {
+            XCTContext.runActivity(named: "Main sidebar requires the installed build; development activation prompt is showing") { _ in }
+            app.menuBarItems["VPN"].click()
+            app.menuBarItems["VPN"].menuItems["Manage VPNs…"].click()
+            XCTAssertTrue(manage.waitForExistence(timeout: 10))
+            return
+        }
+        // A single VPN starts with its sidebar hidden. Use the native toggle.
+        let showSidebar = main.buttons["Show Sidebar"]
+        if showSidebar.exists { showSidebar.click() }
+        let add = main.descendants(matching: .any)["Add VPN"].firstMatch
+        XCTAssertTrue(add.waitForExistence(timeout: 10),
+                      "The configured main window must offer Add VPN in its sidebar.")
+        add.click()
+        XCTAssertTrue(manage.waitForExistence(timeout: 10))
+        XCTAssertTrue(manage.buttons["Choose Configuration…"].waitForExistence(timeout: 10),
+                      "The main + must open the manager on an unsaved New VPN.")
+        XCTAssertFalse(manage.buttons["confirm-add-vpn"].isEnabled)
+        manage.buttons["Cancel"].click()
+    }
+
+    @MainActor
+    func testNewVPNSetupAcceptsPasteAndCancelsWithoutSaving() throws {
+        let app = try launchOrSkip()
+        addTeardownBlock { @MainActor in app.terminate() }
+        app.menuBarItems["VPN"].click()
+        app.menuBarItems["VPN"].menuItems["Manage VPNs…"].click()
+        let manage = app.windows["manage"]
+        XCTAssertTrue(manage.waitForExistence(timeout: 10))
+        let sidebar = manage.outlines["Sidebar"]
+        let before = sidebar.descendants(matching: .outlineRow).count
+        manage.buttons["Add VPN"].firstMatch.click()
+        XCTAssertTrue(manage.buttons["Choose Configuration…"].waitForExistence(timeout: 5))
+        XCTAssertFalse(manage.buttons["confirm-add-vpn"].isEnabled)
+        let text = manage.textViews["Configuration or setup instructions"]
+        XCTAssertTrue(text.waitForExistence(timeout: 5))
+        text.click()
+        text.typeText("[Interface]\nAddress = 192.0.2.2/32\n[Peer]\nEndpoint = vpn.example.test:51820\n")
+        XCTAssertTrue(manage.staticTexts["WireGuard configuration"].waitForExistence(timeout: 5))
+        XCTAssertTrue(manage.buttons["confirm-add-vpn"].isEnabled)
+        let setup = XCTAttachment(screenshot: manage.screenshot())
+        setup.name = "New VPN with recognised pasted configuration"
+        setup.lifetime = .keepAlways
+        add(setup)
+        try runAccessibilityAudit(on: app)
+        manage.buttons["Cancel"].click()
+        XCTAssertTrue(manage.buttons["Choose Configuration…"].waitForNonExistence(timeout: 5))
+        XCTAssertEqual(sidebar.descendants(matching: .outlineRow).count, before, "Cancelling must not leave a saved VPN.")
+        manage.buttons["Add VPN"].firstMatch.click()
+        XCTAssertTrue(text.waitForExistence(timeout: 5))
+        XCTAssertEqual(text.value as? String ?? "", "", "A cancelled draft must not leak into the next VPN.")
+        manage.buttons["Cancel"].click()
     }
 
     @MainActor
     private func removeFixture(_ name: String, in window: XCUIElement, app: XCUIApplication) throws {
-        guard window.exists else { return }
+        if !window.exists {
+            app.menuBarItems["VPN"].click()
+            app.menuBarItems["VPN"].menuItems["Manage VPNs…"].click()
+            guard window.waitForExistence(timeout: 10) else { return }
+        }
         let row = window.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", name + ", WireGuard,")).firstMatch
         guard row.exists else { return } // Import may have failed before creating it.
         row.click()
+        let settings = window.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Settings")).firstMatch
+        if settings.exists { settings.click() }
         guard window.textFields.matching(NSPredicate(format: "value == %@", name)).firstMatch
             .waitForExistence(timeout: 5) else {
             XCTFail("Fixture cleanup refused: selection did not match \(name).")
             return
         }
-        try clickManageToolbarControl("Remove the selected VPN", in: window, app: app)
+        try clickManageSidebarControl("Remove the selected VPN", in: window, app: app)
         guard app.staticTexts["Remove \(name)?"].waitForExistence(timeout: 5) else {
             if window.sheets.firstMatch.buttons["Cancel"].exists { window.sheets.firstMatch.buttons["Cancel"].click() }
             XCTFail("Fixture cleanup refused: removal confirmation names another profile.")
@@ -137,30 +237,13 @@ final class SimpleVPNUITests: XCTestCase {
         XCTAssertTrue(row.waitForNonExistence(timeout: 10))
     }
 
-    /// AppKit moves these controls into its overflow menu at narrow widths.
-    /// Menu controls are not necessarily exposed as XCUIElementTypeButton.
     @MainActor
-    private func clickManageToolbarControl(_ label: String, in window: XCUIElement,
+    private func clickManageSidebarControl(_ label: String, in window: XCUIElement,
                                            app: XCUIApplication) throws {
-        let control = app.descendants(matching: .any)[label].firstMatch
-        if !control.exists {
-            let overflow = window.popUpButtons["more toolbar items"]
-            XCTAssertTrue(overflow.waitForExistence(timeout: 5), "Missing toolbar control \(label) and overflow menu.")
-            overflow.click()
-            for title in ["Remove the selected VPN", "Move Up", "Move Down", "Find a setting"] {
-                XCTAssertTrue(app.menuItems[title].exists,
-                              "The native toolbar overflow must retain the action title: \(title).")
-            }
-            // Xcode cannot reliably traverse flattened native toolbar overflow.
-            // Verify its titles, dismiss it, then use AppKit's own zoom action
-            // to reveal the toolbar controls before performing a mutation.
-            app.typeKey(.escape, modifierFlags: [])
-            let zoom = window.buttons["_XCUI:ZoomWindow"]
-            XCTAssertTrue(zoom.exists)
-            zoom.click()
-        }
-        XCTAssertTrue(control.waitForExistence(timeout: 5), "Missing toolbar control \(label).")
+        let control = window.descendants(matching: .any)[label].firstMatch
+        XCTAssertTrue(control.waitForExistence(timeout: 5), "Missing sidebar control \(label).")
         XCTAssertTrue(control.isEnabled)
+        XCTAssertTrue(control.isHittable)
         control.click()
     }
 
@@ -186,6 +269,8 @@ final class SimpleVPNUITests: XCTestCase {
     @MainActor
     func testFreshInstallProviderChoiceOpensItsSetupPage() throws {
         let app = try launchOrSkip()
+        let services = app.descendants(matching: .any)["I use a VPN service"].firstMatch
+        if services.exists { services.click() }
         let provider = app.buttons["Mullvad"]
         try XCTSkipUnless(provider.waitForExistence(timeout: 5),
                           "This machine already has a VPN, so the fresh-install provider chooser is not visible.")
@@ -700,6 +785,8 @@ extension SimpleVPNUITests {
         app.menuItems["Manage VPNs…"].click()
         let manage = app.windows["manage"]
         XCTAssertTrue(manage.waitForExistence(timeout: 10))
+        let openVPN = manage.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", ", OpenVPN,")).firstMatch
+        if openVPN.exists { openVPN.click() }
         let general = manage.descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@", "General")).firstMatch
         try XCTSkipUnless(general.waitForExistence(timeout: 10),
@@ -731,6 +818,14 @@ extension SimpleVPNUITests {
         }
     }
     @MainActor func testOpenVPNOptionsPageAccessibilityAudit() throws { try auditOpenVPNPage("Options") }
+    @MainActor func testOpenVPNDNSPageAccessibilityAudit() throws {
+        try auditOpenVPNPage("DNS") { manage in
+            let routing = manage.disclosureTriangles.matching(NSPredicate(format: "label BEGINSWITH %@", "Custom Routing")).firstMatch
+            XCTAssertTrue(routing.waitForExistence(timeout: 5), "DNS custom routing must have a named disclosure")
+            if String(describing: routing.value ?? "") == "0" { routing.click() }
+            XCTAssertTrue(manage.textFields["Add match domains"].waitForExistence(timeout: 5))
+        }
+    }
     @MainActor func testOpenVPNCertificatesPageAccessibilityAudit() throws {
         try auditOpenVPNPage("Certificates") { manage in
             let details = manage.buttons["Details"].firstMatch

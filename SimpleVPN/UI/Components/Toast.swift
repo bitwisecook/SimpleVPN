@@ -78,10 +78,10 @@ private struct ToastLayer: ViewModifier {
                             .fixedSize(horizontal: false, vertical: true)
                         if let title = toast.actionTitle, let action = toast.action {
                             Button(title) { action(); center.dismiss() }
-                                .buttonStyle(.glass).controlSize(.small)
+                                .buttonStyle(.bordered).controlSize(.small)
                         }
                         Button { center.dismiss() } label: {
-                            Image(systemName: "xmark").frame(width: 22, height: 22).contentShape(Rectangle())
+                            Image(systemName: "xmark").frame(width: 28, height: 28).contentShape(Rectangle())
                         }
                             .buttonStyle(.plain).foregroundStyle(.secondary)
                             .help("Dismiss")
@@ -89,7 +89,7 @@ private struct ToastLayer: ViewModifier {
                     }
                     .padding(.horizontal, 14).padding(.vertical, 10)
                     .frame(maxWidth: 460, alignment: .leading)
-                    .glassEffect(.regular.tint(toast.tint.opacity(0.18)), in: .capsule)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
                     .padding(.bottom, 18)
                     .transition(reduceMotion
                                 ? AnyTransition.opacity

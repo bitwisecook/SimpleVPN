@@ -158,14 +158,6 @@ struct TailscaleView: View {
                 if !draft.acceptRoutes && draft.useExitNode {
                     SettingCaveat("With shared networks off, only your internet traffic goes through the other machine. The office or home networks other machines share stay unreachable.")
                 }
-                EngineSettingRow(spec: Self.specs["ts.accept-dns"], value: draft.acceptDNS) {
-                    Toggle(isOn: $draft.acceptDNS) {
-                        EngineSettingLabel(spec: Self.specs["ts.accept-dns"], value: draft.acceptDNS)
-                    }
-                }
-                if !draft.acceptDNS && draft.useExitNode {
-                    SettingCaveat("Your traffic goes through the other machine but your name lookups don't — they keep using this Mac's own DNS servers, which reveals every site you visit to whoever runs them. Turn this network's DNS on to send lookups through the machine carrying your traffic.")
-                }
                 EngineSettingRow(spec: Self.specs["ts.exit-node"], value: draft.useExitNode) {
                     Toggle(isOn: $draft.useExitNode) {
                         EngineSettingLabel(spec: Self.specs["ts.exit-node"], value: draft.useExitNode)
@@ -224,6 +216,19 @@ struct TailscaleView: View {
         .disabled(ManagedPolicy.lockConfiguration)
     }
 
+    private var dnsSettings: some View {
+        Section("DNS") {
+            EngineSettingRow(spec: Self.specs["ts.accept-dns"], value: draft.acceptDNS) {
+                Toggle(isOn: $draft.acceptDNS) {
+                    EngineSettingLabel(spec: Self.specs["ts.accept-dns"], value: draft.acceptDNS)
+                }
+            }
+            if !draft.acceptDNS && draft.useExitNode {
+                SettingCaveat("Your traffic goes through the other machine but your name lookups don't — they keep using this Mac's own DNS servers, which reveals every site you visit to whoever runs them. Turn this network's DNS on to send lookups through the machine carrying your traffic.")
+            }
+        }
+    }
+
     var body: some View {
         // Custom Routing is its own TAB in every editor (AGENTS.md "Config
         // surfaces") — appending it as sections put a second, differently-shaped
@@ -232,6 +237,18 @@ struct TailscaleView: View {
             configForm
                 .tag(SettingsTab.settings)
                 .tabItem { Label("Settings", systemImage: "slider.horizontal.3") }
+            Form {
+                dnsSettings
+                VPNDNSServerSection(vpn: vpn, profileID: profileID)
+                CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
+                                    proxyAuthUsername: $crProxyAuthUsername,
+                                    proxyAuthPassword: $crProxyAuthPassword, scope: .dns)
+            }
+            .formStyle(.grouped)
+            .revealsSettings()
+            .disabled(ManagedPolicy.lockConfiguration)
+            .tag(SettingsTab.dns)
+            .tabItem { Label("DNS", systemImage: "network") }
             Form {
                 CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
                                     proxyAuthUsername: $crProxyAuthUsername,

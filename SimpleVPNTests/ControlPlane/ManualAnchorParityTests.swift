@@ -286,8 +286,8 @@ struct ManualAnchorParityTests {
     /// lays out in taxonomy order by construction.
     ///
     /// `cr.*` is the one exception, and deliberately: Custom Routing is its own
-    /// TAB with its own Routes → DNS → Proxy structure, not a run of the canonical
-    /// five, so its declaration order follows the tab. Its specs still declare the
+    /// surface split across the DNS and Custom Routing tabs, not a run of the canonical
+    /// groups, so its declaration order follows its resources. Its specs still declare the
     /// group each subject belongs to (checked above) so search, the CLI and MDM can
     /// still answer "which group is this?".
     @Test func catalogsAreInCanonicalGroupOrder() {

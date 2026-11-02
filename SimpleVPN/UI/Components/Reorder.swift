@@ -476,7 +476,7 @@ struct ReorderDragPreview: View {
             .lineLimit(1)
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .glassEffect(in: .capsule)
+            .background(.regularMaterial, in: .capsule)
     }
 }
 

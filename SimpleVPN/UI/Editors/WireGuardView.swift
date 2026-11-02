@@ -135,36 +135,6 @@ struct WireGuardView: View {
                             .font(.callout).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    if !draft.usesTeleport {
-                        EngineSettingRow(spec: Self.specs["wg.dns"], value: draft.dns) {
-                            listField(Self.specs["wg.dns"], $draft.dns, prompt: "1.1.1.1")
-                        }
-                        // One caveat per resolver the peer won't carry — the split-tunnel
-                        // footgun that shows up as "the VPN works but nothing resolves".
-                        ForEach(uncoveredDNS, id: \.self) { server in
-                            SettingCaveat(WireGuardConfig.dnsCoverageWarning(server))
-                        }
-                        // THE TWO ROWS THAT LANDED LAST. Both carve-outs shipped for every
-                        // other packet-tunnel kind at once — config field, plumbing, manual
-                        // page, portability id, CLI/MDM name — and could not get their rows
-                        // because this file was owned by another change in flight. They sat
-                        // behind `SettingRenderingTests.unrenderedByDesign`, whose reverse
-                        // check fails the moment they appear; those two lines are deleted
-                        // with this change.
-                        //
-                        // Neither has a wg-quick field, which is exactly why they need one
-                        // here: a `.conf` cannot carry a search list (its `DNS=` line has no
-                        // room for one) and has no concept of a local-network carve-out at
-                        // all. Same shape and same order as SSHNetworkTunnelView's pair.
-                    } else {
-                        LabeledContent("DNS Servers", value: "Supplied by Teleport")
-                    }
-                    EngineSettingRow(spec: Self.specs["wg.search-domains"], value: draft.searchDomains) {
-                        listField(Self.specs["wg.search-domains"], $draft.searchDomains,
-                                  prompt: "corp.example, example.com",
-                                  problem: searchDomainsProblem)
-                    }
-                    problemLabel(searchDomainsProblem)
                     EngineSettingRow(spec: Self.specs["wg.local-lan"],
                                      value: draft.allowLocalNetworkAccess) {
                         Toggle(isOn: $draft.allowLocalNetworkAccess) {
@@ -237,6 +207,29 @@ struct WireGuardView: View {
         .disabled(ManagedPolicy.lockConfiguration)
     }
 
+    private var dnsSettings: some View {
+        Section("DNS") {
+            if !draft.usesTeleport {
+                EngineSettingRow(spec: Self.specs["wg.dns"], value: draft.dns) {
+                    listField(Self.specs["wg.dns"], $draft.dns, prompt: "1.1.1.1")
+                }
+                // One caveat per resolver the peer won't carry — the split-tunnel
+                // footgun that shows up as "the VPN works but nothing resolves".
+                ForEach(uncoveredDNS, id: \.self) { server in
+                    SettingCaveat(WireGuardConfig.dnsCoverageWarning(server))
+                }
+            } else {
+                LabeledContent("DNS Servers", value: "Supplied by Teleport")
+            }
+            EngineSettingRow(spec: Self.specs["wg.search-domains"], value: draft.searchDomains) {
+                listField(Self.specs["wg.search-domains"], $draft.searchDomains,
+                          prompt: "corp.example, example.com",
+                          problem: searchDomainsProblem)
+            }
+            problemLabel(searchDomainsProblem)
+        }
+    }
+
     var body: some View {
         // Custom Routing is its own TAB in every editor (AGENTS.md "Config
         // surfaces") — appending it as sections put a second, differently-shaped
@@ -245,6 +238,18 @@ struct WireGuardView: View {
             configForm
                 .tag(SettingsTab.settings)
                 .tabItem { Label("Settings", systemImage: "slider.horizontal.3") }
+            Form {
+                dnsSettings
+                VPNDNSServerSection(vpn: vpn, profileID: profileID)
+                CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
+                                    proxyAuthUsername: $crProxyAuthUsername,
+                                    proxyAuthPassword: $crProxyAuthPassword, scope: .dns)
+            }
+            .formStyle(.grouped)
+            .revealsSettings()
+            .disabled(ManagedPolicy.lockConfiguration)
+            .tag(SettingsTab.dns)
+            .tabItem { Label("DNS", systemImage: "network") }
             Form {
                 CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
                                     proxyAuthUsername: $crProxyAuthUsername,

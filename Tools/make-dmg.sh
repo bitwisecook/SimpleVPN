@@ -9,12 +9,9 @@
 # which needs a logged-in GUI session — it cannot work headless on a GitHub
 # Actions runner, and this script is written to run identically there and here.
 #
-# Also, honestly: there is currently no artwork for a volume icon even locally.
-# SimpleVPN/Assets.xcassets/AppIcon.appiconset/ contains only Contents.json with
-# zero image files, and the built app has no Contents/Resources/AppIcon.icns
-# (icons are compiled into Assets.car instead). When real icon art lands, this
-# can be upgraded to the UDRW -> attach -> SetFile -a C -> detach -> hdiutil
-# convert two-step to add a volume icon.
+# The app icon lives in SimpleVPN/SimpleVPN.icon. A custom DMG volume icon
+# would still require the UDRW -> attach -> SetFile -a C -> detach -> hdiutil
+# convert two-step; the app's icon does not require Finder customization.
 #
 # Usage: Tools/make-dmg.sh <app-path> <version> [out-dir]
 set -euo pipefail

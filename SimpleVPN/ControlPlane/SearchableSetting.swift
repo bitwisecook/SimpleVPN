@@ -170,7 +170,7 @@ enum SettingSurface: String, CaseIterable, Identifiable {
 
     /// Which editor tab holds it. The OpenVPN engine options are the "Options"
     /// tab of a seven-tab editor; the other five editors put their canonical
-    /// groups on "Settings"; Custom Routing is its own tab everywhere.
+    /// groups on "Settings"; DNS has its own tab; route and proxy custom routing keeps its own tab.
     nonisolated var tab: SettingsTab {
         switch self {
         case .openVPN: .options
@@ -229,6 +229,10 @@ enum SettingSurface: String, CaseIterable, Identifiable {
     /// per-surface `tab` is only correct for a surface with no exceptions.
     static func tab(forSettingID settingID: String) -> SettingsTab? {
         if let moved = tabOverrides[settingID] { return moved }
+        if let surface = owning(settingID),
+           surface.settings.first(where: { $0.id == settingID })?.canonicalGroup == .dns {
+            return .dns
+        }
         return owning(settingID)?.tab
     }
 
@@ -332,7 +336,7 @@ enum AllSettings {
 /// already on.
 enum SettingsTab: String, Hashable, CaseIterable {
     // EditVPNView (OpenVPN)
-    case general, servers, signIn, options, certificates, configuration
+    case general, servers, signIn, options, dns, certificates, configuration
     /// The canonical-groups tab of the five single-form editors.
     case settings
     /// Present in all six editors.
@@ -350,6 +354,7 @@ enum SettingsTab: String, Hashable, CaseIterable {
         case .servers: "Servers"
         case .signIn: "Sign-In"
         case .options: "Options"
+        case .dns: "DNS"
         case .certificates: "Certificates"
         case .configuration: "Configuration"
         case .settings: "Settings"

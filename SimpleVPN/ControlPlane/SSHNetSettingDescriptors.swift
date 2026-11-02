@@ -96,25 +96,29 @@ enum SSHNetSettings {
               summary: "Keep printers, file shares and other devices on the network you're on reachable while connected. Traffic to them leaves your Mac outside the tunnel. Default: off.",
               group: .traffic, default: false),
 
-        .init(id: "sshnet.dns", name: "DNS Servers",
-              summary: "Resolvers to use while connected. Lookups are carried over the SSH connection, so they don't leak onto the local network.",
-              group: .traffic, default: [String]()),
 
-        .init(id: "sshnet.search-domains", name: "Search Domains",
-              summary: "Domains to try when you type a short name, so \u{201C}nas\u{201D} finds nas.corp.example. Without one, only full names work.",
-              group: .traffic, default: [String]()),
-
-        .init(id: "sshnet.far-side-dns", name: "Resolve Names at the Server",
-              summary: "Look names up as the SSH server sees them — the way to reach internal names that only it can resolve.",
-              group: .traffic, default: false),
-
-        .init(id: "sshnet.far-side-resolver", name: "Server-Side Resolver",
-              summary: "The resolver to use at the far end, as the server sees it — 127.0.0.1:53 for the server's own, or an internal address only it can reach.",
-              group: .traffic, default: SSHNetworkTunnelConfig.defaultFarSideResolver),
 
         .init(id: "sshnet.mtu", name: "MTU",
               summary: "The tunnel interface's packet size. Rarely needs changing here: nothing is wrapped inside anything else on this kind of tunnel.",
               group: .traffic, default: SSHNetworkTunnelStartConfig.defaultMTU),
+
+        // MARK: DNS
+
+        .init(id: "sshnet.dns", name: "DNS Servers",
+              summary: "Resolvers to use while connected. Lookups are carried over the SSH connection, so they don't leak onto the local network.",
+              group: .dns, default: [String]()),
+
+        .init(id: "sshnet.search-domains", name: "Search Domains",
+              summary: "Domains to try when you type a short name, so \u{201C}nas\u{201D} finds nas.corp.example. Without one, only full names work.",
+              group: .dns, default: [String]()),
+
+        .init(id: "sshnet.far-side-dns", name: "Resolve Names at the Server",
+              summary: "Look names up as the SSH server sees them — the way to reach internal names that only it can resolve.",
+              group: .dns, default: false),
+
+        .init(id: "sshnet.far-side-resolver", name: "Server-Side Resolver",
+              summary: "The resolver to use at the far end, as the server sees it — 127.0.0.1:53 for the server's own, or an internal address only it can reach.",
+              group: .dns, default: SSHNetworkTunnelConfig.defaultFarSideResolver),
 
         // MARK: Security
 

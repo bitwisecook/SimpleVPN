@@ -52,13 +52,13 @@ extension VPNController {
     /// Create a new SSH Network Tunnel. Starts full-tunnel with trust-on-first-use,
     /// which the editor then refines.
     @discardableResult
-    func createSSHNetworkTunnel(name: String = "SSH Network Tunnel") async throws -> String {
+    func createSSHNetworkTunnel(name: String = "SSH Network Tunnel", configuration: SSHNetworkTunnelConfig? = nil) async throws -> String {
         guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
         let id = UUID().uuidString
-        var config = SSHNetworkTunnelConfig()
+        var config = configuration?.normalized() ?? SSHNetworkTunnelConfig()
         // The Mac account name is right far more often than empty is, and it is
         // what ssh(1) would default to.
-        config.username = NSUserName()
+        if config.username.isEmpty { config.username = NSUserName() }
         let mgr = NETunnelProviderManager()
         let proto = NETunnelProviderProtocol()
         proto.providerBundleIdentifier = Self.providerBundleID

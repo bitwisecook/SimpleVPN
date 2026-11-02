@@ -272,6 +272,9 @@ struct EditVPNView: View {
                 optionsTab
                     .tag(SettingsTab.options)
                     .tabItem { Label("Options", systemImage: "slider.horizontal.3") }
+                dnsTab
+                    .tag(SettingsTab.dns)
+                    .tabItem { Label("DNS", systemImage: "network") }
                 CertificatesTab(ovpn: $ovpn, evaluation: evaluation)
                     .disabled(ManagedPolicy.lockConfiguration)
                     .tag(SettingsTab.certificates)
@@ -444,6 +447,19 @@ struct EditVPNView: View {
                            privateKeyPassword: $privateKeyPassword,
                            evaluation: evaluation)
             .disabled(ManagedPolicy.lockConfiguration)
+    }
+
+    private var dnsTab: some View {
+        Form {
+            OpenVPNDNSSettings(draft: $draft, evaluation: evaluation)
+            VPNDNSServerSection(vpn: vpn, profileID: profileID)
+            CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
+                                 proxyAuthUsername: $crProxyAuthUsername,
+                                 proxyAuthPassword: $crProxyAuthPassword, scope: .dns)
+        }
+        .formStyle(.grouped)
+        .revealsSettings()
+        .disabled(ManagedPolicy.lockConfiguration)
     }
 
     private var customRoutingTab: some View {

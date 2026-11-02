@@ -56,15 +56,19 @@ enum ProxyTunnelSettings {
         .init(id: "px.local-lan", name: "Allow local network access",
               summary: "Keep printers, file shares and other devices on the network you're on reachable while connected. Traffic to them leaves your Mac outside the tunnel. Default: off.",
               group: .traffic, default: false),
-        .init(id: "px.dns", name: "DNS Servers",
-              summary: "Name servers to use while connected. Lookups to them go through the proxy too, so they don't leak. Leave empty to keep your Mac's own DNS.",
-              group: .traffic, default: ""),
-        .init(id: "px.search-domains", name: "Search Domains",
-              summary: "Domains to try when you type a short name, so \u{201C}wiki\u{201D} finds wiki.corp.example. Without one, only full names work.",
-              group: .traffic, default: ""),
         .init(id: "px.mtu", name: "MTU",
               summary: "The tunnel's maximum packet size. 1500 suits almost everything; lower it only if a network in the path needs smaller packets.",
               group: .traffic, default: ProxyTunnelStartConfig.defaultMTU),
+        // MARK: DNS
+
+        .init(id: "px.dns", name: "DNS Servers",
+              summary: "Name servers to use while connected. Lookups to them go through the proxy too, so they don't leak. Leave empty to keep your Mac's own DNS.",
+              group: .dns, default: ""),
+
+        .init(id: "px.search-domains", name: "Search Domains",
+              summary: "Domains to try when you type a short name, so \u{201C}wiki\u{201D} finds wiki.corp.example. Without one, only full names work.",
+              group: .dns, default: ""),
+
     ]
 
     static let catalog = EngineSettingCatalog(all)

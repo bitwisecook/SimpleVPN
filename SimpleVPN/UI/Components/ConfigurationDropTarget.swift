@@ -24,11 +24,9 @@ struct ConfigurationDropTarget: View {
     var body: some View {
         VStack(spacing: 10) {
             Image(systemName: isTargeted ? "arrow.down.doc.fill" : "arrow.down.doc")
-                .font(.system(size: 38))
+                .font(.largeTitle)
                 .foregroundStyle(isTargeted ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
                 .contentTransition(.symbolEffect(.replace))
-                .symbolEffect(.wiggle, options: .repeat(.periodic(delay: 5)),
-                              isActive: liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion) && !isTargeted)
                 .accessibilityHidden(true)
             Text("Drag a VPN configuration here")
                 .font(.callout.weight(.medium))
@@ -41,9 +39,8 @@ struct ConfigurationDropTarget: View {
         .padding(.horizontal, compact ? 24 : 30)
         .frame(maxWidth: maximumWidth ?? .infinity)
         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .glassEffect(
-            .regular.tint(isTargeted ? Color.accentColor.opacity(0.22) : nil).interactive(),
-            in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .background(isTargeted ? Color.accentColor.opacity(0.1) : Color(nsColor: .controlBackgroundColor),
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .strokeBorder(style: StrokeStyle(lineWidth: isTargeted ? 2 : 1,

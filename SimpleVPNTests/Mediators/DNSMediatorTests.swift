@@ -195,15 +195,31 @@ struct DNSMediatorTests {
         #expect(reqs.count == 1)
     }
 
-    /// The owner is emitted ONCE as the catch-all even if it also won specific domains
-    /// (the catch-all `[""]` already covers them) — never two requests for one engine.
-    @Test func dnsPlanOwnerEmittedOnceAsCatchAll() {
+    /// A catch-all alone can lose to another VPN's catch-all resolver. Keep the
+    /// owner's explicit domain matches in its ONE request as well as the default.
+    @Test func dnsPlanOwnerKeepsSpecificDomainsAlongsideCatchAll() {
         let plan = DNSArbiter.plan(
             intents: [intent("corp", resolvers: ["10.0.0.53"], match: ["corp.internal"], catchAll: true, at: 1)],
             policy: DNSPolicy(defaultOwner: "corp"))
         let reqs = plan.applyRequests()
         #expect(reqs.count == 1)
-        #expect(reqs["corp"]?.matchDomains == [""])
+        #expect(reqs["corp"]?.matchDomains == ["", "corp.internal"])
+        #expect(reqs["corp"]?.matchDomainsNoSearch == true)
+        #expect(reqs["corp"]?.searchDomains == [])
+        #expect(reqs["corp"]?.makeNEDNSSettings()?.matchDomains == ["", "corp.internal"])
+    }
+
+    @Test func losingOwnerDomainIsDriftEvenWhenCatchAllRemains() {
+        let plan = DNSArbiter.plan(
+            intents: [intent("corp", resolvers: ["10.0.0.53"], match: ["corp.internal"], catchAll: true)],
+            policy: DNSPolicy(defaultOwner: "corp"))
+        var observation = DNSObservation(resolvers: ["10.0.0.53"], searchDomains: [],
+            scoped: [DNSApplyRequest(servers: ["10.0.0.53"], matchDomains: [""])])
+        #expect(DNSDriftDecision.action(expected: plan, observed: observation,
+                                        withinSuppressWindow: false) == .reassert)
+        observation.scoped[0].matchDomains = ["", "corp.internal"]
+        #expect(DNSDriftDecision.action(expected: plan, observed: observation,
+                                        withinSuppressWindow: false) == .none)
     }
 }
 

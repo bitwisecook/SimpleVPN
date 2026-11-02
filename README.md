@@ -1,6 +1,11 @@
 # SimpleVPN
 
-A native macOS OpenVPN client — SwiftUI, Swift 6 (strict concurrency), macOS 26+, built as a
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="Docs/Assets/AppIcon-Dark.png">
+  <img src="Docs/Assets/AppIcon.png" width="112" height="112" alt="SimpleVPN app icon">
+</picture>
+
+A native macOS OpenVPN client — SwiftUI, Swift 6 (strict concurrency), macOS 27.2+, built as a
 Tunnelblick replacement. The tunnel runs in a Network Extension **system extension** driving the
 [OpenVPN 3](https://github.com/OpenVPN/openvpn3) client core, so it installs like a normal app
 (notarized, Developer ID) and shows up in System Settings ▸ VPN like a first-class citizen.
@@ -18,7 +23,7 @@ Tunnelblick replacement. The tunnel runs in a Network Extension **system extensi
 
 ## Building
 
-Requires Xcode 27+ (for Icon Composer 2), [XcodeGen](https://github.com/yonaskolb/XcodeGen), Homebrew
+Requires Xcode 27.2+ (for the Icon Composer source), [XcodeGen](https://github.com/yonaskolb/XcodeGen), Homebrew
 for native engine prerequisites (installed by the engine scripts), and Go 1.27.3+ for the two
 Go static archives (1Password SDK, Tailscale/Headscale engine).
 

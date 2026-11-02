@@ -47,6 +47,7 @@ struct SimpleVPNApp: App {
     /// the sender (a popover in any editor, or the search sheet) and the receiver
     /// (Manage VPNs, then the editor, then its tab) are different windows.
     @State private var settingsRouter = SettingsRouter()
+    @State private var creationRequests = VPNCreationRequests()
     @State private var publicIP = PublicIPMonitor()
     @State private var endpointLocator = EndpointLocator()
     /// Endpoint speed measurements, shared so every server list agrees (and so a
@@ -117,6 +118,7 @@ struct SimpleVPNApp: App {
                 .environment(policy)
                 .environment(manualRouter)
                 .environment(settingsRouter)
+                .environment(creationRequests)
                 .environment(publicIP)
                 .environment(endpointLocator)
                 .environment(endpointProbes)
@@ -256,14 +258,13 @@ struct SimpleVPNApp: App {
         // a few content-state suggestions through its narrow SwiftUI window wrapper.
         .defaultSize(width: 900, height: 660)
         .commands {
-            CommandGroup(replacing: .newItem) {}   // no document "New"
             // SimpleVPN ▸ Install CLI… — links the bundled `simplevpn` tool onto
             // the PATH (admin prompt). Lives in the app menu, like VS Code's
             // "install 'code' command".
             CommandGroup(after: .appInfo) {
                 Button("Install CLI…") { CLIInstaller.install() }
             }
-            VPNCommands(vpn: vpn, updater: updaterController, settingsRouter: settingsRouter)
+            VPNCommands(vpn: vpn, updater: updaterController, settingsRouter: settingsRouter, creationRequests: creationRequests)
             DiagnosticsCommands(vpn: vpn, tunnels: tunnels)
         }
 
@@ -323,6 +324,7 @@ struct SimpleVPNApp: App {
                 .environment(policy)
                 .environment(manualRouter)
                 .environment(settingsRouter)
+                .environment(creationRequests)
                 .environment(compositions)
                 .environment(tunnels)
                 .environment(tunnelManager)
@@ -608,7 +610,16 @@ private struct VPNCommands: Commands {
     let settingsRouter: SettingsRouter
     @Environment(\.openWindow) private var openWindow
 
+    let creationRequests: VPNCreationRequests
+
     var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("New VPN") {
+                creationRequests.request()
+                openWindow(id: "manage")
+            }
+            .keyboardShortcut("n", modifiers: [.command])
+        }
         CommandGroup(replacing: .appInfo) {
             Button("About SimpleVPN") { openWindow(id: "about") }
             // The macOS-conventional home for updates: right under About.

@@ -247,17 +247,6 @@ struct OpenVPNOptionsForm: View {
                     Text("Blocked").tag(OpenVPNOverrides.AddrFamilyPolicy?.some(.block))
                 } label: { SettingLabel(id: "openvpn.unused-families", draft: draft) }
             }
-            SettingRow(id: "openvpn.google-dns-fallback", draft: $draft, context: context) {
-                settingToggle("openvpn.google-dns-fallback", \.googleDnsFallback,
-                              default: OpenVPNOverrides.EngineDefaults.googleDnsFallback)
-            } caveat: {
-                // It reaches the engine, but the engine only reads it under two
-                // conditions at once — so on its own, on a split tunnel or with a
-                // server that pushes DNS, turning it on does nothing at all.
-                if draft.googleDnsFallback == true {
-                    SettingCaveat("Only used when BOTH are true: this VPN carries all your traffic, and the server sends no DNS servers of its own. Otherwise this does nothing.")
-                }
-            }
         }
     }
 
@@ -524,10 +513,6 @@ struct OpenVPNOptionsForm: View {
                 SettingRow(id: "openvpn.ssl-debug", draft: $draft, context: context) {
                     sslDebugPicker
                 }
-                SettingRow(id: "openvpn.synchronous-dns", draft: $draft, context: context) {
-                    settingToggle("openvpn.synchronous-dns", \.synchronousDnsLookup,
-                                  default: OpenVPNOverrides.EngineDefaults.synchronousDnsLookup)
-                }
                 SettingRow(id: "openvpn.no-client-cert", draft: $draft, context: context) {
                     settingToggle("openvpn.no-client-cert", \.disableClientCert,
                                   default: OpenVPNOverrides.EngineDefaults.disableClientCert)
@@ -609,12 +594,7 @@ struct OpenVPNOptionsForm: View {
     private func settingToggle(_ id: String,
                                _ keyPath: WritableKeyPath<OpenVPNOverrides, Bool?>,
                                default engineDefault: Bool) -> some View {
-        Toggle(isOn: Binding(
-            get: { draft[keyPath: keyPath] ?? engineDefault },
-            set: { draft[keyPath: keyPath] = ($0 == engineDefault) ? nil : $0 }
-        )) {
-            SettingLabel(id: id, draft: draft)
-        }
+        OpenVPNSettingToggle(id: id, draft: $draft, keyPath: keyPath, engineDefault: engineDefault)
     }
 
     /// String field binding where an empty (or whitespace) string means nil.
@@ -644,6 +624,55 @@ struct OpenVPNOptionsForm: View {
 
     private func defaultLabel(_ resolved: String?) -> String {
         resolved.map { "Default (\($0))" } ?? "Default"
+    }
+}
+
+// MARK: - DNS
+
+/// DNS overrides live beside the supplied resolvers and DNS custom routing.
+struct OpenVPNDNSSettings: View {
+    @Binding var draft: OpenVPNOverrides
+    let evaluation: ProfileEvaluation?
+    @Environment(PolicyStore.self) private var policyStore
+
+    private var context: SettingsContext {
+        SettingsContext(evaluation: evaluation, draft: draft, policy: policyStore.policy)
+    }
+
+    var body: some View {
+        SettingsSection(group: .dns, draft: draft) {
+            SettingRow(id: "openvpn.google-dns-fallback", draft: $draft, context: context) {
+                OpenVPNSettingToggle(id: "openvpn.google-dns-fallback", draft: $draft,
+                                     keyPath: \.googleDnsFallback, engineDefault: OpenVPNOverrides.EngineDefaults.googleDnsFallback)
+            } caveat: {
+                // It reaches the engine, but the engine only reads it under two
+                // conditions at once — so on its own, on a split tunnel or with a
+                // server that pushes DNS, turning it on does nothing at all.
+                if draft.googleDnsFallback == true {
+                    SettingCaveat("Only used when BOTH are true: this VPN carries all your traffic, and the server sends no DNS servers of its own. Otherwise this does nothing.")
+                }
+            }
+            SettingRow(id: "openvpn.synchronous-dns", draft: $draft, context: context) {
+                OpenVPNSettingToggle(id: "openvpn.synchronous-dns", draft: $draft,
+                                     keyPath: \.synchronousDnsLookup, engineDefault: OpenVPNOverrides.EngineDefaults.synchronousDnsLookup)
+            }
+        }
+    }
+}
+
+private struct OpenVPNSettingToggle: View {
+    let id: String
+    @Binding var draft: OpenVPNOverrides
+    let keyPath: WritableKeyPath<OpenVPNOverrides, Bool?>
+    let engineDefault: Bool
+
+    var body: some View {
+        Toggle(isOn: Binding(
+            get: { draft[keyPath: keyPath] ?? engineDefault },
+            set: { draft[keyPath: keyPath] = ($0 == engineDefault) ? nil : $0 }
+        )) {
+            SettingLabel(id: id, draft: draft)
+        }
     }
 }
 

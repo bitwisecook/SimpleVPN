@@ -45,9 +45,6 @@ enum TailscaleSettings {
         .init(id: "ts.accept-routes", name: "Use Shared Networks",
               summary: "Some machines share the office or home network they sit on. With this on, those networks are reachable through this VPN too.",
               group: .traffic, default: true),
-        .init(id: "ts.accept-dns", name: "Use This Network's DNS",
-              summary: "Lets you reach the other machines by name instead of by address, and uses the DNS servers your network specifies.",
-              group: .traffic, default: true),
         .init(id: "ts.exit-node", name: "Send Internet Traffic Elsewhere",
               summary: "Route everything — not just traffic to your own machines — through another machine on the network, the way a traditional VPN would.",
               group: .traffic, default: false),
@@ -63,6 +60,12 @@ enum TailscaleSettings {
         .init(id: "ts.advertise-routes", name: "Share Networks From This Mac",
               summary: "Offer the networks this Mac can reach (like your home LAN) to the other machines. They still have to be approved on the admin page.",
               group: .traffic, default: ""),
+        // MARK: DNS
+
+        .init(id: "ts.accept-dns", name: "Use This Network's DNS",
+              summary: "Lets you reach the other machines by name instead of by address, and uses the DNS servers your network specifies.",
+              group: .dns, default: true),
+
     ]
 
     static let catalog = EngineSettingCatalog(all)

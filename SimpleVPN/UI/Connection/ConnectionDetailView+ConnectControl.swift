@@ -212,7 +212,7 @@ extension ConnectionDetailView {
                 .fixedSize(horizontal: true, vertical: false)
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
-        .glassEffect(.regular.tint(tint.opacity(0.22)), in: .capsule)
+        .background(tint.opacity(0.1), in: .capsule)
         // One element, saying the state once — not "In progress, Connecting…".
         .accessibilityElement(children: .combine)
         .accessibilityLabel(text)

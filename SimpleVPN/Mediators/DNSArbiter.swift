@@ -104,8 +104,9 @@ nonisolated struct DNSPlan: Sendable, Equatable {
     ///   • each split participant gets its resolvers scoped to ONLY the specific
     ///     domains it won (`matchDomainsNoSearch` so a scoped resolver can't leak its
     ///     suffixes into global search).
-    /// The owner, if it also won specific domains, is still emitted once as the
-    /// catch-all (`[""]` already covers those). PURE + testable.
+    /// The owner is emitted once with BOTH the catch-all and its specific domains.
+    /// Another VPN app can install a higher-priority catch-all; retaining the more
+    /// specific matches lets our domains still select our resolvers. PURE + testable.
     func applyRequests() -> [String: DNSApplyRequest] {
         // Empty requests intentionally suppress DNS on participants that lost all
         // scopes; clearing their override would restore an unwanted catch-all push.
@@ -117,10 +118,11 @@ nonisolated struct DNSPlan: Sendable, Equatable {
                                             matchDomainsNoSearch: true)
         }
         if let owner = catchAllOwner {
+            let domains = perDomain.first { $0.engine == owner }?.domains ?? []
             out[owner] = DNSApplyRequest(servers: systemResolvers,
                                          searchDomains: searchDomainsByEngine[owner] ?? [],
-                                         matchDomains: [""],
-                                         matchDomainsNoSearch: false)
+                                         matchDomains: [""] + domains,
+                                         matchDomainsNoSearch: !domains.isEmpty)
         }
         return out
     }

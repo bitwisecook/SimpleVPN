@@ -1,6 +1,6 @@
 # SimpleVPN — Agent & Contributor Guide
 
-Native **macOS 26** SwiftUI app (Swift 6, strict concurrency) that opens VPN tunnels — a Tunnelblick
+Native **macOS 27.2+** SwiftUI app (Swift 6, strict concurrency) that opens VPN tunnels — a Tunnelblick
 replacement. It started as OpenVPN-only and now covers the 16 kinds in `Shared/VPNKind.swift` across
 six engines (OpenVPN 3, OpenConnect SSL-VPNs, WireGuard, Tailscale/Headscale, SSH, native
 IKEv2/IPsec/L2TP, plus the Proxy Tunnel and SSH Network Tunnel netstack kinds). First target config:
@@ -303,32 +303,24 @@ OMITS it — never an empty section):
 2. **Sign-In** — credentials, keys/certificates used to identify YOU, credential managers,
    verification-code (OTP) config, sign-in browser, remember-password.
 3. **Traffic** — full vs split tunnel ("Send All Traffic"), routes/allowed IPs, exit node,
-   forwards, SOCKS, DNS, local-network access, user-facing MTU.
-4. **Security** — verifying the SERVER and the channel: host-key/certificate checking,
+   forwards, SOCKS, local-network access, user-facing MTU.
+4. **DNS** — resolver servers, search domains, resolver behavior, and DNS custom routing.
+   DNS has its own tab in every VPN editor.
+5. **Security** — verifying the SERVER and the channel: host-key/certificate checking,
    pinned certs, CA files, TLS versions, ciphers, key exchange, PFS, strictness.
-5. **Advanced** — keep-alives, engine internals, spoofing, escape hatches, rarely-touched.
+6. **Advanced** — keep-alives, engine internals, spoofing, escape hatches, rarely-touched.
 
-**Custom Routing stays its own tab everywhere it exists** — enforced, not aspirational.
-It was a tab in EditVPNView and appended `Section`s in the others, which is the same
-surface wearing two shapes. **All seven** hosts now put the canonical groups in one
-`TabView` tab ("Settings") and `CustomRoutingTabView` in a second ("Custom Routing") —
-EditVPNView, WireGuardView, NativeVPNView, SubprocessTunnelView, TailscaleView,
-ProxyTunnelView, SSHNetworkTunnelView. The count is load-bearing: adding an editor means
-adding it to the MDM-lock test that asserts every host disables under lock. The host still
-owns the draft and commits from Save (see `CustomRoutingTabView.swift`'s header — tab
-switches fire its `onDisappear` commit, which is idempotent). Live STATUS blocks
-("This Network", "Right Now") are not config groups: they go AFTER the canonical groups,
-never between them.
+**DNS has its own tab in all seven VPN editors.** Its normal DNS controls and the
+last supplied resolver information appear first; DNS custom routing is one
+`CollapsibleSettingsSection` named "Custom Routing" on that tab. It expands when
+changed or when search reveals one of its settings. The separate Custom Routing
+tab contains routes and proxy rules. Both tabs share the host's single routing
+draft, validation, live-save path, and managed-configuration lock.
 
-The mechanism per surface: the OpenVPN Options form derives its sections from
-`SettingGroup` in `OpenVPNSettingDescriptors.swift` (regroup by editing a descriptor's
-`group` — the form, SettingsSearch and manual all follow); the other editors use
-`Section("<Group>")` headers in canonical order. EditVPNView's tabs follow the same order
-(General · Servers=Connection · Sign-In · Options · Certificates · Configuration · Custom
-Routing). The app-wide Settings window groups by user goal: General · Menu Bar & Icons ·
-Updates · Privacy · Advanced. The manual's nav group headings
-(`Resources/Manual/manual.html`) mirror the five group names — keep them in sync when
-regrouping.
+The OpenVPN editor's Options tab holds its non-DNS engine options; other editors
+keep their non-DNS groups on Settings. `SettingSurface.tab(forSettingID:)` sends
+all DNS descriptors, including `cr.*` DNS controls, to the DNS tab. Stable setting
+ids and manual anchors do not change when controls move.
 
 **One "Advanced" idiom:** `UI/Components/CollapsibleSettingsSection.swift`, group-generic
 and shared. Every editor gets the whole-row hit target, the "n changed" badge and the
@@ -453,3 +445,24 @@ ITS STATE — as quickly as a sighted mouse user. Rules, all binding:
   in either are build-breaking, same as warnings. What is left for a human is
   the short checklist at the end of that doc: speech and announcement timing,
   audio graphs, the rotor, and anything needing a live connection.
+
+## Interface contract
+
+Use the Apple HIG skill from https://github.com/mr8lu/apple-design-hig and current
+Apple primary sources. Target macOS 27.2 or later. Let native windows, split views,
+menus, toolbars and controls provide Liquid Glass. Glass is the functional layer;
+setup instructions, form backgrounds, status labels and other content use standard
+materials or semantic fills. Never layer decorative glass cards inside glass controls.
+
+Assume someone knows nothing about networking and has one VPN. Their normal screen
+shows its name, status, required sign-in and Connect. The sidebar and live inspector
+start closed for one connection. Adding a second VPN reveals the sidebar; advanced
+network tools and settings remain available through menus and progressive disclosure.
+
+The + button opens Manage VPNs with an unsaved New VPN selected. It never presents a
+protocol catalogue. Start with a configuration drop, paste or file picker. Known formats
+use the real import parsers. Unusual instructions can be interpreted on device; extracted
+facts and server-probe results are suggestions to review, never authority to create or
+connect. Probing is an explicit action on the address the person can see. Cancellation
+must leave no saved profile. Never turn free-form notes or model output into executable
+configuration. Keep full keyboard, menu and VoiceOver paths for this workflow.

@@ -181,37 +181,6 @@ struct SSHNetworkTunnelView: View {
                 // rather than describing the mechanism.
                 if draft.allowLocalNetworkAccess { SettingCaveat(Self.localNetworkCaveat) }
 
-                EngineSettingRow(spec: Self.specs["sshnet.dns"], value: dnsText) {
-                    labeledField(Self.specs["sshnet.dns"], $dnsText, prompt: "1.1.1.1, 8.8.8.8",
-                                 problem: dnsProblem)
-                }
-                if let p = dnsProblem { fieldProblem(p) }
-
-                EngineSettingRow(spec: Self.specs["sshnet.search-domains"], value: searchDomainsText) {
-                    labeledField(Self.specs["sshnet.search-domains"], $searchDomainsText,
-                                 prompt: "corp.example, example.com", problem: searchDomainsProblem)
-                }
-                if let p = searchDomainsProblem { fieldProblem(p) }
-
-                EngineSettingRow(spec: Self.specs["sshnet.far-side-dns"],
-                                 value: draft.useFarSideResolver) {
-                    Toggle(isOn: $draft.useFarSideResolver) {
-                        EngineSettingLabel(spec: Self.specs["sshnet.far-side-dns"],
-                                           value: draft.useFarSideResolver)
-                    }
-                }
-                if draft.useFarSideResolver {
-                    EngineSettingRow(spec: Self.specs["sshnet.far-side-resolver"],
-                                     value: draft.farSideResolver) {
-                        labeledField(Self.specs["sshnet.far-side-resolver"], $draft.farSideResolver,
-                                     prompt: SSHNetworkTunnelConfig.defaultFarSideResolver,
-                                     problem: farSideProblem)
-                    }
-                    if let p = farSideProblem { fieldProblem(p) }
-                    if let w = draft.sentinelReachabilityWarning { SettingCaveat(w) }
-                }
-                if let w = draft.dnsWarning { SettingCaveat(w) }
-
                 // ONE MTU control across every engine that has one.
                 EngineSettingRow(spec: Self.specs["sshnet.mtu"], value: draft.mtu) {
                     RequiredMTUField(
@@ -304,11 +273,59 @@ struct SSHNetworkTunnelView: View {
         .disabled(ManagedPolicy.lockConfiguration)
     }
 
+    private var dnsSettings: some View {
+        Section("DNS") {
+            EngineSettingRow(spec: Self.specs["sshnet.dns"], value: dnsText) {
+                labeledField(Self.specs["sshnet.dns"], $dnsText, prompt: "1.1.1.1, 8.8.8.8",
+                             problem: dnsProblem)
+            }
+            if let p = dnsProblem { fieldProblem(p) }
+
+            EngineSettingRow(spec: Self.specs["sshnet.search-domains"], value: searchDomainsText) {
+                labeledField(Self.specs["sshnet.search-domains"], $searchDomainsText,
+                             prompt: "corp.example, example.com", problem: searchDomainsProblem)
+            }
+            if let p = searchDomainsProblem { fieldProblem(p) }
+
+            EngineSettingRow(spec: Self.specs["sshnet.far-side-dns"],
+                             value: draft.useFarSideResolver) {
+                Toggle(isOn: $draft.useFarSideResolver) {
+                    EngineSettingLabel(spec: Self.specs["sshnet.far-side-dns"],
+                                       value: draft.useFarSideResolver)
+                }
+            }
+            if draft.useFarSideResolver {
+                EngineSettingRow(spec: Self.specs["sshnet.far-side-resolver"],
+                                 value: draft.farSideResolver) {
+                    labeledField(Self.specs["sshnet.far-side-resolver"], $draft.farSideResolver,
+                                 prompt: SSHNetworkTunnelConfig.defaultFarSideResolver,
+                                 problem: farSideProblem)
+                }
+                if let p = farSideProblem { fieldProblem(p) }
+                if let w = draft.sentinelReachabilityWarning { SettingCaveat(w) }
+            }
+            if let w = draft.dnsWarning { SettingCaveat(w) }
+
+        }
+    }
+
     var body: some View {
         TabView(selection: $tab) {
             configForm
                 .tag(SettingsTab.settings)
                 .tabItem { Label("Settings", systemImage: "slider.horizontal.3") }
+            Form {
+                dnsSettings
+                VPNDNSServerSection(vpn: vpn, profileID: profileID)
+                CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
+                                    proxyAuthUsername: $crProxyAuthUsername,
+                                    proxyAuthPassword: $crProxyAuthPassword, scope: .dns)
+            }
+            .formStyle(.grouped)
+            .revealsSettings()
+            .disabled(ManagedPolicy.lockConfiguration)
+            .tag(SettingsTab.dns)
+            .tabItem { Label("DNS", systemImage: "network") }
             Form {
                 CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
                                     proxyAuthUsername: $crProxyAuthUsername,

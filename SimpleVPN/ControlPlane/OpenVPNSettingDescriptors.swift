@@ -12,17 +12,18 @@
 import Foundation
 
 /// THE canonical config-surface taxonomy (AGENTS.md "Config surfaces"): every
-/// editor orders its groups Connection → Sign-In → Traffic → Security →
+/// editor orders its groups Connection → Sign-In → Traffic → DNS → Security →
 /// Advanced, omitting groups it has nothing for. Custom Routing stays its own
-/// tab. Do not add per-engine groups — fit new settings into these five.
+/// tab. Do not add per-engine groups — DNS has its own tab; fit new settings into these shared groups.
 enum SettingGroup: String, CaseIterable, Sendable {
-    case connection, signIn, traffic, security, advanced
+    case connection, signIn, traffic, dns, security, advanced
 
     var title: String {
         switch self {
         case .connection: return "Connection"
         case .signIn: return "Sign-In"
         case .traffic: return "Traffic"
+        case .dns: return "DNS"
         case .security: return "Security"
         case .advanced: return "Advanced"
         }
@@ -241,9 +242,15 @@ enum OpenVPNSettings {
             name: "Traffic the VPN doesn't carry",
             summary: "Some VPNs only carry IPv4 or only IPv6. Choose whether the other kind of traffic uses your normal connection (convenient) or is blocked (more private — nothing bypasses the VPN)."),
 
-        SettingDescriptor("openvpn.google-dns-fallback", \.googleDnsFallback, group: .traffic,
+        // MARK: DNS
+
+        SettingDescriptor("openvpn.google-dns-fallback", \.googleDnsFallback, group: .dns,
             name: "Fall back to Google DNS",
             summary: "If the VPN takes over all traffic but doesn't provide DNS servers, use Google's public DNS so browsing still works. Google can then see your DNS lookups."),
+
+        SettingDescriptor("openvpn.synchronous-dns", \.synchronousDnsLookup, group: .dns,
+            name: "Use blocking DNS lookups",
+            summary: "Changes how the server's name is looked up. Can help on unusual network setups."),
 
         // MARK: Security
 
@@ -280,10 +287,6 @@ enum OpenVPNSettings {
         SettingDescriptor("openvpn.ssl-debug", \.sslDebugLevel, group: .advanced,
             name: "TLS diagnostics",
             summary: "Adds TLS handshake detail to the log."),
-
-        SettingDescriptor("openvpn.synchronous-dns", \.synchronousDnsLookup, group: .advanced,
-            name: "Use blocking DNS lookups",
-            summary: "Changes how the server's name is looked up. Can help on unusual network setups."),
 
         SettingDescriptor("openvpn.no-client-cert", \.disableClientCert, group: .advanced,
             name: "Don't send a client certificate",

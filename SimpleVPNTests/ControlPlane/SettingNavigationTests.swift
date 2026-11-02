@@ -297,7 +297,15 @@ struct SettingsRouteTests {
     @Test func routesResolveToTheRightSurfaceAndTab() {
         let cases: [(String, SettingSurface, SettingsTab)] = [
             ("openvpn.compression", .openVPN, .options),
-            ("wg.dns", .wireGuard, .settings),
+            ("wg.dns", .wireGuard, .dns),
+            ("wg.search-domains", .wireGuard, .dns),
+            ("openvpn.google-dns-fallback", .openVPN, .dns),
+            ("openvpn.synchronous-dns", .openVPN, .dns),
+            ("ts.accept-dns", .tailscale, .dns),
+            ("px.dns", .proxyTunnel, .dns),
+            ("sshnet.far-side-resolver", .sshNetworkTunnel, .dns),
+            ("cr.match-domains", .customRouting, .dns),
+            ("cr.dns-rule", .customRouting, .dns),
             ("ts.exit-node", .tailscale, .settings),
             ("px.included", .proxyTunnel, .settings),
             ("native.pfs", .native, .settings),

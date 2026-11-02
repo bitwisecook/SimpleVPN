@@ -12,7 +12,7 @@ nothing about the next. So we translate once, here.
 **This file is THE authority on naming.** The glossary used to live in `AGENTS.md`; it has been
 moved here in full, so there is exactly one place to look and no chance of two lists drifting.
 `AGENTS.md` now points here and keeps what is genuinely its own: the group taxonomy (which of the
-five canonical groups a setting belongs to), the id/anchor contract, and the build rules.
+six canonical groups a setting belongs to), the id/anchor contract, and the build rules.
 
 **Read this before naming anything a user will read** — a label, a summary, an accessibility
 string, a manual heading, an error sentence.

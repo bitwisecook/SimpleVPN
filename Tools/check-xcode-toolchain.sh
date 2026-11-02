@@ -13,10 +13,10 @@ SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
 if ! python3 - "$SDK_VERSION" <<'PYSDK'
 import sys
 version = tuple(int(part) for part in sys.argv[1].split('.')[:2])
-sys.exit(0 if version >= (26, 0) else 1)
+sys.exit(0 if version >= (27, 2) else 1)
 PYSDK
 then
-  echo "FATAL: macOS SDK 26.0 or later is required; selected SDK is $SDK_VERSION." >&2
+  echo "FATAL: macOS SDK 27.2 or later is required; selected SDK is $SDK_VERSION." >&2
   exit 1
 fi
 
@@ -34,4 +34,4 @@ if [ "${1:-}" = --icon-composer ]; then
   fi
 fi
 
-echo "Toolchain ready (macOS SDK $SDK_VERSION; deployment target macOS 26.0)."
+echo "Toolchain ready (macOS SDK $SDK_VERSION; deployment target macOS 27.2)."

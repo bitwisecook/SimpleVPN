@@ -418,20 +418,20 @@ struct MercatorMapView: View {
         VStack(spacing: 0) {
             // Square, content-shaped frames: a borderless button's hit area is the
             // bare glyph, and "minus" is a ~2pt-tall hairline that's nearly impossible
-            // to land on. 22pt gives both a real target.
+            // to land on. 28pt gives both a real target.
             Button { camera.zoom(by: 1.5, anchor: nil, viewSize: nil) } label: {
-                Image(systemName: "plus").frame(width: 22, height: 22).contentShape(Rectangle())
+                Image(systemName: "plus").frame(width: 28, height: 28).contentShape(Rectangle())
             }
             .accessibilityLabel("Zoom in")
             Divider().frame(width: 16)
             Button { camera.zoom(by: 1 / 1.5, anchor: nil, viewSize: nil) } label: {
-                Image(systemName: "minus").frame(width: 22, height: 22).contentShape(Rectangle())
+                Image(systemName: "minus").frame(width: 28, height: 28).contentShape(Rectangle())
             }
             .accessibilityLabel("Zoom out")
         }
         .buttonStyle(.borderless)
         .padding(6)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7))
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
         .padding(8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
     }

@@ -21,7 +21,7 @@ struct MainConnectionEnvironmentTests {
     func mainWindowGetsTheConnectionDependencies() throws {
         let app = try source("SimpleVPN/App/SimpleVPNApp.swift")
         let main = try #require(app.components(separatedBy: "Window(\"About SimpleVPN\"").first)
-        for dependency in [".environment(tunnels)", ".environment(tunnelManager)", ".environment(nativeVPN)"] {
+        for dependency in [".environment(tunnels)", ".environment(tunnelManager)", ".environment(nativeVPN)", ".environment(creationRequests)"] {
             #expect(main.contains(dependency), "main window is missing \(dependency)")
         }
 
@@ -39,6 +39,28 @@ struct MainConnectionEnvironmentTests {
         let route = try #require(function.range(of: "settingsRouter?.go(to: settingID, profileID: profileID)"))
         let window = try #require(function.range(of: "openWindow(id: \"manage\")"))
         #expect(route.lowerBound < window.lowerBound)
+    }
+
+    @Test("the main + requests an unsaved VPN before opening its manager")
+    func mainAddStagesTheDraftBeforeOpeningTheWindow() throws {
+        let view = try source("SimpleVPN/UI/Connection/ConnectionView.swift")
+        let function = try #require(view.components(separatedBy: "private func beginAddingVPN()")
+            .dropFirst().first?.components(separatedBy: "\n    }").first)
+        let request = try #require(function.range(of: "creationRequests.request()"))
+        let window = try #require(function.range(of: "openWindow(id: \"manage\")"))
+        #expect(request.lowerBound < window.lowerBound)
+        let manager = try source("SimpleVPN/UI/Editors/ManageVPNsView.swift")
+        #expect(manager.contains("NewVPNSetupView(draft: draft"))
+        #expect(manager.contains("if creationRequests.take() { beginAddingVPN() }"))
+    }
+
+    @Test("a second VPN reveals navigation without overriding later sidebar choices")
+    func secondVPNRevealsTheSidebarOnce() throws {
+        let view = try source("SimpleVPN/UI/Connection/ConnectionView.swift")
+        #expect(view.contains("if oldTags.count < 2 && newTags.count > 1 { columnVisibility = .all }"))
+        let app = try source("SimpleVPN/App/SimpleVPNApp.swift")
+        #expect(app.contains("Button(\"New VPN\")"))
+        #expect(app.contains(".keyboardShortcut(\"n\", modifiers: [.command])"))
     }
 
     @Test("the Manage VPNs initial seed cannot replace an explicit repair destination")

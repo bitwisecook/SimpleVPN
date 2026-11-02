@@ -66,7 +66,7 @@ jobs:
   # job that executes third-party build scripts.
   engines:
     # Runner choice: `macos-26`, not `macos-15`/`macos-latest`. The app's
-    # deployment target is macOS 26.0 project-wide (project.yml ARCHS/SDK
+    # deployment target is macOS 27.2 project-wide (project.yml ARCHS/SDK
     # settings) and every engine is compiled -mmacosx-version-min=26.0, so a
     # macos-15 image's Xcode (which predates the macOS 26 SDK) cannot build
     # this project at all — picking an older runner to be "safe" would just
@@ -101,7 +101,7 @@ jobs:
             exit 1
           fi
 
-      # The app and helper icons require Icon Composer 2 (Xcode 27+).
+      # The macOS 27.2 SDK or later is required for the app.
       - name: Select Xcode + verify macOS SDK
         id: xc
         run: |
@@ -302,7 +302,7 @@ jobs:
                 <link>https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}</link>
                 <sparkle:version>${{ steps.build.outputs.buildno }}</sparkle:version>
                 <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
-                <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+                <sparkle:minimumSystemVersion>27.2</sparkle:minimumSystemVersion>
                 <enclosure url="${URL}" ${SIG_AND_LEN} type="application/octet-stream"/>
               </item>
             </channel>

@@ -113,7 +113,7 @@ struct ConnectedChip: View {   // was private — internal for the file split
         }
         .foregroundStyle(.green)
         .padding(.horizontal, 12).frame(height: 34)
-        .glassEffect(.regular.tint(.green.opacity(0.22)), in: .capsule)
+        .background(.green.opacity(0.1), in: .capsule)
         .accessibilityLabel("Connected")
     }
 }
@@ -374,7 +374,7 @@ struct ProblemPill: View {   // was private — internal for the file split
                 .foregroundStyle(contrast == .increased ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
         }
         .padding(.horizontal, 10).padding(.vertical, 5)
-        .glassEffect(.regular.tint(dot.color.opacity(0.18)), in: .capsule)
+        .background(dot.color.opacity(0.1), in: .capsule)
         .animation(reduceMotion ? nil : .smooth(duration: 0.4), value: text)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(text)

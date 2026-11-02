@@ -124,8 +124,8 @@ final class DNSRealizer: MediatorRealizer {
             }
         }
         let order = requests.keys.sorted {
-            let a = requests[$0]?.matchDomains == [""]
-            let b = requests[$1]?.matchDomains == [""]
+            let a = requests[$0]?.matchDomains.contains("") == true
+            let b = requests[$1]?.matchDomains.contains("") == true
             return a != b ? !a : $0 < $1
         }
         for engine in order {

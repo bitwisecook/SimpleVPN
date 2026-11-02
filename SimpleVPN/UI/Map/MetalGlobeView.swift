@@ -446,11 +446,9 @@ struct MetalGlobeMapView: View {
                 .frame(width: 26, height: 26)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(.glass)
         .help("Centre the active route and put north up")
         .accessibilityLabel("Centre globe on the active route")
-        .padding(8)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7))
         .padding(8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
     }

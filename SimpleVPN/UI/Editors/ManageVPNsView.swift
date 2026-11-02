@@ -3,7 +3,7 @@
 //
 //  ManageVPNsView.swift
 //  Dedicated VPN-management window: create / import / edit / remove / export.
-//  Uses the standard macOS list-management idiom (+ menu, − / Edit toolbar, context menu).
+//  Uses sidebar + / − controls, a window toolbar, and row context menus.
 //
 
 import SwiftUI
@@ -19,6 +19,11 @@ struct ManageVPNsView: View {
     @Environment(NativeVPNManager.self) private var nativeVPN
     @Environment(SettingsRouter.self) private var settingsRouter: SettingsRouter?
     @Environment(\.dismiss) private var dismissWindow
+    @Environment(VPNCreationRequests.self) private var creationRequests
+    @State private var newVPN: VPNSetupDraft?
+    @State private var setupFile: URL?
+    @State private var creationFailure: UserFacingError?
+    private static let newVPNTag = "new-vpn:"
     @State private var selection: String?
     @FocusState private var sidebarFocused: Bool
     /// The app-wide "Find a Setting…" sheet (⌘⇧F, or the toolbar).
@@ -118,6 +123,7 @@ struct ManageVPNsView: View {
     private var splitViewContent: some View {
         NavigationSplitView {
             sidebarList
+            .safeAreaInset(edge: .bottom, spacing: 0) { sidebarActions }
             // A persisted narrow split must not override the usable row width.
             .frame(minWidth: 240)
             .navigationSplitViewColumnWidth(min: 240, ideal: 260, max: 400)
@@ -134,38 +140,7 @@ struct ManageVPNsView: View {
         }
         .frame(minWidth: 760, minHeight: 560)
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                // A hosted container keeps NSToolbar from extracting the menu's
-                // symbol and rebuilding it as a fixed-height oval menu button.
-                HStack(spacing: 0) {
-                    Menu { addMenu } label: {
-                        Label("Add VPN", systemImage: "plus")
-                            .labelStyle(.iconOnly)
-                            .frame(width: 36, height: 36)
-                    }
-                        .menuStyle(.button)
-                        .menuIndicator(.hidden)
-                        .controlSize(.regular)
-                        .buttonStyle(.plain)
-                        .frame(width: 36, height: 36)
-                        .contentShape(Circle())
-                        .glassEffect(.regular.interactive(), in: Circle())
-                        .help("Add a connection, or import a config file (any supported type)")
-                        .accessibilityLabel("Add VPN")
-                }
-            }
-            .sharedBackgroundVisibility(.hidden)
-            ToolbarItem(placement: .primaryAction) {
-                // Let AppKit size the complete button and its padding. A frame
-                // on the whole control squeezes the symbol against its bezel.
-                Button("Remove the selected VPN", systemImage: "minus") { removeSelection() }
-                    .labelStyle(.iconOnly)
-                    .controlSize(.regular)
-                    .disabled(!canRemoveSelection)
-                    .help("Remove the selected VPN")
-                    .accessibilityLabel("Remove the selected VPN")
-            }
-            // MOVE UP / MOVE DOWN, beside + and − — the System Settings idiom,
+            // MOVE UP / MOVE DOWN — also available in each row’s context menu,
             // and the reason the drag is allowed to exist at all: a drag-only
             // order is unusable without a pointer (Docs/Accessibility.md rule
             // 7). Same words, same refusals and same announcement as the
@@ -265,7 +240,10 @@ struct ManageVPNsView: View {
         .alert("Config Imported", isPresented: ciscoNotePresented) {
             Button("OK", role: .cancel) { ciscoNote = nil }
         } message: { Text(ciscoNote ?? "") }
-        .fileDropTarget { urls in importFiles(urls) }
+        .fileDropTarget { urls in
+            if selection == Self.newVPNTag { setupFile = urls.first }
+            else { importFiles(urls) }
+        }
         // Attached ONCE for the window: the rows and the menu item write into
         // `serverFilesRequest`, this presents the file panel and the sheet. A drop on
         // a row is caught by that row's own target first, so a configuration dropped
@@ -284,6 +262,7 @@ struct ManageVPNsView: View {
         }
         .sheet(isPresented: $showFindSetting) { GlobalSettingsSearchView() }
         .sheet(item: $addingServersFrom, content: addServersSheet)
+        .sheet(item: $creationFailure) { UserFacingErrorSheet(error: $0) }
     }
 
     private var lifecycleContent: some View {
@@ -305,7 +284,11 @@ struct ManageVPNsView: View {
         .alert("No VPN for that setting", isPresented: unroutableAlertPresented) {
             Button("OK", role: .cancel) { settingsRouter?.unroutableMessage = nil }
         } message: { Text(settingsRouter?.unroutableMessage ?? "") }
-        .task { await loadInitialState() }
+        .onChange(of: creationRequests.generation) { consumeCreationRequest() }
+        .task {
+            await loadInitialState()
+            consumeCreationRequest()
+        }
     }
 
     private var wireGuardConsentPresented: Binding<Bool> {
@@ -391,6 +374,11 @@ struct ManageVPNsView: View {
                 // whole arrangement, and both would have to agree by luck.
                 let order = self.order
                 return List(selection: $selection) {
+                    if newVPN != nil {
+                        Label("New VPN", systemImage: "doc.badge.plus")
+                            .tag(Self.newVPNTag)
+                            .accessibilityLabel("New VPN, not yet added")
+                    }
                     // THE HEADINGS THIS WINDOW USED TO HAVE: "VPNs", "Tunnels" and
                     // "Native (IKEv2 / IPsec)" — our three transports, named as though
                     // they were three kinds of thing the user owns. That is where the
@@ -817,59 +805,108 @@ struct ManageVPNsView: View {
 
     // MARK: Discovery → concrete VPN
 
-    /// Turn a discovery candidate into a real config in the right store and select it.
-    private func createFromDiscovery(_ c: DiscoveryCandidate) {
-        switch c.engine {
-        case .ssh:
-            var t = SubprocessTunnelConfig()
-            t.kind = .ssh
-            t.name = "SSH — \(c.host)"
-            t.server = c.host
-            t.port = c.port == 22 ? nil : c.port
-            tunnels.save(t)
-            selection = Self.tunnelTag + t.id
-
-        case .sslVPN:
-            var t = SubprocessTunnelConfig()
-            t.kind = c.kind ?? .ciscoAnyConnect
-            t.name = c.title
-            t.server = "https://\(c.host):\(c.port)"
-            tunnels.save(t)
-            selection = Self.tunnelTag + t.id
-
-        case .ikev2:
-            var n = NativeVPNConfig()
-            n.kind = .ikev2
-            n.name = "IKEv2 — \(c.host)"
-            n.server = c.host
-            n.remoteID = c.host
-            n.ikeEncryption = Self.mapIKEEncryption(c.facts["encryption"])
-            n.ikeIntegrity = Self.mapIKEIntegrity(c.facts["integrity"])
-            n.ikeDHGroup = c.facts["dhGroup"] ?? ""
-            nativeVPN.save(n)
-            selection = Self.nativeTag + n.id
-
-        case .openVPN:
-            let proto = c.facts["proto"] ?? "udp"
-            let stub = """
-            client
-            dev tun
-            proto \(proto)
-            remote \(c.host) \(c.port)
-            nobind
-            persist-tun
-            persist-key
-            remote-cert-tls server
-            # Add the CA your provider gave you (<ca>…</ca>) and your credentials.
-            """
-            Task {
-                if case .imported(let id, _) = await vpn.importProfile(text: stub, suggestedName: "OpenVPN — \(c.host)") {
-                    selection = id
+    private func createFromSetup(_ draft: VPNSetupSubmission) async throws {
+        guard !ManagedPolicy.lockConfiguration else { throw VPNController.configLocked }
+        if let format = draft.format {
+            switch format {
+            case .openVPN, .wireGuard:
+                let outcome = await vpn.importProfile(text: draft.text, suggestedName: draft.name)
+                switch outcome {
+                case .imported(let id, _): selection = id
+                case .duplicate(let id, _): selection = id
+                case .invalid(let reason): throw vpn.err(reason)
                 }
+            case .cisco:
+                guard case .unrecognized = CiscoImport.parse(draft.text, name: draft.name) else {
+                    importCiscoText(draft.text, name: draft.name)
+                    newVPN = nil
+                    setupFile = nil
+                    return
+                }
+                throw vpn.err("This configuration doesn’t contain a server SimpleVPN can use.")
+            case .ssh:
+                guard let host = draft.sshHost else {
+                    throw vpn.err("Choose a server from this SSH configuration first.")
+                }
+                var config = SubprocessTunnelConfig()
+                config.kind = .ssh
+                SSHConfigImport.apply(host, to: &config)
+                config.name = draft.name
+                tunnels.save(config)
+                selection = Self.tunnelTag + config.id
             }
+        } else {
+            // Free-form instructions never become executable configuration. Only
+            // reviewed, typed fields cross into a saved profile.
+            let host = draft.server?.host ?? ""
+            let port = draft.discovery?.port ?? draft.server?.port
+            switch draft.kind {
+            case .openVPN:
+                let transport = draft.discovery?.facts["proto"]?.hasPrefix("tcp") == true ? "tcp-client" : "udp"
+                var config = "client\ndev tun\nproto \(transport)\nnobind\nremote-cert-tls server\n"
+                if !host.isEmpty { config += "remote \(host) \(port ?? 1194)\n" }
+                selection = try await vpn.importProfile(name: draft.name, ovpn: config, server: host)
+            case .wireGuard:
+                var config = WireGuardConfig(name: draft.name)
+                config.usesTeleport = draft.usesTeleport
+                config.persistentKeepalive = 25
+                config.mtu = draft.usesTeleport ? 1280 : 1420
+                if let server = draft.server {
+                    config.endpoint = VPNSetupServer(host: server.host, port: port ?? 51820).address
+                }
+                selection = try await vpn.createWireGuard(from: config)
+            case .tailscale:
+                var config = TailscaleConfig()
+                if let server = draft.server {
+                    config.preset = .headscale
+                    config.controlURL = "https://" + server.address
+                }
+                selection = try await vpn.createTailscale(name: draft.name, configuration: config)
+            case .proxyTunnel:
+                var config = ProxyTunnelConfig()
+                if let server = draft.server { config.upstream = "socks5://" + server.address }
+                selection = try await vpn.createProxyTunnel(name: draft.name, configuration: config)
+            case .sshNetworkTunnel:
+                var config = SSHNetworkTunnelConfig()
+                config.server = host
+                config.port = port ?? 0
+                selection = try await vpn.createSSHNetworkTunnel(name: draft.name, configuration: config)
+            case .ikev2, .ipsec, .l2tp:
+                var config = NativeVPNConfig()
+                config.name = draft.name; config.kind = draft.kind
+                config.server = host; config.remoteID = host
+                if let facts = draft.discovery?.facts {
+                    config.ikeEncryption = Self.mapIKEEncryption(facts["encryption"])
+                    config.ikeIntegrity = Self.mapIKEIntegrity(facts["integrity"])
+                    config.ikeDHGroup = facts["dhGroup"] ?? ""
+                }
+                nativeVPN.save(config)
+                selection = Self.nativeTag + config.id
+            default:
+                var config = SubprocessTunnelConfig()
+                config.name = draft.name; config.kind = draft.kind
+                config.server = draft.kind.isSSLVPN && !host.isEmpty
+                    ? "https://" + VPNSetupServer(host: host, port: port).address : host
+                config.port = port
+                tunnels.save(config)
+                selection = Self.tunnelTag + config.id
+            }
+        }
+        newVPN = nil
+        setupFile = nil
+        AccessibilityAnnouncer.sayNow("Added \(draft.name). You can now enter your sign-in details.")
+    }
 
-        case .wireGuard:
-            break   // not creatable from a probe
+    /// Discovery and the guided setup share creation, defaults and error handling.
+    private func createFromDiscovery(_ candidate: DiscoveryCandidate) {
+        guard let kind = candidate.kind else { return }
+        let submission = VPNSetupSubmission(name: "\(kind.displayName) — \(candidate.host)",
+            kind: kind, text: "", format: nil,
+            server: .init(host: candidate.host, port: candidate.port), sshHost: nil,
+            discovery: candidate, usesTeleport: false)
+        Task {
+            do { try await createFromSetup(submission) }
+            catch { creationFailure = UserFacingError.classify(error) }
         }
     }
 
@@ -890,27 +927,11 @@ struct ManageVPNsView: View {
         }
     }
 
-    private func newTunnel(_ kind: VPNKind) {
-        var t = SubprocessTunnelConfig()
-        t.kind = kind
-        t.name = kind.displayName
-        tunnels.save(t)
-        selection = Self.tunnelTag + t.id
-    }
-
     /// The tunnel config for a tagged selection, if it names one.
     private func tunnelBinding(for selection: String) -> SubprocessTunnelConfig? {
         guard selection.hasPrefix(Self.tunnelTag) else { return nil }
         let id = String(selection.dropFirst(Self.tunnelTag.count))
         return tunnels.tunnels.first { $0.id == id }
-    }
-
-    private func newNative(_ kind: VPNKind) {
-        var c = NativeVPNConfig()
-        c.kind = kind
-        c.name = kind.displayName
-        nativeVPN.save(c)
-        selection = Self.nativeTag + c.id
     }
 
     private func nativeBinding(for selection: String) -> NativeVPNConfig? {
@@ -988,68 +1009,57 @@ struct ManageVPNsView: View {
         }
     }
 
-    private func newWireGuard(teleport: Bool = false) async {
-        var c = WireGuardConfig()
-        // Sensible defaults for a hand-built tunnel (imports keep their own values):
-        // a 25s keepalive so the peer stays reachable through NAT, and an explicit
-        // 1420 MTU that fits inside the common 1500 path once WireGuard's own
-        // overhead is subtracted — heading off the MTU-blackhole stall.
-        c.persistentKeepalive = 25
-        c.mtu = teleport ? 1280 : 1420
-        c.usesTeleport = teleport
-        if teleport { c.name = "UniFi Teleport" }
-        do { selection = try await vpn.createWireGuard(from: c) }
-        catch { vpn.lastError = error.localizedDescription }
+    private var sidebarActions: some View {
+        SidebarActionBar {
+            AddVPNButton { beginAddingVPN() }
+            Button("Remove the selected VPN", systemImage: "minus") { removeSelection() }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+                .frame(width: 32, height: 32)
+                .contentShape(Rectangle())
+                .disabled(!canRemoveSelection)
+                .help("Remove the selected VPN")
+                .accessibilityLabel("Remove the selected VPN")
+                .accessibilityValue(canRemoveSelection ? "" : "Select a VPN to remove")
+            Spacer()
+            Menu("More VPN Actions", systemImage: "ellipsis") {
+                Button("Import Configuration…") { showImporter = true }
+                Button("Discover from Address…") { showDiscover = true }
+                Divider()
+                Menu(ProviderPickerCopy.sectionTitle) { providerMenu }
+                Button(ConfigurationDropCopy.menuTitle) {
+                    if let p = selectedProfileForServerFiles {
+                        serverFilesRequest = ServerConfigurationRequest(profile: p)
+                    }
+                }
+                .disabled(selectedProfileForServerFiles == nil)
+                .help(serverFilesMenuReason ?? "Add servers to the selected VPN")
+                Divider()
+                Button("Create a Composition…") { editingComposition = VPNComposition() }
+                    .disabled(vpn.profiles.count < 2)
+                    .help("A composition combines two or more VPNs.")
+            }
+            .labelStyle(.iconOnly)
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 32, height: 32)
+            .accessibilityLabel("More VPN Actions")
+        }
     }
 
-    /// The "+" menu. Extracted from the toolbar closure: SwiftUI's result
-    /// builders type-check the whole thing as one expression, and this list
-    /// alone is past what the compiler will do in reasonable time inline.
-    @ViewBuilder private var addMenu: some View {
-        Button("OpenVPN") { Task { await newEmpty() } }
-        Button("WireGuard") { Task { await newWireGuard() } }
-        Button("UniFi Teleport") { Task { await newWireGuard(teleport: true) } }
-        Button("Tailscale / Headscale") { Task { await newTailscale() } }
-        Button("Proxy Tunnel (SOCKS5 / HTTP)") { Task { await newProxyTunnel() } }
-        Button("IKEv2") { newNative(.ikev2) }
-        Button("IPsec (IKEv1)") { newNative(.ipsec) }
-        Button("L2TP / IPsec") { newNative(.l2tp) }
-        Button("SSH (SOCKS, forwards, tunnel)") { newTunnel(.ssh) }
-        Button("SSH Network Tunnel (routes over SSH)") { Task { await newSSHNetworkTunnel() } }
-        Button("FortiGate SSL VPN") { newTunnel(.fortinet) }
-        Button("F5 BIG-IP APM") { newTunnel(.f5apm) }
-        Button("Cisco AnyConnect") { newTunnel(.ciscoAnyConnect) }
-        Button("Palo Alto GlobalProtect") { newTunnel(.globalProtect) }
-        Button("Juniper Network Connect") { newTunnel(.juniper) }
-        Button("Pulse Connect Secure") { newTunnel(.pulse) }
-        Button("Array Networks SSL VPN") { newTunnel(.arrayNetworks) }
-        Button("Composition (multiple VPNs)…") { editingComposition = VPNComposition() }
-            .disabled(vpn.profiles.count < 2)
-        Divider()
-        // THE SECOND ENTRY POINT (the first is the no-VPNs page). A submenu rather
-        // than four more top-level items: the `+` menu already lists sixteen kinds,
-        // and four company names among them would read as four more kinds of VPN,
-        // which is exactly the wrong idea — these add SERVERS to a VPN that already
-        // exists (ONTOLOGY.md §7).
-        //
-        // Every row is enabled or disabled for a stated reason, never hidden: with
-        // no VPN selected it says so, and Proton's row says its own.
-        Menu(ProviderPickerCopy.sectionTitle) { providerMenu }
-        // The OTHER source of servers for a VPN that already exists, and the one the
-        // drag makes discoverable but must not own. It sits here rather than under
-        // Import… because it adds to a VPN instead of making one — the same
-        // distinction the provider submenu above draws.
-        Button(ConfigurationDropCopy.menuTitle) {
-            if let p = selectedProfileForServerFiles {
-                serverFilesRequest = ServerConfigurationRequest(profile: p)
-            }
-        }
-        .disabled(selectedProfileForServerFiles == nil)
-        .help(serverFilesMenuReason ?? ConfigurationDropCopy.dropLabel(
-            selectedProfileForServerFiles?.name ?? ""))
-        Divider()
-        Button("Import…") { showImporter = true }
-        Button("Discover from Address…") { showDiscover = true }
+    private func beginAddingVPN() {
+        if newVPN == nil { newVPN = VPNSetupDraft() }
+        selection = Self.newVPNTag
+    }
+
+    private func consumeCreationRequest() {
+        if creationRequests.take() { beginAddingVPN() }
+    }
+
+    private func cancelNewVPN() {
+        newVPN = nil
+        setupFile = nil
+        selection = order.allTags.first
     }
 
     /// The selected VPN, when it is one servers can be added to from a file.
@@ -1095,7 +1105,10 @@ struct ManageVPNsView: View {
     /// profile shares the transport with OpenVPN but nothing in the OpenVPN
     /// editor (raw .ovpn, certificates, engine overrides) applies to it.
     @ViewBuilder private var detailPane: some View {
-        if let id = selection, let t = tunnelBinding(for: id) {
+        if selection == Self.newVPNTag, let draft = newVPN {
+            NewVPNSetupView(draft: draft, incomingFile: $setupFile, onCreate: createFromSetup, onCancel: cancelNewVPN)
+                .id(draft.id)
+        } else if let id = selection, let t = tunnelBinding(for: id) {
             SubprocessTunnelView(vpn: vpn, store: tunnels, manager: tunnelManager, draft: t).id(id)
         } else if let id = selection, let c = nativeBinding(for: id) {
             NativeVPNView(vpn: vpn, manager: nativeVPN, draft: c).id(id)
@@ -1117,26 +1130,6 @@ struct ManageVPNsView: View {
             ContentUnavailableView("No VPN Selected", systemImage: "network",
                                    description: Text("Select a VPN, or use + to import or create one."))
         }
-    }
-
-    private func newSSHNetworkTunnel() async {
-        do { selection = try await vpn.createSSHNetworkTunnel() }
-        catch { vpn.lastError = error.localizedDescription }
-    }
-
-    private func newTailscale() async {
-        do { selection = try await vpn.createTailscale() }
-        catch { vpn.lastError = error.localizedDescription }
-    }
-
-    private func newProxyTunnel() async {
-        do { selection = try await vpn.createProxyTunnel() }
-        catch { vpn.lastError = error.localizedDescription }
-    }
-
-    private func newEmpty() async {
-        do { let id = try await vpn.importProfile(name: "New VPN", ovpn: "", server: ""); selection = id }
-        catch { vpn.lastError = error.localizedDescription }
     }
 
     /// Export the selected VPN's configuration — WITHOUT its private key.

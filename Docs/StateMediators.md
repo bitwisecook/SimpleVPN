@@ -94,12 +94,21 @@ sourced from reality). Three mediators replaced that with one authority per reso
 - **Applier (REAL, sole writer):** per-tunnel `NEDNSSettings` + `matchDomains`, pushed
   live over the `dns:apply:`/`dns:clear` IPC (`Shared/DNSApply.swift`). Because DNS
   arbitrates per-domain, the applier is PER PARTICIPANT: the catch-all owner gets the
-  default resolvers scoped to `[""]`; each split participant gets its resolvers scoped
-  to only the domains it won. The in-process bridges (openvpn3, OpenConnect) store the
+  default resolvers scoped to `[""]` **plus its explicit domain matches**; each split
+  participant gets its resolvers scoped to only the domains it won. The in-process
+  bridges (openvpn3, OpenConnect) store the
   override and re-apply their captured tun settings live (no reconnect) — the DNS
   parallel of the proxy applier. RECONNECT is now only the FALLBACK for engines with no
   live DNS applier (proxy-tunnel / Tailscale re-establish DNS from their config; native
   kinds are OS-owned). (Tier-3: our DNS listeners + resolver chains.)
+  The owner's specific matches must survive even though its catch-all also covers
+  those names: another VPN app, such as standalone Tailscale, can install a
+  higher-priority catch-all. A saved Custom Routing match domain must still select
+  this tunnel's DNS. These matches are for resolver selection, not additions to the
+  search list. `DNSMediatorTests` guards both the apply payload and drift detection
+  when the catch-all remains present but an explicit match disappears. Domains must
+  be supplied by the VPN or saved in Custom Routing; they are not inferred from the
+  VPN server's hostname.
 - **Monitor:** **`SCDynamicStore`** notifications on `State:/Network/Global/DNS` and
   per-service DNS keys — detect external resolver changes and re-assert.
 - **Publisher:** effective resolver map to the UI (which domain resolves where).

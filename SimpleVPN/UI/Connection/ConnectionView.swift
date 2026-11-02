@@ -31,6 +31,7 @@ struct ConnectionView: View {
     @Bindable var ext: ExtensionController
     @Bindable var labels: LabelStore
     @Environment(\.openWindow) private var openWindow
+    @Environment(VPNCreationRequests.self) private var creationRequests
     @Environment(ReachabilityMonitor.self) private var reach: ReachabilityMonitor?
     @Environment(LinkStateMonitor.self) private var link: LinkStateMonitor?
     @Environment(ExtensionDoctor.self) private var extDoctor: ExtensionDoctor?
@@ -339,6 +340,11 @@ struct ConnectionView: View {
         Button("Settings…") { openSettings(for: row) }
     }
 
+    private func beginAddingVPN() {
+        creationRequests.request()
+        openWindow(id: "manage")
+    }
+
     /// Every non-NE editor has a connection/address row. Naming it gives the
     /// Manage VPNs router both the correct profile AND an anchor it can reveal,
     /// so a context-menu Settings action does not land on whichever VPN happened
@@ -599,7 +605,7 @@ struct ConnectionView: View {
                         .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
                 } else if hasNothingConfigured {
                     EmptyVPNsPrompt(importAction: { showImporter = true },
-                                    manageAction: { openWindow(id: "manage") },
+                                    manageAction: { beginAddingVPN() },
                                     dropAction: { vpn.handleImport(of: $0) })
                         .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
                 } else {
@@ -649,6 +655,12 @@ struct ConnectionView: View {
                 // no rows draws nothing (see `connectSection`).
                 connectSection(.wholeMac)
                 connectSection(.localPort)
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                SidebarActionBar {
+                    AddVPNButton { beginAddingVPN() }
+                    Spacer()
+                }
             }
             // This is navigation, not an icon rail. Keep enough width for an ordinary
             // VPN name plus its status and trailing action without replacing the name
@@ -712,11 +724,14 @@ struct ConnectionView: View {
             // The complete tagged listing owns both answers.
             selectSoleConnectionIfNeeded()
         }
-        .onChange(of: connectionTags, initial: true) { _, _ in
+        .onChange(of: connectionTags, initial: true) { oldTags, newTags in
             // A tunnel can be added while this window is already open. Do not
             // override a real selection, but make the first and only connection
             // usable as soon as it exists.
             selectSoleConnectionIfNeeded()
+            // A second VPN is the point where navigation becomes useful. Reveal
+            // it once, while preserving later manual sidebar choices.
+            if oldTags.count < 2 && newTags.count > 1 { columnVisibility = .all }
         }
         // What each non-profile connection still needs, gathered OUT of `body` (it
         // costs a keychain query per row) and refreshed at every moment the answer
@@ -888,14 +903,14 @@ private struct EmptyVPNsPrompt: View {
     private var landing: some View {
         VStack(spacing: 16) {
             ContentUnavailableView {
-                Label("No VPNs Configured", systemImage: "network.slash")
+                Label("Set Up Your VPN", systemImage: "lock.shield")
             } description: {
                 // No format lecture up front: the import pipeline detects the
                 // type itself (ConfigDetector — OpenVPN / WireGuard / Cisco).
-                Text("Drop a configuration file here, import one, or add a VPN by hand. The type is worked out automatically.")
+                Text("Use the configuration file or setup instructions from your workplace or VPN service. SimpleVPN will help with the details.")
             } actions: {
-                Button("Import Configuration…", action: importAction).buttonStyle(.glassProminent)
-                Button("Add VPN…", action: manageAction).buttonStyle(.glass)
+                Button("Add VPN…", action: manageAction).buttonStyle(.glassProminent)
+                Button("Import Configuration…", action: importAction).buttonStyle(.glass)
             }
 
             // The whole window accepts drops. This is the same visible, interactive
@@ -907,12 +922,16 @@ private struct EmptyVPNsPrompt: View {
             // Four concise choices. Every explanation — including Proton's import-
             // only path — belongs on the provider's second page, so none of these
             // reads as an inert text block and none is disabled.
-            ProviderPickerSection(title: ProviderPickerCopy.firstRunSectionTitle,
-                                  detail: ProviderPickerCopy.firstRunDetail,
-                                  showsDetails: false,
-                                  allowsBlockedSelection: true,
-                                  action: { providerPath.append($0.id) })
-                .frame(maxWidth: 460)
+            DisclosureGroup("I use a VPN service") {
+                ProviderPickerSection(title: ProviderPickerCopy.firstRunSectionTitle,
+                                      detail: ProviderPickerCopy.firstRunDetail,
+                                      showsDetails: false,
+                                      allowsBlockedSelection: true,
+                                      action: { providerPath.append($0.id) })
+                    .padding(.top, 12)
+            }
+            .frame(maxWidth: 460)
+
         }
     }
 }

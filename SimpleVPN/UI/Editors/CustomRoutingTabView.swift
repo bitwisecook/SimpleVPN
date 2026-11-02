@@ -4,7 +4,7 @@
 //  CustomRoutingTabView.swift
 //  The "Custom Routing" tab/section embedded in every VPN kind's editor — the SwiftUI
 //  surface over Mediators/CustomRouting.swift (the model is done; this only binds to
-//  it). Three sub-sections (Routes / DNS / Proxy), each an ordered rule list the user
+//  it). Routes and proxy rules on Custom Routing, DNS rules on the DNS tab, each an ordered rule list the user
 //  builds against the profile's last-seen PUSHED reference (works offline), with
 //  field-level inline validation and a small set of status icons driven entirely by
 //  the model (`ruleStatus`, `CustomRoutingValidator`, `CustomRoutingDiff`).
@@ -269,6 +269,7 @@ private struct IssueCaption: View {
 // MARK: - The view
 
 struct CustomRoutingTabView: View {
+    enum Scope { case routesAndProxy, dns }
     let vpn: VPNController
     let profileID: String
     @Binding var profile: CustomRoutingProfile
@@ -278,6 +279,7 @@ struct CustomRoutingTabView: View {
     /// profiles resolve through the controller; hosts living outside it (the native
     /// NEVPNManager kinds) pass it explicitly.
     var kind: VPNKind? = nil
+    var scope: Scope = .routesAndProxy
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The host editor's search model — which kind's editor this tab is inside,
@@ -308,10 +310,13 @@ struct CustomRoutingTabView: View {
 
     var body: some View {
         Group {
-            routesSection
-            dnsSection
-            proxySection
-            crossLinksSection
+            if scope == .dns {
+                dnsSection
+            } else {
+                routesSection
+                proxySection
+                crossLinksSection
+            }
         }
         .onChange(of: focusedRuleID) { _, new in
             guard new != nil else { return }
@@ -897,7 +902,9 @@ struct CustomRoutingTabView: View {
     // MARK: DNS
 
     @ViewBuilder private var dnsSection: some View {
-        Section("Custom Routing — DNS") {
+        CollapsibleSettingsSection(title: "Custom Routing",
+                                   holding: .settings(Set(CustomRoutingSettings.specs(in: .dns).map(\.id))),
+                                   changedCount: dnsChangedCount) {
             EngineSettingRow(spec: Self.specs["cr.dns-default"],
                              value: profile.dns.defaultDisposition) {
                 SettingPicker(selection: $profile.dns.defaultDisposition) {
@@ -972,11 +979,17 @@ struct CustomRoutingTabView: View {
                                 ? "\u{201C}Ignore all pushed match domains\u{201D} is on, which already drops every one."
                                 : nil)
 
-            if !pushed.dns.resolvers.isEmpty || !pushed.dns.searchDomains.isEmpty || !pushed.dns.matchDomains.isEmpty {
-                Divider()
-                pushedDNSReference
-            }
         }
+    }
+
+    private var dnsChangedCount: Int {
+        [profile.dns.defaultDisposition != .accept,
+         !profile.dns.resolverRules.isEmpty,
+         profile.dns.ignorePushedSearchDomains,
+         profile.dns.ignorePushedMatchDomains,
+         !profile.dns.addSearchDomains.isEmpty || !profile.dns.ignoreSearchDomains.isEmpty,
+         !profile.dns.addMatchDomains.isEmpty || !profile.dns.ignoreMatchDomains.isEmpty]
+            .filter { $0 }.count
     }
 
     /// The DNS list's counterpart to `addRouteRuleTitle`.
@@ -1099,6 +1112,7 @@ struct CustomRoutingTabView: View {
                     // A dead field says why, in the tooltip AND to VoiceOver.
                     .disabled(disabledReason != nil)
                     .help(disabledReason ?? title)
+                    .accessibilityLabel(title)
                     .accessibilityValue(disabledReason.map { "unavailable — \($0)" }
                         ?? (bad.isEmpty
                             ? binding.wrappedValue.joined(separator: ", ")
@@ -1116,22 +1130,6 @@ struct CustomRoutingTabView: View {
         }
     }
 
-    @ViewBuilder private var pushedDNSReference: some View {
-        Text("Pushed by this VPN").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            .accessibilityAddTraits(.isHeader)
-        if !pushed.dns.resolvers.isEmpty {
-            Text("Resolvers: \(pushed.dns.resolvers.joined(separator: ", "))")
-                .font(.caption.monospaced()).foregroundStyle(.secondary)
-        }
-        if !pushed.dns.searchDomains.isEmpty {
-            Text("Search domains: \(pushed.dns.searchDomains.joined(separator: ", "))")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-        if !pushed.dns.matchDomains.isEmpty {
-            Text("Match domains: \(pushed.dns.matchDomains.joined(separator: ", "))")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-    }
 
     // MARK: Proxy
 

@@ -105,9 +105,13 @@ nonisolated enum WireGuardEndpointSelection {
 
     /// `host:port`, with an IPv6 literal bracketed — the grammar
     /// `WireGuardConfig.endpointProblem` and wireguard-go's own resolver both take.
-    static func endpointString(host: String, port: Int) -> String {
+    /// Setup recognition reuses this rendering with no port until one is known.
+    /// Keep IPv6 bracketing here until the shared Endpoint type replaces it
+    /// (Docs/Drift.md §5), rather than adding another implementation in import.
+    static func endpointString(host: String, port: Int?) -> String {
         let h = host.trimmingCharacters(in: .whitespaces)
-        return h.contains(":") && !h.hasPrefix("[") ? "[\(h)]:\(port)" : "\(h):\(port)"
+        let displayHost = h.contains(":") && !h.hasPrefix("[") ? "[\(h)]" : h
+        return port.map { "\(displayHost):\($0)" } ?? displayHost
     }
 
     /// The port the configuration is on now, so choosing a different relay from the

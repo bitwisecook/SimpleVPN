@@ -48,13 +48,14 @@ struct SSHSettingDescriptorTests {
     }
 
     /// Groups follow the canonical taxonomy order (Connection → Sign-In →
-    /// Traffic → Security → Advanced), with nothing left over or empty.
+    /// Traffic → DNS → Security → Advanced). A port-forward connection has no DNS.
     @Test func groupsAreCanonicalAndOrdered() {
         let order = SettingGroup.allCases
         let indices = SSHSettings.all.compactMap { s in s.group.flatMap(order.firstIndex(of:)) }
         #expect(indices.count == SSHSettings.all.count)
         #expect(indices == indices.sorted(), "catalog order must follow the canonical group order")
-        for group in order {
+        #expect(SSHSettings.specs(in: .dns).isEmpty)
+        for group in order where group != .dns {
             #expect(!SSHSettings.specs(in: group).isEmpty, "group \(group.title) has no SSH options")
         }
     }

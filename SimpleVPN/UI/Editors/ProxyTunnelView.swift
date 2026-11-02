@@ -168,38 +168,6 @@ struct ProxyTunnelView: View {
                 // ON means traffic leaves the tunnel, so the row says what leaves
                 // rather than describing the mechanism.
                 if draft.allowLocalNetworkAccess { SettingCaveat(Self.localNetworkCaveat) }
-                EngineSettingRow(spec: Self.specs["px.dns"], value: dnsText) {
-                    // A bad resolver is the FIELD's problem — NE just drops it,
-                    // and DNS stops with nothing said anywhere.
-                    labeledField(Self.specs["px.dns"], $dnsText, prompt: "1.1.1.1, 8.8.8.8",
-                                 problem: dnsProblem)
-                }
-                if let p = dnsProblem {
-                    Label(p, systemImage: "exclamationmark.triangle.fill")
-                        .font(.callout).foregroundStyle(.orange)
-                        .accessibilityLabel("Problem: \(p)")
-                }
-                // A resolver an exclusion carves out still gets used — just
-                // directly, outside the proxy. The one DNS hazard this tunnel
-                // really has (a resolver outside the included routes is already
-                // handled: ProxyTunnelNetworkSettings routes each one in).
-                if let w = dnsExcludedWarning {
-                    SettingCaveat(w)
-                }
-                EngineSettingRow(spec: Self.specs["px.search-domains"], value: searchDomainsText) {
-                    labeledField(Self.specs["px.search-domains"], $searchDomainsText,
-                                 prompt: "corp.example, example.com",
-                                 problem: searchDomainsProblem)
-                }
-                if let p = searchDomainsProblem {
-                    Label(p, systemImage: "exclamationmark.triangle.fill")
-                        .font(.callout).foregroundStyle(.orange)
-                        .accessibilityLabel("Problem: \(p)")
-                }
-                // ONE MTU control across every engine that has one (see
-                // UI/Components/MTUField.swift). This was a `Stepper(step: 4)`
-                // over a 925-wide range — thirty clicks from 1500 to 1380, with
-                // no way to type the number at all.
                 EngineSettingRow(spec: Self.specs["px.mtu"], value: draft.mtu) {
                     RequiredMTUField(
                         label: { EngineSettingLabel(spec: Self.specs["px.mtu"], value: draft.mtu) },
@@ -222,6 +190,43 @@ struct ProxyTunnelView: View {
         .disabled(ManagedPolicy.lockConfiguration)
     }
 
+    private var dnsSettings: some View {
+        Section("DNS") {
+            EngineSettingRow(spec: Self.specs["px.dns"], value: dnsText) {
+                // A bad resolver is the FIELD's problem — NE just drops it,
+                // and DNS stops with nothing said anywhere.
+                labeledField(Self.specs["px.dns"], $dnsText, prompt: "1.1.1.1, 8.8.8.8",
+                             problem: dnsProblem)
+            }
+            if let p = dnsProblem {
+                Label(p, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout).foregroundStyle(.orange)
+                    .accessibilityLabel("Problem: \(p)")
+            }
+            // A resolver an exclusion carves out still gets used — just
+            // directly, outside the proxy. The one DNS hazard this tunnel
+            // really has (a resolver outside the included routes is already
+            // handled: ProxyTunnelNetworkSettings routes each one in).
+            if let w = dnsExcludedWarning {
+                SettingCaveat(w)
+            }
+            EngineSettingRow(spec: Self.specs["px.search-domains"], value: searchDomainsText) {
+                labeledField(Self.specs["px.search-domains"], $searchDomainsText,
+                             prompt: "corp.example, example.com",
+                             problem: searchDomainsProblem)
+            }
+            if let p = searchDomainsProblem {
+                Label(p, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout).foregroundStyle(.orange)
+                    .accessibilityLabel("Problem: \(p)")
+            }
+            // ONE MTU control across every engine that has one (see
+            // UI/Components/MTUField.swift). This was a `Stepper(step: 4)`
+            // over a 925-wide range — thirty clicks from 1500 to 1380, with
+            // no way to type the number at all.
+        }
+    }
+
     var body: some View {
         // Custom Routing is its own TAB in every editor (AGENTS.md "Config
         // surfaces") — appending it as sections put a second, differently-shaped
@@ -230,6 +235,18 @@ struct ProxyTunnelView: View {
             configForm
                 .tag(SettingsTab.settings)
                 .tabItem { Label("Settings", systemImage: "slider.horizontal.3") }
+            Form {
+                dnsSettings
+                VPNDNSServerSection(vpn: vpn, profileID: profileID)
+                CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
+                                    proxyAuthUsername: $crProxyAuthUsername,
+                                    proxyAuthPassword: $crProxyAuthPassword, scope: .dns)
+            }
+            .formStyle(.grouped)
+            .revealsSettings()
+            .disabled(ManagedPolicy.lockConfiguration)
+            .tag(SettingsTab.dns)
+            .tabItem { Label("DNS", systemImage: "network") }
             Form {
                 CustomRoutingTabView(vpn: vpn, profileID: profileID, profile: $customRouting,
                                     proxyAuthUsername: $crProxyAuthUsername,

@@ -195,7 +195,9 @@
   <h2>Traffic</h2>
   <a href="#openvpn-local-lan">Local Network Access</a>
   <a href="#openvpn-unused-families">Traffic the VPN Doesn't Carry</a>
+  <h2>DNS</h2>
   <a href="#openvpn-google-dns-fallback">Google DNS Fallback</a>
+  <a href="#openvpn-synchronous-dns">Blocking DNS Lookups</a>
 
   <h2>Security</h2>
   <a href="#openvpn-tls-version-min">Minimum TLS Version</a>
@@ -208,7 +210,6 @@
 
   <h2>Advanced</h2>
   <a href="#openvpn-ssl-debug">TLS Diagnostics</a>
-  <a href="#openvpn-synchronous-dns">Blocking DNS Lookups</a>
   <a href="#openvpn-no-client-cert">No Client Certificate</a>
   <a href="#openvpn-key-direction">Key Direction</a>
 
@@ -1522,6 +1523,7 @@ who wants them.</p>
 
 <h2 id="cr-what-is-it">What This Is</h2>
 <p class="default">Every VPN kind has this tab. It changes nothing until you add a rule.</p>
+<p>Every VPN editor has a <strong>DNS</strong> tab. It holds the DNS controls and the last DNS settings supplied by the VPN. Expand <strong>Custom Routing</strong> on that tab to change resolver rules, search domains, or match domains. A changed group opens automatically; searching for a control opens it too. Route and proxy rules stay on the separate <strong>Custom Routing</strong> tab.</p>
 <p>When a VPN connects it <em>pushes</em> settings at your Mac: which networks it carries, which DNS servers to use, sometimes a proxy. Custom Routing is where you edit that push — accept it, ignore parts of it, replace a value, or add one the VPN never offered — per VPN.</p>
 <p>Every rule is written against what this VPN last pushed, which SimpleVPN remembers, so the tab works the same whether or not the VPN is connected right now. Each section shows a &ldquo;Pushed by this VPN&rdquo; reference list for exactly that reason. Rules that can&rsquo;t match anything, or can&rsquo;t change anything, are marked as such rather than left looking effective.</p>
 <div class="warn">Custom Routing overrides what your VPN administrator configured. Ignoring a pushed route or resolver can take away access you need — or send traffic outside the tunnel that was meant to stay inside it.</div>

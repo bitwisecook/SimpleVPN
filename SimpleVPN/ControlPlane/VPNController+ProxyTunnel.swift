@@ -37,10 +37,10 @@ extension VPNController {
     /// Create a new Proxy Tunnel. Starts as a SOCKS5 preset with a full-tunnel
     /// default route — the common case — which the editor then refines.
     @discardableResult
-    func createProxyTunnel(name: String = "Proxy Tunnel") async throws -> String {
+    func createProxyTunnel(name: String = "Proxy Tunnel", configuration: ProxyTunnelConfig? = nil) async throws -> String {
         guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
         let id = UUID().uuidString
-        let config = ProxyTunnelConfig()
+        let config = configuration?.normalized() ?? ProxyTunnelConfig()
         let mgr = NETunnelProviderManager()
         let proto = NETunnelProviderProtocol()
         proto.providerBundleIdentifier = Self.providerBundleID

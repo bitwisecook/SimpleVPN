@@ -16,7 +16,7 @@
 //  Grouping note: Custom Routing is its own TAB, not one of the canonical five
 //  groups (AGENTS.md "Config surfaces"), but every spec still declares the group
 //  its subject belongs to so the taxonomy stays answerable for search, the CLI and
-//  MDM: routes, resolvers, domains and the proxy itself are Traffic decisions; the
+//  MDM: routes and the proxy itself are Traffic decisions; resolvers and domains are DNS; the
 //  proxy's username and password are Sign-In.
 //
 
@@ -37,31 +37,31 @@ enum CustomRoutingSettings {
               summary: "An ordered list that edits the networks this VPN offers: accept one, ignore one, replace one with another, or add a network the VPN never offered.",
               group: .traffic, default: 0),
 
-        // MARK: Traffic — DNS
+        // MARK: DNS
 
         .init(id: "cr.dns-default", name: "Unmatched Resolvers",
               summary: "What happens to the DNS servers this VPN offers that no rule below mentions: Accept keeps them, Ignore drops them so only what a rule accepts is used.",
-              group: .traffic, default: UnmatchedDisposition.accept),
+              group: .dns, default: UnmatchedDisposition.accept),
 
         .init(id: "cr.dns-rule", name: "Resolver Rules",
               summary: "An ordered list that edits the DNS servers this VPN offers: accept one, ignore one, replace one with another, or add a server of your own.",
-              group: .traffic, default: 0),
+              group: .dns, default: 0),
 
         .init(id: "cr.ignore-pushed-search", name: "Ignore All Pushed Search Domains",
               summary: "Drop every search domain this VPN offers. Search domains let you type a short name (\u{201C}wiki\u{201D}) and have it completed to a full one.",
-              group: .traffic, default: false),
+              group: .dns, default: false),
 
         .init(id: "cr.ignore-pushed-match", name: "Ignore All Pushed Match Domains",
               summary: "Drop every match domain this VPN offers. Match domains are the name suffixes whose lookups go to this VPN's DNS servers instead of your Mac's.",
-              group: .traffic, default: false),
+              group: .dns, default: false),
 
         .init(id: "cr.add-search-domains", name: "Search Domains",
               summary: "Search domains to add to whatever this VPN offers, and individual ones to leave out. Comma-separated.",
-              group: .traffic, default: [String]()),
+              group: .dns, default: [String]()),
 
         .init(id: "cr.match-domains", name: "Match Domains",
               summary: "Name suffixes to send to this VPN's DNS servers on top of whatever it offers, and individual ones to leave out. Comma-separated.",
-              group: .traffic, default: [String]()),
+              group: .dns, default: [String]()),
 
         // MARK: Traffic — proxy
 
