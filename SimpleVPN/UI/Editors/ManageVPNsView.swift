@@ -894,7 +894,9 @@ struct ManageVPNsView: View {
         }
         newVPN = nil
         setupFile = nil
-        AccessibilityAnnouncer.sayNow("Added \(draft.name). You can now enter your sign-in details.")
+        AccessibilityAnnouncer.sayNow(draft.usesTeleport
+            ? "Added \(draft.name). You can now pair it with a Teleport invitation."
+            : "Added \(draft.name). You can now enter your sign-in details.")
     }
 
     /// Discovery and the guided setup share creation, defaults and error handling.

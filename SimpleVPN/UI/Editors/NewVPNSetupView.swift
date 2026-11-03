@@ -26,6 +26,11 @@ final class VPNSetupDraft: Identifiable {
 /// An unsaved VPN, in the manager's normal detail pane. No configuration or
 /// keychain item is created until the person reviews the result and chooses Add.
 struct NewVPNSetupView: View {
+    private enum TypeChoice: Hashable {
+        case vpn(VPNKind)
+        case teleport
+    }
+
     @Bindable var draft: VPNSetupDraft
     @Binding var incomingFile: URL?
     var onCreate: (VPNSetupSubmission) async throws -> Void
@@ -45,13 +50,32 @@ struct NewVPNSetupView: View {
         if draft.isWorking { return "Wait for the check to finish, or cancel it" }
         if draft.input.utf8.count > VPNSetupInput.maximumBytes { return "Choose a configuration smaller than 1 MB" }
         if draft.kind == nil { return "Add a configuration or choose a VPN type first" }
-        if draft.analysis.format == nil && !draft.serverAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && server == nil {
+        if !draft.usesTeleport && draft.analysis.format == nil && !draft.serverAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && server == nil {
             return "Check the server address before adding this VPN"
         }
         return nil
     }
     private var canCreate: Bool { creationProblem == nil }
-    private var server: VPNSetupServer? { VPNSetupServer.parse(draft.serverAddress) }
+    private var server: VPNSetupServer? {
+        draft.usesTeleport ? nil : VPNSetupServer.parse(draft.serverAddress)
+    }
+
+    private var typeChoice: Binding<TypeChoice?> {
+        Binding(get: {
+            draft.usesTeleport ? .teleport : draft.kind.map(TypeChoice.vpn)
+        }, set: { choice in
+            cancelWork()
+            draft.message = ""
+            draft.selectedCandidate = nil
+            draft.chosenType = true
+            draft.usesTeleport = choice == .teleport
+            switch choice {
+            case .vpn(let kind): draft.kind = kind
+            case .teleport: draft.kind = .wireGuard
+            case nil: draft.kind = nil
+            }
+        })
+    }
 
     var body: some View {
         Form {
@@ -96,7 +120,7 @@ struct NewVPNSetupView: View {
         Section {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Let’s set up your VPN").font(.title2.bold())
-                Text("Drop a configuration file or paste the instructions you were given. SimpleVPN will help fill in the details.")
+                Text("Drop a configuration file, paste your setup instructions, or choose UniFi Teleport if you received an invitation.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -135,7 +159,7 @@ struct NewVPNSetupView: View {
                 if draft.isWorking {
                     ProgressView().controlSize(.small).accessibilityLabel("Identifying your VPN")
                     Button("Cancel Check") { cancelWork() }
-                } else if draft.analysis.format == nil && !draft.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                } else if !draft.usesTeleport && draft.analysis.format == nil && !draft.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Button("Help Identify This", systemImage: "sparkles") { interpretInstructions() }
                         .disabled(VPNSetupIntelligence.unavailableReason != nil || draft.input.utf8.count > VPNSetupInput.maximumBytes)
                         .help(VPNSetupIntelligence.unavailableReason ?? "Uses Apple Intelligence on this Mac to read your setup instructions.")
@@ -147,7 +171,7 @@ struct NewVPNSetupView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if draft.analysis.format == nil && !draft.input.isEmpty {
+            if !draft.usesTeleport && draft.analysis.format == nil && !draft.input.isEmpty {
                 Text(VPNSetupIntelligence.unavailableReason ?? "Apple Intelligence can help read unusual instructions. Your text stays on this Mac.")
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -157,7 +181,7 @@ struct NewVPNSetupView: View {
 
     private var detailsSection: some View {
         Section {
-            TextField("Name", text: $draft.name, prompt: Text("My VPN"))
+            TextField("Name", text: $draft.name, prompt: Text(draft.usesTeleport ? "UniFi Teleport" : "My VPN"))
                 .accessibilityHint("An optional name to help you recognise this VPN.")
             if let format = draft.analysis.format {
                 LabeledContent("VPN Type", value: draft.kind?.displayName ?? "Recognised configuration")
@@ -169,32 +193,34 @@ struct NewVPNSetupView: View {
                 Text("Your configuration will be imported when you choose Add VPN. You can enter your sign-in details next.")
                     .foregroundStyle(.secondary).font(.callout)
             } else {
-                HStack {
-                    TextField("Server Address", text: $draft.serverAddress, prompt: Text("vpn.example.com"))
-                        .autocorrectionDisabled()
-                    Button("Check Server") { checkServer() }
-                        .disabled(server == nil || draft.isWorking || draft.isCreating)
-                        .help(server == nil ? "Enter the server address you were given first." : "Contacts this server without signing in to help identify its VPN type.")
-                        .accessibilityValue(server == nil ? "Enter a server address first" : "Contacts this server without signing in")
-                }
-                Text("A server check contacts the address above to look for the kind of VPN it uses. Some servers keep this private, so a check may find nothing.")
-                    .font(.callout).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if !draft.candidates.isEmpty { candidateChoices }
-                Picker("VPN Type", selection: Binding(get: { draft.kind }, set: {
-                    draft.kind = $0; draft.chosenType = true; draft.selectedCandidate = nil
-                })) {
-                    Text("Choose a type…").tag(Optional<VPNKind>.none)
+                Picker("VPN Type", selection: typeChoice) {
+                    Text("Choose a type…").tag(Optional<TypeChoice>.none)
+                    Text("UniFi Teleport").tag(Optional(TypeChoice.teleport))
                     ForEach(VPNKind.allCases, id: \.self) { type in
-                        Text(type.displayName).tag(Optional(type))
+                        Text(type.displayName).tag(Optional(TypeChoice.vpn(type)))
                     }
                 }
-                if draft.kind == .wireGuard {
-                    Toggle("Use a UniFi Teleport invitation", isOn: $draft.usesTeleport)
+                if draft.usesTeleport {
+                    Text("Add this VPN, then use a fresh invitation from your UniFi console to pair it in Settings.")
+                        .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    HStack {
+                        TextField("Server Address", text: $draft.serverAddress, prompt: Text("vpn.example.com"))
+                            .autocorrectionDisabled()
+                        Button("Check Server") { checkServer() }
+                            .disabled(server == nil || draft.isWorking || draft.isCreating)
+                            .help(server == nil ? "Enter the server address you were given first." : "Contacts this server without signing in to help identify its VPN type.")
+                            .accessibilityValue(server == nil ? "Enter a server address first" : "Contacts this server without signing in")
+                    }
+                    Text("A server check contacts the address above to look for the kind of VPN it uses. Some servers keep this private, so a check may find nothing.")
+                        .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if !draft.candidates.isEmpty { candidateChoices }
+                    Text("If you don’t know the type, paste your instructions above or check the server. You can also ask the person who gave you the VPN.")
+                        .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Text("If you don’t know the type, paste your instructions above or check the server. You can also ask the person who gave you the VPN.")
-                    .font(.callout).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         } header: { Text("Your VPN") }
     }
@@ -205,6 +231,7 @@ struct NewVPNSetupView: View {
             ForEach(draft.candidates) { candidate in
                 Button {
                     draft.kind = candidate.kind
+                    draft.usesTeleport = false
                     draft.selectedCandidate = candidate
                     draft.chosenType = true
                 } label: {
@@ -244,12 +271,16 @@ struct NewVPNSetupView: View {
         cancelWork()
         draft.candidates = []; draft.selectedCandidate = nil; draft.message = ""
         guard draft.input.utf8.count <= VPNSetupInput.maximumBytes else {
-            draft.analysis = .init(); draft.kind = nil
+            draft.analysis = .init()
+            if !draft.usesTeleport { draft.kind = nil }
             draft.message = "This text is too large. Choose a configuration smaller than 1 MB."
             return
         }
         draft.analysis = VPNSetupInput.analyse(draft.input)
-        if draft.analysis.format != nil || !draft.chosenType { draft.kind = draft.analysis.kind }
+        if draft.analysis.format != nil || !draft.chosenType {
+            draft.kind = draft.analysis.kind
+            draft.usesTeleport = false
+        }
         if let server = draft.analysis.server { draft.serverAddress = server.address }
         draft.sshHostID = sshHosts.first?.id ?? ""
     }
@@ -323,7 +354,8 @@ struct NewVPNSetupView: View {
     private func create() {
         guard canCreate, let type = draft.kind else { return }
         let trimmedName = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let submission = VPNSetupSubmission(name: trimmedName.isEmpty ? "My VPN" : trimmedName,
+        let defaultName = draft.usesTeleport ? "UniFi Teleport" : "My VPN"
+        let submission = VPNSetupSubmission(name: trimmedName.isEmpty ? defaultName : trimmedName,
             kind: type, text: draft.input, format: draft.analysis.format, server: server,
             sshHost: sshHosts.first { $0.id == draft.sshHostID }, discovery: draft.selectedCandidate,
             usesTeleport: draft.usesTeleport)
