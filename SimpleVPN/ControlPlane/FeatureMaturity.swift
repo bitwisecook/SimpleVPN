@@ -357,7 +357,11 @@ nonisolated extension VPNKind {
     var maturity: FeatureMaturity { FeatureMaturityRegistry.maturity(of: self) }
 
     /// The notice to show for this kind, or nil when it is tested.
-    var maturityNotice: MaturityNotice? { MaturityNotice.forKind(self) }
+    var maturityNotice: MaturityNotice? { maturityNotice(usesTeleport: false) }
+
+    func maturityNotice(usesTeleport: Bool) -> MaturityNotice? {
+        MaturityNotice.forKind(self, usesTeleport: usesTeleport)
+    }
 }
 
 nonisolated extension VPNServiceProvider {
@@ -438,9 +442,11 @@ nonisolated struct MaturityNotice: Sendable, Equatable {
     /// A VPN kind. nil when the kind is tested: there is nothing to say, and a
     /// nil is what makes "no banner" the structural default rather than a
     /// condition somebody has to remember to write.
-    static func forKind(_ kind: VPNKind,
+    static func forKind(_ kind: VPNKind, usesTeleport: Bool = false,
                         in table: [VPNKind: FeatureMaturity]? = nil) -> MaturityNotice? {
-        let maturity = FeatureMaturityRegistry.maturity(of: kind, in: table)
+        // UniFi Teleport was confirmed working on a live setup on 2026-11-03.
+        let maturity: FeatureMaturity = kind == .wireGuard && usesTeleport
+            ? .tested : FeatureMaturityRegistry.maturity(of: kind, in: table)
         guard maturity.needsNotice else { return nil }
         let name = kind.displayName
         switch maturity {

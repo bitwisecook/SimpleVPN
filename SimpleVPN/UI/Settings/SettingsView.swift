@@ -365,9 +365,7 @@ private struct ExtensionsSettings: View {
                 if ext.needsApplicationsInstallation || !SystemExtensionManager.isEligibleForActivation {
                     Label("Open the copy in Applications to manage the VPN engine.", systemImage: "folder")
                         .foregroundStyle(.orange)
-                    Button("Open Installed SimpleVPN") {
-                        NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/SimpleVPN.app"))
-                    }
+                    InstalledSimpleVPNHandoff()
                 } else {
                     Button("Re-activate Extension") { Task { await ext.activate() } }
                     Button("Remove VPN Engine…", role: .destructive) {

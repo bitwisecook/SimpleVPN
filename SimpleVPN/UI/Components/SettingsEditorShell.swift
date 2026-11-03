@@ -117,6 +117,6 @@ extension View {
         modifier(SettingsEditorShell(search: search, tab: tab,
                                      surfaces: surfaces, profileID: profileID,
                                      vpn: vpn, routingDraft: routingDraft))
-            .modifier(MaturityBannerScaffold(kind: kind, profileID: profileID))
+            .modifier(MaturityBannerScaffold(kind: kind, profileID: profileID, vpn: vpn))
     }
 }

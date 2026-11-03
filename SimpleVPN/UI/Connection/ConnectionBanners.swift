@@ -205,27 +205,36 @@ struct UnreachableHereBanner: View {   // was private — internal for the file 
 /// A Tailscale connect waiting on the user's browser sign-in. Orange like the
 /// other "waiting on you" states, with the one action that moves it forward:
 /// re-open the sign-in page (the engine's login URL stays valid until used).
-struct TailscaleSignInBanner: View {   // was private — internal for the file split
+struct TailscaleSignInBanner: View {
+    let title: String
+    let browser: BrowserSelection
     let reopen: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "person.badge.key").font(.title3).foregroundStyle(.orange)
+        HStack(alignment: .center, spacing: 10) {
+            if let icon = BrowserCatalog.icon(for: browser) {
+                Image(nsImage: icon)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 24, height: 24)
+                    .accessibilityHidden(true)
+            } else {
+                Image(systemName: "safari").font(.title3)
+                    .accessibilityHidden(true)
+            }
             VStack(alignment: .leading, spacing: 3) {
-                Text("Sign in in your browser").font(.callout.weight(.semibold))
-                Text("A sign-in page opened in your browser. Finish signing in there and this Mac joins the network by itself. Closed the tab? Open it again.")
+                Text("Finish signing in").font(.callout.weight(.semibold))
+                Text("Complete sign-in in the browser window. SimpleVPN will continue automatically.")
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
-            Button("Open Sign-In Page", action: reopen)
-                .buttonStyle(.glassProminent).tint(.orange)
+            Button(title, action: reopen)
+                .buttonStyle(.glassProminent)
+                .disabled(true)
         }
         .bannerSurface(tint: .orange)
-        // `.contain`: the sign-in button is the only way forward and must stay
-        // reachable — a combine here made this banner a dead end (rule 4).
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Sign in in your browser. A sign-in page opened in your browser. Finish signing in there and this Mac joins the network by itself. Closed the tab? Open it again.")
     }
 }
 
@@ -378,5 +387,99 @@ struct ProblemPill: View {   // was private — internal for the file split
         .animation(reduceMotion ? nil : .smooth(duration: 0.4), value: text)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(text)
+    }
+}
+
+
+struct TailscaleSignInSuccess: View {
+    var body: some View {
+        Label {
+            Text("Sign-in successful")
+                .font(.headline)
+        } icon: {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.green.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
+    }
+}
+
+
+struct TailscaleKeyExpiryLabel: View {
+    let expiry: Date
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            let remaining = expiry.timeIntervalSince(context.date)
+            Label {
+                Text(remaining <= 0 ? "Node key expired" : "Node key expires \(expiry.formatted(date: .abbreviated, time: .shortened))")
+            } icon: {
+                Image(systemName: remaining <= 7 * 86_400 ? "exclamationmark.triangle.fill" : "key")
+                    .foregroundStyle(remaining <= 2 * 86_400 ? Color.red
+                                     : remaining <= 7 * 86_400 ? Color.yellow : Color.secondary)
+            }
+        }
+    }
+}
+
+struct TailscaleKeyExpiryBadge: View {
+    let expiry: Date
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            let remaining = expiry.timeIntervalSince(context.date)
+            if remaining <= 2 * 86_400 {
+                let message = remaining <= 0 ? "Node key expired" : "Node key expires within 2 days"
+                Label {
+                    Text(remaining <= 0 ? "Key expired" : "Key expires soon")
+                        .font(.caption)
+                } icon: {
+                    Image(systemName: "key.fill").foregroundStyle(.red)
+                }
+                .help(message)
+                .accessibilityLabel(message)
+            }
+        }
+    }
+}
+
+
+struct TailscaleSignInAction: View {
+    let vpn: VPNController
+    let profileID: String
+    let canReauthenticate: Bool
+
+    var body: some View {
+        let result = vpn.tailscaleSignInResults[profileID]
+        if vpn.tailscaleSignInURL[profileID] != nil {
+            TailscaleSignInBanner(title: vpn.tailscaleSignInTitle(id: profileID),
+                                  browser: vpn.tailscaleConfig(for: profileID).signInBrowser) {
+                vpn.openTailscaleSignIn(id: profileID)
+            }
+        } else if vpn.tailscaleStatuses[profileID]?.backendState == .needsMachineAuth && result != .failed {
+            Label("Waiting for approval on your network", systemImage: "person.badge.clock")
+        } else if result == .preparing {
+            ProgressView("Preparing sign-in…").controlSize(.small)
+        } else if result == .failed || canReauthenticate {
+            HStack(spacing: 12) {
+                if result == .failed {
+                    Label {
+                        Text("Sign-in failed")
+                    } icon: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
+                    }
+                } else {
+                    TailscaleSignInSuccess()
+                }
+                if canReauthenticate {
+                    Button(result == .failed ? "Retry Sign-In" : "Reauthenticate") {
+                        Task { await vpn.reauthenticateTailscale(id: profileID) }
+                    }
+                }
+            }
+        }
     }
 }

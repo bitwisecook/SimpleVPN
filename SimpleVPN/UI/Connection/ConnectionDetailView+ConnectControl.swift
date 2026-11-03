@@ -37,7 +37,12 @@ extension ConnectionDetailView {
                       fallbackSymbol: profile.kind.systemImage)
                 .scaleEffect(1.6).frame(width: 40, height: 40)
             VStack(alignment: .leading, spacing: 3) {
-                Text(profile.name).font(.title2).bold()
+                HStack(spacing: 6) {
+                    Text(profile.name).font(.title2).bold()
+                    if profile.kind == .tailscale, let expiry = vpn.tailscaleStatuses[profile.id]?.nodeKeyExpiry {
+                        TailscaleKeyExpiryBadge(expiry: expiry)
+                    }
+                }
                 // A healthy connection says nothing here — good news is the dot's
                 // job. The line under the name speaks only when something is
                 // wrong (plain English), or shows the server while disconnected.
@@ -164,7 +169,12 @@ extension ConnectionDetailView {
                 if shown == .connecting { trailingStopButton }
             }
         default:   // disconnected / invalid
-            connectButton
+            HStack(spacing: 8) {
+                if profile.kind == .tailscale, vpn.tailscaleSignInResults[profile.id] == .failed {
+                    TailscaleSignInAction(vpn: vpn, profileID: profile.id, canReauthenticate: false)
+                }
+                connectButton
+            }
         }
     }
 
@@ -262,7 +272,13 @@ extension ConnectionDetailView {
         // on WHY before the second press confirms. So a person can't start a
         // conflicting second datapath with one absent-minded click.
         let armed = tailscaleConflict && tailscaleConflictArmed
-        let label = armed ? "I Understand" : (tailscaleConflict ? "Connect Anyway" : "Connect")
+        let needsBrowserSignIn = profile.kind == .tailscale
+            && vpn.tailscaleStatuses[profile.id]?.haveNodeKey != true
+            && vpn.tailscaleAuthKey(for: profile.id).isEmpty
+        let signInFailed = profile.kind == .tailscale && vpn.tailscaleSignInResults[profile.id] == .failed
+        let connectLabel = signInFailed ? "Retry Sign-In"
+            : needsBrowserSignIn ? vpn.tailscaleSignInTitle(id: profile.id) : "Connect"
+        let label = armed ? "I Understand" : (tailscaleConflict ? "Connect Anyway" : connectLabel)
         return AnyView(
             Button(label) {
                 guard canConnect else { return }

@@ -11,6 +11,8 @@
 -->
 <plist version="1.0">
 <dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Scan VPN setup QR codes from another device.</string>
     <!-- Shown in the macOS permission prompt, which only ever appears if the user turns
          on Settings ▸ General ▸ Privacy ▸ "Use this Mac's location" (off by default).
          See Core/LocationAuthority.swift. -->

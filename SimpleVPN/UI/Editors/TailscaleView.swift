@@ -25,7 +25,11 @@ struct TailscaleView: View {
     @State private var loaded = false
     @State private var saves = LatestSettingsSave()
     private var saving: Bool { saves.isApplying }
-    @State private var status: TailscaleStatus?
+    private var status: TailscaleStatus? {
+        guard let profile = vpn.profiles.first(where: { $0.id == profileID }),
+              UI.isActive(profile.status) else { return nil }
+        return vpn.tailscaleStatuses[profileID]
+    }
     @State private var prefsError: String?
     @State private var customRouting = CustomRoutingProfile()
     @State private var crProxyAuthUsername = ""
@@ -47,6 +51,14 @@ struct TailscaleView: View {
     /// i.e. inside the run of config groups).
     private var configForm: some View {
         Form {
+            let canReauthenticate = vpn.profiles.first(where: { $0.id == profileID })?.status == .connected
+                && status?.backendState == .running
+            if canReauthenticate || vpn.tailscaleSignInResults[profileID] != nil || vpn.tailscaleSignInURL[profileID] != nil {
+                Section {
+                    TailscaleSignInAction(vpn: vpn, profileID: profileID, canReauthenticate: canReauthenticate)
+                    if let expiry = status?.nodeKeyExpiry { TailscaleKeyExpiryLabel(expiry: expiry) }
+                }
+            }
             SettingsSearchSection(search: search)
             Section("Connection") {
                 ConfigurationNameField(name: $name)
@@ -140,7 +152,6 @@ struct TailscaleView: View {
                                   systemDefaultLabel: "Default browser (\(BrowserCatalog.osDefaultName))",
                                   showsAppDefaultLink: true)
                 }
-                signInStatusRow
             }
 
             Section("Traffic") {
@@ -296,35 +307,6 @@ struct TailscaleView: View {
 
     // MARK: Rows
 
-    @ViewBuilder private var signInStatusRow: some View {
-        if let status {
-            let state = status.backendState
-            HStack(spacing: 6) {
-                // Icon + text read as ONE sentence; the button stays separate.
-                HStack(spacing: 6) {
-                    Image(systemName: state.isConnected ? "checkmark.circle.fill"
-                            : (state.needsUserAction ? "person.crop.circle.badge.questionmark" : "clock"))
-                        .foregroundStyle(state.isConnected ? .green : (state.needsUserAction ? .orange : .secondary))
-                        .accessibilityHidden(true)
-                    Text(state.displayText).font(.callout).foregroundStyle(.secondary)
-                }
-                .accessibilityElement(children: .combine)
-                if state == .needsLogin {
-                    Spacer()
-                    // The engine's login URL, in the default browser (the SSO
-                    // window is OpenConnect's loopback flow, not this one).
-                    // Disabled until the engine has issued a URL to open.
-                    Button("Open Sign-In…") { vpn.openTailscaleSignIn(id: profileID) }
-                        .disabled(vpn.tailscaleSignInURL[profileID] == nil)
-                        // A dead button must say why.
-                        .help(vpn.tailscaleSignInURL[profileID] == nil
-                              ? "Connect first — the sign-in page's address comes from the connection attempt."
-                              : "Open the sign-in page in your browser")
-                }
-            }
-        }
-    }
-
     @ViewBuilder private var exitNodePicker: some View {
         let nodes = status?.exitNodes ?? []
         let spec = Self.specs["ts.exit-node-machine"]
@@ -453,7 +435,6 @@ struct TailscaleView: View {
         name = vpn.displayName(for: profileID)
         authKey = vpn.tailscaleAuthKey(for: profileID)
         advertiseText = draft.advertiseRoutes.joined(separator: ", ")
-        status = vpn.tailscaleStatuses[profileID]
         customRouting = vpn.customRouting(for: profileID)
         (crProxyAuthUsername, crProxyAuthPassword) = loadCustomRoutingProxyAuthFields(profileID: profileID)
     }
@@ -463,7 +444,7 @@ struct TailscaleView: View {
     private func pollStatus() async {
         while !Task.isCancelled {
             if vpn.profiles.first(where: { $0.id == profileID })?.status == .connected {
-                status = await vpn.refreshTailscaleStatus(id: profileID)
+                await vpn.refreshTailscaleStatus(id: profileID)
             }
             try? await Task.sleep(for: .seconds(2))
         }

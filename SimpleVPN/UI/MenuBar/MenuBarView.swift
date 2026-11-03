@@ -534,7 +534,7 @@ struct MenuBarView: View {
                 if !assignedLabels.isEmpty { LabelPills(labels: assignedLabels) }
                 // Same chip as the two window lists, for the same reason: a kind
                 // nobody has proven must not look like one that has been.
-                if let notice = p.kind.maturityNotice { MaturityBadge(notice: notice) }
+                if let notice = p.kind.maturityNotice(usesTeleport: vpn.usesTeleport(kind: p.kind, profileID: p.id)) { MaturityBadge(notice: notice) }
                 trailingGlyph(p)
             }
         }
@@ -553,7 +553,7 @@ struct MenuBarView: View {
         var bits = [p.name, dotState.accessibilityDescription]
         let assignedLabels = labels.labels(for: p.id).map(\.name)
         if !assignedLabels.isEmpty { bits.append(assignedLabels.formatted(.list(type: .and))) }
-        if let notice = p.kind.maturityNotice { bits.append(notice.spokenValue) }
+        if let notice = p.kind.maturityNotice(usesTeleport: vpn.usesTeleport(kind: p.kind, profileID: p.id)) { bits.append(notice.spokenValue) }
         return bits.joined(separator: ", ")
     }
 

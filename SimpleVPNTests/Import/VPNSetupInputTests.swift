@@ -27,12 +27,53 @@ struct VPNSetupInputTests {
         #expect(result.server?.port == 1197)
     }
 
+    @Test func openVPNPreviewSkipsInlineMaterialAndUsesTheDefaultPort() {
+        let result = VPNSetupInput.analyse(
+            "client\r\n<ca>\r\nremote ignored.example.test 9999\r\n</ca>\r\n"
+                + "remote vpn.example.test\r\nport 1197\r\n"
+        )
+        #expect(result.format == .openVPN)
+        #expect(result.server == VPNSetupServer(host: "vpn.example.test", port: 1197))
+    }
+
     @Test func aNamedTypeInAnEmailIsASuggestionRatherThanAConfiguration() {
         let result = VPNSetupInput.analyse("Use FortiGate at https://vpn.example.test:10443. Ask help@example.test if needed.")
         #expect(result.format == nil)
         #expect(result.kind == .fortinet)
         #expect(result.server?.host == "vpn.example.test")
         #expect(result.server?.port == 10443)
+    }
+
+    @Test func teleportInvitationInEmailIsRecognisedWithoutAProbeTarget() {
+        let invite = "https://teleport.ui.link/123e4567-e89b-12d3-a456-426614174000"
+        let result = VPNSetupInput.analyse("Open this invitation: <\(invite)>.")
+        #expect(result.isTeleport)
+        #expect(result.invitation == invite)
+        #expect(result.server == nil)
+    }
+
+    @Test(arguments: ["tskey-auth-example", "https://login.tailscale.com/admin/invite/example"])
+    func tailscaleInvitationsAreRecognised(_ invitation: String) {
+        let result = VPNSetupInput.analyse(invitation)
+        #expect(result.kind == .tailscale)
+        #expect(result.invitation == invitation)
+        #expect(result.server == nil)
+    }
+
+    @Test func headscaleInstructionsKeepTheControlURLAndSetupKey() {
+        let result = VPNSetupInput.analyse("Headscale server URL: https://vpn.example.test:8443/control\nPre-auth key: example")
+        #expect(result.kind == .tailscale)
+        #expect(result.headscaleURL == "https://vpn.example.test:8443/control")
+        #expect(result.invitation == "example")
+        #expect(result.server == nil)
+    }
+
+    @Test func headscaleControlURLTakesPrecedenceOverAKeyPrefix() {
+        let result = VPNSetupInput.analyse(
+            "Headscale URL: https://vpn.example.test\nSetup key: tskey-auth-example"
+        )
+        #expect(result.headscaleURL == "https://vpn.example.test")
+        #expect(result.invitation == "tskey-auth-example")
     }
 
     @Test func anEmailAddressIsNeverTreatedAsAServer() {

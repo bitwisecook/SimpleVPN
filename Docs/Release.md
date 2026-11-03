@@ -1,6 +1,6 @@
 # Releasing SimpleVPN
 
-This is the runbook for cutting a signed, notarized, drag-install DMG release
+This is the runbook for cutting a signed, notarized, double-click installer DMG release
 via GitHub Actions (`.github/workflows/release.yml`).
 
 Two build paths exist and serve different purposes:
@@ -234,3 +234,5 @@ the local distribution script remains the working release path.
   private key onto the runner's disk for the job's duration. Keep the
   workflow's trigger tag-only — never add a `pull_request` trigger to
   `release.yml`.
+
+The DMG packaging step uses `dmgbuild==1.6.7` on PATH. Install it in a Python virtual environment for local release builds. CI installs it before packaging.

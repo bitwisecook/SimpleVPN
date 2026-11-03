@@ -43,6 +43,10 @@ nonisolated enum VPNKind: String, Codable, Sendable, CaseIterable {
     // `.egressItself`, which is the wrong answer for an SSH session.
     case sshNetworkTunnel = "sshnet" // utun+routes, one SSH direct-tcpip channel per flow, in-process (TCP only)
 
+    func configuredDisplayName(usesTeleport: Bool) -> String {
+        self == .wireGuard && usesTeleport ? "UniFi Teleport" : displayName
+    }
+
     var displayName: String {
         switch self {
         case .openVPN: "OpenVPN"

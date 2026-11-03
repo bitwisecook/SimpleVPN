@@ -171,9 +171,7 @@ extension VPNController {
         wireGuardStatuses[id] = nil
         tailscaleConfigs[id] = nil
         tailscaleStatuses[id] = nil
-        tailscaleSignInWatch[id]?.cancel()
-        tailscaleSignInWatch[id] = nil
-        tailscaleSignInURL[id] = nil
+        clearTailscaleSignIn(id: id)
         proxyTunnelConfigs[id] = nil
         proxyTunnelStatuses[id] = nil
         appliedOverrides[id] = nil

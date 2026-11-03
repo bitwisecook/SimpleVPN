@@ -13,6 +13,7 @@ static void tsInstanceString(TSInstanceStringCallback f, uint64_t c, const char 
 import "C"
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"unsafe"
 
 	"pxengine/instance"
+	"tailscale.com/ipn"
 )
 
 type tsInstance struct {
@@ -143,6 +145,24 @@ func TSStatusInstance(handle C.uint64_t) *C.char {
 func TSUpdatePrefsInstance(handle C.uint64_t, patchJSON *C.char) *C.char {
 	owned, _ := tsInstances.Get(uint64(handle))
 	return tsUpdateStatePrefs(owned.state, patchJSON)
+}
+
+//export TSReauthenticateInstance
+func TSReauthenticateInstance(handle C.uint64_t) *C.char {
+	owned, _ := tsInstances.Get(uint64(handle))
+	st := owned.state
+	if st == nil {
+		return fail("badRequest", "no Tailscale session is running")
+	}
+	st.operations.Lock()
+	defer st.operations.Unlock()
+	if st.closed || st.lb == nil || st.backendState() != ipn.Running.String() {
+		return fail("badRequest", "connect this VPN before reauthenticating")
+	}
+	if err := st.lb.StartLoginInteractive(context.Background()); err != nil {
+		return fail("login", "could not start reauthentication: %v", err)
+	}
+	return cJSON(map[string]bool{"ok": true})
 }
 
 //export TSStopInstance

@@ -380,13 +380,20 @@ struct MaturityBannerScaffold: ViewModifier {
     let kind: VPNKind?
     let profileID: String?
 
+    var vpn: VPNController? = nil
+
     @ViewBuilder func body(content: Content) -> some View {
-        if let kind, let notice = kind.maturityNotice {
-            VStack(spacing: 8) {
-                MaturityBanner(notice: notice,
-                               request: .init(kind: kind, profileID: profileID,
-                                              reason: .untestedKind))
-                    .padding(.horizontal, 20)
+        if let kind {
+            let usesTeleport = profileID.map { vpn?.usesTeleport(kind: kind, profileID: $0) == true } ?? false
+            if let notice = kind.maturityNotice(usesTeleport: usesTeleport) {
+                VStack(spacing: 8) {
+                    MaturityBanner(notice: notice,
+                                   request: .init(kind: kind, profileID: profileID,
+                                                  reason: .untestedKind))
+                        .padding(.horizontal, 20)
+                    content
+                }
+            } else {
                 content
             }
         } else {

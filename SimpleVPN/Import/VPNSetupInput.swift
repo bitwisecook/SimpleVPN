@@ -43,6 +43,9 @@ nonisolated struct VPNSetupAnalysis: Sendable, Equatable {
     var kind: VPNKind?
     var server: VPNSetupServer?
     var evidence = ""
+    var invitation: String?
+    var isTeleport = false
+    var headscaleURL: String?
 }
 
 nonisolated enum VPNSetupInput {
@@ -64,21 +67,52 @@ nonisolated enum VPNSetupInput {
         if lower.contains("[main]"), lines.contains(where: { $0.hasPrefix("host=") }) {
             return .init(format: .cisco, kind: .ipsec, evidence: "Cisco IPsec configuration")
         }
-        let hasRemote = lines.contains { $0.hasPrefix("remote ") || $0.hasPrefix("remote\t") }
-        if hasRemote, lines.contains(where: { $0 == "client" || $0.hasPrefix("dev ") || $0.hasPrefix("proto ") }) {
-            let remote = text.components(separatedBy: .newlines).first {
-                let line = $0.trimmingCharacters(in: .whitespaces).lowercased()
-                return line.hasPrefix("remote ") || line.hasPrefix("remote\t")
-            }?.split(whereSeparator: \.isWhitespace)
-            let host = remote.flatMap { $0.count >= 2 ? String($0[1]) : nil }
-            let port = remote.flatMap { $0.count >= 3 ? Int($0[2]) : nil }
-            let server = host.flatMap(VPNSetupServer.parse).map { VPNSetupServer(host: $0.host, port: port ?? $0.port) }
-            return .init(format: .openVPN, kind: .openVPN, server: server, evidence: "OpenVPN configuration")
+        if lines.contains(where: { $0 == "client" || $0.hasPrefix("dev ") || $0.hasPrefix("proto ") }) {
+            let remote = EndpointScanner.endpoints(in: text.replacingOccurrences(of: "\r\n", with: "\n")).first
+            let server = remote.flatMap { endpoint in
+                VPNSetupServer.parse(endpoint.host).map {
+                    VPNSetupServer(host: $0.host, port: endpoint.port ?? $0.port)
+                }
+            }
+            // Connection blocks belong to the OpenVPN engine parser. Recognize
+            // the format here without guessing which block supplies the endpoint.
+            if remote != nil || lines.contains("<connection>") {
+                return .init(format: .openVPN, kind: .openVPN, server: server, evidence: "OpenVPN configuration")
+            }
         }
         if lines.contains(where: { $0.hasPrefix("host ") || $0.hasPrefix("host\t") }),
            let host = SSHConfigImport.parse(text).first {
             return .init(format: .ssh, kind: .ssh,
                          server: .init(host: host.effectiveHostName, port: host.port), evidence: "SSH configuration")
+        }
+        let tokens = text.split { $0.isWhitespace || "<>\"'(),;".contains($0) }
+        let headscaleURL = lower.contains("headscale") ? text.components(separatedBy: .newlines)
+            .compactMap { line -> String? in
+                guard let match = line.firstMatch(of: /(?i)^\s*(?:headscale(?: server)?(?: url)?|control (?:server|url)|server url)\s*:\s*(\S+)\s*$/) else {
+                    return nil
+                }
+                let value = String(match.1)
+                return isHeadscaleControlURL(value) ? value : nil
+            }.first : nil
+        if let headscaleURL {
+            let key = text.firstMatch(of: /(?im)^\s*(?:pre[- ]?auth(?:entication)?|setup|auth)[ -]?key\s*:\s*([A-Za-z0-9_-]+)\s*$/)
+            return .init(kind: .tailscale, evidence: "Headscale setup instructions",
+                         invitation: key.map { String($0.1) }, headscaleURL: headscaleURL)
+        }
+        for token in tokens {
+            let value = String(token).trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            if value.hasPrefix("https://"), TeleportSession.inviteProblem(value) == nil {
+                return .init(kind: .wireGuard, evidence: "UniFi Teleport invitation",
+                             invitation: value, isTeleport: true)
+            }
+            if value.wholeMatch(of: /tskey-auth-[A-Za-z0-9_-]+/) != nil {
+                return .init(kind: .tailscale, evidence: "Tailscale setup key", invitation: value)
+            }
+            if let url = URLComponents(string: value), url.scheme == "https",
+               url.host == "login.tailscale.com", url.user == nil, url.password == nil,
+               url.port == nil, url.path.hasPrefix("/admin/invite/") {
+                return .init(kind: .tailscale, evidence: "Tailscale invitation", invitation: value)
+            }
         }
         // Explicit names are useful evidence in setup instructions. Port numbers
         // alone are never used as proof of a VPN type.
@@ -92,6 +126,13 @@ nonisolated enum VPNSetupInput {
         let match = names.first { lower.contains($0.0) }
         return .init(kind: match?.1, server: firstServer(in: text),
                      evidence: match.map { "Your instructions mention \($0.1.displayName)." } ?? "")
+    }
+
+    static func isHeadscaleControlURL(_ value: String) -> Bool {
+        guard let url = URLComponents(string: value),
+              url.scheme == "https" || url.scheme == "http",
+              let host = url.host, !host.isEmpty else { return false }
+        return url.user == nil && url.password == nil && url.query == nil && url.fragment == nil
     }
 
     static func firstServer(in text: String) -> VPNSetupServer? {
@@ -125,4 +166,8 @@ struct VPNSetupSubmission {
     var sshHost: SSHConfigHost?
     var discovery: DiscoveryCandidate?
     var usesTeleport: Bool
+    var invitation = ""
+    var headscaleURL = ""
+    var signInBrowser: BrowserSelection = .osDefault
+    var startSignIn = false
 }

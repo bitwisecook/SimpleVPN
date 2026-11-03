@@ -9,6 +9,13 @@ import UniformTypeIdentifiers
 final class VPNSetupDraft: Identifiable {
     let id = UUID()
     var name = ""
+    var invitation = ""
+    var headscaleURL = ""
+    var usesHeadscale = false
+    var signInBrowser: BrowserSelection = .osDefault
+    var offeredPasteboard = false
+    var inferredInvitation: String?
+    var inferredHeadscaleURL: String?
     var input = ""
     var serverAddress = ""
     var kind: VPNKind?
@@ -29,6 +36,7 @@ struct NewVPNSetupView: View {
     private enum TypeChoice: Hashable {
         case vpn(VPNKind)
         case teleport
+        case headscale
     }
 
     @Bindable var draft: VPNSetupDraft
@@ -36,6 +44,9 @@ struct NewVPNSetupView: View {
     var onCreate: (VPNSetupSubmission) async throws -> Void
     var onCancel: () -> Void
 
+    @State private var offerClipboard = false
+    @State private var interpretClipboard = false
+    @State private var qrCapture = VPNSetupQRCapture()
     @State private var showFilePicker = false
     @State private var isTargeted = false
     @State private var work: Task<Void, Never>?
@@ -50,28 +61,55 @@ struct NewVPNSetupView: View {
         if draft.isWorking { return "Wait for the check to finish, or cancel it" }
         if draft.input.utf8.count > VPNSetupInput.maximumBytes { return "Choose a configuration smaller than 1 MB" }
         if draft.kind == nil { return "Add a configuration or choose a VPN type first" }
-        if !draft.usesTeleport && draft.analysis.format == nil && !draft.serverAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && server == nil {
+        if draft.usesTeleport { return TeleportSession.inviteProblem(draft.invitation) }
+        if draft.kind == .tailscale {
+            if draft.usesHeadscale {
+                if let problem = TailscaleConfig.controlURLProblem(headscaleURL, preset: .headscale) {
+                    return problem
+                }
+                if !VPNSetupInput.isHeadscaleControlURL(headscaleURL) {
+                    return "Enter a Headscale control URL without a query or fragment"
+                }
+            }
+            if !setupKey.isEmpty {
+                let validKey = draft.usesHeadscale
+                    ? setupKey.wholeMatch(of: /[A-Za-z0-9_-]+/) != nil
+                    : setupKey.wholeMatch(of: /tskey-auth-[A-Za-z0-9_-]+/) != nil
+                if !validKey { return "Enter a valid setup key" }
+            }
+        }
+        if draft.kind != .tailscale && draft.analysis.format == nil && !draft.serverAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && server == nil {
             return "Check the server address before adding this VPN"
         }
         return nil
     }
     private var canCreate: Bool { creationProblem == nil }
     private var server: VPNSetupServer? {
-        draft.usesTeleport ? nil : VPNSetupServer.parse(draft.serverAddress)
+        draft.usesTeleport || draft.kind == .tailscale ? nil : VPNSetupServer.parse(draft.serverAddress)
+    }
+
+    private var selectedType: TypeChoice? {
+        if draft.usesTeleport { return .teleport }
+        if draft.kind == .tailscale && draft.usesHeadscale { return .headscale }
+        return draft.kind.map(TypeChoice.vpn)
     }
 
     private var typeChoice: Binding<TypeChoice?> {
-        Binding(get: {
-            draft.usesTeleport ? .teleport : draft.kind.map(TypeChoice.vpn)
-        }, set: { choice in
+        Binding(get: { selectedType }, set: { choice in
             cancelWork()
             draft.message = ""
             draft.selectedCandidate = nil
             draft.chosenType = true
+            if choice != selectedType {
+                draft.invitation = ""
+                draft.inferredInvitation = nil
+            }
             draft.usesTeleport = choice == .teleport
+            draft.usesHeadscale = choice == .headscale
             switch choice {
             case .vpn(let kind): draft.kind = kind
             case .teleport: draft.kind = .wireGuard
+            case .headscale: draft.kind = .tailscale
             case nil: draft.kind = nil
             }
         })
@@ -81,6 +119,7 @@ struct NewVPNSetupView: View {
         Form {
             introduction
             configurationSection
+            typeSection
             detailsSection
             if !draft.message.isEmpty {
                 Section {
@@ -106,13 +145,34 @@ struct NewVPNSetupView: View {
             incomingFile = nil
             readFile(url)
         }
-        .onChange(of: draft.input) { recogniseInput() }
+        .onChange(of: draft.input) {
+            recogniseInput()
+            if interpretClipboard, draft.analysis.format == nil, draft.analysis.invitation == nil,
+               draft.analysis.headscaleURL == nil, !draft.usesTeleport, draft.analysis.server == nil {
+                interpretInstructions()
+            }
+            interpretClipboard = false
+        }
         .onChange(of: draft.serverAddress) {
             if !draft.candidates.isEmpty || draft.selectedCandidate != nil || draft.message == "Checking the server…" { draft.message = "" }
             cancelWork()
             draft.candidates = []; draft.selectedCandidate = nil
         }
-        .onDisappear { if !draft.isCreating { cancelWork() } }
+        .onAppear {
+            guard !draft.offeredPasteboard else { return }
+            draft.offeredPasteboard = true
+            offerClipboard = incomingFile == nil && draft.input.isEmpty && VPNSetupQRCapture.hasClipboardInput
+        }
+        .alert("Use what’s on your clipboard?", isPresented: $offerClipboard) {
+            Button("Use Clipboard") { useClipboard() }
+            Button("Skip", role: .cancel) {}
+        } message: {
+            Text("SimpleVPN can look for a configuration, invitation, QR code, or setup instructions.")
+        }
+        .onDisappear {
+            qrCapture.close()
+            if !draft.isCreating { cancelWork() }
+        }
         .sheet(item: $failure) { UserFacingErrorSheet(error: $0) }
     }
 
@@ -120,7 +180,7 @@ struct NewVPNSetupView: View {
         Section {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Let’s set up your VPN").font(.title2.bold())
-                Text("Drop a configuration file, paste your setup instructions, or choose UniFi Teleport if you received an invitation.")
+                Text("Start with a configuration file, setup instructions, an invitation, or a QR code. Review the VPN type and settings below.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -148,18 +208,30 @@ struct NewVPNSetupView: View {
             } isTargeted: { isTargeted = $0 }
             TextEditor(text: $draft.input)
                 .frame(minHeight: 110, idealHeight: 140)
+                .overlay(alignment: .topLeading) {
+                    if draft.input.isEmpty {
+                        Text("Paste the full email from your VPN administrator here. Apple Intelligence can use its on-device model to pre-configure your VPN. You can also paste a configuration or invitation.")
+                            .foregroundStyle(.secondary)
+                            .padding(6)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
+                }
+                .onPasteCommand(of: [.image, .text, .fileURL]) { _ in useClipboard() }
                 .accessibilityLabel("Configuration or setup instructions")
                 .accessibilityHint("Paste the configuration or instructions you received. They stay on this Mac.")
                 .privacySensitive()
             HStack {
-                PasteButton(payloadType: String.self) { values in
-                    if let value = values.first { draft.input = value }
+                Button("Paste") { useClipboard() }
+                Menu("Scan QR Code", systemImage: "qrcode.viewfinder") {
+                    Button("Capture from Screen…") { qrCapture.showScreenButton(completion: acceptQR) }
+                    Button("Use Camera…") { qrCapture.showCamera(completion: acceptQR) }
                 }
                 Spacer()
                 if draft.isWorking {
                     ProgressView().controlSize(.small).accessibilityLabel("Identifying your VPN")
                     Button("Cancel Check") { cancelWork() }
-                } else if !draft.usesTeleport && draft.analysis.format == nil && !draft.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                } else if !draft.usesTeleport && draft.analysis.invitation == nil && draft.analysis.format == nil && !draft.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Button("Help Identify This", systemImage: "sparkles") { interpretInstructions() }
                         .disabled(VPNSetupIntelligence.unavailableReason != nil || draft.input.utf8.count > VPNSetupInput.maximumBytes)
                         .help(VPNSetupIntelligence.unavailableReason ?? "Uses Apple Intelligence on this Mac to read your setup instructions.")
@@ -171,7 +243,7 @@ struct NewVPNSetupView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if !draft.usesTeleport && draft.analysis.format == nil && !draft.input.isEmpty {
+            if !draft.usesTeleport && draft.analysis.invitation == nil && draft.analysis.format == nil && !draft.input.isEmpty {
                 Text(VPNSetupIntelligence.unavailableReason ?? "Apple Intelligence can help read unusual instructions. Your text stays on this Mac.")
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -179,31 +251,84 @@ struct NewVPNSetupView: View {
         }
     }
 
+    private var typeSection: some View {
+        Section {
+            if draft.analysis.format != nil {
+                LabeledContent("VPN Type", value: draft.kind?.displayName ?? "Recognised configuration")
+            } else {
+                Picker("VPN Type", selection: typeChoice) {
+                    Text("Choose a type…").tag(Optional<TypeChoice>.none)
+                    Text("UniFi Teleport").tag(Optional(TypeChoice.teleport))
+                    Text("Headscale").tag(Optional(TypeChoice.headscale))
+                    ForEach(VPNKind.allCases, id: \.self) { type in
+                        Text(type.displayName).tag(Optional(TypeChoice.vpn(type)))
+                    }
+                }
+            }
+        }
+    }
+
+    private var headscaleURL: String {
+        draft.headscaleURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var setupKey: String {
+        draft.invitation.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var defaultName: String {
+        if draft.usesTeleport { return "UniFi Teleport" }
+        if draft.kind == .tailscale { return draft.usesHeadscale ? "Headscale" : "Tailscale" }
+        return "My VPN"
+    }
+
+    private var startsSignIn: Bool { draft.kind == .tailscale && setupKey.isEmpty }
+
     private var detailsSection: some View {
         Section {
-            TextField("Name", text: $draft.name, prompt: Text(draft.usesTeleport ? "UniFi Teleport" : "My VPN"))
+            TextField("Name", text: $draft.name, prompt: Text(defaultName))
                 .accessibilityHint("An optional name to help you recognise this VPN.")
             if let format = draft.analysis.format {
-                LabeledContent("VPN Type", value: draft.kind?.displayName ?? "Recognised configuration")
                 if format == .ssh && sshHosts.count > 1 {
                     Picker("Server", selection: $draft.sshHostID) {
                         ForEach(sshHosts) { host in Text(host.alias).tag(host.id) }
                     }
                 }
-                Text("Your configuration will be imported when you choose Add VPN. You can enter your sign-in details next.")
+                Text(format == .openVPN
+                     ? "Add this OpenVPN profile, then choose Connect. SimpleVPN will ask for any sign-in details the profile requires."
+                     : "Your configuration will be imported when you choose Add VPN. You can enter your sign-in details next.")
                     .foregroundStyle(.secondary).font(.callout)
             } else {
-                Picker("VPN Type", selection: typeChoice) {
-                    Text("Choose a type…").tag(Optional<TypeChoice>.none)
-                    Text("UniFi Teleport").tag(Optional(TypeChoice.teleport))
-                    ForEach(VPNKind.allCases, id: \.self) { type in
-                        Text(type.displayName).tag(Optional(TypeChoice.vpn(type)))
-                    }
-                }
                 if draft.usesTeleport {
-                    Text("Add this VPN, then use a fresh invitation from your UniFi console to pair it in Settings.")
-                        .font(.callout).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    SecureField("Teleport invitation", text: $draft.invitation)
+                        .accessibilityValue(draft.invitation.isEmpty ? "Empty" : "Entered")
+                    Text("Use a fresh invite from your UniFi console. Pairing saves access for future connections.")
+                        .foregroundStyle(.secondary).font(.callout)
+                } else if draft.kind == .tailscale {
+                    if draft.usesHeadscale {
+                        TextField("Headscale control URL", text: $draft.headscaleURL,
+                                  prompt: Text("https://headscale.example.com"))
+                            .autocorrectionDisabled()
+                    }
+                    if !draft.usesHeadscale, let invitation = draft.analysis.invitation,
+                       draft.analysis.kind == .tailscale, invitation.hasPrefix("https://"),
+                       let url = URL(string: invitation) {
+                        Link("Accept Tailscale Invitation", destination: url)
+                        Text("Accept the invitation in your browser before signing this Mac in.")
+                            .foregroundStyle(.secondary).font(.callout)
+                    }
+                    if startsSignIn {
+                        Text("SimpleVPN will open a browser so you can sign in.")
+                            .foregroundStyle(.secondary).font(.callout)
+                    }
+                    DisclosureGroup("Advanced") {
+                        SecureField("Setup key (optional)", text: $draft.invitation)
+                            .accessibilityValue(draft.invitation.isEmpty ? "Empty" : "Entered")
+                        if startsSignIn {
+                            BrowserPicker(selection: $draft.signInBrowser,
+                                          systemDefaultLabel: "Default browser (\(BrowserCatalog.osDefaultName))")
+                        }
+                    }
                 } else {
                     HStack {
                         TextField("Server Address", text: $draft.serverAddress, prompt: Text("vpn.example.com"))
@@ -252,15 +377,24 @@ struct NewVPNSetupView: View {
 
     private var actions: some View {
         HStack {
-            Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction).disabled(draft.isCreating)
+            Button("Cancel") {
+                if draft.isCreating { work?.cancel() }
+                else { onCancel() }
+            }
+            .keyboardShortcut(.cancelAction)
+            .disabled(draft.isCreating && !draft.usesTeleport)
             Spacer()
-            if draft.isCreating { ProgressView().controlSize(.small).accessibilityLabel("Adding VPN") }
-            Button("Add VPN") { create() }
+            if draft.isCreating {
+                ProgressView(draft.usesTeleport ? "Pairing Teleport…" : "Adding VPN…")
+                    .controlSize(.small)
+            }
+            Button(startsSignIn ? "Sign in with \(BrowserCatalog.label(draft.signInBrowser))"
+                   : draft.usesTeleport ? "Pair and Add VPN" : "Add VPN") { create() }
                 .accessibilityIdentifier("confirm-add-vpn")
                 .buttonStyle(.glassProminent)
                 .keyboardShortcut(.defaultAction)
                 .disabled(!canCreate)
-                .help(creationProblem ?? "Add this VPN and open its settings.")
+                .help(creationProblem ?? (startsSignIn ? "Add this VPN and open the sign-in page." : "Add this VPN and open its settings."))
                 .accessibilityValue(creationProblem ?? "Ready to add")
         }
         .padding(12)
@@ -277,12 +411,57 @@ struct NewVPNSetupView: View {
             return
         }
         draft.analysis = VPNSetupInput.analyse(draft.input)
-        if draft.analysis.format != nil || !draft.chosenType {
+        if draft.invitation == draft.inferredInvitation { draft.invitation = "" }
+        draft.inferredInvitation = nil
+        if draft.headscaleURL == draft.inferredHeadscaleURL { draft.headscaleURL = "" }
+        draft.inferredHeadscaleURL = draft.analysis.headscaleURL
+        if let url = draft.analysis.headscaleURL { draft.headscaleURL = url }
+        if draft.analysis.invitation != nil || draft.analysis.headscaleURL != nil {
+            let invitation = draft.analysis.invitation
+            draft.inferredInvitation = invitation.flatMap {
+                draft.analysis.isTeleport || !$0.hasPrefix("https://") ? $0 : nil
+            }
+            draft.invitation = draft.inferredInvitation ?? ""
+            draft.usesHeadscale = draft.analysis.headscaleURL != nil
+            draft.kind = draft.analysis.kind
+            draft.usesTeleport = draft.analysis.isTeleport
+        } else if draft.usesTeleport, TeleportSession.inviteProblem(draft.input) == nil {
+            draft.inferredInvitation = draft.input
+            draft.invitation = draft.input
+        } else if draft.analysis.format != nil || !draft.chosenType {
             draft.kind = draft.analysis.kind
             draft.usesTeleport = false
         }
-        if let server = draft.analysis.server { draft.serverAddress = server.address }
+        if let server = draft.analysis.server, !draft.usesTeleport, draft.kind != .tailscale {
+            draft.serverAddress = server.address
+        }
         draft.sshHostID = sshHosts.first?.id ?? ""
+    }
+
+    private func useClipboard() {
+        let pasteboard = NSPasteboard.general
+        if let file = pasteboard.readObjects(forClasses: [NSURL.self],
+                                             options: [.urlReadingFileURLsOnly: true])?.first as? URL {
+            readFile(file)
+        } else if let image = NSImage(pasteboard: pasteboard), let data = image.tiffRepresentation {
+            qrCapture.decode(data, completion: acceptQR)
+        } else if let text = pasteboard.string(forType: .string), text != draft.input {
+            interpretClipboard = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            draft.input = text
+        }
+    }
+
+    private func acceptQR(_ payload: String?) {
+        guard let payload else {
+            draft.message = "No single QR code was found. Try capturing just one code."
+            AccessibilityAnnouncer.sayNow(draft.message)
+            return
+        }
+        draft.input = payload
+        recogniseInput()
+        if draft.analysis.format == nil && draft.analysis.invitation == nil && !draft.usesTeleport {
+            draft.message = "QR code read. Review the contents and choose a VPN type if needed."
+        }
     }
 
     private func readFile(_ url: URL) {
@@ -292,6 +471,10 @@ struct NewVPNSetupView: View {
             let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
             guard size <= VPNSetupInput.maximumBytes else {
                 draft.message = "This file is too large. Choose a configuration smaller than 1 MB."
+                return
+            }
+            if let type = UTType(filenameExtension: url.pathExtension), type.conforms(to: .image) {
+                qrCapture.decode(try Data(contentsOf: url), completion: acceptQR)
                 return
             }
             let text = try String(contentsOf: url, encoding: .utf8)
@@ -308,7 +491,8 @@ struct NewVPNSetupView: View {
     }
 
     private func interpretInstructions() {
-        guard !draft.isWorking, VPNSetupIntelligence.unavailableReason == nil else { return }
+        guard !draft.isWorking, draft.input.utf8.count <= VPNSetupInput.maximumBytes,
+              VPNSetupIntelligence.unavailableReason == nil else { return }
         let source = draft.input
         workRevision += 1
         let revision = workRevision
@@ -354,15 +538,21 @@ struct NewVPNSetupView: View {
     private func create() {
         guard canCreate, let type = draft.kind else { return }
         let trimmedName = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let defaultName = draft.usesTeleport ? "UniFi Teleport" : "My VPN"
         let submission = VPNSetupSubmission(name: trimmedName.isEmpty ? defaultName : trimmedName,
             kind: type, text: draft.input, format: draft.analysis.format, server: server,
             sshHost: sshHosts.first { $0.id == draft.sshHostID }, discovery: draft.selectedCandidate,
-            usesTeleport: draft.usesTeleport)
+            usesTeleport: draft.usesTeleport,
+            invitation: draft.usesTeleport ? draft.invitation : (type == .tailscale ? setupKey : ""),
+            headscaleURL: type == .tailscale && draft.usesHeadscale ? headscaleURL : "",
+            signInBrowser: draft.signInBrowser, startSignIn: startsSignIn)
         draft.isCreating = true
         work = Task {
             defer { draft.isCreating = false }
             do { try await onCreate(submission) }
+            catch is CancellationError {
+                draft.message = "Pairing canceled. If the invite was redeemed, create a fresh invite in UniFi before trying again."
+                AccessibilityAnnouncer.sayNow(draft.message)
+            }
             catch { failure = UserFacingError.classify(error) }
         }
     }

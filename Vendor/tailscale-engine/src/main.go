@@ -205,24 +205,25 @@ type peerSummary struct {
 }
 
 type statusPayload struct {
-	State          string        `json:"state"`
-	AuthURL        string        `json:"authURL,omitempty"`
-	HaveNodeKey    bool          `json:"haveNodeKey"`
-	SelfIPs        []string      `json:"selfIPs"`
-	SelfDNSName    string        `json:"selfDNSName,omitempty"`
-	SelfHostName   string        `json:"selfHostName,omitempty"`
-	MagicDNSSuffix string        `json:"magicDNSSuffix,omitempty"`
-	Tailnet        string        `json:"tailnet,omitempty"`
-	PeerCount      int           `json:"peerCount"`
-	PeersOnline    int           `json:"peersOnline"`
-	ExitNodes      []peerSummary `json:"exitNodes"`
-	ExitNodeID     string        `json:"exitNodeID,omitempty"`
-	ExitNodeName   string        `json:"exitNodeName,omitempty"`
-	RxBytes        int64         `json:"rxBytes"`
-	TxBytes        int64         `json:"txBytes"`
-	Health         []string      `json:"health,omitempty"`
-	Config         *tunnelConfig `json:"config,omitempty"`
-	PacketsDropped int64         `json:"packetsDropped"`
+	State             string        `json:"state"`
+	AuthURL           string        `json:"authURL,omitempty"`
+	HaveNodeKey       bool          `json:"haveNodeKey"`
+	SelfIPs           []string      `json:"selfIPs"`
+	SelfDNSName       string        `json:"selfDNSName,omitempty"`
+	SelfHostName      string        `json:"selfHostName,omitempty"`
+	MagicDNSSuffix    string        `json:"magicDNSSuffix,omitempty"`
+	Tailnet           string        `json:"tailnet,omitempty"`
+	NodeKeyExpiryUnix int64         `json:"nodeKeyExpiryUnix,omitempty"`
+	PeerCount         int           `json:"peerCount"`
+	PeersOnline       int           `json:"peersOnline"`
+	ExitNodes         []peerSummary `json:"exitNodes"`
+	ExitNodeID        string        `json:"exitNodeID,omitempty"`
+	ExitNodeName      string        `json:"exitNodeName,omitempty"`
+	RxBytes           int64         `json:"rxBytes"`
+	TxBytes           int64         `json:"txBytes"`
+	Health            []string      `json:"health,omitempty"`
+	Config            *tunnelConfig `json:"config,omitempty"`
+	PacketsDropped    int64         `json:"packetsDropped"`
 }
 
 // ---- Callback registry ------------------------------------------------------
@@ -924,6 +925,9 @@ func tsStatusState(st *engineState) *C.char {
 	if s.Self != nil {
 		out.SelfDNSName = strings.TrimSuffix(s.Self.DNSName, ".")
 		out.SelfHostName = s.Self.HostName
+		if expiry := s.Self.KeyExpiry; expiry != nil && !expiry.IsZero() {
+			out.NodeKeyExpiryUnix = expiry.Unix()
+		}
 	}
 	if s.CurrentTailnet != nil {
 		out.MagicDNSSuffix = s.CurrentTailnet.MagicDNSSuffix

@@ -540,7 +540,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                 // most valuable thing anyone can tell us. One line here serves
                 // all sixteen kinds; the claim itself lives in the maturity
                 // registry and nowhere else.
-                if let notice = profile.kind.maturityNotice {
+                if let notice = profile.kind.maturityNotice(usesTeleport: vpn.usesTeleport(kind: profile.kind, profileID: profile.id)) {
                     MaturityBanner(notice: notice,
                                    request: .init(kind: profile.kind, profileID: profile.id,
                                                   reason: .untestedKind))
@@ -692,9 +692,11 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
         VStack(alignment: .leading, spacing: 16) {
             // A Tailscale connect waiting on the browser sign-in: say so, and
             // keep the URL reachable — a dismissed tab must not be a dead end.
-            if profile.status == .connecting, profile.kind == .tailscale,
-               vpn.tailscaleSignInURL[profile.id] != nil {
-                TailscaleSignInBanner { vpn.openTailscaleSignIn(id: profile.id) }
+            if profile.kind == .tailscale {
+                let status = vpn.tailscaleStatuses[profile.id]
+                TailscaleSignInAction(vpn: vpn, profileID: profile.id,
+                                      canReauthenticate: profile.status == .connected && status?.backendState == .running)
+                if let expiry = status?.nodeKeyExpiry { TailscaleKeyExpiryLabel(expiry: expiry) }
             }
             if profile.status == .connecting, connectingTooLong,
                vpn.tailscaleSignInURL[profile.id] == nil {   // the sign-in banner already explains the wait
@@ -758,8 +760,6 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     /// Says what will happen rather than asking for something that doesn't
     /// exist, and points at the one place a setup key can be entered.
     @ViewBuilder private var tailscalePanel: some View {
-        let status = vpn.tailscaleStatuses[profile.id]
-        let signInURL = vpn.tailscaleSignInURL[profile.id]
         VStack(alignment: .leading, spacing: 8) {
             // Read out here: the keyframe closure below is @Sendable and can't
             // touch the main-actor environment.
@@ -799,28 +799,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                 }
                 .accessibilityAddTraits(.isStaticText)
             }
-            if let status, status.backendState.needsUserAction {
-                Label(status.backendState == .needsMachineAuth
-                      ? "Waiting for someone to approve this Mac on your network."
-                      : "Waiting for you to sign in. The sign-in page should have opened in your browser.",
-                      systemImage: "person.badge.key")
-                    .foregroundStyle(.orange)
-                if status.backendState == .needsLogin {
-                    // Re-opens the engine's login URL in the default browser —
-                    // the way back when the tab was closed. Disabled until the
-                    // engine has actually issued one.
-                    Button("Open Sign-In Page") { vpn.openTailscaleSignIn(id: profile.id) }
-                        .disabled(signInURL == nil)
-                }
-            } else if let status, status.backendState == .running {
-                Label("This Mac is on the network as \(status.selfDNSName.isEmpty ? status.primaryIPv4 : status.selfDNSName).",
-                      systemImage: "checkmark.circle")
-                    .foregroundStyle(.secondary)
-                if status.peerCount > 0 {
-                    Text("\(status.peersOnline) of \(status.peerCount) machines online.")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
-            } else {
+            if vpn.tailscaleSignInResults[profile.id] != .failed {
                 Label("This VPN signs itself in — with a setup key, or by opening a sign-in page the first time.",
                       systemImage: "point.3.connected.trianglepath.dotted")
                     .foregroundStyle(.secondary)

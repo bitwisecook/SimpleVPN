@@ -974,6 +974,7 @@ extension VPNController {
     func disconnect(id: String) {
         if let why = controlDenied(.disconnect(profile: id)) { lastError = why; return }
         connectionReservations.cancel(member: id)
+        clearTailscaleSignIn(id: id)
         if disconnectVirtualMember(id) { return }
         // Cancelling a connect that was already grinding away is the same evidence the
         // watchdog collects — the user just got there first. Remember the network so the

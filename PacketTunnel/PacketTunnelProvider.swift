@@ -1316,6 +1316,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
             guard let ts = lock.withLock({ tsEngine }) else { reply(Data()); return }
             statsQueue.async { reply(ts.authURL()) }
 
+        case "tsreauth":
+            guard let ts = lock.withLock({ tsEngine }) else { reply("error: not connected"); return }
+            statsQueue.async {
+                if let problem = ts.reauthenticate() { reply("error: " + problem) }
+                else { reply("ok") }
+            }
+
         case "tsstatus":
             // Full engine status for the connection panel and the exit-node
             // picker (which needs the peer list this session actually sees).

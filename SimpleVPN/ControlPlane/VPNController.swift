@@ -601,6 +601,8 @@ final class VPNController {
     var tailscaleConfigs: [String: TailscaleConfig] = [:]   // was private(set) — internal for the +File split
     /// Latest engine status per profile, refreshed while connected.
     var tailscaleStatuses: [String: TailscaleStatus] = [:]   // was private(set) — internal for the +File split
+    enum TailscaleSignInResult { case preparing, failed }
+    var tailscaleSignInResults: [String: TailscaleSignInResult] = [:]
     @ObservationIgnored var tailscaleSignInWatch: [String: Task<Void, Never>] = [:]   // was private — internal for the +File split
     /// The sign-in page we sent this VPN's user to — observable, so the connect
     /// panel can offer to re-open it; cleared once the node registers.
@@ -923,6 +925,11 @@ final class VPNController {
         // A connect that can never succeed (wrong network, unreachable
         // gateway) is retried by the engine for ever, so the app has to
         // impose its own deadline — otherwise "Connecting…" is permanent.
+        if s == .disconnecting || s == .disconnected || s == .invalid {
+            let signInInterrupted = tailscaleSignInURL[id] != nil || tailscaleSignInResults[id] != nil
+            clearTailscaleSignIn(id: id)
+            if signInInterrupted { tailscaleSignInResults[id] = .failed }
+        }
         if s == .connecting {
             self.startConnectWatchdog(id: id)
             // Is a running virtual machine's network about to be swallowed by this

@@ -521,6 +521,11 @@ nonisolated struct TailscaleStatus: Codable, Sendable, Equatable {
     var state: String = TailscaleBackendState.noState.rawValue
     var authURL: String = ""
     var haveNodeKey: Bool = false
+    var nodeKeyExpiryUnix: Int64?
+
+    var nodeKeyExpiry: Date? {
+        nodeKeyExpiryUnix.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+    }
     var selfIPs: [String] = []
     var selfDNSName: String = ""
     var selfHostName: String = ""
@@ -550,6 +555,7 @@ nonisolated struct TailscaleStatus: Codable, Sendable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         state = (try? c.decodeIfPresent(String.self, forKey: .state)) ?? TailscaleBackendState.noState.rawValue
         authURL = (try? c.decodeIfPresent(String.self, forKey: .authURL)) ?? ""
+        nodeKeyExpiryUnix = try? c.decodeIfPresent(Int64.self, forKey: .nodeKeyExpiryUnix)
         haveNodeKey = (try? c.decodeIfPresent(Bool.self, forKey: .haveNodeKey)) ?? false
         selfIPs = (try? c.decodeIfPresent([String].self, forKey: .selfIPs)) ?? []
         selfDNSName = (try? c.decodeIfPresent(String.self, forKey: .selfDNSName)) ?? ""

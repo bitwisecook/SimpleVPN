@@ -468,8 +468,10 @@ struct ManageVPNsView: View {
         ConnectionRowLayout(
             id: p.id, name: p.name, kind: p.kind, status: p.status,
             dot: .from(status: p.status),
-            caption: ConnectionRowCaption.of(name: p.name, kind: p.kind),
-            labels: labels.labels(for: p.id)
+            caption: ConnectionRowCaption.of(name: p.name, kind: p.kind,
+                                             usesTeleport: vpn.usesTeleport(kind: p.kind, profileID: p.id)),
+            labels: labels.labels(for: p.id),
+            usesTeleport: vpn.usesTeleport(kind: p.kind, profileID: p.id)
         ) {
             // The two warnings only an NE profile can carry. Outside the combined
             // element on purpose — each is its own labelled, help-carrying badge.
@@ -807,6 +809,7 @@ struct ManageVPNsView: View {
 
     private func createFromSetup(_ draft: VPNSetupSubmission) async throws {
         guard !ManagedPolicy.lockConfiguration else { throw VPNController.configLocked }
+        var signInProfileID: String?
         if let format = draft.format {
             switch format {
             case .openVPN, .wireGuard:
@@ -854,14 +857,36 @@ struct ManageVPNsView: View {
                 if let server = draft.server {
                     config.endpoint = VPNSetupServer(host: server.host, port: port ?? 51820).address
                 }
-                selection = try await vpn.createWireGuard(from: config)
+                let id = try await vpn.createWireGuard(from: config)
+                if draft.usesTeleport {
+                    do { try await vpn.pairTeleport(id: id, invite: draft.invitation) }
+                    catch {
+                        try await vpn.remove(id: id)
+                        throw error
+                    }
+                }
+                selection = id
             case .tailscale:
                 var config = TailscaleConfig()
+                config.signInBrowser = draft.signInBrowser
                 if let server = draft.server {
                     config.preset = .headscale
                     config.controlURL = "https://" + server.address
                 }
-                selection = try await vpn.createTailscale(name: draft.name, configuration: config)
+                if !draft.headscaleURL.isEmpty {
+                    config.preset = .headscale
+                    config.controlURL = draft.headscaleURL
+                }
+                let id = try await vpn.createTailscale(name: draft.name, configuration: config)
+                if !draft.invitation.isEmpty {
+                    do { try vpn.setTailscaleAuthKey(draft.invitation, for: id) }
+                    catch {
+                        try await vpn.remove(id: id)
+                        throw error
+                    }
+                }
+                selection = id
+                if draft.startSignIn { signInProfileID = id }
             case .proxyTunnel:
                 var config = ProxyTunnelConfig()
                 if let server = draft.server { config.upstream = "socks5://" + server.address }
@@ -894,9 +919,31 @@ struct ManageVPNsView: View {
         }
         newVPN = nil
         setupFile = nil
-        AccessibilityAnnouncer.sayNow(draft.usesTeleport
-            ? "Added \(draft.name). You can now pair it with a Teleport invitation."
-            : "Added \(draft.name). You can now enter your sign-in details.")
+        if let signInProfileID {
+            AccessibilityAnnouncer.sayNow("Added \(draft.name). Starting sign-in.")
+            if !(await vpn.connectWithSavedCredentials(id: signInProfileID)) {
+                vpn.tailscaleSignInResults[signInProfileID] = .failed
+                creationFailure = UserFacingError.classify(
+                    vpn.err(vpn.lastError ?? "Could not start sign-in. Try connecting again."))
+            }
+            return
+        }
+        if draft.usesTeleport {
+            AccessibilityAnnouncer.sayNow("Added \(draft.name). Teleport is paired. Choose Connect.")
+        } else if draft.kind == .openVPN, let id = selection {
+            switch vpn.connectReadiness(for: id) {
+            case .ready:
+                AccessibilityAnnouncer.sayNow("VPN added. Choose Connect.")
+            case .needsSignIn:
+                AccessibilityAnnouncer.sayNow("VPN added. Enter your sign-in details, then choose Connect.")
+            case .needsCode:
+                AccessibilityAnnouncer.sayNow("VPN added. Enter your verification code, then choose Connect.")
+            case .blocked:
+                AccessibilityAnnouncer.sayNow("VPN added. Review its settings before connecting.")
+            }
+        } else {
+            AccessibilityAnnouncer.sayNow("Added \(draft.name).")
+        }
     }
 
     /// Discovery and the guided setup share creation, defaults and error handling.

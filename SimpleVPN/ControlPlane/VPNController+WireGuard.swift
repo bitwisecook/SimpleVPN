@@ -30,6 +30,10 @@ extension VPNController {
 
     /// The saved (redacted) config for a profile — the keys are in the
     /// keychain, not here.
+    func usesTeleport(kind: VPNKind, profileID: String) -> Bool {
+        kind == .wireGuard && wireGuardConfig(for: profileID).usesTeleport
+    }
+
     func wireGuardConfig(for id: String) -> WireGuardConfig {
         if let c = wireGuardConfigs[id] { return c }
         let proto = managers[id]?.protocolConfiguration as? NETunnelProviderProtocol

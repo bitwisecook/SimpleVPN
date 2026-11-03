@@ -42,6 +42,7 @@ char *TSStopInstance(uint64_t handle);
 char *TSNodeState(uint64_t handle);
 char *TSAckNodeState(uint64_t handle, uint64_t revision);
 char *TSStatusInstance(uint64_t handle);
+char *TSReauthenticateInstance(uint64_t handle);
 char *TSUpdatePrefsInstance(uint64_t handle, const char *patchJSON);
 int TSPacketInInstance(uint64_t handle, const void *bytes, int length);
 

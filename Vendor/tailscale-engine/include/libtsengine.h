@@ -151,6 +151,7 @@ extern char* TSCreateInstance(char* cfgJSON, uint64_t context, TSInstancePacketC
 extern int TSPacketInInstance(uint64_t handle, void* bytes, int length);
 extern char* TSStatusInstance(uint64_t handle);
 extern char* TSUpdatePrefsInstance(uint64_t handle, char* patchJSON);
+extern char* TSReauthenticateInstance(uint64_t handle);
 extern char* TSStopInstance(uint64_t handle);
 extern char* TSNodeState(uint64_t handle);
 extern char* TSAckNodeState(uint64_t handle, uint64_t revision);

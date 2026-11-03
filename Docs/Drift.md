@@ -534,8 +534,8 @@ included only in explicitly secret-bearing configuration exports.
 
 **Verdict: KEEP SEPARATE control plane, SHARE the WireGuard engine.** Protocol
 fixtures and Teleport configuration tests cover invite exchange, socket handoff,
-secret exclusion and routing configuration. Live UniFi interoperability requires
-a real console and invite; offline tests do not establish that claim.
+secret exclusion and routing configuration. A user confirmed UniFi Teleport
+working on a live setup on 2026-11-03.
 
 ## 20. Required names and editor save failures — SHARED PRESENTATION, ENGINE PERSISTENCE
 

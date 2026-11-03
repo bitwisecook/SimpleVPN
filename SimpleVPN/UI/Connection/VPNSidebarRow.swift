@@ -52,6 +52,10 @@ struct VPNSidebarRow: View {
                 // endpoint picker stays its own element (it's interactive).
                 Text(profile.name).lineLimit(1).truncationMode(.tail)
                     .accessibilityLabel(rowAccessibilitySummary)
+                if usesTeleport, let caption = ConnectionRowCaption.of(name: profile.name, kind: profile.kind, usesTeleport: true) {
+                    Text(caption).font(.caption).foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                }
                 if endpoints.count > 1 {
                     endpointPicker
                     // The picker replaces the status line, but "waiting on you"
@@ -84,6 +88,9 @@ struct VPNSidebarRow: View {
             if let maturityNotice {
                 MaturityBadge(notice: maturityNotice).fixedSize()
             }
+            if profile.kind == .tailscale, let expiry = vpn.tailscaleStatuses[profile.id]?.nodeKeyExpiry {
+                TailscaleKeyExpiryBadge(expiry: expiry)
+            }
             controls
         }
         .padding(.vertical, ConnectionRowMetrics.verticalPadding)
@@ -92,7 +99,8 @@ struct VPNSidebarRow: View {
 
     /// Whether this VPN's kind still carries a maturity notice. One lookup, from
     /// the registry — never a list of kinds written out here.
-    private var maturityNotice: MaturityNotice? { profile.kind.maturityNotice }
+    private var usesTeleport: Bool { vpn.usesTeleport(kind: profile.kind, profileID: profile.id) }
+    private var maturityNotice: MaturityNotice? { profile.kind.maturityNotice(usesTeleport: usesTeleport) }
 
     /// The row as one sentence: name, protocol, live state (same words the
     /// visible status line uses, plus the dot-only degraded/captive states),
@@ -107,7 +115,7 @@ struct VPNSidebarRow: View {
             name: profile.name, kind: profile.kind, dot: dotState,
             stateInWords: rowStateDescription,
             notes: [vpn.routes.effectiveGatewayOwner == profile.id ? "owns the default route" : ""],
-            labels: labelDefs.map(\.name), maturity: maturityNotice)
+            labels: labelDefs.map(\.name), maturity: maturityNotice, usesTeleport: usesTeleport)
     }
 
     private var rowStateDescription: String {

@@ -110,7 +110,7 @@ mv "$OUT/libtsengine.h" "$INCLUDE/libtsengine.h"
 # Read nm completely before matching: grep -q in a pipe can make nm fail
 # with SIGPIPE under pipefail even when the required symbol exists.
 symbols="$(nm -gU "$OUT/libtsengine.a" 2>/dev/null)"
-for sym in _TSSetCallbacks _TSStart _TSStop _TSStatus _TSUpdatePrefs _TSPacketIn _TSFree _TSCreateInstance _TSStopInstance _TSStatusInstance _TSUpdatePrefsInstance _TSPacketInInstance _TSNodeState _TSAckNodeState; do
+for sym in _TSSetCallbacks _TSStart _TSStop _TSStatus _TSUpdatePrefs _TSPacketIn _TSFree _TSCreateInstance _TSStopInstance _TSStatusInstance _TSReauthenticateInstance _TSUpdatePrefsInstance _TSPacketInInstance _TSNodeState _TSAckNodeState; do
   grep -q " T $sym\$" <<< "$symbols" \
     || { echo "error: $sym missing from libtsengine.a" >&2; exit 1; }
   grep -q "${sym#_}" "$INCLUDE/tsengine.h" \

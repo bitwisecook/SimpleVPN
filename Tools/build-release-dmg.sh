@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 #
 # End-to-end DISTRIBUTION build: Release build -> notarize+staple the .app ->
-# build the drag-install DMG -> notarize+staple the DMG -> verify everything a
+# build the installer DMG -> notarize+staple the DMG -> verify everything a
 # recipient's Mac will check. Deliberately does NOT install to /Applications —
 # that is what Tools/build-notarize-install.sh is for (the local live-test
 # path). This script is the one CI runs, and it is written to behave
@@ -48,6 +48,11 @@ if [ -z "$VERSION" ]; then
   echo "FATAL: no version given, \$MARKETING_VERSION unset, no exact tag checked out,"
   echo "       and no MARKETING_VERSION found in project.yml."
   echo "       usage: Tools/build-release-dmg.sh <version>"
+  exit 1
+fi
+
+if ! command -v dmgbuild >/dev/null; then
+  echo "FATAL: install dmgbuild==1.6.7 in a Python virtual environment and put it on PATH."
   exit 1
 fi
 

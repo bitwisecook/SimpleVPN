@@ -563,6 +563,20 @@ virtual routing session can become the normal connection model while the advance
 editor remains optional. The older "PBR always off" rule concerns the unbuilt
 power feature; it should not indefinitely prevent the user's requested core model.
 
+## Future plan — launch macOS apps through a selected VPN
+
+Defer this feature while we improve setup, sign-in where applicable, and
+day-to-day connection handling for Tailscale, UniFi Teleport, and OpenVPN.
+
+- Drop an application onto a VPN row or choose **Run Application on This VPN…**
+  from its context menu for a one-off launch.
+- Add a per-VPN **Applications** list. Save apps using **+** or drag and drop,
+  then double-click a saved app to launch it through that VPN.
+- Prototype a macOS transparent proxy for unmanaged Macs before exposing these
+  controls. Verify that the chosen app's flows use the selected VPN, other apps
+  keep their routes, and the chosen app's traffic is blocked if the VPN drops.
+  Refuse launch if the routing scope cannot be established.
+
 ## App and command attribution — required flow-layer capability
 
 The user wants policies to distinguish a `.app` and a CLI executable. The existing

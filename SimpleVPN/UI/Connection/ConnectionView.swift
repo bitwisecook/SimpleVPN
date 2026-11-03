@@ -438,11 +438,26 @@ struct ConnectionView: View {
             }
     }
 
+    private var connectedTailscaleIDs: [String] {
+        vpn.profiles.filter { $0.kind == .tailscale && $0.status == .connected }.map(\.id)
+    }
+
     var body: some View {
         content
             .adaptiveMainWindowSizing(windowLayoutMode)
             .toasts()
             .navigationTitle("SimpleVPN")
+            .task(id: connectedTailscaleIDs) {
+                let ids = connectedTailscaleIDs
+                guard !ids.isEmpty else { return }
+                while !Task.isCancelled {
+                    for id in ids {
+                        guard !Task.isCancelled else { return }
+                        await vpn.refreshTailscaleStatus(id: id)
+                    }
+                    try? await Task.sleep(for: .seconds(60))
+                }
+            }
             .task {
                 await vpn.loadAll()
                 // Resolve the first stable window shape before publishing the
@@ -832,9 +847,7 @@ private struct ActivationPrompt: View {
             }
         } actions: {
             if ext.needsApplicationsInstallation {
-                Button("Open Installed SimpleVPN") {
-                    NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/SimpleVPN.app"))
-                }
+                InstalledSimpleVPNHandoff()
                 .buttonStyle(.glassProminent)
             } else {
                 Button("Activate Extension") { Task { await ext.activate() } }

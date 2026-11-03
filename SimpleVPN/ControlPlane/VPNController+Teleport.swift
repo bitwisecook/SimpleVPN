@@ -27,12 +27,18 @@ extension VPNController {
         defer { connectionReservations.finish(attempt); resyncStatuses() }
 
         let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/teleport-pair")
+        guard FileManager.default.isExecutableFile(atPath: helper.path) else {
+            throw err("This copy of SimpleVPN is missing the Teleport pairing helper. Reinstall SimpleVPN and try again.")
+        }
         let request = try JSONSerialization.data(withJSONObject: [
             "invite": invite.trimmingCharacters(in: .whitespacesAndNewlines),
             "name": "SimpleVPN"
         ])
         let reply = await LocalToolRunner.run(executable: helper.path, arguments: [], deadline: 160, stdin: request)
         try Task.checkCancellation()
+        if reply.timedOut {
+            throw err("Teleport pairing timed out. Check that your UniFi console is online and try with a fresh invite.")
+        }
         guard reply.exitCode == 0,
               let session = try? JSONDecoder().decode(TeleportSession.self, from: reply.stdout), session.isValid else {
             throw err("Teleport could not pair. Check that the invite is fresh and the console is online, then try again.")

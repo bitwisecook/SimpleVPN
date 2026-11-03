@@ -69,12 +69,23 @@ enum BrowserCatalog {
         return "\(b.name) · \(profileName)"
     }
 
+    private static var osDefaultURL: URL? {
+        URL(string: "https://apple.com").flatMap { NSWorkspace.shared.urlForApplication(toOpen: $0) }
+    }
+
     /// The name of the OS default browser (for the "System Default" picker label).
     static var osDefaultName: String {
-        guard let http = URL(string: "https://apple.com"),
-              let appURL = NSWorkspace.shared.urlForApplication(toOpen: http) else { return "System Default" }
+        guard let appURL = osDefaultURL else { return "System Default" }
         let name = FileManager.default.displayName(atPath: appURL.path)
         return name.replacingOccurrences(of: ".app", with: "")
+    }
+
+    static func icon(for selection: BrowserSelection) -> NSImage? {
+        guard !selection.isInApp else { return nil }
+        let selectedURL = browser(selection.bundleID).flatMap {
+            NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0.bundleID)
+        }
+        return (selectedURL ?? osDefaultURL).map { NSWorkspace.shared.icon(forFile: $0.path) }
     }
 
     // MARK: Profiles

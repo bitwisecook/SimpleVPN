@@ -169,21 +169,25 @@ extension VPNController {
         watchTailscaleSignIn(id: id)
     }
 
-    /// Poll the extension for a sign-in URL and open it in the user's default
-    /// browser. The extension cannot push across the root/user boundary (see
-    /// TunnelIncidentStore's note), so this is a short, bounded poll that
-    /// stops as soon as the node is authorized. Not the in-app SSO webview:
-    /// that window belongs to OpenConnect's loopback-redirect flow — a
-    /// Tailscale login is an arbitrary IdP page that may need the user's
-    /// password manager or passkeys, which live in their real browser.
-    private func watchTailscaleSignIn(id: String) {
-        tailscaleSignInWatch[id]?.cancel()
-        tailscaleSignInURL[id] = nil   // fresh attempt — last attempt's URL is dead
+    /// Poll for the sign-in URL and open it in the profile's chosen browser.
+    /// The extension cannot push across the root/user boundary, so the app
+    /// polls until the node is authorized or the attempt times out.
+    func clearTailscaleSignIn(id: String) {
+        tailscaleSignInWatch.removeValue(forKey: id)?.cancel()
+        tailscaleSignInURL[id] = nil
+        tailscaleSignInResults[id] = nil
+    }
+
+    private func watchTailscaleSignIn(id: String, reauthenticating: Bool = false) {
+        clearTailscaleSignIn(id: id)
+        tailscaleSignInResults[id] = .preparing
         tailscaleSignInWatch[id] = Task { [weak self] in
             // Five minutes is longer than any legitimate registration (the user
             // has to read a consent page) and short enough that a wedged session
             // doesn't poll forever.
-            for _ in 0..<300 {
+            var openedSignInPage = false
+            let deadline = ContinuousClock.now + .seconds(300)
+            while ContinuousClock.now < deadline {
                 try? await Task.sleep(for: .seconds(1))
                 guard let self, !Task.isCancelled else { return }
                 guard self.profiles.contains(where: { $0.id == id }) else { return }
@@ -191,23 +195,58 @@ extension VPNController {
                 // clears the sign-in state once the control plane completes
                 // the login on its own, and what the editor shows meanwhile.
                 let status = await self.refreshTailscaleStatus(id: id)
-                if status?.backendState == .running { return }
+                guard !Task.isCancelled else { return }
+                if let status, status.backendState == .running, status.authURL.isEmpty,
+                   !reauthenticating || openedSignInPage {
+                    self.tailscaleSignInResults[id] = nil
+                    return
+                }
                 // The status carries the login URL once the engine has one; the
                 // dedicated tsauth message covers a session that can't answer a
                 // full status yet.
                 var url = status.flatMap { $0.authURL.isEmpty ? nil : URL(string: $0.authURL) }
-                if url == nil,
+                if url == nil, !reauthenticating,
                    let data = await self.sendMessageData("tsauth", to: id, timeout: 4),
                    let text = String(data: data, encoding: .utf8), !text.isEmpty {
                     url = URL(string: text)
                 }
                 // Each DISTINCT URL opens once per attempt — not once per status
                 // tick, and a re-keyed login (new URL) still surfaces.
-                guard let url, url != self.tailscaleSignInURL[id] else { continue }
+                guard !Task.isCancelled else { return }
+                guard let url, SSOAuthModel.accepts(url), url != self.tailscaleSignInURL[id] else { continue }
+                openedSignInPage = true
                 self.tailscaleSignInURL[id] = url
+                self.tailscaleSignInResults[id] = nil
                 self.openTailscaleURL(url, id: id)
             }
+            guard let self, !Task.isCancelled else { return }
+            if !reauthenticating, self.profiles.first(where: { $0.id == id })?.status == .connecting {
+                self.disconnect(id: id)
+            }
+            self.tailscaleSignInURL[id] = nil
+            self.tailscaleSignInResults[id] = .failed
+            AccessibilityAnnouncer.sayNow("Sign-in timed out")
         }
+    }
+
+    func tailscaleSignInTitle(id: String) -> String {
+        "Sign in with \(BrowserCatalog.label(tailscaleConfig(for: id).signInBrowser))"
+    }
+
+    func reauthenticateTailscale(id: String) async {
+        guard tailscaleSignInResults[id] != .preparing, tailscaleSignInURL[id] == nil,
+              let connection = managers[id]?.connection, connection.status == .connected else { return }
+        tailscaleSignInResults[id] = .preparing
+        let data = await sendMessageData("tsreauth", to: id)
+        guard tailscaleSignInResults[id] == .preparing,
+              managers[id]?.connection === connection, connection.status == .connected else { return }
+        guard let data,
+              let reply = String(data: data, encoding: .utf8), reply == "ok" else {
+            tailscaleSignInResults[id] = .failed
+            AccessibilityAnnouncer.sayNow("Could not start sign-in")
+            return
+        }
+        watchTailscaleSignIn(id: id, reauthenticating: true)
     }
 
     /// Re-open the current browser sign-in (the panel's button — the way back
@@ -229,16 +268,26 @@ extension VPNController {
     /// Refresh (and publish) the engine status for a connected Tailscale VPN.
     @discardableResult
     func refreshTailscaleStatus(id: String) async -> TailscaleStatus? {
-        guard let data = await sendMessageData("tsstatus", to: id),
+        guard let connection = managers[id]?.connection,
+              UI.isActive(connection.status),
+              let data = await sendMessageData("tsstatus", to: id),
+              !Task.isCancelled,
+              managers[id]?.connection === connection,
+              UI.isActive(connection.status),
               let status = try? JSONDecoder().decode(TailscaleStatus.self, from: data) else { return nil }
+        let wasWaitingForSignIn = tailscaleSignInURL[id] != nil
+            || tailscaleStatuses[id]?.backendState.needsUserAction == true
         tailscaleStatuses[id] = status
         // Once the node is registered there is nothing left to sign in to. The
         // control plane completed the sign-in on its own — the browser never
         // redirects anywhere this app can see — so the stale sign-in state has
         // to be cleared from this side.
-        if status.backendState == .running {
-            tailscaleSignInWatch[id]?.cancel()
+        if status.backendState == .running && status.authURL.isEmpty {
             tailscaleSignInURL[id] = nil
+            if wasWaitingForSignIn {
+                tailscaleSignInResults[id] = nil
+                AccessibilityAnnouncer.sayNow("Sign-in successful")
+            }
         }
         return status
     }

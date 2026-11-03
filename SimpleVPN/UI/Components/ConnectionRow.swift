@@ -84,9 +84,9 @@ nonisolated enum ConnectionRowCaption {
 
     /// The ordinary caption: the kind, and any fact worth the space. `nil` when the kind
     /// is all there is and the name already said it.
-    static func of(name: String, kind: VPNKind, fact: String? = nil) -> String? {
+    static func of(name: String, kind: VPNKind, fact: String? = nil, usesTeleport: Bool = false) -> String? {
         let fact = fact?.trimmingCharacters(in: .whitespaces)
-        let kindName = kind.displayName
+        let kindName = kind.configuredDisplayName(usesTeleport: usesTeleport)
         if fact == nil || fact?.isEmpty == true {
             // Rule 3. Compared case- and whitespace-insensitively because the name is
             // the user's to edit and "ikev2" is the same claim as "IKEv2".
@@ -140,9 +140,10 @@ enum ConnectionRowSentence {
                      stateInWords: String? = nil,
                      notes: [String] = [],
                      labels: [String] = [],
-                     maturity: MaturityNotice? = nil) -> String {
+                     maturity: MaturityNotice? = nil,
+                     usesTeleport: Bool = false) -> String {
         var bits = [name]
-        if let kind { bits.append(kind.displayName) }
+        if let kind { bits.append(kind.configuredDisplayName(usesTeleport: usesTeleport)) }
         if let fact, !fact.isEmpty { bits.append(fact) }
         bits.append(stateInWords.flatMap { $0.isEmpty ? nil : $0 }
                     ?? dot.accessibilityDescription)
@@ -191,9 +192,10 @@ struct ConnectionRowLayout<Accessory: View>: View {
     var spokenNotes: [String] = []
     /// The state in words for a focused row, when the list has one to give.
     var spokenValue: String = ""
+    var usesTeleport = false
     @ViewBuilder var accessory: () -> Accessory
 
-    private var maturityNotice: MaturityNotice? { kind.maturityNotice }
+    private var maturityNotice: MaturityNotice? { kind.maturityNotice(usesTeleport: usesTeleport) }
 
     var body: some View {
         HStack(spacing: ConnectionRowMetrics.spacing) {
@@ -230,7 +232,7 @@ struct ConnectionRowLayout<Accessory: View>: View {
             .accessibilityLabel(ConnectionRowSentence.make(
                 name: name, kind: kind, fact: caption.flatMap { stripKind($0) },
                 dot: dot, notes: spokenNotes,
-                labels: labels.map(\.name), maturity: maturityNotice))
+                labels: labels.map(\.name), maturity: maturityNotice, usesTeleport: usesTeleport))
             .accessibilityValue(spokenValue)
 
             accessory()
@@ -243,9 +245,10 @@ struct ConnectionRowLayout<Accessory: View>: View {
     /// hearing "F5 BIG-IP APM, F5 BIG-IP APM · SOCKS on 127.0.0.1:1080" is the fragmenting
     /// this element exists to stop. Returns nil when the caption was only the kind.
     private func stripKind(_ caption: String) -> String? {
-        let prefix = kind.displayName + " \u{00B7} "
+        let kindName = kind.configuredDisplayName(usesTeleport: usesTeleport)
+        let prefix = kindName + " \u{00B7} "
         guard caption.hasPrefix(prefix) else {
-            return caption == kind.displayName ? nil : caption
+            return caption == kindName ? nil : caption
         }
         return String(caption.dropFirst(prefix.count))
     }

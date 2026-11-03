@@ -169,6 +169,14 @@ final class TailscaleEngine: @unchecked Sendable {
         return status().authURL
     }
 
+    func reauthenticate() -> String? {
+        let current = lock.withLock { stopped ? 0 : handle }
+        guard let response = Self.takeString(TSReauthenticateInstance(current)) else {
+            return "The engine did not answer."
+        }
+        return Self.engineError(from: response, fallback: "Reauthentication could not start.")?.localizedDescription
+    }
+
     /// Apply a live prefs change (exit node / accept-routes / accept-DNS /
     /// advertised routes). Returns nil on success or a message on failure.
     func updatePrefs(_ patch: TailscalePrefsPatch) -> String? {

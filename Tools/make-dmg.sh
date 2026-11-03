@@ -2,16 +2,8 @@
 # Copyright 2026 James Deucker (bitwisecook)
 # SPDX-License-Identifier: GPL-3.0-only
 #
-# Build a drag-install DMG from an already-built (and ideally already-notarized
-# + stapled) SimpleVPN.app. Deliberately NOT a Finder-styled DMG: no background
-# image, no window geometry, no custom volume icon, no .DS_Store. All of that
-# requires driving Finder over AppleScript (`tell application "Finder" to ...`),
-# which needs a logged-in GUI session — it cannot work headless on a GitHub
-# Actions runner, and this script is written to run identically there and here.
-#
-# The app icon lives in SimpleVPN/SimpleVPN.icon. A custom DMG volume icon
-# would still require the UDRW -> attach -> SetFile -a C -> detach -> hdiutil
-# convert two-step; the app's icon does not require Finder customization.
+# Build the installer DMG from an already-built, stapled SimpleVPN.app.
+# dmgbuild writes the Finder layout without requiring a GUI session.
 #
 # Usage: Tools/make-dmg.sh <app-path> <version> [out-dir]
 set -euo pipefail
@@ -25,18 +17,18 @@ if [ ! -d "$APP" ]; then
   echo "FATAL: app not found at $APP"; exit 1
 fi
 
-STAGE="$REPO/build/dmg-stage"
+mkdir -p "$REPO/build" "$OUT_DIR"
+STAGE="$(mktemp -d "$REPO/build/dmg-stage.XXXXXX")"
+trap 'rm -rf "$STAGE"' EXIT
 # ARCHS is arm64-only project-wide (project.yml: engine xcframeworks are arm64
 # slices) so the filename must say so — an unqualified SimpleVPN.dmg that
 # silently fails to launch on Intel would be a support disaster.
 DMG_NAME="SimpleVPN-${VERSION}-arm64.dmg"
 DMG="$OUT_DIR/$DMG_NAME"
+BUILDNO="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")"
 
 echo "==> stage DMG contents"
-rm -rf "$STAGE"
-mkdir -p "$STAGE" "$OUT_DIR"
 cp -R "$APP" "$STAGE/"
-ln -s /Applications "$STAGE/Applications"
 if [ -f "$REPO/LICENSE" ]; then
   cp "$REPO/LICENSE" "$STAGE/LICENSE.txt"
 fi
@@ -44,24 +36,26 @@ cat > "$STAGE/Read Me First.txt" <<'EOF'
 SimpleVPN — Read Me First
 ==========================
 
-1. Drag SimpleVPN.app to the Applications folder (the shortcut is right here
-   in this window). Do NOT run it directly from this disk image — macOS will
-   refuse to load the system extension until the app is in /Applications.
+1. Double-click SimpleVPN.app in this window. Follow the installer to
+   install or update SimpleVPN and open the copy in Applications.
 
-2. Open SimpleVPN from Applications, then go to System Settings > General >
-   Login Items & Extensions and approve the SimpleVPN network extension.
-   Until you approve it there, connections will not work.
+2. If prompted, approve the SimpleVPN network extension in System Settings >
+   General > Login Items & Extensions.
 
 This build is Apple Silicon (arm64) only.
 EOF
 
-echo "==> hdiutil create $DMG_NAME"
+echo "==> build Finder layout and create $DMG_NAME"
+xcrun swift -module-cache-path "$REPO/build/dmg-module-cache" \
+  "$REPO/Tools/dmg-background.swift" "$STAGE/background.png"
+mkdir "$STAGE/Volume.iconset"
+xcrun swift -module-cache-path "$REPO/build/dmg-module-cache" \
+  "$REPO/Tools/dmg-icon.swift" "$STAGE/Volume.iconset"
+iconutil -c icns "$STAGE/Volume.iconset" -o "$STAGE/Volume.icns"
 rm -f "$DMG"
-hdiutil create \
-  -volname "SimpleVPN $VERSION" \
-  -srcfolder "$STAGE" \
-  -ov -fs HFS+ -format UDZO -imagekey zlib-level=9 \
-  "$DMG"
+dmgbuild -s "$REPO/Tools/dmg-settings.py" \
+  -D "stage=$STAGE" -D "background=$STAGE/background.png" -D "icon=$STAGE/Volume.icns" \
+  "SimpleVPN $VERSION (build $BUILDNO)" "$DMG"
 
 # Sign the DMG itself (separate from the app's own signature, already applied
 # and notarized/stapled before this script ran). SIGN_ID defaults to the
