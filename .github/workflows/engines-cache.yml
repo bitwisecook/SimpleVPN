@@ -27,7 +27,7 @@ jobs:
     # there. Kept as a plain runs-on rather than a reusable-workflow call
     # (see the cache-key comment below for why duplication was chosen
     # deliberately over indirection for these two call sites).
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,7 +36,7 @@ jobs:
         id: xc
         run: |
           set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode.app
+          sudo xcode-select --switch /Applications/Xcode_27.2.app/Contents/Developer
           bash Tools/check-xcode-toolchain.sh
           echo "version=$(xcodebuild -version | awk '/^Xcode/{print $2}')" >> "$GITHUB_OUTPUT"
 

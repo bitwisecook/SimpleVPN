@@ -81,7 +81,7 @@ jobs:
     # "verify macOS 26 SDK" step below fails, that lag is the reason, and the
     # fallback is a self-hosted runner on a Mac that already has the right
     # Xcode — see the RISKS section of Docs/Release.md.
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 90
     outputs:
       cache-hit: ${{ steps.cache.outputs.cache-hit }}
@@ -106,7 +106,7 @@ jobs:
         id: xc
         run: |
           set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode.app
+          sudo xcode-select --switch /Applications/Xcode_27.2.app/Contents/Developer
           bash Tools/check-xcode-toolchain.sh
           echo "version=$(xcodebuild -version | awk '/^Xcode/{print $2}')" >> "$GITHUB_OUTPUT"
 
@@ -176,7 +176,7 @@ jobs:
   # runs a freshly-cloned upstream build script — only this repo's own Tools/.
   release:
     needs: engines
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 90
     permissions:
       contents: write
@@ -186,7 +186,7 @@ jobs:
       - name: Select Xcode + verify Icon Composer toolchain
         run: |
           set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode.app
+          sudo xcode-select --switch /Applications/Xcode_27.2.app/Contents/Developer
           bash Tools/check-xcode-toolchain.sh --icon-composer
 
       - name: Install xcodegen
@@ -254,7 +254,14 @@ jobs:
           # next value. The BuildNumber dependency runs exactly once inside the
           # build, just as it does for local Run/Test/Profile/Archive actions.
           Tools/bump-build-number.sh --check >/dev/null
-          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(awk -F'"' '/MARKETING_VERSION:/ {print $2; exit}' project.yml)"
+          fi
+          python3 -m venv "$RUNNER_TEMP/simplevpn-dmg-tools"
+          "$RUNNER_TEMP/simplevpn-dmg-tools/bin/pip" install dmgbuild==1.6.7
+          export PATH="$RUNNER_TEMP/simplevpn-dmg-tools/bin:$PATH"
           Tools/build-release-dmg.sh "$VERSION"
           DMG="build/dist/SimpleVPN-${VERSION}-arm64.dmg"
           BUILT_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' build/dd/Build/Products/Release/SimpleVPN.app/Contents/Info.plist)"
@@ -330,11 +337,8 @@ jobs:
       # cleanup-signing.sh, but keep the whole job's tool surface minimal on
       # principle).
       - name: Create GitHub Release
-        # github.event.inputs is only populated for workflow_dispatch; for a
-        # tag push it's null, and null.dry_run is null (not an error) in GHA
-        # expression syntax, so this is safe for both trigger types. Boolean
-        # dispatch inputs arrive as the string "true"/"false" here.
-        if: github.event.inputs.dry_run != 'true'
+        # Branch dispatches are rehearsals. Only a tag can publish.
+        if: github.ref_type == 'tag' && github.event.inputs.dry_run != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
