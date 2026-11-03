@@ -189,6 +189,9 @@ jobs:
           sudo xcode-select --switch /Applications/Xcode_27.2.app/Contents/Developer
           bash Tools/check-xcode-toolchain.sh --icon-composer
 
+      - name: Install Metal Toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+
       - name: Install xcodegen
         run: brew install xcodegen
 
