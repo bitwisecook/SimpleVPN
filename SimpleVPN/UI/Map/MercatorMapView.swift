@@ -86,6 +86,7 @@ struct MercatorMapView: View {
     var onSelect: (String) -> Void = { _ in }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.windowShowsLiveContent) private var windowVisible
     @Environment(\.liveVisualPolicy) private var liveVisuals
     @State private var camera = MapCamera()
     /// When each link first appeared, so a newly-connected tunnel draws itself in
@@ -237,7 +238,7 @@ struct MercatorMapView: View {
 
     /// Only spend frames when there is something live to animate.
     private var flowAnimates: Bool {
-        liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion)
+        liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion, windowVisible: windowVisible)
             && connections.contains { $0.isTunnel }
     }
 

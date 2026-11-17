@@ -304,7 +304,17 @@ final class TopologyMonitor {
         }
     }
 
-    func startWatching() {
+    /// Hold a sampling lease until the consuming view's task is cancelled.
+    func watchWhileVisible() async {
+        guard !Task.isCancelled else { return }
+        startWatching()
+        defer { stopWatching() }
+        let (lifetime, end) = AsyncStream<Void>.makeStream()
+        defer { end.finish() }
+        for await _ in lifetime {}
+    }
+
+    private func startWatching() {
         watchers += 1
         guard pollTask == nil else { return }
         pollTask = Task { [weak self] in
@@ -316,20 +326,22 @@ final class TopologyMonitor {
                 if tick % 5 == 0 {
                     (routes, snapshot, neighbours) = await Self.readRoutes()
                 }
-                self?.update(routes: routes, snapshot: snapshot, neighbours: neighbours)
+                guard !Task.isCancelled, let self else { return }
+                self.update(routes: routes, snapshot: snapshot, neighbours: neighbours)
                 tick += 1
                 try? await Task.sleep(for: .seconds(1))
             }
         }
     }
 
-    func stopWatching() {
+    private func stopWatching() {
         watchers = max(0, watchers - 1)
         if watchers == 0 {
             pollTask?.cancel()
             pollTask = nil
             guestScan?.cancel()
             guestScan = nil
+            previousCounters.removeAll()
         }
     }
 

@@ -26,6 +26,7 @@ struct EndpointSection: View {
     @Environment(PublicIPMonitor.self) private var publicIP
     @Environment(EndpointProbeStore.self) private var probes: EndpointProbeStore?
     @Environment(ReachabilityMonitor.self) private var reach: ReachabilityMonitor?
+    @Environment(\.windowShowsLiveContent) private var windowVisible
 
     /// A useful globe inside the trailing inspector. The square shader surface
     /// avoids the empty horizontal space needed by the old detail-pane 2:1
@@ -52,7 +53,7 @@ struct EndpointSection: View {
     /// state is deliberately not enough: blue means that the transport has already
     /// reported the endpoint, not that a button was pressed.
     private var liveEndpoint: RankedEndpoint? {
-        guard vpn.displayStatus(for: profile.id) == .connected,
+        guard windowVisible, vpn.displayStatus(for: profile.id) == .connected,
               let stats = reach?.stats(for: profile.id) else { return nil }
         return rankedEndpoints.first {
             ServersTableCopy.isInUse($0, serverIP: stats.serverIP,
@@ -90,7 +91,7 @@ struct EndpointSection: View {
             // it is showing belong to a network the user has left. Connecting and
             // disconnecting count too — the sweep is refused while this VPN is
             // engaged, so disconnecting is when its servers become measurable.
-            .task(id: "\(profile.id)\u{1F}\(NetworkMemory.shared.current?.key ?? "")\u{1F}\(connected)") {
+            .liveWindowTask(id: "\(profile.id)\u{1F}\(NetworkMemory.shared.current?.key ?? "")\u{1F}\(connected)") {
                 probes?.refresh(endpoints, kind: profile.kind, profile: profile.id)
             }
         }

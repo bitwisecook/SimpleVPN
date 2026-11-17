@@ -268,8 +268,7 @@ struct ConnectionInfoPanel: View {
                              serverEndpoint: stats?.serverEndpoint ?? "",
                              paused: paused,
                              bypassing: bypassing)
-                    .onAppear { topo.startWatching() }
-                    .onDisappear { topo.stopWatching() }
+                    .liveWindowTask { await topo.watchWhileVisible() }
             }
             if let proxies = stats?.proxies, !proxies.isEmpty {
                 Label(proxies.joined(separator: " · "), systemImage: "arrow.triangle.branch")

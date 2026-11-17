@@ -436,6 +436,13 @@ struct MenuBarView: View {
     }
 
     var body: some View {
+        // Keep the requested credential row across dismissal, even when the
+        // connect check is still in flight. The live popup graph is disposable.
+        VisibleMenuBarContent { popupBody }
+            .frame(width: 340)
+    }
+
+    private var popupBody: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("SimpleVPN").font(.headline)
                 .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 6)
@@ -508,7 +515,6 @@ struct MenuBarView: View {
             .disabled(quitting)
         }
         .padding(.bottom, 10)
-        .frame(width: 340)
     }
 
     // MARK: VPN rows
@@ -685,8 +691,7 @@ struct MenuBarView: View {
                              paused: vpn.pausedProfiles.contains(p.id),
                              bypassing: vpn.pausedProfiles.contains(p.id),
                              compact: true)
-                    .onAppear { topo.startWatching() }
-                    .onDisappear { topo.stopWatching() }
+                    .liveWindowTask { await topo.watchWhileVisible() }
             }
         }
         .padding(.horizontal, 14)

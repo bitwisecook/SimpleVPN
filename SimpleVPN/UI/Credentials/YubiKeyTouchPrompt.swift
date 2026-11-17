@@ -95,6 +95,7 @@ struct YubiKeyTouchPrompt: View {
     let arm: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.windowShowsLiveContent) private var windowVisible
     @Environment(\.liveVisualPolicy) private var liveVisuals
     /// Re-read on a timer only while armed, so the countdown moves.
     @State private var now = Date()
@@ -198,6 +199,7 @@ struct YubiKeyTouchPrompt: View {
                 .foregroundStyle(.blue)
                 .scaleEffect(reduceMotion ? 1 : (pulsing ? 1.12 : 1))
                 .onAppear { updatePulse() }
+                .onChange(of: windowVisible) { updatePulse() }
                 .onDisappear { pulsing = false }
                 .accessibilityHidden(true)
         } else {
@@ -207,7 +209,7 @@ struct YubiKeyTouchPrompt: View {
     }
 
     private func updatePulse() {
-        guard liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion) else {
+        guard liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion, windowVisible: windowVisible) else {
             pulsing = false
             return
         }

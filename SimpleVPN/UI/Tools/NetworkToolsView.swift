@@ -43,7 +43,7 @@ final class LatencyMonitor {
     }
 
     func start(host: String, boundIf: UInt32 = 0) {
-        stop()
+        pause()
         task = Task { [weak self] in
             // Ping the first IPv4 (unprivileged ICMP is v4 here).
             var target = await NetworkProbes.resolve(host: host).v4.first ?? host
@@ -75,7 +75,12 @@ final class LatencyMonitor {
             }
         }
     }
-    func stop() { task?.cancel(); task = nil; samples = []; seq = 0; lastRTT = nil; lossPercent = 0; targetIP = nil }
+    func pause() { task?.cancel(); task = nil }
+
+    func stop() {
+        pause()
+        samples = []; seq = 0; lastRTT = nil; lossPercent = 0; targetIP = nil
+    }
 
     private func tick(_ r: NetworkProbes.PingReply) {
         seq += 1
@@ -123,7 +128,9 @@ struct NetworkToolsView: View {
     /// specific tunnel even when routing wouldn't send it there.
     @State private var egress: ProbeEgress = .automatic
     @State private var request = NetworkToolsRequest.shared
+    @Environment(\.windowShowsLiveContent) private var windowVisible
     @State private var latency = LatencyMonitor()
+    @State private var latencyTarget: (host: String, boundIf: UInt32)?
     @State private var running = false
     @State private var hops: [NetworkProbes.TraceHop] = []
     @State private var hopNames: [Int: String] = [:]
@@ -208,9 +215,10 @@ struct NetworkToolsView: View {
             run()
         }
         // Initial focus: the target field — the window exists to test an address.
-        .onAppear { topo?.startWatching(); targetFocused = true }      // need the routing table to classify the path
+        .onAppear { targetFocused = true }
+        .liveWindowTask { await topo?.watchWhileVisible() } // classify the path using the routing table
+        .onChange(of: windowVisible) { updateLatencySampling() }
         .onDisappear {
-            topo?.stopWatching()
             stop()                          // cancel latency/traceroute/DNS/resolve/MTU
             ladderRunner.cancel()           // …and drop whatever key material it held
         }
@@ -1268,7 +1276,8 @@ struct NetworkToolsView: View {
         // reverse-DNS labels, or nodes.
         hops = []; hopNames = [:]; dnsAnswers = []; targetNode = nil; dnsServerNode = nil
         pathMTU = nil; transportMTU = nil
-        latency.start(host: host, boundIf: egressBoundIf)
+        latencyTarget = (host, egressBoundIf)
+        updateLatencySampling()
         probeTasks = [
             Task { await resolveTarget(host) },
             Task { await runTraceroute(host) },
@@ -1278,8 +1287,17 @@ struct NetworkToolsView: View {
         restartVPNProbe()
     }
 
+    private func updateLatencySampling() {
+        if windowVisible, let latencyTarget {
+            latency.start(host: latencyTarget.host, boundIf: latencyTarget.boundIf)
+        } else {
+            latency.pause()
+        }
+    }
+
     private func stop() {
         running = false
+        latencyTarget = nil
         latency.stop()
         for t in probeTasks { t.cancel() }
         probeTasks = []

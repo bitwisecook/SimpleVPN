@@ -18,6 +18,7 @@ struct ProviderFirstRunView: View {
     let chooseConfiguration: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.windowShowsLiveContent) private var windowVisible
     @Environment(\.liveVisualPolicy) private var liveVisuals
     @State private var showsImportCue = true
 
@@ -165,7 +166,7 @@ struct ProviderFirstRunView: View {
             Label("Continue to import configuration", systemImage: "chevron.down")
                 .font(.callout.weight(.semibold))
                 .symbolEffect(.bounce.down, options: .repeat(.periodic(delay: 1.8)),
-                              isActive: liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion))
+                              isActive: liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion, windowVisible: windowVisible))
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.small)

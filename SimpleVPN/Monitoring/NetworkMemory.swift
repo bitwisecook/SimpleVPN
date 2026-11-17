@@ -24,6 +24,7 @@
 
 import Foundation
 import Network
+import Observation
 import OSLog
 
 nonisolated struct NetworkFingerprint: Codable, Hashable, Sendable {
@@ -364,6 +365,7 @@ final class NetworkMemory {
 
     func refresh() async {
         let fresh = await NetworkIdentity.current()
+        guard !Task.isCancelled, fresh != current else { return }
         if fresh?.key != current?.key {
             NetworkIdentity.logNetworkChange(from: current?.key, to: fresh?.key)
         }
@@ -425,24 +427,13 @@ enum NetworkChange {
     /// every refresh — most of which land on the same network — so the key, not
     /// the assignment, is what counts as a change.
     ///
-    /// Returns the driving task: cancel it (or drop the property holding it) to
-    /// stop observing.
+    /// Returns the driving task. Cancel it to stop observing, even if the
+    /// network stays unchanged for the rest of the session.
     static func observe(_ body: @escaping @MainActor (String?) -> Void) -> Task<Void, Never> {
         Task { @MainActor in
-            var last = NetworkMemory.shared.current?.key
-            while !Task.isCancelled {
-                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                    // onChange fires during the willSet, so the new value is only
-                    // readable once the continuation has resumed us back onto the
-                    // main actor — which is why the read happens after the await.
-                    withObservationTracking {
-                        _ = NetworkMemory.shared.current?.key
-                    } onChange: {
-                        continuation.resume()
-                    }
-                }
-                guard !Task.isCancelled else { return }
-                let now = NetworkMemory.shared.current?.key
+            var changes = Observations { NetworkMemory.shared.current?.key }.makeAsyncIterator()
+            guard var last = await changes.next() else { return }
+            while let now = await changes.next(), !Task.isCancelled {
                 guard now != last else { continue }
                 last = now
                 body(now)

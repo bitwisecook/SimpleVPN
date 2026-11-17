@@ -48,6 +48,7 @@ struct SubprocessTunnelView: View {
     @State private var authNote: String?
     // SSH import (drop well) state.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.windowShowsLiveContent) private var windowVisible
     @Environment(\.liveVisualPolicy) private var liveVisuals
     @State private var importTargeted = false
     @State private var importFeedback: (text: String, ok: Bool)?
@@ -598,7 +599,7 @@ struct SubprocessTunnelView: View {
                     .foregroundStyle(importTargeted ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
                     .contentTransition(.symbolEffect(.replace))
                     .symbolEffect(.wiggle, options: .repeat(.periodic(delay: 6)),
-                                  isActive: liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion) && !importTargeted)
+                                  isActive: liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion, windowVisible: windowVisible) && !importTargeted)
                 Text("Drag your SSH config, a key, or a certificate here")
                     .font(.callout).foregroundStyle(.secondary)
                 Text("Forwards, jump hosts and keys defined for this server are picked up automatically.")

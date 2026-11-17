@@ -187,7 +187,7 @@ extension VPNController {
     /// per engine; empty when we can't enumerate them.
     func gatewaySubnets(for id: String) -> [String] {
         guard let p = profiles.first(where: { $0.id == id }) else { return [] }
-        if let prefixes = pushedNetworkStats[id]?.advertisedPrefixes {
+        if let prefixes = pushedNetworkState[id]?.advertisedPrefixes {
             return prefixes.filter { $0 != "0.0.0.0/0" && $0 != "::/0" }
         }
         switch p.kind {
@@ -356,7 +356,7 @@ extension VPNController: RouteMediatorHost {
         case .sshNetworkTunnel: return sshNetworkTunnelConfig(for: id).includeDefaultRoute
         case .tailscale: return !tailscaleExitNode(for: id).isEmpty
         case .openVPN, .fortinet, .f5apm, .ciscoAnyConnect, .globalProtect, .juniper, .pulse, .arrayNetworks:
-            if let pushed = pushedNetworkStats[id], pushed.defaultRouteV4 != nil || pushed.defaultRouteV6 != nil {
+            if let pushed = pushedNetworkState[id], pushed.defaultRouteV4 != nil || pushed.defaultRouteV6 != nil {
                 return pushed.defaultRouteV4 == true || pushed.defaultRouteV6 == true
             }
             return profileWantsFullTunnel(id)
@@ -408,7 +408,7 @@ extension VPNController: DNSMediatorHost {
                 wantsCatchAll = c.includeDefaultRoute && !resolvers.isEmpty
                 matchDomains = wantsCatchAll ? [""] : []
             }
-            if let pushed = pushedNetworkStats[p.id] {
+            if let pushed = pushedNetworkState[p.id] {
                 resolvers = pushed.dnsServers
                 searchDomains = pushed.searchDomains ?? searchDomains
                 matchDomains = pushed.dnsMatchDomains ?? []

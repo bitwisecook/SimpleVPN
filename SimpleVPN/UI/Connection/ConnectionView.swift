@@ -447,7 +447,7 @@ struct ConnectionView: View {
             .adaptiveMainWindowSizing(windowLayoutMode)
             .toasts()
             .navigationTitle("SimpleVPN")
-            .task(id: connectedTailscaleIDs) {
+            .liveWindowTask(id: connectedTailscaleIDs) {
                 let ids = connectedTailscaleIDs
                 guard !ids.isEmpty else { return }
                 while !Task.isCancelled {
@@ -711,7 +711,9 @@ struct ConnectionView: View {
             }
             .inspector(isPresented: $showInspector) {
                 Group {
-                    if let p = vpn.selected {
+                    if !showInspector {
+                        Color.clear.accessibilityHidden(true)
+                    } else if let p = vpn.selected {
                         ConnectionInspectorView(vpn: vpn, profile: p).id(p.id)
                     } else {
                         ContentUnavailableView("Live Details", systemImage: "chart.line.uptrend.xyaxis",

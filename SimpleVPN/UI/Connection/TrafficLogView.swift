@@ -63,7 +63,7 @@ struct TrafficLogView: View {
             } }
             .frame(minWidth: 620, minHeight: 460)
         }
-        .task { await poll() }
+        .liveWindowTask { await poll() }
         .alert("Divert Rule", isPresented: Binding(get: { note != nil }, set: { if !$0 { note = nil } })) {
             Button("OK") { note = nil }
         } message: { Text(note ?? "") }

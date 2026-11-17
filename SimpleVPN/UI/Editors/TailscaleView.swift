@@ -284,7 +284,7 @@ struct TailscaleView: View {
         .padding(.top, 10)
         .navigationTitle(name.isEmpty ? "Tailscale" : name)
         .task { loadOnce() }
-        .task(id: profileID) { await pollStatus() }
+        .liveWindowTask(id: profileID) { await pollStatus() }
         // LIVE SAVE — no confirming button in any editor now. See `SettingCommit`.
         .savesSettingsLive { Task { await save() } }
         // RED ON THE FIELD THAT IS HOLDING THE CONNECTION UP — see `SettingNeeds`.

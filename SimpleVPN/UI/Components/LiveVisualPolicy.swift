@@ -55,8 +55,8 @@ final class LiveVisualPolicy {
     }
 
     /// High-frequency decoration is paused under either user motion preference.
-    func permitsContinuousAnimation(reduceMotion: Bool) -> Bool {
-        !reduceMotion && !isLowPowerModeEnabled
+    func permitsContinuousAnimation(reduceMotion: Bool, windowVisible: Bool = true) -> Bool {
+        windowVisible && !reduceMotion && !isLowPowerModeEnabled
     }
 
     func frameInterval(normalFramesPerSecond: Int) -> TimeInterval {

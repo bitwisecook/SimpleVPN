@@ -127,6 +127,7 @@ struct StatusDot: View {
     var size: CGFloat = 8
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
+    @Environment(\.windowShowsLiveContent) private var windowVisible
     @Environment(\.liveVisualPolicy) private var liveVisuals
     /// 0 = at rest, 1 = the state's rhythm at full swing.
     @State private var amplitude: Double = 0
@@ -143,7 +144,7 @@ struct StatusDot: View {
 
     private var animated: Bool {
         switch state {
-        case .busy, .degraded, .captivePortal: liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion)
+        case .busy, .degraded, .captivePortal: liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion, windowVisible: windowVisible)
         case .off, .connected, .paused: false
         }
     }
@@ -166,7 +167,7 @@ struct StatusDot: View {
 
     private var animatedDot: some View {
         TimelineView(.animation(minimumInterval: liveVisuals.frameInterval(normalFramesPerSecond: 30),
-                                paused: amplitude == 0 || liveVisuals.isLowPowerModeEnabled)) { context in
+                                paused: !windowVisible || amplitude == 0 || liveVisuals.isLowPowerModeEnabled)) { context in
             let t = context.date.timeIntervalSinceReferenceDate
             let motion = motion(at: t)
 
@@ -549,6 +550,7 @@ struct DrawnSpinner: View {
     var lineWidth: CGFloat = 1.8
     @State private var spinning = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.windowShowsLiveContent) private var windowVisible
     @Environment(\.liveVisualPolicy) private var liveVisuals
 
     var body: some View {
@@ -562,6 +564,7 @@ struct DrawnSpinner: View {
             }
             .onChange(of: liveVisuals.isLowPowerModeEnabled) { _, _ in updateSpinning() }
             .onChange(of: reduceMotion) { _, _ in updateSpinning() }
+            .onChange(of: windowVisible) { _, _ in updateSpinning() }
             .onDisappear { spinning = false }
             .accessibilityLabel("In progress")
     }
@@ -569,7 +572,7 @@ struct DrawnSpinner: View {
     private func updateSpinning() {
         // Reduce Motion and Low Power Mode both keep the recognisable open ring,
         // but remove the timer-backed rotation entirely.
-        guard liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion) else {
+        guard liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion, windowVisible: windowVisible) else {
             spinning = false
             return
         }

@@ -100,7 +100,7 @@ final class ReachabilityMonitor {
         var t = track[id] ?? Track()
         defer { track[id] = t }
         guard let prev = t.prev else {
-            t.prev = s; t.lastRx = Date(); health[id] = .healthy; return
+            t.prev = s; t.lastRx = Date(); publishHealth(.healthy, for: id); return
         }
         // Throughput sample for the shared graph backing.
         let dt = s.timestamp - prev.timestamp
@@ -111,7 +111,7 @@ final class ReachabilityMonitor {
         }
         t.prev = s
         if s.bytesIn > prev.bytesIn {                       // something came back → healthy
-            t.lastRx = Date(); t.txSinceRx = 0; health[id] = .healthy; return
+            t.lastRx = Date(); t.txSinceRx = 0; publishHealth(.healthy, for: id); return
         }
         t.txSinceRx += max(0, s.bytesOut - prev.bytesOut)   // still sending?
         let lastRx = t.lastRx ?? Date()
@@ -119,8 +119,12 @@ final class ReachabilityMonitor {
         let quietFor = Date().timeIntervalSince(lastRx)
         if quietFor >= Self.stallThreshold {
             // Sending into the void → stalled; nothing either way → just idle.
-            health[id] = t.txSinceRx > 4_096 ? .stalled(seconds: Int(quietFor)) : .quiet
+            publishHealth(t.txSinceRx > 4_096 ? .stalled(seconds: Int(quietFor)) : .quiet, for: id)
         }
+    }
+
+    private func publishHealth(_ value: Health, for id: String) {
+        if health[id] != value { health[id] = value }
     }
 }
 

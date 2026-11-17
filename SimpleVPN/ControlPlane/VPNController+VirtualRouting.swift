@@ -6,7 +6,7 @@ import Foundation
 
 extension VPNController {
     var virtualDefaultCaptureBlocked: Bool {
-        pushedNetworkStats.contains { routeVirtualProfileIDs.contains($0.key) && $0.value.defaultCaptureBlocked == true }
+        pushedNetworkState.contains { routeVirtualProfileIDs.contains($0.key) && $0.value.defaultCaptureBlocked == true }
     }
     var routeVirtualProfileIDs: Set<String> {
         Set(virtualMembers.keys.filter { virtualManager(for: $0) != nil })

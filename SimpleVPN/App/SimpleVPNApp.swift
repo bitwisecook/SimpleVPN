@@ -27,7 +27,7 @@ func defaultsBool(_ key: String, initially: Bool) -> Bool {
 // SimpleVPNLauncher handles installation before any SwiftUI state is initialized.
 struct SimpleVPNApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var vpn = VPNController()
+    @State private var vpn: VPNController
     @State private var control: ControlPlaneDispatcher
     /// Speaks connection transitions to VoiceOver ("Tig Lab connected") off the
     /// dispatcher's one event stream — see AccessibilityAnnouncer.
@@ -59,7 +59,7 @@ struct SimpleVPNApp: App {
     @State private var tunnelManager = SubprocessTunnelManager()
     @State private var nativeVPN = NativeVPNManager()
     @State private var wireguard = WireGuardStore()
-    @State private var reachability = ReachabilityMonitor()
+    @State private var reachability: ReachabilityMonitor
     /// One derivation of "what is this connection doing", shared by every surface.
     @State private var linkState: LinkStateMonitor
     /// Sparkle. Automatic checks are OFF via Info.plist (SUEnableAutomaticChecks)
@@ -267,6 +267,7 @@ struct SimpleVPNApp: App {
                     await extDoctor.checkUp(trigger: .launch)
                 }
                 .task { GeoIP.warm() }                 // parse the ~10 MB DB off-main
+                .tracksWindowActivity()
         }
         // `main` is a stable scene identity, so macOS restores position and any
         // manually chosen size. Until the first live resize, ConnectionView makes
@@ -297,6 +298,7 @@ struct SimpleVPNApp: App {
 
         Window("VPN Sign-In", id: "sso") {
             SSOAuthWindowView()
+                .tracksWindowActivity()
         }
         .defaultSize(width: 520, height: 680)
         .windowResizability(.contentSize)
@@ -308,6 +310,7 @@ struct SimpleVPNApp: App {
                 .environment(reachability)
                 .environment(linkState)
                 .environment(ext)
+                .tracksWindowActivity()
         }
         .defaultSize(width: 1000, height: 700)
         .commandsRemoved()
@@ -325,6 +328,7 @@ struct SimpleVPNApp: App {
                 .environment(tunnels)
                 .environment(nativeVPN)
                 .environment(wireguard)
+                .tracksWindowActivity()
         }
         .defaultSize(width: 680, height: 680)
         .commandsRemoved()
@@ -349,6 +353,7 @@ struct SimpleVPNApp: App {
                 .environment(reachability)
                 .environment(linkState)
                 .environment(ext)
+                .tracksWindowActivity()
         }
         .defaultSize(width: 560, height: 420)
         .commandsRemoved()
@@ -384,6 +389,7 @@ struct SimpleVPNApp: App {
                 // So a route to an app-level setting (a `creds.*` global-search hit,
                 // or "Configure…" on a sign-in chooser row) can select the tab.
                 .environment(settingsRouter)
+                .tracksWindowActivity()
         }
 
         menuBarScene
@@ -409,6 +415,7 @@ struct SimpleVPNApp: App {
                 .environment(reachability)
                 .environment(linkState)
                 .environment(ext)
+                .tracksWindowActivity()
         } label: {
             MenuBarLabel(vpn: vpn, reachability: reachability,
                          tunnelManager: tunnelManager, nativeVPN: nativeVPN)

@@ -798,7 +798,7 @@ final class VPNController {
     /// (the structured `proxy*` fields). The Proxy mediator reads it through
     /// `proxyProfiles` and re-arbitrates when it changes (see `fetchStats`). Absent ⇒
     /// nothing pushed. This is the OpenVPN per-kind capture from StateMediators.md.
-    var pushedNetworkStats: [String: TunnelStats] = [:]
+    var pushedNetworkState: [String: PushedNetworkState] = [:]
     @ObservationIgnored var networkStateSamples = SampleRevisionFence()
     var pushedProxyIntents: [String: ProxyIntent] = [:]   // was private — internal for the +File split
     /// How long to allow for a resumed session to settle before calling it failed.
@@ -969,7 +969,7 @@ final class VPNController {
         } else if s == .disconnected {
             extensionVersion = "unavailable"
             pausedProfiles.remove(id)      // pause never outlives its session
-            pushedNetworkStats[id] = nil
+            pushedNetworkState[id] = nil
             networkStateSamples.invalidate()
             pushedProxyIntents[id] = nil   // pushed proxy never outlives its session
             incidents[id] = TunnelIncidentStore.read(profile: id)

@@ -162,7 +162,21 @@ struct RouteGraphView: View {
     /// in between, and double the exposure to the read that once blocked for ever.
     var virtualization: VirtualizationSnapshot { topo?.guests ?? VirtualizationSnapshot() }
 
+    @Environment(\.windowShowsLiveContent) private var windowVisible
+    @State private var hasFocusedSearchOnOpen = false
+
     var body: some View {
+        Group {
+            if windowVisible {
+                visibleGraph
+            } else {
+                Color.clear.accessibilityHidden(true)
+            }
+        }
+        .modifier(RouteGraphWindowTitle(isWindow: editorGraph == nil))
+    }
+
+    private var visibleGraph: some View {
         // Resolved ONCE and handed down: every card, row and edge that lights up is
         // reading the same answer, and the resolver runs once per pass rather than
         // once per card.
@@ -170,7 +184,7 @@ struct RouteGraphView: View {
         let layout = editorGraph.map(editorLayout) ?? buildLayout(outcome)
         let content = CGSize(width: layout.canvas.width + canvasInset * 2,
                              height: layout.canvas.height + canvasInset * 2)
-        VStack(spacing: 0) {
+        return VStack(spacing: 0) {
             if let editorGraph {
                 editorControlBar(editorGraph)
             } else {
@@ -289,11 +303,14 @@ struct RouteGraphView: View {
             rotorEntries(editorGraph == nil ? problemRotorTargets(layout) : railroadRotorTargets(layout, warningsOnly: true))
         }
         .background(Color(nsColor: .underPageBackgroundColor))
-        .modifier(RouteGraphWindowTitle(isWindow: editorGraph == nil))
         // Initial focus: the search field — typing filters at once, and the
         // diagram (arrows/+/−) is one Tab away.
-        .onAppear { topo?.startWatching(); searchFocused = editorGraph == nil }
-        .onDisappear { topo?.stopWatching() }
+        .onAppear {
+            guard editorGraph == nil, !hasFocusedSearchOnOpen else { return }
+            hasFocusedSearchOnOpen = true
+            searchFocused = true
+        }
+        .liveWindowTask { await topo?.watchWhileVisible() }
         .overlay {
             if layout.nodes.count <= 1 {
                 ContentUnavailableView("No Active Routes", systemImage: "arrow.triangle.branch",

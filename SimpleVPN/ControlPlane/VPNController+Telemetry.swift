@@ -14,6 +14,30 @@ import Foundation
 @preconcurrency import NetworkExtension
 import os
 
+/// Engine facts used by routing and DNS. Publishing counters or sample time
+/// here would also invalidate editors that only read a route or a resolver.
+nonisolated struct PushedNetworkState: Equatable {
+    let advertisedPrefixes: [String]?
+    let dnsServers: [String]
+    let searchDomains: [String]?
+    let dnsMatchDomains: [String]?
+    let defaultRouteV4: Bool?
+    let defaultRouteV6: Bool?
+    let defaultCaptureBlocked: Bool?
+    let settingsRevision: UInt64?
+
+    init(_ stats: TunnelStats) {
+        advertisedPrefixes = stats.advertisedPrefixes
+        dnsServers = stats.dnsServers
+        searchDomains = stats.searchDomains
+        dnsMatchDomains = stats.dnsMatchDomains
+        defaultRouteV4 = stats.defaultRouteV4
+        defaultRouteV6 = stats.defaultRouteV6
+        defaultCaptureBlocked = stats.defaultCaptureBlocked
+        settingsRevision = stats.settingsRevision
+    }
+}
+
 extension VPNController {
 
     /// One-shot IPC to the running tunnel; nil when no session or send fails.
@@ -71,7 +95,7 @@ extension VPNController {
         }
         guard networkStateSamples.accepts(revision) else { return nil }
         let stats = try? JSONDecoder().decode(TunnelStats.self, from: data)
-        if let stats, let previous = pushedNetworkStats[id],
+        if let stats, let previous = pushedNetworkState[id],
            let old = previous.settingsRevision, let new = stats.settingsRevision, new < old { return nil }
         // Fold the engine's ground-truth default-route ownership into the gateway
         // coordinator on every poll: keeps the applied-role cache honest and heals
@@ -82,8 +106,9 @@ extension VPNController {
         // way as the default-route ownership above. Only kinds that PUSH a proxy
         // structurally do this today (OpenVPN); OpenConnect is a marked TODO below.
         if let stats {
-            let prior = pushedNetworkStats[id]
-            pushedNetworkStats[id] = stats
+            let prior = pushedNetworkState[id]
+            let state = PushedNetworkState(stats)
+            if prior != state { pushedNetworkState[id] = state }
             if prior?.advertisedPrefixes != stats.advertisedPrefixes {
                 routes.reconcileGateway()
             }
@@ -115,9 +140,9 @@ extension VPNController {
         default:
             newIntent = nil
         }
-        let changed = pushedProxyIntents[id] != newIntent
+        guard pushedProxyIntents[id] != newIntent else { return }
         pushedProxyIntents[id] = newIntent
-        proxies.noteEnginePushedProxy(changed: changed)
+        proxies.noteEnginePushedProxy()
     }
 
     /// Build a `ProxyIntent` from the structured pushed-proxy fields of a stats sample

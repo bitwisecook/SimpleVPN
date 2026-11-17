@@ -181,6 +181,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     /// This VPN's opt-in advanced controls (pause button, Connection Manager).
     var uiPrefs: VPNUIPrefs { vpn.uiPrefs(for: profile.id) }   // was private — internal for the file split
     @Environment(TopologyMonitor.self) private var topo: TopologyMonitor?
+    @Environment(\.windowShowsLiveContent) private var windowVisible
 
     /// Snapshot of live telemetry the Connection Manager + Doctor read.
     private var doctorSnapshot: DoctorSnapshot {
@@ -550,7 +551,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                 }
                 // Advanced surface, opt-in per VPN (Manage VPNs ▸ this VPN):
                 // health checks and connection toggles most people never touch.
-                if uiPrefs.showConnectionManager {
+                if windowVisible, uiPrefs.showConnectionManager {
                     ConnectionManagerPanel(vpn: vpn, profileID: profile.id, vpnName: profile.name,
                                            snapshot: doctorSnapshot, findings: doctorFindings)
                 }
@@ -558,7 +559,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                 // button next to a green dot asks the user to know the iconography.
                 // Sits above the map; deliberately makes no claims about which
                 // traffic is protected (that's the tunnel-mode toggle's story).
-                if vpn.displayStatus(for: profile.id) == .connected, !vpn.isReconfiguring(profile.id), !isPaused,
+                if windowVisible, vpn.displayStatus(for: profile.id) == .connected, !vpn.isReconfiguring(profile.id), !isPaused,
                    !bannerCollapsed {
                     ConnectedBanner(vpnName: profile.name, server: profile.server,
                                     uptime: reach?.stats(for: profile.id)?.uptime)
@@ -596,7 +597,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
         // unreliable for menu-bar/agent apps like Tailscale, so polling is the honest
         // approach — and it keeps this view pure SwiftUI. A profile switch also
         // re-checks and resets the arm (see below).
-        .task {
+        .liveWindowTask {
             while !Task.isCancelled {
                 refreshTailscaleClients()
                 try? await Task.sleep(for: .seconds(2))

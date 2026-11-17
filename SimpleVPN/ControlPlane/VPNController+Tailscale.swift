@@ -277,13 +277,13 @@ extension VPNController {
               let status = try? JSONDecoder().decode(TailscaleStatus.self, from: data) else { return nil }
         let wasWaitingForSignIn = tailscaleSignInURL[id] != nil
             || tailscaleStatuses[id]?.backendState.needsUserAction == true
-        tailscaleStatuses[id] = status
+        if tailscaleStatuses[id] != status { tailscaleStatuses[id] = status }
         // Once the node is registered there is nothing left to sign in to. The
         // control plane completed the sign-in on its own — the browser never
         // redirects anywhere this app can see — so the stale sign-in state has
         // to be cleared from this side.
         if status.backendState == .running && status.authURL.isEmpty {
-            tailscaleSignInURL[id] = nil
+            if tailscaleSignInURL[id] != nil { tailscaleSignInURL[id] = nil }
             if wasWaitingForSignIn {
                 tailscaleSignInResults[id] = nil
                 AccessibilityAnnouncer.sayNow("Sign-in successful")

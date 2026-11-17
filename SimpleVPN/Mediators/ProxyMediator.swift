@@ -327,8 +327,7 @@ final class ProxyMediator {
     /// reflects it), then calls this to re-arbitrate and apply — but ONLY when the
     /// decision actually changes, so the ~1 Hz stats poll doesn't spam `proxy:apply`.
     /// Mirrors `RouteMediator.noteEngineDefaultOwned`.
-    func noteEnginePushedProxy(changed: Bool) {
-        guard changed else { return }
+    func noteEnginePushedProxy() {
         reconcile()
     }
 

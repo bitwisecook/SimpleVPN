@@ -20,11 +20,23 @@ struct ConnectionInspectorView: View {   // was private — internal for the fil
     @Environment(PublicIPMonitor.self) private var publicIP
     @Environment(ReachabilityMonitor.self) private var reach: ReachabilityMonitor?
     @State private var showTrafficLog = false
+    @Environment(\.windowShowsLiveContent) private var windowVisible
 
     private var isPaused: Bool { vpn.pausedProfiles.contains(profile.id) }
     private var live: Bool { UI.isActive(profile.status) || vpn.isReconfiguring(profile.id) }
 
     var body: some View {
+        Group {
+            if windowVisible { liveDetails } else { Color.clear.accessibilityHidden(true) }
+        }
+        .navigationTitle("")
+        .sheet(isPresented: $showTrafficLog) {
+            TrafficLogView(vpn: vpn, profileID: profile.id, vpnName: profile.name)
+                .tracksWindowActivity()
+        }
+    }
+
+    private var liveDetails: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 EndpointSection(vpn: vpn, profile: profile, presentation: .globe)
@@ -60,10 +72,6 @@ struct ConnectionInspectorView: View {   // was private — internal for the fil
             }
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .navigationTitle("")
-        .sheet(isPresented: $showTrafficLog) {
-            TrafficLogView(vpn: vpn, profileID: profile.id, vpnName: profile.name)
         }
     }
 }

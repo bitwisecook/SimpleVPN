@@ -22,6 +22,7 @@ struct TrackLine: View {
     var color: Color = .accentColor
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.windowShowsLiveContent) private var windowVisible
     @Environment(\.liveVisualPolicy) private var liveVisuals
 
     private var hasTraffic: Bool { inRate > 64 || outRate > 64 }
@@ -35,7 +36,7 @@ struct TrackLine: View {
 
     var body: some View {
         TimelineView(.animation(minimumInterval: liveVisuals.frameInterval(normalFramesPerSecond: 30),
-                                paused: !liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion) || !hasTraffic)) { context in
+                                paused: !liveVisuals.permitsContinuousAnimation(reduceMotion: reduceMotion, windowVisible: windowVisible) || !hasTraffic)) { context in
             let t = context.date.timeIntervalSinceReferenceDate
             Canvas { ctx, size in
                 let midY = size.height / 2

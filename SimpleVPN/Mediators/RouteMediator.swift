@@ -618,9 +618,9 @@ final class RouteMediator {
     /// Seeds the realizer cache and self-heals any desync. Called from the host's
     /// ~1 Hz stats poll, so a full/split that drifts out of band is corrected (RC4).
     func noteEngineDefaultOwned(id: String, owned: Bool) {
-        let changed = engineDefaultOwned[id] != owned
+        guard engineDefaultOwned[id] != owned else { return }
         engineDefaultOwned[id] = owned
-        guard changed, let info = info(id), gatewayRoleApplies(info.kind), info.engaged else { return }
+        guard let info = info(id), gatewayRoleApplies(info.kind), info.engaged else { return }
         realizer.seed(id: id, owned: owned)
         let wanted = GatewayPolicy.role(for: id, owner: effectiveGatewayOwner)
         if (owned ? GatewayRole.full : .split) != wanted { reconcileGateway() }

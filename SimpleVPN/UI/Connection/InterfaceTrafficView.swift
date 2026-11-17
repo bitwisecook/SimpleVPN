@@ -161,8 +161,7 @@ struct InterfaceTrafficView: View {
         }
         // Interface rates come from the routing/link poller; it's refcounted, so
         // starting it here is safe alongside the railroad.
-        .onAppear { topo?.startWatching() }
-        .onDisappear { topo?.stopWatching() }
+        .liveWindowTask { await topo?.watchWhileVisible() }
     }
 
     // MARK: Chart
