@@ -96,13 +96,14 @@ the lifetime of one job run on an ephemeral runner.
 ## Cutting a release
 
 ```sh
-git tag -a v0.2.0 -m "0.2.0"
-git push origin v0.2.0
+git tag -a v0.7-476 -m "SimpleVPN 0.7-476"
+git push origin v0.7-476
 ```
 
-Pushing a tag matching `v*` triggers `.github/workflows/release.yml`. The
-version embedded in the app (`MARKETING_VERSION`) comes from the tag with the
-leading `v` stripped. Every Xcode Build action—Run, Test, Profile, Archive,
+Tag releases as `v<major>.<minor>-<build>` on `main`. Use the next number after
+the checked-in `BUILDNUMBER`. The tag `v0.7-476` ships app version `0.7`, build
+`476`, and the asset `SimpleVPN-0.7-476-arm64.dmg`. The workflow checks that the
+signed app's build number matches the tag. Every Xcode Build action—Run, Test, Profile, Archive,
 local distribution and CI distribution—first builds the `BuildNumber` legacy
 dependency. It calls `Tools/bump-build-number.sh` exactly once, advancing the
 committed `BUILDNUMBER` file and `project.yml` together. Clean does not consume
@@ -124,9 +125,6 @@ deliberately not used.
 The Sparkle appcast is generated in the same job: it is written to
 `build/dist/appcast.xml`, uploaded as an artifact, and served from
 `releases/latest/download/appcast.xml`.
-
-Pre-release tags (`v1.2.3-beta.1`, `v1.2.3-rc1`, …) are automatically created
-as GitHub prereleases.
 
 ## Rehearsing without publishing
 

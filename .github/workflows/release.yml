@@ -256,9 +256,19 @@ jobs:
           # Validate the checked-in counter before Xcode allocates this build's
           # next value. The BuildNumber dependency runs exactly once inside the
           # build, just as it does for local Run/Test/Profile/Archive actions.
-          Tools/bump-build-number.sh --check >/dev/null
+          COUNTER_BEFORE="$(Tools/bump-build-number.sh --check)"
+          TAG_BUILD=""
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
+            if [[ ! "$GITHUB_REF_NAME" =~ ^v([0-9]+\.[0-9]+)-([1-9][0-9]*)$ ]]; then
+              echo "::error::Use a release tag of the form v<major>.<minor>-<build>."
+              exit 1
+            fi
+            VERSION="${BASH_REMATCH[1]}"
+            TAG_BUILD="${BASH_REMATCH[2]}"
+            if [[ "$TAG_BUILD" != "$((COUNTER_BEFORE + 1))" ]]; then
+              echo "::error::Tagged build must match the next checked-in build number."
+              exit 1
+            fi
           else
             VERSION="$(awk -F'"' '/MARKETING_VERSION:/ {print $2; exit}' project.yml)"
           fi
@@ -274,6 +284,17 @@ jobs:
             || { echo "built app ($BUILT_BUILD) and BUILDNUMBER ($COUNTER_BUILD) differ"; exit 1; }
           test "$PROJECT_BUILD" = "$COUNTER_BUILD" \
             || { echo "project.yml ($PROJECT_BUILD) and BUILDNUMBER ($COUNTER_BUILD) differ"; exit 1; }
+          if [[ -n "$TAG_BUILD" ]]; then
+            if [[ "$BUILT_BUILD" != "$TAG_BUILD" ]]; then
+              echo "::error::Built app ($BUILT_BUILD) differs from tagged build ($TAG_BUILD)."
+              exit 1
+            fi
+            RELEASE_DMG="build/dist/SimpleVPN-${VERSION}-${BUILT_BUILD}-arm64.dmg"
+            mv "$DMG" "$RELEASE_DMG"
+            mv "$DMG.sha256" "$RELEASE_DMG.sha256"
+            DMG="$RELEASE_DMG"
+            (cd build/dist && shasum -a 256 "$(basename "$DMG")") > "$DMG.sha256"
+          fi
           echo "buildno=$BUILT_BUILD" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
@@ -349,15 +370,11 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           VERSION="${{ steps.build.outputs.version }}"
           DMG="${{ steps.build.outputs.dmg }}"
-          EXTRA_ARGS=()
-          # v1.2.3-beta.1 / v1.2.3-rc1 etc. -> mark as a GitHub prerelease.
-          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(beta|rc) ]]; then
-            EXTRA_ARGS+=(--prerelease)
-          fi
+          BUILD="${{ steps.build.outputs.buildno }}"
           gh release create "$TAG" \
-            --title "SimpleVPN $VERSION" \
+            --title "SimpleVPN ${VERSION}-${BUILD}" \
             --generate-notes \
-            ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
+            --latest \
             "$DMG" "$DMG.sha256" build/dist/appcast.xml
 
       - name: Clean up signing keychain + secrets

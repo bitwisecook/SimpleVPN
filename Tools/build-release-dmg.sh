@@ -39,6 +39,9 @@ VERSION="${1:-${MARKETING_VERSION:-}}"
 if [ -z "$VERSION" ]; then
   VERSION="$(git -C "$REPO" describe --tags --exact-match 2>/dev/null || true)"
   VERSION="${VERSION#v}"
+  if [[ "$VERSION" =~ ^([0-9]+\.[0-9]+)-[1-9][0-9]*$ ]]; then
+    VERSION="${BASH_REMATCH[1]}"
+  fi
 fi
 if [ -z "$VERSION" ]; then
   # Last resort: the literal xcodebuild would have used by default anyway.
