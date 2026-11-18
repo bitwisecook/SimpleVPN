@@ -14,11 +14,6 @@ final class VPNSetupQRCapture: NSObject, NSWindowDelegate, AVCaptureMetadataOutp
     private var cameraResult: (@MainActor @Sendable (String?) -> Void)?
     private var revision = 0
 
-    static var hasClipboardInput: Bool {
-        NSPasteboard.general.canReadObject(forClasses: [NSString.self, NSImage.self, NSURL.self],
-                                          options: [.urlReadingFileURLsOnly: true])
-    }
-
     func decode(_ data: Data, completion: @escaping @MainActor @Sendable (String?) -> Void) {
         let current = revision
         Task {

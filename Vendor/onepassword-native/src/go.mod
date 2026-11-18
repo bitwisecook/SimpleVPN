@@ -1,6 +1,6 @@
 module opnative
 
-go 1.27.3
+go 1.27.4
 
 require github.com/1password/onepassword-sdk-go v0.4.1
 
@@ -12,6 +12,6 @@ require (
 	github.com/tetratelabs/wabin v0.0.0-20230304001439-f6f874872834 // indirect
 	github.com/tetratelabs/wazero v1.12.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.11.1 // indirect
-	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 )

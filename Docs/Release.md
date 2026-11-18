@@ -233,4 +233,4 @@ the local distribution script remains the working release path.
   workflow's trigger tag-only — never add a `pull_request` trigger to
   `release.yml`.
 
-The DMG packaging step uses `dmgbuild==1.6.7` on PATH. Install it in a Python virtual environment for local release builds. CI installs it before packaging.
+The DMG packaging step uses `dmgbuild==2.0.0` on PATH. Install it in a Python virtual environment for local release builds. CI installs it before packaging.

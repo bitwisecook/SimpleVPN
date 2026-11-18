@@ -4,6 +4,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -39,6 +41,14 @@ type nodeStateSnapshot struct {
 func newKeychainState(seed, legacyFile string, fail func()) (*keychainState, error) {
 	s := &keychainState{data: make(map[ipn.StateKey][]byte), changed: make(chan struct{}), legacyFile: legacyFile,
 		fail: fail, timeout: 10 * time.Second}
+	// Old apps acknowledge a bare revision. Start each engine at an independent
+	// random offset so a delayed legacy ACK cannot satisfy a replacement engine.
+	var nonce [8]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return nil, err
+	}
+	s.revision = binary.BigEndian.Uint64(nonce[:]) >> 1
+	s.acknowledged = s.revision
 	if len(seed) > maxNodeState {
 		return nil, errors.New("node state exceeds storage limit")
 	}
@@ -57,7 +67,7 @@ func newKeychainState(seed, legacyFile string, fail func()) (*keychainState, err
 		}
 		seed = string(legacy)
 		if len(legacy) != 0 {
-			s.revision = 1
+			s.revision++
 		}
 	}
 	if seed != "" {
@@ -156,13 +166,21 @@ func (s *keychainState) arm() {
 }
 
 func (s *keychainState) snapshot() (nodeStateSnapshot, error) {
+	snapshot, _, err := s.snapshotSince(nil)
+	return snapshot, err
+}
+
+func (s *keychainState) snapshotSince(previous *uint64) (nodeStateSnapshot, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return nodeStateSnapshot{}, errors.New("node state store stopped")
+		return nodeStateSnapshot{}, false, errors.New("node state store stopped")
+	}
+	if previous != nil && *previous == s.revision && s.acknowledged == s.revision {
+		return nodeStateSnapshot{}, true, nil
 	}
 	data, err := json.Marshal(s.data)
-	return nodeStateSnapshot{Revision: s.revision, Data: string(data)}, err
+	return nodeStateSnapshot{Revision: s.revision, Data: string(data)}, false, err
 }
 
 func (s *keychainState) ack(revision uint64) error {

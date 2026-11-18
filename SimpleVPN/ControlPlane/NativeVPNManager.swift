@@ -282,6 +282,12 @@ final class NativeVPNManager {
     var dnsQueryStatusDidChange: (@MainActor () -> Void)?
     private(set) var status: NEVPNStatus = .invalid { didSet { dnsQueryStatusDidChange?() } }
     private(set) var activeConfigID: String? { didSet { dnsQueryStatusDidChange?() } }
+    private var lastConnectionFailure: (configID: String, message: String)?
+    func connectionError(for id: String) -> String? {
+        guard let failure = lastConnectionFailure, failure.configID == id else { return nil }
+        return failure.message
+    }
+
     private(set) var lastError: String?
     /// Set when saveToPreferences fails for the missing Personal VPN capability.
     private(set) var needsEntitlement = false
@@ -295,7 +301,8 @@ final class NativeVPNManager {
 
     var configs: [NativeVPNConfig] { store }
 
-    init() {
+    init(loadSaved: Bool = true) {
+        guard loadSaved else { return }
         load()
         // Scope to the shared personal-VPN connection so we don't churn on every
         // unrelated OpenVPN packet-tunnel transition.
@@ -369,19 +376,7 @@ final class NativeVPNManager {
             return false
         }
         store.removeAll { $0.id == id }
-        // Both the persistent-reference copies (nativeService, keyed by the
-        // accounts connect() writes) and the credsService copy NativeVPNView.save()
-        // writes need clearing — leaving either behind is a stale-secret leak.
-        KeychainCredentialStore.deleteNativeSecret(account: "native.\(id)")
-        KeychainCredentialStore.deleteNativeSecret(account: "native.\(id).psk")
-        KeychainCredentialStore.deleteCredentials(profile: "native.\(id)")
-        KeychainCredentialStore.deleteCredentials(profile: "native.\(id).secret")
-        KeychainCredentialStore.deleteCredentials(profile: "native.\(id).ppp")
-        KeychainCredentialStore.deleteCredentials(profile: "native.proxy.http.\(id)")
-        KeychainCredentialStore.deleteCredentials(profile: "native.proxy.https.\(id)")
-        // The Custom Routing proxy sign-in and the filter's fallback blob are keyed by
-        // the profile id too — same stale-secret rule.
-        KeychainCredentialStore.deleteCustomRoutingProxyAuth(profile: id)
+        ConfigSecretTransfer.deleteAll(id: id)
         CustomRoutingFallbackStore().clear(id)
         persist()
         return true
@@ -399,7 +394,7 @@ final class NativeVPNManager {
         guard revision == lifecycleRevision else { return }
         status = mgr.connection.status
         restoreActiveIdentity(mgr)
-        _ = await migrateStoredProxyCredentials(mgr)
+        if VPNController.permitsLiveCredentialBrokers { _ = await migrateStoredProxyCredentials(mgr) }
     }
 
     private func restoreActiveIdentity(_ manager: NEVPNManager) {
@@ -454,6 +449,12 @@ final class NativeVPNManager {
         }
     }
 
+    func replacementWarning(for id: String) -> String? {
+        guard UI.isActive(status), let activeConfigID, activeConfigID != id else { return nil }
+        let name = store.first { $0.id == activeConfigID }?.name.trimmingCharacters(in: .whitespaces)
+        return "Connecting will disconnect \(name.flatMap { $0.isEmpty ? nil : $0 } ?? "the other native VPN")."
+    }
+
     /// Push this config into the single personal-VPN slot and start it.
     /// `secret` is the IKEv2 password/PSK, or the IPsec XAuth password.
     /// `sharedSecret` is the IPsec group PSK (ignored for IKEv2, which only
@@ -471,7 +472,11 @@ final class NativeVPNManager {
         await operations.acquire()
         defer { operations.release() }
         guard revision == lifecycleRevision, store.contains(where: { $0.id == c.id }), !Task.isCancelled else { return }
+        lastConnectionFailure = nil
         lastError = nil; needsEntitlement = false
+        defer {
+            if let lastError { lastConnectionFailure = (c.id, lastError) }
+        }
         guard c.kind != .l2tp else {
             lastError = "L2TP can't be configured programmatically on macOS. Use “Export Configuration Profile” and install it."
             return

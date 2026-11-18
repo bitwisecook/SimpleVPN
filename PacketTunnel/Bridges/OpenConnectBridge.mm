@@ -155,18 +155,16 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
     //
     // `openconnect_set_http_proxy` takes credentials only as URL userinfo — there is
     // no separate setter (`openconnect_set_proxy_auth` chooses the auth *methods*,
-    // not the identity). So they are composed HERE, at the last moment, and that is
-    // the whole difference from the subprocess: on this path the URL is an in-memory
-    // string, not argv, so no local process can read the password with `ps`. The
-    // app's "include proxy password in process arguments" opt-in
-    // (`proxyPasswordInArgv`) exists only for the tool and is deliberately not
-    // consulted here — there is no argv to leak into.
+    // not the identity). Compose them only when starting the engine. The
+    // saved-password opt-in for the external tool is independent of this path.
     if (_cfg.proxy.length) {
         NSString *url = _cfg.proxy;
         if (_cfg.proxyUsername.length) {
-            NSString *cred = _cfg.proxyPassword.length
-                ? [NSString stringWithFormat:@"%@:%@", _cfg.proxyUsername, _cfg.proxyPassword]
-                : _cfg.proxyUsername;
+            NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+                @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"];
+            NSString *user = [_cfg.proxyUsername stringByAddingPercentEncodingWithAllowedCharacters:allowed];
+            NSString *password = [_cfg.proxyPassword stringByAddingPercentEncodingWithAllowedCharacters:allowed];
+            NSString *cred = password.length ? [NSString stringWithFormat:@"%@:%@", user, password] : user;
             NSRange scheme = [url rangeOfString:@"://"];
             url = scheme.location == NSNotFound
                 ? [NSString stringWithFormat:@"http://%@@%@", cred, url]

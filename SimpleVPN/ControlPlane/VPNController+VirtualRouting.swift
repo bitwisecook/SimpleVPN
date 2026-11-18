@@ -125,7 +125,10 @@ extension VPNController {
               ids.allSatisfy({ managers[$0] != nil && !locallyRemovedProfileIDs.contains($0) }) else { throw CancellationError() }
         guard let session = manager.connection as? NETunnelProviderSession else { throw err("The virtual connection is not ready.") }
         let start = VirtualRoutingStartConfig(members: startMembers, policy: policy)
-        try session.startTunnel(options: ["routingStart": try JSONEncoder().encode(start) as NSData])
+        try routes.startWithGateway(for: owner, members: Set(ids), wantsDefault: !owner.isEmpty) { owned in
+            try session.startTunnel(options: ["routingStart": try JSONEncoder().encode(start) as NSData,
+                                              "gatewayOwned": owned as NSNumber])
+        }
         virtualManagers[composition.id] = manager
         virtualStarts[composition.id] = Date()
         virtualObservedActive.remove(composition.id)

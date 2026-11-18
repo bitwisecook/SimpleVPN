@@ -11,7 +11,6 @@ static void vrPacket(VRPacketCallback f, uint64_t c, const unsigned char *p, int
 import "C"
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -142,7 +141,7 @@ func createVRState(cfg vrConfig, output func([]byte), bind func(string) conn.Bin
 		}
 		st.mtu = min(st.mtu, mtu)
 		ports = append(ports, packetrouter.Port{ID: id, Generation: handle, Addresses: addresses, Allowed: allowed, MTU: mtu,
-			Send: func(p []byte) bool { return engine.tundev.push(bytes.Clone(p)) }})
+			Send: engine.tundev.push})
 	}
 	router, err := packetrouter.New(capture, ports, policy, output)
 	if err != nil {
@@ -213,7 +212,8 @@ func VRPacketIn(handle C.uint64_t, bytes unsafe.Pointer, length C.int) C.int {
 		return 0
 	}
 	st, ok := virtualInstances.Get(uint64(handle))
-	if ok && st.router.Forward(C.GoBytes(bytes, length)) {
+	// Forward takes its own copy before translation, fragment storage, or queueing.
+	if ok && st.router.Forward(unsafe.Slice((*byte)(bytes), int(length))) {
 		return 1
 	}
 	return 0

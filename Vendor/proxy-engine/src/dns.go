@@ -42,6 +42,8 @@ func dnsOverTCP(ctx context.Context, up flowDialer, base *net.Dialer, resolverHo
 		return nil, err
 	}
 	defer conn.Close()
+	stopCancel := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stopCancel()
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
 	}

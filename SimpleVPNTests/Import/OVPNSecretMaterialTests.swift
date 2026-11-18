@@ -683,3 +683,82 @@ struct ManagedInlineSecretNoticeTests {
         #expect(OVPNSecretMaterial.humanNames(for: OVPNSecretMaterial.publicTags).isEmpty)
     }
 }
+
+@MainActor
+struct OpenVPNConfigurationEditTests {
+    private enum Rejected: Error { case save }
+
+    @Test func partiallyTypedSecretIsWithheldFromEveryRedactedRepresentation() {
+        for tag in OVPNSecretMaterial.secretTags {
+            let input = "client\n<\(tag)>\nDISPOSABLE_FIXTURE"
+            let split = OVPNSecretMaterial.split(input)
+            #expect(split.unterminatedTag == tag)
+            #expect(split.secrets[tag] == "DISPOSABLE_FIXTURE")
+            #expect(!split.config.contains("DISPOSABLE_FIXTURE"))
+            #expect(!OVPNSecretMaterial.exportText(input).contains("DISPOSABLE_FIXTURE"))
+            #expect(!OVPNSecretMaterial.canonicalIdentityText(input).contains("DISPOSABLE_FIXTURE"))
+        }
+    }
+
+    @Test func staleEditorCannotClearOrReplaceAKeyItNeverLoaded() {
+        let keys = ["key": "original"]
+        let stored = OVPNSecretMaterial.marker(for: "key")
+        #expect(throws: OpenVPNConfigurationEdit.Failure.self) {
+            try OpenVPNConfigurationEdit.checkOriginal("client", stored: stored, keys: keys, replacement: [:])
+        }
+        #expect(throws: Never.self) {
+            try OpenVPNConfigurationEdit.checkOriginal("<key>\noriginal\n</key>", stored: stored, keys: keys, replacement: [:])
+        }
+    }
+
+    @Test func editingAnIncompleteProfilePreservesTheReferenceUntilItsKeyIsRestored() {
+        let stored = OVPNSecretMaterial.marker(for: "key")
+        #expect(throws: OpenVPNConfigurationEdit.Failure.self) {
+            try OpenVPNConfigurationEdit.checkOriginal("client", stored: stored, keys: [:], replacement: [:])
+        }
+        #expect(throws: Never.self) {
+            try OpenVPNConfigurationEdit.checkOriginal("client", stored: stored, keys: [:], replacement: ["key": "replacement"])
+        }
+    }
+
+    @Test func failedPreferenceWriteRestoresReplacedOrDeletedKeys() async {
+        let previous = ["key": "original"]
+        for next in [["key": "updated"], [:]] {
+            var keys = previous
+            var writes = 0
+            do {
+                try await OpenVPNConfigurationEdit.save(previous: previous, replacement: next, read: { keys }) {
+                    keys = $0
+                    writes += 1
+                } commit: {
+                    #expect(keys == next)
+                    throw Rejected.save
+                }
+                Issue.record("Accepted a failed preference save")
+            } catch { #expect(error is Rejected) }
+            #expect(writes == 2)
+            #expect(keys == previous)
+        }
+    }
+
+    @Test func deniedWriteDoesNotPromptAgainToRestoreAnIntactKey() async {
+        let original = ["key": "original"]
+        var writes = 0
+        do {
+            try await OpenVPNConfigurationEdit.save(previous: original, replacement: [:], read: { original }) { _ in
+                writes += 1
+                throw Rejected.save
+            } commit: { Issue.record("Committed settings after a refused Keychain write") }
+            Issue.record("Accepted a denied write")
+        } catch { #expect(error is Rejected) }
+        #expect(writes == 1)
+    }
+
+    @Test func unrelatedEditSkipsKeychainWrite() async throws {
+        var committed = false
+        try await OpenVPNConfigurationEdit.save(previous: ["key": "same"], replacement: ["key": "same"], read: { [:] }) { _ in
+            Issue.record("Rewrote an unchanged key")
+        } commit: { committed = true }
+        #expect(committed)
+    }
+}

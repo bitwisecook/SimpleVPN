@@ -96,8 +96,6 @@ enum ConfigAppSettings {
                   name: "Get server lists from VPN providers",
                   kind: .boolean(false), importable: false),
             // Importable, and safely so: it can only make the feature ask for LESS.
-            // The default is on, so the ordinary path routes the request through the
-            // provider's own exit, where they learn essentially nothing new.
             .init(id: "app.provider-lists-only-connected",
                   key: ProviderListSettings.onlyWhenConnectedKey,
                   name: "Only refresh a provider\u{2019}s server list while connected to it",
@@ -156,6 +154,14 @@ enum ConfigAppSettings {
         }
     }
 
+    /// A private lookup service may put credentials in its URL. Query strings
+    /// and fragments are opaque to the app and can contain access tokens.
+    static func privateLookupAddress(id: String, value: ConfigValue) -> Bool {
+        guard id == "app.public-address-url-v4" || id == "app.public-address-url-v6",
+              let raw = value.stringValue else { return false }
+        return SubprocessTunnelConfig.passwordInAddress(raw) || raw.contains("?") || raw.contains("#")
+    }
+
     // MARK: Writing
 
     /// Why an imported value cannot be applied, or nil when it can. Type-checked
@@ -163,9 +169,16 @@ enum ConfigAppSettings {
     /// refused rather than coerced to a truth value.
     static func refusal(applying value: ConfigValue, to e: Entry,
                         store: UserDefaults = .standard) -> String? {
+        if privateLookupAddress(id: e.id, value: value) {
+            return "Set up your private address lookup URL in Settings on this Mac."
+        }
         if !e.importable {
             return "\u{201C}\(e.name)\u{201D} is left as it is \u{2014} macOS only asks for that "
                 + "permission when you turn it on yourself."
+        }
+        if e.key == ProviderListSettings.onlyWhenConnectedKey, value.boolValue == false,
+           read(e, from: store)?.boolValue == true {
+            return "Only you can allow server list requests while disconnected. Change this in Settings."
         }
         if store.objectIsForced(forKey: e.key) {
             return "\u{201C}\(e.name)\u{201D} is set by your organization and can\u{2019}t be changed."

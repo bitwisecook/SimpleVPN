@@ -151,7 +151,7 @@ nonisolated enum ConfigJSON {
 
     private static func convert(_ any: Any) -> ConfigValue {
         switch any {
-        case let s as String: return .document(s)
+        case let s as String: return .verbatim(s)
         // NSNumber BEFORE Bool, and it is load-bearing: `1 as Any as? Bool` is
         // `true` in Swift, so a leading `as? Bool` case turns every 1 and 0 in the
         // file into a boolean — which is how `format: 1` came back as `true`.
@@ -159,14 +159,14 @@ nonisolated enum ConfigJSON {
         case let n as NSNumber:
             if CFGetTypeID(n) == CFBooleanGetTypeID() { return .bool(n.boolValue) }
             let d = n.doubleValue
-            if d == d.rounded(), abs(d) <= Double(Int.max) { return .int(n.intValue) }
+            if let integer = Int(n.stringValue) ?? Int(exactly: d) { return .int(integer) }
             return .double(d)
         case let a as [Any]: return .list(a.map(convert))
         case let d as [String: Any]:
             // Sorted, so a JSON file re-exported as YAML is at least STABLE even
             // though JSON gave us no order to preserve.
             var m = ConfigMap()
-            for key in d.keys.sorted() { m[key] = convert(d[key]!) }
+            for key in d.keys.sorted() { m.entries.append(.init(key: key, value: convert(d[key]!))) }
             return .map(m)
         default: return .string("")
         }
@@ -326,7 +326,7 @@ nonisolated enum ConfigYAML {
     /// else falls back to a quoted string with `\n` escapes — uglier, still exact.
     private static func blockScalarSafe(_ s: String) -> Bool {
         // Scalar-level, for the CRLF-is-one-Character reason above.
-        guard !s.isEmpty, !s.unicodeScalars.contains("\r") else { return false }
+        guard !s.isEmpty, !s.hasSuffix("\n"), !s.unicodeScalars.contains("\r") else { return false }
         for line in s.components(separatedBy: "\n") {
             if let f = line.first, f == " " || f == "\t" { return false }
             if line.hasSuffix(" ") || line.hasSuffix("\t") { return false }
@@ -429,7 +429,7 @@ nonisolated enum ConfigYAML {
                 // `|`, `|-` and `|+` all land in the same place: ConfigValue.document
                 // drops trailing newlines anyway, so the chomping indicator changes
                 // nothing here and is accepted rather than refused.
-                open = (indent: indent, prefix: "\(dash)\(split.key)", startedAt: number)
+                open = (indent: indent, prefix: "\(dash)\(key(split.key))", startedAt: number)
                 continue
             }
             out.append(Line(number: number, indent: indent, content: "\(dash)\(content)"))
@@ -443,22 +443,37 @@ nonisolated enum ConfigYAML {
     /// `- vpn.example.com:1194` in a list of servers would parse as a record with a
     /// key of "vpn.example.com".
     ///
-    /// Plain keys only. A quoted key is legal YAML, is never emitted here, and
-    /// accepting it would mean a second scalar parser for keys.
+    /// Public keys and vendor field names can contain punctuation, so accept the
+    /// double-quoted keys emitted by the writer as well as plain setting names.
     private static func splitKey(_ body: String) -> (key: String, value: String)? {
-        let chars = Array(body)
-        for (i, ch) in chars.enumerated() where ch == ":" {
-            guard i == chars.count - 1 || chars[i + 1] == " " else { continue }
-            let key = String(chars[0..<i]).trimmingCharacters(in: .whitespaces)
+        if body.first == "\"" {
+            var escaped = false
+            for i in body.indices.dropFirst() {
+                if escaped { escaped = false; continue }
+                if body[i] == "\\" { escaped = true; continue }
+                if body[i] == "\"" {
+                    let tail = body[body.index(after: i)...]
+                    guard tail.first == ":", tail.count == 1 || tail.dropFirst().first == " ",
+                          let key = try? unquoteDouble(String(body[...i]), line: 0) else { return nil }
+                    return (key, tail.dropFirst().trimmingCharacters(in: .whitespaces))
+                }
+            }
+            return nil
+        }
+        for i in body.indices where body[i] == ":" {
+            let next = body.index(after: i)
+            guard next == body.endIndex || body[next] == " " else { continue }
+            let key = body[..<i].trimmingCharacters(in: .whitespaces)
             guard !key.isEmpty, !key.contains(" "), !key.contains("\""), !key.contains("'") else { return nil }
-            let value = String(chars[(i + 1)...]).trimmingCharacters(in: .whitespaces)
-            return (key, value)
+            return (key, body[next...].trimmingCharacters(in: .whitespaces))
         }
         return nil
     }
 
-    private static func parseMap(_ lines: [Line], _ i: inout Int, indent: Int) throws -> ConfigMap {
+    private static func parseMap(_ lines: [Line], _ i: inout Int, indent: Int, depth: Int = 0) throws -> ConfigMap {
+        guard depth < 64 else { throw ConfigCodingError.unsupportedYAML(line: lines[i].number, what: "too many nested sections") }
         var m = ConfigMap()
+        var seen = Set<String>()
         while i < lines.count {
             let line = lines[i]
             if line.indent < indent { break }
@@ -470,27 +485,31 @@ nonisolated enum ConfigYAML {
             guard let (key, rawValue) = splitKey(line.content) else {
                 throw ConfigCodingError.unsupportedYAML(line: line.number, what: "a line with no “name:”")
             }
+            guard seen.insert(key).inserted else {
+                throw ConfigCodingError.unsupportedYAML(line: line.number, what: "a duplicate setting name")
+            }
             i += 1
             if rawValue.isEmpty {
                 // A nested block: either a map or a sequence, decided by the next line.
                 guard i < lines.count, lines[i].indent > indent else {
-                    m[key] = .map(ConfigMap())          // "key:" with nothing under it
+                    m.entries.append(.init(key: key, value: .map(ConfigMap())))          // "key:" with nothing under it
                     continue
                 }
                 let childIndent = lines[i].indent
                 if lines[i].content.hasPrefix("- ") || lines[i].content == "-" {
-                    m[key] = .list(try parseList(lines, &i, indent: childIndent))
+                    m.entries.append(.init(key: key, value: .list(try parseList(lines, &i, indent: childIndent, depth: depth + 1))))
                 } else {
-                    m[key] = .map(try parseMap(lines, &i, indent: childIndent))
+                    m.entries.append(.init(key: key, value: .map(try parseMap(lines, &i, indent: childIndent, depth: depth + 1))))
                 }
             } else {
-                m[key] = try parseScalar(rawValue, line: line.number)
+                m.entries.append(.init(key: key, value: try parseScalar(rawValue, line: line.number)))
             }
         }
         return m
     }
 
-    private static func parseList(_ lines: [Line], _ i: inout Int, indent: Int) throws -> [ConfigValue] {
+    private static func parseList(_ lines: [Line], _ i: inout Int, indent: Int, depth: Int) throws -> [ConfigValue] {
+        guard depth < 64 else { throw ConfigCodingError.unsupportedYAML(line: lines[i].number, what: "too many nested sections") }
         var out: [ConfigValue] = []
         while i < lines.count {
             let line = lines[i]
@@ -502,15 +521,15 @@ nonisolated enum ConfigYAML {
                 i += 1
                 guard i < lines.count, lines[i].indent > indent else { out.append(.string("")); continue }
                 if lines[i].content.hasPrefix("- ") {
-                    out.append(.list(try parseList(lines, &i, indent: lines[i].indent)))
+                    out.append(.list(try parseList(lines, &i, indent: lines[i].indent, depth: depth + 1)))
                 } else {
-                    out.append(.map(try parseMap(lines, &i, indent: lines[i].indent)))
+                    out.append(.map(try parseMap(lines, &i, indent: lines[i].indent, depth: depth + 1)))
                 }
                 continue
             }
             if item == "{}" { out.append(.map(ConfigMap())); i += 1; continue }
             if item == "[]" { out.append(.list([])); i += 1; continue }
-            if let (key, rawValue) = splitKey(item), !item.hasPrefix("\"") {
+            if let (key, rawValue) = splitKey(item) {
                 // "- key: value" — a record. Its remaining keys sit at the column
                 // the first key starts in, which is two past the dash.
                 let recordIndent = indent + 2
@@ -519,9 +538,9 @@ nonisolated enum ConfigYAML {
                     i += 1
                     if i < lines.count, lines[i].indent > recordIndent {
                         if lines[i].content.hasPrefix("- ") || lines[i].content == "-" {
-                            record[key] = .list(try parseList(lines, &i, indent: lines[i].indent))
+                            record[key] = .list(try parseList(lines, &i, indent: lines[i].indent, depth: depth + 1))
                         } else {
-                            record[key] = .map(try parseMap(lines, &i, indent: lines[i].indent))
+                            record[key] = .map(try parseMap(lines, &i, indent: lines[i].indent, depth: depth + 1))
                         }
                     } else {
                         record[key] = .map(ConfigMap())
@@ -531,7 +550,10 @@ nonisolated enum ConfigYAML {
                     i += 1
                 }
                 if i < lines.count, lines[i].indent == recordIndent {
-                    let rest = try parseMap(lines, &i, indent: recordIndent)
+                    let rest = try parseMap(lines, &i, indent: recordIndent, depth: depth + 1)
+                    guard rest[key] == nil else {
+                        throw ConfigCodingError.unsupportedYAML(line: line.number, what: "a duplicate setting name")
+                    }
                     record.entries.append(contentsOf: rest.entries)
                 }
                 out.append(.map(record))
@@ -559,10 +581,10 @@ nonisolated enum ConfigYAML {
             throw ConfigCodingError.unsupportedYAML(line: line, what: "an anchor, alias or tag")
         }
         if raw.hasPrefix("\"") {
-            return .document(try unquoteDouble(raw, line: line))
+            return .verbatim(try unquoteDouble(raw, line: line))
         }
         if raw.hasPrefix("'") {
-            return .document(try unquoteSingle(raw, line: line))
+            return .verbatim(try unquoteSingle(raw, line: line))
         }
         // Strip a trailing comment from a plain scalar (" # like this").
         var body = raw

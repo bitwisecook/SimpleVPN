@@ -766,8 +766,7 @@ struct SubprocessTunnelView: View {
         socksRows(portID: "ssh.socks-port", systemProxyID: "ssh.system-proxy")
     }
 
-    /// The SOCKS pair — the local listener's port and "route the whole Mac
-    /// through it" — rendered from whichever surface's specs. ONE builder, because
+    /// The local listener's port and the system SOCKS proxy toggle, rendered from whichever surface's specs. ONE builder, because
     /// the SSH and SSL-VPN kinds expose the SAME TWO CONCEPTS off the same two
     /// model fields (`socksPort`, `setSystemProxy`): the SSL half used to be a
     /// bare `intField` plus a hand-written Toggle, so the two kinds described one
@@ -799,10 +798,6 @@ struct SubprocessTunnelView: View {
                 store.save(draft)
                 manager.setSystemProxyLive(draft, enabled: draft.setSystemProxy)
             }
-        }
-        if active {
-            Text("Flipping it while connected applies immediately — no reconnect.")
-                .font(.callout).foregroundStyle(.secondary)
         }
     }
 
@@ -923,7 +918,7 @@ struct SubprocessTunnelView: View {
             TextField("Proxy username (optional)", text: $draft.proxyUsername)
                 .autocorrectionDisabled()
             SecureField("Proxy password (optional)", text: $proxyPassword)
-            Toggle("Include proxy password in process arguments (visible to other local processes)",
+            Toggle("Use saved proxy password with the openconnect tool",
                    isOn: Binding(get: { draft.proxyPasswordInArgv ?? false },
                                  set: { draft.proxyPasswordInArgv = $0 ? true : nil }))
         }
@@ -934,7 +929,7 @@ struct SubprocessTunnelView: View {
         switch draft.proxyMode {
         case .systemDefault: "Reach the VPN server through whatever web proxy your Mac is configured to use (System Settings ▸ Network ▸ Proxies)."
         case .none: "Ignore any system proxy and connect straight to the server."
-        case .manual: "Send the connection through this specific HTTP/SOCKS proxy. Supports http://, https:// and socks5://. openconnect can only take a proxy password on its command line — where any local process can read it with `ps` — so it's only passed when the toggle above is on; off, an authenticating proxy will refuse the connection (use an unauthenticated proxy, or the in-process engine under Advanced)."
+        case .manual: "Enter an HTTP, HTTPS or SOCKS5 proxy. Enable the saved password if the proxy requires it when using the openconnect tool."
         }
     }
 
@@ -1497,6 +1492,7 @@ struct SubprocessTunnelView: View {
     /// "hold the value with the reason" or "silently move it to 1080 and break
     /// them". This is the hold.
     private var saveDisabledReason: String? {
+        if let reason = SubprocessTunnelManager.addressCredentialReason(draft) { return reason }
         if let problem = ConfigurationNameField.problem(draft.name) { return problem }
         if draft.server.isEmpty { return "Enter the server address first." }
         if draft.kind.isSSLVPN, let problem = SubprocessTunnelConfig.sslServerAddressProblem(draft.server) {
@@ -1730,7 +1726,10 @@ struct SubprocessTunnelView: View {
     @discardableResult
     private func save() -> Bool {
         guard !ManagedPolicy.lockConfiguration else { return false }
-        guard saveDisabledReason == nil else { return false }
+        if let reason = saveDisabledReason {
+            saveProblem = reason
+            return false
+        }
         saveProblem = nil
         do {
             if remember, !password.isEmpty {

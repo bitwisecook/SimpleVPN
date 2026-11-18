@@ -372,8 +372,7 @@ struct EditVPNView: View {
                 loadedOverrides = new
             }
             .onChange(of: vpn.ovpnText(id: profileID) ?? "") { _, new in
-                if ovpn == loadedOVPN { ovpn = new }
-                loadedOVPN = new
+                if ovpn == loadedOVPN { ovpn = new; loadedOVPN = new }
             }
             .alert("Couldn’t save changes", isPresented: Binding(
                 get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
@@ -1867,6 +1866,7 @@ struct EditVPNView: View {
     private var protectBinding: Binding<Bool> {
         Binding(get: { vpn.authConfig(for: profileID).protectWithBiometrics },
                 set: { on in
+                    guard !vpn.locallyRemovedProfileIDs.contains(profileID) else { return }
                     var live = vpn.transientCredentials(for: profileID)
                     if !username.isEmpty { live.username = username }
                     if !password.isEmpty { live.password = password }
@@ -1874,7 +1874,10 @@ struct EditVPNView: View {
                     let totp = totpSecretInput.isEmpty ? nil
                         : TOTPConfiguration.canonicalStorageString(from: totpSecretInput)
                     Task {
-                        do { try await vpn.setBiometricProtection(on, for: profileID, totpSecret: totp) }
+                        do {
+                            try await vpn.setBiometricProtection(on, for: profileID, totpSecret: totp)
+                            if on { username = ""; password = ""; remember = true }
+                        }
                         catch is CancellationError {}
                         catch { saveError = error.localizedDescription }
                     }
@@ -1981,7 +1984,7 @@ struct EditVPNView: View {
             auth = VPNAuthConfig.resolved(auth, autologin: isAutologin,
                                           staticChallenge: staticChallenge != nil)
             do {
-                try await vpn.updateOVPN(id: profileID, ovpn: ovpn, server: server)
+                try await vpn.updateOVPN(id: profileID, ovpn: ovpn, server: server, original: loadedOVPN)
                 try await vpn.setOverrides(draft, for: profileID)
                 try await vpn.setAuthConfig(auth, for: profileID)
                 loadedOVPN = ovpn; loadedOverrides = draft   // snapshots now match persisted
@@ -2018,17 +2021,18 @@ struct EditVPNView: View {
 
         // Push into the shared credential state so the main window and menu bar
         // immediately see what was typed here.
+        guard !vpn.locallyRemovedProfileIDs.contains(profileID) else { return false }
         var live = vpn.transientCredentials(for: profileID)
         live.username = username
         live.password = password
-        vpn.transientCreds[profileID] = live
+        if !vpn.authConfig(for: profileID).protectWithBiometrics { vpn.transientCreds[profileID] = live }
 
         // The profile's allow-password-save (auth-nocache) always wins over the toggle.
         let mayRemember = evaluation?.allowPasswordSave ?? true
         do {
             if !ManagedPolicy.lockConfiguration {
                 if mayRemember && remember && !username.isEmpty {
-                    try KeychainCredentialStore.saveCredentials(profile: profileID, .init(username: username, password: password))
+                    try vpn.saveOrdinarySignIn(id: profileID, username: username, password: password)
                 } else if !remember || !mayRemember {
                     KeychainCredentialStore.deleteCredentials(profile: profileID)
                 }

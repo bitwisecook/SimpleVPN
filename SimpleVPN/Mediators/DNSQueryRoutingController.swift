@@ -79,13 +79,16 @@ private final class SystemDNSQueryRoutingBackend: DNSQueryRoutingBackend {
         observer = NotificationCenter.default.addObserver(forName: .NEDNSProxyConfigurationDidChange, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, !applying else { return }
+                generation &+= 1
                 let revision = generation
                 let manager = NEDNSProxyManager.shared()
                 do {
                     try await manager.loadFromPreferences()
                     guard !applying, revision == generation else { return }
                     onConfiguration?(manager.isEnabled && manager.providerProtocol?.providerBundleIdentifier == providerID)
-                } catch { onConfiguration?(false) }
+                } catch {
+                    // A failed read cannot establish that someone disabled the proxy.
+                }
             }
         }
     }

@@ -194,8 +194,7 @@ nonisolated struct DiscoveredPath: Sendable, Equatable, Identifiable {
             "\(path) \u{2014} from \(locationClass.title). SimpleVPN doesn\u{2019}t look here on "
             + "its own; set this as the tool\u{2019}s path to use it."
         case .unsafeDirectory:
-            "\(path) \u{2014} from \(locationClass.title). SimpleVPN won\u{2019}t run this: anyone "
-            + "using this Mac can replace files in that folder."
+            "\(path) — another user can change this program or its location."
         case .notExecutable:
             "\(path) \u{2014} from \(locationClass.title). Not a program SimpleVPN can run."
         }

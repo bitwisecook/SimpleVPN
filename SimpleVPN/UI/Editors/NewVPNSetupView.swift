@@ -13,7 +13,6 @@ final class VPNSetupDraft: Identifiable {
     var headscaleURL = ""
     var usesHeadscale = false
     var signInBrowser: BrowserSelection = .osDefault
-    var offeredPasteboard = false
     var inferredInvitation: String?
     var inferredHeadscaleURL: String?
     var input = ""
@@ -44,7 +43,6 @@ struct NewVPNSetupView: View {
     var onCreate: (VPNSetupSubmission) async throws -> Void
     var onCancel: () -> Void
 
-    @State private var offerClipboard = false
     @State private var interpretClipboard = false
     @State private var qrCapture = VPNSetupQRCapture()
     @State private var showFilePicker = false
@@ -158,17 +156,6 @@ struct NewVPNSetupView: View {
             cancelWork()
             draft.candidates = []; draft.selectedCandidate = nil
         }
-        .onAppear {
-            guard !draft.offeredPasteboard else { return }
-            draft.offeredPasteboard = true
-            offerClipboard = incomingFile == nil && draft.input.isEmpty && VPNSetupQRCapture.hasClipboardInput
-        }
-        .alert("Use what’s on your clipboard?", isPresented: $offerClipboard) {
-            Button("Use Clipboard") { useClipboard() }
-            Button("Skip", role: .cancel) {}
-        } message: {
-            Text("SimpleVPN can look for a configuration, invitation, QR code, or setup instructions.")
-        }
         .onDisappear {
             qrCapture.close()
             if !draft.isCreating { cancelWork() }
@@ -210,7 +197,7 @@ struct NewVPNSetupView: View {
                 .frame(minHeight: 110, idealHeight: 140)
                 .overlay(alignment: .topLeading) {
                     if draft.input.isEmpty {
-                        Text("Paste the full email from your VPN administrator here. Apple Intelligence can use its on-device model to pre-configure your VPN. You can also paste a configuration or invitation.")
+                        Text("Paste a configuration, invitation, or setup instructions.")
                             .foregroundStyle(.secondary)
                             .padding(6)
                             .allowsHitTesting(false)

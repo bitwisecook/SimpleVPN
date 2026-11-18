@@ -125,6 +125,20 @@ struct ThroughputGraph: View {
     private let up = Color.green
 
     var body: some View {
+        Group {
+            if compact {
+                ThroughputSparkline(samples: samples, scaleMax: scaleMax, download: down, upload: up)
+            } else {
+                fullChart
+            }
+        }
+        .frame(height: compact ? 56 : 160)
+        .clipped()
+        .accessibilityLabel("Throughput graph")
+        .accessibilityChartDescriptor(ThroughputChartDescriptor(samples: samples, scaleMax: scaleMax))
+    }
+
+    private var fullChart: some View {
         Chart {
             ForEach(samples) { s in
                 AreaMark(x: .value("t", s.id), y: .value("rate", s.inRate),
@@ -145,21 +159,44 @@ struct ThroughputGraph: View {
         .chartYScale(domain: 0...scaleMax)
         .chartXAxis(.hidden)
         .chartYAxis {
-            if !compact {
-                AxisMarks(position: .leading) { value in
-                    AxisGridLine()
-                    if let v = value.as(Double.self) { AxisValueLabel { Text(Fmt.rate(v)).font(.caption2) } }
+            AxisMarks(position: .leading) { value in
+                AxisGridLine()
+                if let v = value.as(Double.self) {
+                    AxisValueLabel {
+                        Text(Fmt.rate(v)).font(.caption2).lineLimit(1)
+                            .frame(width: 68, alignment: .trailing)
+                    }
                 }
             }
         }
         .chartLegend(.hidden)
-        .frame(height: compact ? 56 : 160)
-        .clipped()
-        // A real audio graph, not a labeled picture: VoiceOver's "describe
-        // chart" / sonification reads both series with human axis units.
-        .accessibilityLabel("Throughput graph")
-        .accessibilityChartDescriptor(ThroughputChartDescriptor(samples: samples,
-                                                                scaleMax: scaleMax))
+    }
+}
+
+/// Draw traffic changes into an existing rectangle, with no axes or marks
+/// that can negotiate a new layout on every sample.
+struct ThroughputSparkline: View {
+    let samples: [ThroughputMonitor.Sample]
+    let scaleMax: Double
+    let download: Color
+    let upload: Color
+
+    var body: some View {
+        Canvas { context, size in
+            guard let first = samples.first, let last = samples.last, last.id > first.id else { return }
+            func line(_ rate: KeyPath<ThroughputMonitor.Sample, Double>) -> Path {
+                Path { path in
+                    for (index, sample) in samples.enumerated() {
+                        let x = Double(sample.id - first.id) / Double(last.id - first.id)
+                        let y = 1 - min(1, max(0, sample[keyPath: rate] / max(1, scaleMax)))
+                        let point = CGPoint(x: size.width * x, y: size.height * y)
+                        if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
+                    }
+                }
+            }
+            context.stroke(line(\.inRate), with: .color(download), lineWidth: 1)
+            context.stroke(line(\.outRate), with: .color(upload), lineWidth: 1)
+        }
     }
 }
 
@@ -229,17 +266,18 @@ struct ThroughputReadout: View {
     let inRate: Double
     let outRate: Double
     var body: some View {
-        HStack(spacing: 20) {
+        HStack(spacing: 12) {
             rate(symbol: "arrow.down", color: .blue, value: inRate)
             rate(symbol: "arrow.up", color: .green, value: outRate)
-            Spacer()
         }
     }
     private func rate(symbol: String, color: Color, value: Double) -> some View {
         HStack(spacing: 6) {
-            Image(systemName: symbol).foregroundStyle(color)
+            Image(systemName: symbol).foregroundStyle(color).frame(width: 14)
             Text(Fmt.rate(value)).font(.system(.title3, design: .rounded)).monospacedDigit().bold()
+                .lineLimit(1, reservesSpace: true)
         }
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -259,8 +297,8 @@ struct ConnectionInfoPanel: View {
             HStack(spacing: 10) {
                 metric("Uptime", Fmt.duration(stats?.uptime ?? 0), "clock")
                 metric("Reconnects", "\(stats?.reconnects ?? 0)", "arrow.triangle.2.circlepath")
-                if let total = stats { metric("Transferred", Fmt.byteCount(Double(total.bytesIn + total.bytesOut)), "arrow.up.arrow.down") }
-                Spacer()
+                metric("Transferred", stats.map { Fmt.byteCount(Double($0.bytesIn + $0.bytesOut)) } ?? "—",
+                       "arrow.up.arrow.down")
             }
             if let topo {
                 RailroadView(topology: topo.topology,
@@ -283,11 +321,12 @@ struct ConnectionInfoPanel: View {
     /// treatment the address rows already use.
     private func metric(_ title: String, _ value: String, _ symbol: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Label(title, systemImage: symbol).font(.caption).foregroundStyle(.secondary)
+            Label(title, systemImage: symbol).font(.caption).foregroundStyle(.secondary).lineLimit(1, reservesSpace: true)
             Text(value).font(.system(.body, design: .rounded)).monospacedDigit().bold()
+                .lineLimit(1, reservesSpace: true)
         }
         .padding(.horizontal, 10).padding(.vertical, 7)
-        .frame(minWidth: 92, alignment: .leading)
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
     }
 }
@@ -309,7 +348,7 @@ struct ConnectionDetailsPanel: View {
                         row("Server") { CopyableValue(value: server) }
                     }
                     if let ip = stats?.serverIP, !ip.isEmpty {
-                        row("Server address") { CopyableValue(value: ip) }
+                        row("Server address") { NetworkAddressValue(value: ip) }
                     }
                     if let mtu = stats?.mtu {
                         row("MTU") { Text("\(mtu)").font(.callout.monospaced()) }
@@ -348,11 +387,12 @@ struct ConnectionDetailsPanel: View {
 
             if let publicIP, let country = publicIP.countryName {
                 HStack(spacing: 6) {
-                    Text(CountryCentroids.flag(for: publicIP.countryCode ?? ""))
+                    Text(CountryCentroids.flag(for: publicIP.countryCode ?? "")).frame(width: 20)
                     Text("Your connection appears from \(country).")
                         .font(.callout).foregroundStyle(.secondary)
+                        .lineLimit(1, reservesSpace: true)
                     if publicIP.isRefreshing {
-                        ProgressView().controlSize(.mini)
+                        DrawnSpinner(size: 12).frame(width: 22, height: 22)
                     } else {
                         Button {
                             Task { await publicIP.refresh() }
@@ -379,20 +419,11 @@ struct ConnectionDetailsPanel: View {
     private func familyBox(title: String, tunnel: String?, gateway: String?, publicAddress: String?) -> some View {
         GroupBox(title) {
             VStack(alignment: .leading, spacing: 6) {
-                row("Tunnel") { valueOrDash(tunnel) }
-                row("Gateway") { valueOrDash(gateway) }
-                row("Public") { valueOrDash(publicAddress) }
+                row("Tunnel") { NetworkAddressValue(value: tunnel) }
+                row("Gateway") { NetworkAddressValue(value: gateway) }
+                row("Public") { NetworkAddressValue(value: publicAddress) }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    @ViewBuilder private func valueOrDash(_ value: String?) -> some View {
-        if let value, !value.isEmpty {
-            CopyableValue(value: value)
-        } else {
-            Text("—").font(.callout).foregroundStyle(.secondary)
-                .accessibilityLabel("none")
         }
     }
 

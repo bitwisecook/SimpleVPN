@@ -48,6 +48,7 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
     /// source chooser from drifting away from the first-connect experience.
     var isFirstConnection = true
     @Binding var dismissed: Bool
+    @Environment(\.controlActiveState) private var controlActiveState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.liveVisualPolicy) private var liveVisuals
     @State private var apServer = ""
@@ -401,17 +402,13 @@ struct FirstConnectSetupCard: View {   // was private — internal for the file 
         // manager's approval UI; it belongs to an explicit recheck, not to
         // merely opening the VPN window.
         .onAppear {
-            sources.refresh()
             if opItemTitle.isEmpty { opItemTitle = source.referenceTitle }
         }
         // Deliberately no task keyed on the linked 1Password item. A drop only
         // records coordinates; the ordinary Connect action is the first read,
         // so it is also the only Touch ID approval needed to get online.
-        .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
-                sources.refresh()
-            }
+        .onChange(of: controlActiveState) { _, state in
+            if state == .key { sources.refresh() }
         }
         .sheet(isPresented: $showFieldMap) {
             OnePasswordFieldMapSheet(itemTitle: opItemTitle, fields: opFields,

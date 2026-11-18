@@ -31,8 +31,25 @@ struct ProfileRemovalAndDropTests {
         #expect(crud.contains("locallyRemovedProfileIDs.insert(id)"))
         #expect(controller.contains("func hideProfileWhileRemoving(id: String)"))
         #expect(crud.contains("hideProfileWhileRemoving(id: id)"))
-        #expect(crud.contains("locallyRemovedProfileIDs.remove(id)\n            await loadAll()"),
-                "only a failed preference removal may clear the tombstone")
+        let removal = try #require(crud.components(separatedBy: "private func removeProfile(id:").last)
+        #expect(removal.contains("locallyRemovedProfileIDs.remove(id)\n            throw error"),
+                "a failed preference removal must clear the tombstone")
+        let removeWrapper = try #require(crud.components(separatedBy: "private func removeProfile(id:").first)
+        #expect(removeWrapper.contains("try await removeProfile(id: id, manager: current)\n        } catch {\n            await loadAll()"),
+                "refresh only after the removal has released its configuration gate")
+    }
+
+    @Test func disappearingProfileReleasesOnlyItsCachedKeysAndEditorText() {
+        let vpn = VPNController()
+        for id in ["removed", "kept"] {
+            vpn.ovpnSecretsCache[id] = ["key": "fixture"]
+            vpn.ovpnTextCache[id] = "editor fixture"
+            vpn.appliedOVPN[id] = "previous fixture"
+        }
+        vpn.forgetRemovedNetworkProfiles(["removed"])
+        #expect(vpn.ovpnSecretsCache.keys.sorted() == ["kept"])
+        #expect(vpn.ovpnTextCache.keys.sorted() == ["kept"])
+        #expect(vpn.appliedOVPN.keys.sorted() == ["kept"])
     }
 
     @Test func credentialWellOwnsItsSourceDetectingDestinationWithoutAWindowWideAncestor() throws {

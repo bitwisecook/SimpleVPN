@@ -77,13 +77,18 @@ final class PFRouteMonitor: MediatorMonitor, @unchecked Sendable {
     /// Open the socket and begin watching. Idempotent.
     nonisolated func start(onDrift: @escaping @Sendable (DefaultRouteState) -> Void) throws {
         lock.lock()
-        guard source == nil else { lock.unlock(); return }
-        self.onDrift = onDrift
-        lock.unlock()
+        defer { lock.unlock() }
+        guard source == nil else { return }
 
         let descriptor = socket(PF_ROUTE, SOCK_RAW, 0)
         guard descriptor >= 0 else { throw RouteTableError.socketFailed(code: errno) }
-        _ = fcntl(descriptor, F_SETFL, fcntl(descriptor, F_GETFL, 0) | O_NONBLOCK)
+        let flags = fcntl(descriptor, F_GETFL, 0)
+        guard flags >= 0, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0,
+              fcntl(descriptor, F_SETFD, FD_CLOEXEC) == 0 else {
+            let failure = errno
+            close(descriptor)
+            throw RouteTableError.socketFailed(code: failure)
+        }
 
         let readSource = DispatchSource.makeReadSource(fileDescriptor: descriptor, queue: queue)
         // Explicit @Sendable so the handlers stay OFF the main actor (see ISOLATION note).
@@ -92,15 +97,9 @@ final class PFRouteMonitor: MediatorMonitor, @unchecked Sendable {
         readSource.setEventHandler(handler: onEvent)
         readSource.setCancelHandler(handler: onCancel)
 
-        lock.lock()
-        if source == nil {
-            source = readSource
-            lock.unlock()
-            readSource.resume()
-        } else {
-            lock.unlock()
-            readSource.cancel()   // lost a start() race
-        }
+        self.onDrift = onDrift
+        source = readSource
+        readSource.resume()
     }
 
     nonisolated func stop() { cancelSource() }
@@ -128,11 +127,16 @@ final class PFRouteMonitor: MediatorMonitor, @unchecked Sendable {
                 sawDefaultChange = true
             }
         }
-        if sawDefaultChange { scheduleCallback() }
+        if sawDefaultChange { scheduleCallback(from: descriptor) }
     }
 
-    nonisolated private func scheduleCallback() {
-        let scheduled: UInt64 = lock.withLock { generation &+= 1; return generation }
+    nonisolated private func scheduleCallback(from descriptor: Int32) {
+        let scheduled: UInt64? = lock.withLock {
+            guard source?.handle == UInt(descriptor) else { return nil }
+            generation &+= 1
+            return generation
+        }
+        guard let scheduled else { return }
         let work: @Sendable () -> Void = { [weak self] in
             guard let self else { return }
             let (current, callback) = self.lock.withLock {

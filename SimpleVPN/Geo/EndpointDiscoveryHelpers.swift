@@ -25,18 +25,6 @@ nonisolated extension EndpointDiscovery {
     }
 }
 
-// MARK: - Subprocess with timeout
-
-nonisolated extension EndpointDiscovery {
-    struct ProcOut: Sendable { var status: Int32; var stdout: String; var stderr: String }
-
-    static func runProcess(_ path: String, _ args: [String], timeout: TimeInterval) async -> ProcOut {
-        let result = await LocalToolRunner.run(executable: path, arguments: args, deadline: timeout)
-        return ProcOut(status: result.timedOut ? -124 : result.exitCode,
-                       stdout: String(decoding: result.stdout, as: UTF8.self), stderr: result.stderr)
-    }
-}
-
 // MARK: - HTTP probe
 
 nonisolated extension EndpointDiscovery {
@@ -52,20 +40,24 @@ nonisolated extension EndpointDiscovery {
         guard let url = URL(string: urlString) else { return nil }
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 6
+        cfg.timeoutIntervalForResource = 6
         cfg.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         let delegate = DiscoveryURLDelegate()
         let session = URLSession(configuration: cfg, delegate: delegate, delegateQueue: nil)
-        defer { session.finishTasksAndInvalidate() }
+        defer { session.invalidateAndCancel() }
         var req = URLRequest(url: url)
         req.setValue("SimpleVPN-Discovery", forHTTPHeaderField: "User-Agent")
         do {
-            let (data, response) = try await session.data(for: req)
+            let (bytes, response) = try await session.bytes(for: req)
             guard let http = response as? HTTPURLResponse else { return nil }
             var headers: [String: String] = [:]
             for (k, v) in http.allHeaderFields {
                 if let ks = k as? String, let vs = v as? String { headers[ks] = vs }
             }
-            let body = String(data: data.prefix(16_384), encoding: .utf8) ?? ""
+            // Stop receiving as soon as the fingerprint prefix is complete.
+            var data = Data()
+            for try await byte in bytes.prefix(16_384) { data.append(byte) }
+            let body = String(decoding: data, as: UTF8.self)
             return HTTPProbe(status: http.statusCode, headers: headers, body: body)
         } catch {
             return nil

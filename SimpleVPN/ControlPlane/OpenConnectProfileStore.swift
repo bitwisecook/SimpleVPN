@@ -42,7 +42,7 @@ enum OpenConnectProfileStore {
     /// (which persists) — and the extension skips its own sign-in.
     static func start(_ config: SubprocessTunnelConfig, password: String?,
                       oneTimeCode: String? = nil,
-                      auth: OCAuthDone? = nil,
+                      auth: OCAuthDone? = nil, coordinator: VPNController?,
                       onEvent: @escaping @MainActor (Event) -> Void) async -> Bool {
         guard config.kind.isSSLVPN else { return false }
         let type = config.kind.rawValue   // provider resolves it via VPNKind.openconnectProtocol
@@ -100,7 +100,11 @@ enum OpenConnectProfileStore {
                 options["servercert"] = auth.servercert as NSString
                 if !auth.connectURL.isEmpty { options["connectURL"] = auth.connectURL as NSString }
             }
-            try (mgr.connection as? NETunnelProviderSession)?.startTunnel(options: options)
+            guard let coordinator, let session = mgr.connection as? NETunnelProviderSession else { return false }
+            if coordinator.managers[config.id] == nil {
+                await coordinator.registerCreatedManager(mgr, id: config.id)
+            }
+            try coordinator.startWithInitialGateway(session, profile: config.id, options: options)
             observe(mgr.connection, id: config.id, onEvent: onEvent)
             log.log("started in-process OpenConnect for \(config.id, privacy: .public) (\(type, privacy: .public))")
             return true

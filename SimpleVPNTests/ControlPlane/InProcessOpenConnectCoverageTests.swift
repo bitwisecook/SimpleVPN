@@ -146,7 +146,7 @@ struct InProcessOpenConnectCoverageTests {
         // credentials ride startTunnel options in memory. The URL is composed with its
         // userinfo only at the last moment, inside the bridge — which is also why the
         // in-process path needs no equivalent of the subprocess's explicit
-        // "include the proxy password in process arguments" opt-in: there is no argv.
+        // "use saved proxy password with the openconnect tool" opt-in.
         for value in manual.values.compactMap({ $0 as? String }) {
             #expect(!value.contains(":@"), "no credentials in a persisted configuration")
         }

@@ -147,7 +147,7 @@ struct VPNSidebarRow: View {
             DrawnSpinner().frame(width: 34, height: 34)
                 .transition(.blurReplace)
         } else {
-            switch profile.status {
+            switch vpn.displayStatus(for: profile.id) {
             case .connected, .reasserting:
                 if isPaused {
                     circle("play.fill", tint: .green, help: "Resume",
@@ -165,7 +165,7 @@ struct VPNSidebarRow: View {
                     .transition(.blurReplace)
                 // Always offer a way out of "Connecting…" — a gateway that can't be
                 // reached is retried indefinitely, so a spinner alone traps the user.
-                if profile.status == .connecting {
+                if vpn.displayStatus(for: profile.id) == .connecting {
                     circle("xmark.circle.fill", tint: UI.cancelRed, help: "Cancel connecting",
                            label: "Cancel connecting \(profile.name)") { vpn.disconnect(id: profile.id) }
                         .transition(.blurReplace)
@@ -232,12 +232,12 @@ struct VPNSidebarRow: View {
     }
 
     private func play() {
-        vpn.selectedID = profile.id                 // focus it if it needs input
+        vpn.requestedConnectionTag = profile.id
         Task {
             // If saved credentials can't do it after all (a manager item went
             // missing, a code became required), don't fail silently — walk the
             // user to the form like the dimmed play button would have.
-            if await !vpn.connectWithSavedCredentials(id: profile.id), vpn.lastError == nil {
+            if await vpn.quickConnect(id: profile.id) == .needsInput {
                 vpn.nudgeCredentials(id: profile.id)
             }
         }

@@ -8,6 +8,136 @@ import Testing
 
 @MainActor
 struct SecretExportTests {
+    @Test func protectedProfileAndDeletedProfileSuppressOrdinaryCredentialWrites() throws {
+        let vpn = VPNController(), id = UUID().uuidString
+        defer { KeychainCredentialStore.deleteCredentials(profile: id) }
+        var auth = VPNAuthConfig()
+        auth.protectWithBiometrics = true
+        vpn.authConfigs[id] = auth
+        vpn.transientCreds[id] = .init(username: "alex", password: "fixture")
+        #expect(!vpn.canReconnectUnattended(id: id))
+        try vpn.saveOrdinarySignIn(id: id, username: "alex", password: "fixture")
+        #expect(KeychainCredentialStore.loadCredentials(profile: id) == nil)
+        vpn.authConfigs[id] = nil
+        vpn.locallyRemovedProfileIDs.insert(id)
+        try vpn.saveOrdinarySignIn(id: id, username: "alex", password: "fixture")
+        #expect(KeychainCredentialStore.loadCredentials(profile: id) == nil)
+    }
+
+    @Test func deletingAProfileErasesImportedRolesAcrossEngines() throws {
+        let id = UUID().uuidString, sibling = UUID().uuidString
+        let ssh = VPNController.sshNetKeyProfile(id)
+        defer {
+            ConfigSecretTransfer.deleteAll(id: id)
+            ConfigSecretTransfer.deleteAll(id: sibling)
+        }
+        try KeychainCredentialStore.saveCredentials(profile: ssh, .init(username: "alex", password: "fixture"))
+        try KeychainCredentialStore.saveCustomRoutingProxyAuth(profile: id, .init(username: "alex", password: "fixture"))
+        try KeychainCredentialStore.saveCredentials(profile: sibling, .init(username: "alex", password: "sibling"))
+        ConfigSecretTransfer.deleteAll(id: id)
+        #expect(try KeychainCredentialStore.credentialsForExport(profile: ssh) == nil)
+        #expect(try KeychainCredentialStore.routingProxyAuthForExport(profile: id) == nil)
+        #expect(try KeychainCredentialStore.credentialsForExport(profile: sibling)?.password == "sibling")
+    }
+
+    @Test func importRetainsProtectionWhenThePreferenceAndSecretRoleDisagree() throws {
+        var values = ConfigMap()
+        values.put("username", .string("alex"))
+        values.put("password", .string("ordinary fixture"))
+        values.put("privateKeyPassword", .string("separate engine fixture"))
+        var secrets = ConfigMap()
+        secrets.put("credentials", .map(values))
+        var entry = ConfigSnapshot.VPN(id: "test", name: "Example", kind: .openVPN, server: "vpn.example")
+        entry.ovpn = "client\nremote vpn.example 1194\n"
+        var auth = VPNAuthConfig()
+        auth.protectWithBiometrics = true
+        entry.auth = auth
+        func planned(_ input: ConfigSnapshot.VPN) throws -> ConfigSnapshot.VPN {
+            var snapshot = ConfigSnapshot()
+            snapshot.vpns = [input]
+            let text = ConfigDocument.text(from: snapshot, format: .json, secretMode: .include)
+            return try #require(ConfigImport.plan(text: text, current: ConfigSnapshot()).vpns.first?.vpn)
+        }
+        entry.secrets = secrets
+        let converted = try planned(entry)
+        #expect(converted.secrets["credentials"] == nil)
+        #expect(converted.secrets["protected"]?.mapValue?["password"]?.stringValue == "ordinary fixture")
+        #expect(converted.secrets["profile-secrets"]?.mapValue?["privateKeyPassword"]?.stringValue == "separate engine fixture")
+
+        entry.auth = nil
+        values["privateKeyPassword"] = nil
+        values.put("password", .string("protected fixture"))
+        secrets.put("protected", .map(values))
+        entry.secrets = secrets
+        let restored = try planned(entry)
+        #expect(restored.auth?.protectWithBiometrics == true)
+        #expect(restored.auth?.rememberCredentials == true)
+        #expect(restored.secrets["credentials"] == nil)
+        #expect(restored.secrets["protected"]?.mapValue?["password"]?.stringValue == "protected fixture")
+    }
+
+    @Test func portableSecretsKeepKeyTerminatorsAndWireGuardPeerNames() throws {
+        let key = "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture  \n-----END OPENSSH PRIVATE KEY-----\n"
+        let peerName = Data(repeating: 251, count: 32).base64EncodedString()
+        let nested = ConfigJSON.value([peerName: key])
+        var doc = ConfigMap()
+        doc.put("wireguard-peers", nested)
+        for back in [try ConfigJSON.decode(ConfigJSON.encode(doc)), try ConfigYAML.decode(ConfigYAML.encode(doc))] {
+            #expect(back["wireguard-peers"]?.mapValue?[peerName]?.stringValue == key)
+        }
+    }
+
+    @Test func placeholdersAndUnrelatedEngineSecretsStayOutsideTheExportSnapshot() async throws {
+        let id = UUID().uuidString
+        defer { ConfigSecretTransfer.deleteAll(id: id) }
+        try KeychainCredentialStore.saveSSHPrivateKey(profile: id, pem: "private fixture")
+        try KeychainCredentialStore.saveCredentials(profile: VPNController.tailscaleNodeStateProfile(id),
+            .init(username: "state", password: #"{"other":"YQ=="}"#))
+        let ssh = try await ConfigSecretTransfer.collect(id: id, kind: .ssh, mode: .include)
+        #expect(ssh["tailscale-state"] == nil)
+        #expect(ssh["ssh-key"]?.mapValue?["password"]?.stringValue == "private fixture")
+        let redacted = try await ConfigSecretTransfer.collect(id: id, kind: .ssh, mode: .placeholders)
+        #expect(!ConfigJSON.encode(redacted).contains("private fixture"))
+        #expect(throws: (any Error).self) { try ConfigSecretTransfer.validated(ssh, kind: .tailscale) }
+    }
+
+    @Test(arguments: [ConfigFileFormat.yaml, .json])
+    func externalSignInRetainsPasswordFieldIdentifier(_ format: ConfigFileFormat) throws {
+        var entry = ConfigSnapshot.VPN(id: "test", name: "VPN", kind: .openVPN, server: "vpn.example")
+        entry.ovpn = "client\nremote vpn.example 1194"
+        var source = CredentialSource()
+        source.kind = .onePassword
+        source.reference = "fixture-item-id"
+        source.accountReference = "fixture-account-id"
+        source.vault = "fixture-vault-id"
+        source.fieldMap = ["password": "fixture-field-id", "otp": "fixture-otp-id"]
+        entry.credentialSource = source
+        var input = ConfigSnapshot()
+        input.vpns = [entry]
+        let text = ConfigDocument.text(from: input, format: format)
+        let imported = try #require(ConfigImport.plan(text: text, current: ConfigSnapshot()).vpns.first?.vpn)
+        #expect(imported.credentialSource == source)
+    }
+
+    @Test func exportedProxyAndEndpointAddressesCannotCarryEmbeddedPasswords() throws {
+        let embedded = "http://alex:fixture-password@vpn.example"
+        var entry = ConfigSnapshot.VPN(id: "test", name: "VPN", kind: .openVPN, server: "vpn.example")
+        entry.ovpn = "client\nremote vpn.example 1194"
+        var routing = CustomRoutingProfile()
+        routing.proxy.mode = .custom
+        routing.proxy.manualURL = embedded
+        entry.customRouting = routing
+        entry.endpoints = .init(endpoints: [.init(host: embedded), .init(host: "safe.example")])
+        var input = ConfigSnapshot()
+        input.vpns = [entry]
+        let text = ConfigDocument.text(from: input, format: .yaml)
+        #expect(!text.contains("fixture-password"))
+        let plan = ConfigImport.plan(text: text, current: ConfigSnapshot())
+        let imported = try #require(plan.vpns.first?.vpn)
+        #expect(imported.endpoints?.endpoints.map(\.host) == ["safe.example"])
+        #expect(imported.customRouting?.proxy.manualURL == nil)
+    }
+
     private func snapshot() -> ConfigSnapshot {
         var snapshot = ConfigSnapshot()
         var vpn = ConfigSnapshot.VPN(id: "test", name: "SSH", kind: .ssh, server: "example.com")
@@ -59,10 +189,10 @@ struct SecretExportTests {
         credentials.put("password", .int(123))
         var secrets = ConfigMap()
         secrets.put("ssh-key", .map(credentials))
-        #expect(throws: (any Error).self) { try ConfigSecretTransfer.validated(secrets) }
+        #expect(throws: (any Error).self) { try ConfigSecretTransfer.validated(secrets, kind: .ssh) }
         secrets = ConfigMap()
         secrets.put("arbitrary-user-keychain-account", .map(ConfigMap()))
-        #expect(throws: (any Error).self) { try ConfigSecretTransfer.validated(secrets) }
+        #expect(throws: (any Error).self) { try ConfigSecretTransfer.validated(secrets, kind: .ssh) }
     }
 
     @Test func secretExportIsPrivateWhenCreatedAndWhenReplacingAFile() throws {
@@ -90,12 +220,12 @@ struct SecretExportTests {
         config.sshAuthMethod = "keychain"
         config.sshAgentSocket = "unused/relative/socket"
         #expect(SubprocessTunnelManager.sshAuthBlockReason(config) == nil)
-        let collected = try await ConfigSecretTransfer.collect(id: originalID, mode: .include)
+        let collected = try await ConfigSecretTransfer.collect(id: originalID, kind: .ssh, mode: .include)
         var export = snapshot()
         export.vpns[0].secrets = collected
         #expect(ConfigDocument.text(from: export, format: .yaml, secretMode: .include).contains("TEST_ONLY_PEM_CANARY"))
         #expect(!ConfigDocument.text(from: export, format: .yaml, secretMode: .placeholders).contains("TEST_ONLY_PEM_CANARY"))
-        try ConfigSecretTransfer.save(collected, id: importedID)
+        try ConfigSecretTransfer.save(collected, id: importedID, kind: .ssh)
         #expect(KeychainCredentialStore.loadSSHPrivateKey(profile: originalID) == "TEST_ONLY_PEM_CANARY")
         #expect(KeychainCredentialStore.loadSSHPrivateKey(profile: importedID) == "TEST_ONLY_PEM_CANARY")
     }
@@ -235,11 +365,37 @@ struct SecretExportTests {
             KeychainCredentialStore.deleteCredentials(profile:VPNController.tailscaleNodeStateProfile(destination))
         }
         try KeychainCredentialStore.saveCredentials(profile:VPNController.tailscaleNodeStateProfile(source),.init(username:"node-state",password:state))
-        let collected=try await ConfigSecretTransfer.collect(id:source,mode:.include)
+        let collected=try await ConfigSecretTransfer.collect(id:source,kind:.tailscale,mode:.include)
         #expect(collected["tailscale-state"]?.mapValue?["password"]?.stringValue == state)
-        try ConfigSecretTransfer.save(collected,id:destination)
+        try ConfigSecretTransfer.save(collected,id:destination,kind:.tailscale)
         #expect(try KeychainCredentialStore.credentialsForExport(profile:VPNController.tailscaleNodeStateProfile(destination))?.password == state)
         #expect(!ConfigSecretTransfer.placeholders(collected).jsonRepresentation.description.contains("VEVTVF9OT0RFX0tFWQ"))
+    }
+    @Test func identityAcknowledgementsAndUnchangedRepliesBelongToTheirEngine() throws {
+        let one = TailscaleNodeState(revision: 7, data: "{}", generation: UUID())
+        let two = TailscaleNodeState(revision: 7, data: "{}", generation: UUID())
+        #expect(one.cursor != two.cursor)
+        #expect(one.acknowledgement != two.acknowledgement)
+        let request = String(decoding: TailscaleNodeState.request(after: one.cursor), as: UTF8.self)
+        #expect(request == "tsstate:since:" + one.cursor.wireValue)
+        #expect(TailscaleNodeState.Cursor.parse(Substring(one.cursor.wireValue)) == one.cursor)
+        let unchanged = Data(("unchanged:" + one.cursor.wireValue).utf8)
+        #expect(TailscaleNodeState.decodeReply(unchanged, after: one.cursor) == .unchanged)
+        #expect(TailscaleNodeState.decodeReply(unchanged, after: two.cursor) == nil)
+        #expect(TailscaleNodeState.decodeReply(unchanged, after: nil) == nil)
+        let replacement = try JSONEncoder().encode(two)
+        #expect(TailscaleNodeState.decodeReply(replacement, after: one.cursor) == .snapshot(two))
+        #expect(TailscaleNodeState.decodeReply(Data("starting".utf8), after: two.cursor) == .starting)
+    }
+
+    @Test func legacyIdentityPollUsesFullSnapshotAndDetectsReusedRevisions() throws {
+        let bytes = Data(#"{"data":"{}","revision":2}"#.utf8)
+        let old = TailscaleNodeState(revision: 2, data: "{}")
+        #expect(TailscaleNodeState.decodeReply(bytes, after: nil) == .snapshot(old))
+        #expect(TailscaleNodeState.request(after: old.cursor) == Data("tsstate".utf8))
+        #expect(old.acknowledgement == Data("tsstate:ack:2".utf8))
+        let replacement = TailscaleNodeState(revision: 2, data: #"{"node":"YQ=="}"#)
+        #expect(old.cursor != replacement.cursor)
     }
     @Test func malformedNodeStateCannotBeAccepted() {
         #expect(!TailscaleNodeState(revision:1,data:"{\"node-key\":123}").isValid)

@@ -53,6 +53,12 @@ nonisolated indirect enum ConfigValue: Equatable, Sendable {
         return t.contains("\n") ? .text(t) : .string(t)
     }
 
+    /// Credentials and imported scalar values must retain every byte, including
+    /// the terminating newline on an OpenSSH private key.
+    static func verbatim(_ s: String) -> ConfigValue {
+        s.contains("\n") ? .text(s) : .string(s)
+    }
+
     static func strings(_ list: [String]) -> ConfigValue { .list(list.map { .string($0) }) }
 
     // MARK: Readers (import side — every one of them TOLERANT)

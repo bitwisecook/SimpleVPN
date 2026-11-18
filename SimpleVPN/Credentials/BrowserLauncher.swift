@@ -10,8 +10,8 @@
 //  here) and Tailscale sign-in opens its control URL the same way.
 //
 //  Chromium picks a profile with `--profile-directory=<dir>`, Firefox with
-//  `-P <name>`, Safari has no CLI-selectable profile. We shell out to `/usr/bin/
-//  open` (arg-array, no shell) — the documented, reliable way to pass browser args.
+//  `-P <name>`. Launch Services receives the sign-in URL separately from those
+//  arguments, including when a browser is already running.
 //
 
 import Foundation
@@ -145,28 +145,30 @@ enum BrowserCatalog {
     /// Open `url` in the selected browser/profile (or the OS default when unset).
     static func open(_ url: URL, using sel: BrowserSelection) {
         if sel.isInApp { Task { @MainActor in SSOAuthModel.shared.request(url) }; return }
-        guard let b = browser(sel.bundleID) else { NSWorkspace.shared.open(url); return }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        p.arguments = openArguments(for: b, profile: sel.profile, url: url.absoluteString)
-        try? p.run()
+        guard SSOAuthModel.accepts(url) else { return }
+        guard let browser = browser(sel.bundleID),
+              let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: browser.bundleID) else {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        let options = NSWorkspace.OpenConfiguration()
+        options.arguments = profileArguments(for: browser.family, profile: sel.profile)
+        // Running instances ignore new launch arguments. Have Launch Services
+        // launch with the chosen profile, then deliver the URL as an open event.
+        options.createsNewApplicationInstance = !options.arguments.isEmpty
+        NSWorkspace.shared.open([url], withApplicationAt: app, configuration: options)
     }
 
-    /// `open` argv for a browser+profile+URL (arg array — no shell interpolation).
-    static func openArguments(for b: InstalledBrowser, profile: String?, url: String) -> [String] {
-        switch b.family {
+    static func profileArguments(for family: BrowserFamily, profile: String?) -> [String] {
+        guard let profile, !profile.isEmpty, !profile.contains("\0") else { return [] }
+        switch family {
         case .chromium:
-            var a = ["-b", b.bundleID, "--args"]
-            if let profile, !profile.isEmpty { a.append("--profile-directory=\(profile)") }
-            a.append(url)
-            return a
+            guard !profile.contains("/"), profile != ".", profile != ".." else { return [] }
+            return ["--profile-directory=\(profile)"]
         case .firefox:
-            var a = ["-b", b.bundleID, "--args"]
-            if let profile, !profile.isEmpty { a += ["-P", profile] }
-            a += ["-url", url]
-            return a
-        default:   // Safari / other — no profile selection
-            return ["-b", b.bundleID, url]
+            return ["-P", profile]
+        default:
+            return []
         }
     }
 

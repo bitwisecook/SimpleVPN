@@ -13,7 +13,7 @@
 //  writer — which sends `proxy:apply:` to the OWNER egress (wire type in
 //  `Shared/ProxyApply.swift`, applied onto that engine's `NEProxySettings` in
 //  `PacketTunnelProvider`). The subprocess SOCKS kinds still set the host's system proxy
-//  through `SubprocessTunnelManager` (`networksetup`), and re-point/reconnect survives as
+//  through `SubprocessTunnelManager` and SystemConfiguration, and re-point/reconnect survives as
 //  the fallback lever for an engine that doesn't ack. The per-flow per-egress PAC
 //  (JavaScriptCore) applier is the remaining P3-tier-3 seam — left clean here, like the
 //  Route mediator's `PBRRealizer`.

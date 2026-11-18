@@ -57,7 +57,6 @@ final class SCStoreMonitor<Observation: Sendable>: MediatorMonitor, @unchecked S
     // opts these out of the target's default @MainActor isolation (a class-level
     // `nonisolated` does NOT), which is what lets the off-actor SC handler touch them.
     nonisolated(unsafe) private var store: SCDynamicStore?
-    nonisolated(unsafe) private var box: SCStoreCallbackBox?
     nonisolated(unsafe) private var generation: UInt64 = 0
     nonisolated(unsafe) private var onDrift: (@Sendable (Observation) -> Void)?
 
@@ -89,22 +88,27 @@ final class SCStoreMonitor<Observation: Sendable>: MediatorMonitor, @unchecked S
         // reaches through `info` to call it.
         let box = SCStoreCallbackBox(fire: { [weak self] in self?.scheduleCallback() })
         var context = SCDynamicStoreContext(version: 0, info: Unmanaged.passUnretained(box).toOpaque(),
-                                            retain: nil, release: nil, copyDescription: nil)
+                                            retain: { info in
+                                                _ = Unmanaged<SCStoreCallbackBox>.fromOpaque(info).retain()
+                                                return info
+                                            }, release: { info in
+                                                Unmanaged<SCStoreCallbackBox>.fromOpaque(info).release()
+                                            }, copyDescription: nil)
         let callback: SCDynamicStoreCallBack = { _, _, info in
             guard let info else { return }
             let box = Unmanaged<SCStoreCallbackBox>.fromOpaque(info).takeUnretainedValue()
             box.fire()
         }
-        guard let store = SCDynamicStoreCreate(nil, label as CFString, callback, &context) else {
+        let created = withExtendedLifetime(box) { SCDynamicStoreCreate(nil, label as CFString, callback, &context) }
+        guard let store = created else {
             throw MediatorMonitorError.storeCreateFailed
         }
-        SCDynamicStoreSetNotificationKeys(store, keys as CFArray, patterns as CFArray)
-        SCDynamicStoreSetDispatchQueue(store, queue)
+        guard SCDynamicStoreSetNotificationKeys(store, keys as CFArray, patterns as CFArray),
+              SCDynamicStoreSetDispatchQueue(store, queue) else { throw MediatorMonitorError.storeCreateFailed }
 
         lock.lock()
         if self.store == nil {
             self.store = store
-            self.box = box
             lock.unlock()
         } else {
             lock.unlock()
@@ -115,7 +119,7 @@ final class SCStoreMonitor<Observation: Sendable>: MediatorMonitor, @unchecked S
     nonisolated func stop() {
         let doomed: SCDynamicStore? = lock.withLock {
             generation &+= 1
-            defer { store = nil; box = nil; onDrift = nil }
+            defer { store = nil; onDrift = nil }
             return store
         }
         if let doomed { SCDynamicStoreSetDispatchQueue(doomed, nil) }

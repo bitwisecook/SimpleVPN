@@ -513,3 +513,20 @@ struct SSHAgentSettingTests {
         #expect((try? SSHTunnelEngine.authPlan(config)) == [.agent])
     }
 }
+
+struct SSHAgentRequestDeliveryTests {
+    @Test func replacingAnIdleWaiterReleasesItAndStopReleasesTheReplacement() async throws {
+        let broker = try SSHAgentSigningBroker()
+        let first = AsyncStream<SSHAgentSigningRequest?>.makeStream()
+        let second = AsyncStream<SSHAgentSigningRequest?>.makeStream()
+        broker.nextRequest { first.continuation.yield($0); first.continuation.finish() }
+        broker.nextRequest { second.continuation.yield($0); second.continuation.finish() }
+        broker.stop()
+        for stream in [first.stream, second.stream] {
+            var results = [SSHAgentSigningRequest?]()
+            for await request in stream { results.append(request) }
+            #expect(results.count == 1)
+            #expect(results.compactMap { $0 }.isEmpty)
+        }
+    }
+}

@@ -445,6 +445,7 @@ private enum SignInChooserPopoverMetrics {
 /// The popover's contents. A view of its own so it can own the probe refresh and
 /// the Done button without every host repeating them.
 struct SignInChooserPopover: View {
+    @Environment(\.controlActiveState) private var controlActiveState
     let vpn: VPNController
     let profile: VPNController.Profile
     let allowsPasswordSave: Bool
@@ -525,15 +526,10 @@ struct SignInChooserPopover: View {
         // draft is reseeded rather than carrying one vendor's entry into another's.
         .onChange(of: source.kind) { seedDraft() }
         .task { await sources.deepScan() }
-        // Same live refresh as the first-run card: an app started or a CLI
-        // installed while this is open must change what is on offer, and
-        // following an enablement banner must flip its row without a restart.
-        .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
-                sources.refresh()
-                await sources.recheckIfDue()
-            }
+        .onChange(of: controlActiveState) { _, state in
+            guard state == .key else { return }
+            sources.refresh()
+            Task { await sources.recheckIfDue() }
         }
     }
 

@@ -62,6 +62,13 @@ struct GeoIPTests {
 
     // MARK: Reader
 
+    @Test func readsASlicedDatabaseWithFileRelativeOffsets() throws {
+        let fixture = makeFixture()
+        let slice = (Data([0, 0]) + fixture).dropFirst(2)
+        let db = try #require(GeoIPDatabase(data: slice))
+        #expect(db.countryCode(for: "81.2.69.142") == "DE")
+    }
+
     @Test func ipv4InsideCIDRResolves() throws {
         let db = try #require(GeoIPDatabase(data: makeFixture()))
         #expect(db.countryCode(for: "81.2.69.142") == "DE")

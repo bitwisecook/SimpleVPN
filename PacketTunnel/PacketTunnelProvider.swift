@@ -89,7 +89,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
                     userInfo: [NSLocalizedDescriptionKey: "Invalid virtual connection configuration."]))
                 return
             }
-            let engine = VirtualRoutingEngine(provider: self, config: config)
+            let engine = VirtualRoutingEngine(provider: self, config: config,
+                gatewayOwned: (options?["gatewayOwned"] as? NSNumber)?.boolValue ?? true)
             lock.withLock { virtualEngine = engine; profileID = config.id }
             engine.start(start, completion: completionHandler)
             return
@@ -1116,14 +1117,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
             do { try FileManager.default.removeItem(atPath: path); reply("ok") }
             catch { reply("error:Previous node identity could not be removed.") }
         case "tsstate":
-            // Do not use statsQueue: backend preference writes may be waiting
-            // for this independent credential acknowledgement.
-            let snapshot = lock.withLock { tsEngine }?.nodeStateSnapshot()
-            reply(snapshot.map { Data($0.utf8) })
+            // Keep identity requests independent of backend preference writes
+            // that may be waiting for the app's acknowledgement.
+            guard let engine = lock.withLock({ tsEngine }) else { reply("starting"); return }
+            reply(engine.nodeStateReply(after: nil))
+        case let value where value.hasPrefix("tsstate:since:"):
+            guard let cursor = TailscaleNodeState.Cursor.parse(value.dropFirst("tsstate:since:".count)),
+                  cursor.generation != nil else { reply("error:Invalid node identity cursor."); return }
+            guard let engine = lock.withLock({ tsEngine }) else { reply("starting"); return }
+            reply(engine.nodeStateReply(after: cursor))
         case let value where value.hasPrefix("tsstate:ack:"):
-            guard let revision = UInt64(value.dropFirst("tsstate:ack:".count)),
+            guard let cursor = TailscaleNodeState.Cursor.parse(value.dropFirst("tsstate:ack:".count)),
                   let engine = lock.withLock({ tsEngine }) else { reply("error:Node identity unavailable."); return }
-            reply(engine.acknowledgeNodeState(revision) ? "ok" : "error:Node identity acknowledgement failed.")
+            reply(engine.acknowledgeNodeState(cursor) ? "ok" : "error:Node identity acknowledgement failed.")
         case "version":
             // Reply with this running extension's version (the app's staleness check).
             let info = Bundle.main.infoDictionary
@@ -1335,6 +1341,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
             guard let px = lock.withLock({ pxEngine }) else { reply(nil); return }
             statsQueue.async { reply.encode(px.status()) }
 
+        case "sshnetagent:wait":
+            guard let engine = lock.withLock({ snEngine }) else { reply("null"); return }
+            engine.waitForAgentRequest { request in reply.encode(request) }
         case "sshnetagent:request":
             reply.encode(lock.withLock { snEngine }?.agentRequest())
         case let value where value.hasPrefix("sshnetagent:reply:"):

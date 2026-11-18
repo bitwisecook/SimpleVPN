@@ -772,6 +772,39 @@ struct ConfigImportRefusalTests {
         return m
     }
 
+    @Test func privateLookupURLsStayOutOfRecoveryFiles() {
+        let value = ConfigValue.string("https://service.example/address?key=fixture-token")
+        let id = "app.public-address-url-v4"
+        var snapshot = ConfigSnapshot()
+        snapshot.appSettings = [.init(id: id, value: value)]
+        let file = ConfigDocument.text(from: snapshot, format: .yaml)
+        #expect(!file.contains("fixture-token"))
+        #expect(file.contains("custom public address lookup URL"))
+    }
+
+    @Test func commandLineOptionsStayOnTheMacThatConfiguredThem() {
+        var tunnel = SubprocessTunnelConfig()
+        tunnel.kind = .ssh
+        tunnel.sshExtraOptions = ["Compression=yes"]
+        tunnel.proxyURL = "http://name:test-password@proxy.example"
+        var profile = ConfigSnapshot.VPN(id: tunnel.id, name: "Lab", kind: .ssh, server: "")
+        profile.subprocess = tunnel
+        var snapshot = ConfigSnapshot()
+        snapshot.vpns = [profile]
+        for format in [ConfigFileFormat.yaml, .json] {
+            let document = ConfigDocument.text(from: snapshot, format: format)
+            #expect(!document.contains("Compression=yes"))
+            #expect(!document.contains("test-password"))
+        }
+
+        var settings = ConfigMap()
+        settings.put(ConfigFieldNaming.id(field: "sshExtraOptions", namespace: "ssh."), .strings(["Compression=yes"]))
+        let plan = ConfigImport.plan(text: document(vpn: vpn(kind: VPNKind.ssh.rawValue, settings: settings)),
+                                     current: ConfigSnapshot())
+        #expect(plan.vpns.isEmpty)
+        #expect(plan.refusals.count == 1)
+    }
+
     /// An unknown kind is REFUSED, never coerced. Defaulting it to OpenVPN would
     /// build a profile that cannot work out of settings that meant something else.
     @Test func anUnknownKindIsRefused() {

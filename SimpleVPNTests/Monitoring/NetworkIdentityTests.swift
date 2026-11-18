@@ -347,3 +347,31 @@ struct NetworkIdentityTests {
         #expect(!EndpointRegions.orderExplanation([], home: nil, connected: false).contains("paused"))
     }
 }
+
+@MainActor
+struct PublicIPPrivacyTests {
+    @Test func clearingConsentDiscardsAnOutstandingLookup() async {
+        let (started, report) = AsyncStream<Void>.makeStream()
+        let (replies, release) = AsyncStream<String>.makeStream()
+        let service = IPLookupProvider(id: "fixture", name: "Fixture",
+                                      v4URL: URL(string: "https://example.invalid"), v6URL: nil)
+        let monitor = PublicIPMonitor(lookupService: { service }) { url in
+            guard url != nil else { return nil }
+            report.yield(())
+            // Model a transport that still delivers its result after cancellation.
+            return await Task.detached {
+                for await address in replies { return address }
+                return nil as String?
+            }.value
+        }
+        let lookup = Task { await monitor.refresh() }
+        for await _ in started { break }
+        monitor.clear()
+        release.yield("192.0.2.7")
+        release.finish()
+        await lookup.value
+        #expect(monitor.publicIPv4 == nil)
+        #expect(monitor.lastUpdated == nil)
+        #expect(!monitor.isRefreshing)
+    }
+}

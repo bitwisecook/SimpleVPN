@@ -1105,6 +1105,21 @@ struct LocalToolRunnerTests {
         #expect(!LocalToolRunner.isSafeExecutable(atPath: tool.path))
     }
 
+    @Test func linkedToolsAndTheirTargetsNeedSecurePermissions() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let tool = dir.appendingPathComponent("tool")
+        let link = dir.appendingPathComponent("link")
+        try Data().write(to: tool)
+        try fm.createSymbolicLink(atPath: link.path, withDestinationPath: "tool")
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)
+        #expect(LocalToolRunner.isSafeExecutable(atPath: link.path))
+        try fm.setAttributes([.posixPermissions: 0o777], ofItemAtPath: tool.path)
+        #expect(!LocalToolRunner.isSafeExecutable(atPath: link.path))
+    }
+
     @Test func aDirectoryIsNotAnExecutable() {
         #expect(!LocalToolRunner.isSafeExecutable(atPath: "/usr/bin"))
         #expect(LocalToolRunner.isSafeExecutable(atPath: "/bin/ls"))

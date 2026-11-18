@@ -325,7 +325,7 @@ Update Tailscale, WireGuard, and these adapters together.
 
 gVisor updates resolve **`@go`**, not `@latest`: upstream's default branch
 requires Bazel and lacks the source layout needed by standard Go tooling. The
-2026-11-02 Go-branch revision (`1cea747efe8d`) is pinned in both modules and the
+2026-11-18 Go-branch revision (`13a33f77533a`) is pinned in both modules and the
 proxy build script.
 
 OpenSSL 4.1.0 is built once from its SHA-256-verified upstream source with a macOS
@@ -333,8 +333,8 @@ OpenSSL 4.1.0 is built once from its SHA-256-verified upstream source with a mac
 repository-local installation. The CI installer uses the same script, avoiding
 Homebrew formula snapshots and host-only deployment targets. The native engine
 cache keys include this script. Other native inputs remain at their current
-upstream releases (OpenConnect 9.21, libssh 0.12.2, libfido2 1.17.0, libcbor 0.14.0,
-Asio 1.38.2, fmt 12.2.0, xxHash 0.8.4, LZ4 1.10.0).
+upstream releases (OpenConnect 9.21, libssh 0.12.2, libfido2 1.17.0, libcbor 0.15.0,
+Asio 1.38.2, fmt 12.2.1, xxHash 0.8.4, LZ4 1.11.1).
 
 **Dependency refresh (2026-11-02):** all three native engines now share OpenSSL
 4.1.0 (official source SHA-256 verified). OpenVPN core 3.12 advances to
@@ -361,6 +361,21 @@ with the local sshd fixture and OpenSSL 4.1.0. Full results are retained in
 `build/dependencies-20261102-tests.xcresult`; build and engine logs use the same
 `build/dependencies-20261102-` prefix. Installed-provider/live-VPN acceptance
 remains covered by the existing §18 register entry.
+
+**Dependency refresh (2026-11-18):** Tailscale 1.104.7 uses its WireGuard fork
+at `9e0ab45c16ca`. The Go toolchain moves to 1.27.4 and both netstacks pin
+gVisor `v0.0.0-20261118061622-13a33f77533a`. All three Go module graphs
+were upgraded and tidied, including their test dependencies. OpenVPN core
+3.12 advances to `0c1ce172fe918b05463d71e682a0c2f2d8fe7899`, with fmt
+12.2.1 and LZ4 1.11.1. OpenConnect shares the LZ4 pin. The libssh build
+uses SHA-256-verified libcbor 0.15.0. The release workflow uses setup-go
+7.1.0 and both packaging paths use dmgbuild 2.0.0. OpenSSL 4.1.0,
+Sparkle 2.10.1 and 1Password SDK 0.4.1 were already current. The Teleport
+pairing helper builds from the Tailscale module and uses its WireGuard pin.
+The three Go modules passed their tests and the native engine build scripts
+rebuilt their archives. The unsigned Debug app and packet tunnel built against
+those archives. A disk image created with dmgbuild 2.0.0 and the repository's
+Finder layout passed `hdiutil verify`.
 
 **Verdict: KEEP SEPARATE — each engine builds independently, with coordinated
 pins.** Verify all engine archives whenever a shared dependency changes.

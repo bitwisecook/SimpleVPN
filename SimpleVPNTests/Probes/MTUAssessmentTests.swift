@@ -180,3 +180,24 @@ struct MTUAssessmentTests {
         #expect(a.verdict == .inconclusive)
     }
 }
+
+struct TracerouteCancellationTests {
+    @Test func aCancelledHopStopsTheRunAndDiscardsItsReply() async {
+        let result = await Task {
+            await NetworkProbes.traceHops(to: "127.0.0.1", maxHops: 30) { ttl in
+                #expect(ttl == 1)
+                withUnsafeCurrentTask { $0?.cancel() }
+                return NetworkProbes.TraceHop(ttl: ttl, ip: nil, rttMS: nil)
+            }
+        }.value
+        #expect(result.isEmpty)
+    }
+
+    @Test func reachingTheDestinationFinishesTheTrace() async {
+        let host = "127.0.0.1"
+        let result = await NetworkProbes.traceHops(to: host, maxHops: 30) { ttl in
+            NetworkProbes.TraceHop(ttl: ttl, ip: ttl == 2 ? host : nil, rttMS: nil)
+        }
+        #expect(result.map(\.ttl) == [1, 2])
+    }
+}

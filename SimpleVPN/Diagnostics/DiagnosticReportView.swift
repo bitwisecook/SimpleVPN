@@ -59,22 +59,58 @@ final class DiagnosticReportModel {
         }
     }
 
+    var hasDraft: Bool {
+        previewEdited || !answers.whatYouWereDoing.isEmpty || !answers.whatWentWrong.isEmpty
+    }
+
     func restart(with request: DiagnosticReportRequest) {
+        cancelGathering()
         self.request = request
-        Task { await gather() }
+        answers = DiagnosticReportAnswers()
+        included = []
+        payload = nil
+        previewEdited = false
+        answerLimitHit = false
+        lastOutcome = nil
+        renderPreview()
+        startGathering()
     }
 
     // MARK: Gathering
 
-    func gather() async {
-        guard !gathering else { return }
+    @ObservationIgnored private var gatherTask: Task<Void, Never>?
+
+    func cancelGathering() {
+        gatherTask?.cancel()
+        gatherTask = nil
+        renderDebounce?.cancel()
+        renderDebounce = nil
+        gathering = false
+    }
+
+    @discardableResult
+    func startGathering(
+        assemble: @escaping @MainActor (DiagnosticReportRequest, DiagnosticReportContext, DiagnosticReportAnswers)
+            async -> DiagnosticReportPayload? = DiagnosticReportAssembler.assemble
+    ) -> Task<Void, Never> {
+        if let gatherTask { return gatherTask }
         gathering = true
-        defer { gathering = false }
-        let built = await DiagnosticReportAssembler.assemble(request, context: context, answers: answers)
-        payload = built
-        included = DiagnosticReportPayload.defaultSelection(for: built.sections)
-        previewEdited = false
-        renderPreview()
+        let task = Task { [weak self, request, context, answers] in
+            guard var built = await assemble(request, context, answers),
+                  !Task.isCancelled, let self else { return }
+            // The questions are editable while system information is being read.
+            if self.answers != answers {
+                built.sections = DiagnosticReportAssembler.rebuildWhatHappened(request, answers: self.answers, in: built)
+            }
+            self.payload = built
+            self.included = DiagnosticReportPayload.defaultSelection(for: built.sections)
+            self.previewEdited = false
+            self.renderPreview()
+            self.gathering = false
+            self.gatherTask = nil
+        }
+        gatherTask = task
+        return task
     }
 
     /// The text as WE last rendered it. Needed because the preview's `onChange`
@@ -234,10 +270,7 @@ struct DiagnosticReportView: View {
             actions
         }
         .frame(minWidth: 560, minHeight: 620)
-        .task {
-            await model.gather()
-            focus = .doing
-        }
+        .onAppear { focus = .doing }
     }
 
     // MARK: Header
@@ -364,6 +397,7 @@ struct DiagnosticReportView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             TextEditor(text: $model.previewText)
+                .disabled(model.payload == nil)
                 .font(.system(.callout, design: .monospaced))
                 .frame(height: 200)
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
@@ -394,20 +428,22 @@ struct DiagnosticReportView: View {
                 // anyone driving from the keyboard. "sends nothing anywhere" is
                 // exactly the reassurance this window owes, so it must be spoken.
                 Button("Copy Report") { model.copyOnly() }
+                    .disabled(model.payload == nil)
                     .help("Copies the text above to the clipboard, and sends nothing anywhere.")
                     .accessibilityHint("Copies the text above to the clipboard, and sends nothing anywhere.")
                 Button("Save to a File\u{2026}") { model.saveToFile() }
+                    .disabled(model.payload == nil)
                     .help("Saves the text above so you can attach it to an issue yourself.")
                     .accessibilityHint("Saves the text above so you can attach it to an issue yourself.")
                 Spacer()
                 Button("Close") { DiagnosticReportCoordinator.shared.close() }
                     .keyboardShortcut(.cancelAction)
-                Button(model.plan.needsFile ? "Save and Open GitHub\u{2026}" : "Copy and Open GitHub\u{2026}") {
+                Button(model.plan.needsFile ? "Save Report\u{2026}" : "Copy and Open GitHub\u{2026}") {
                     model.openIssue { openURL($0) }
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.glassProminent)
-                .disabled(model.gathering)
+                .disabled(model.payload == nil)
                 .help(model.gathering ? "Still gathering the report." : model.plan.explanation)
                 .accessibilityValue(model.gathering
                     ? "Not available yet: SimpleVPN is still gathering the report"

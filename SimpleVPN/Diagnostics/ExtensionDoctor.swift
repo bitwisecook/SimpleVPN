@@ -483,10 +483,10 @@ final class ExtensionDoctor {
     private func bringBack(_ profiles: [ExtensionHealthSnapshot.ProfileFacts]) async {
         for f in profiles {
             if f.canReconnectUnattended {
-                if await vpn.connectWithSavedCredentials(id: f.id) {
-                    watchForReturn(f)
-                } else {
-                    vpn.nudgeCredentials(id: f.id)
+                switch await vpn.quickConnect(id: f.id) {
+                case .started: watchForReturn(f)
+                case .needsInput: vpn.nudgeCredentials(id: f.id)
+                case .failed: break
                 }
             } else {
                 vpn.nudgeCredentials(id: f.id)

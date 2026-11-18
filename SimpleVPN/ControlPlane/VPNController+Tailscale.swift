@@ -29,7 +29,9 @@ extension VPNController {
 
 
     func isTailscale(_ id: String) -> Bool {
-        profiles.first { $0.id == id }?.kind == .tailscale
+        if let proto = managers[id]?.protocolConfiguration as? NETunnelProviderProtocol,
+           let kind = proto.providerConfiguration?["vpnType"] as? String { return kind == VPNKind.tailscale.rawValue }
+        return profiles.first { $0.id == id }?.kind == .tailscale
     }
 
     func tailscaleConfig(for id: String) -> TailscaleConfig {
@@ -62,8 +64,7 @@ extension VPNController {
         mgr.localizedDescription = name
         mgr.isEnabled = true
         try await mgr.saveToPreferences()
-        try await mgr.loadFromPreferences()
-        await loadAll()
+        await registerCreatedManager(mgr, id: id)
         selectedID = id
         Self.log.log("created tailscale profile id=\(id, privacy: .public)")
         return id
@@ -130,6 +131,12 @@ extension VPNController {
         guard let existing = managers[id], existing.connection.status == .disconnected || existing.connection.status == .invalid else {
             throw err("Disconnect this VPN before starting a new connection.")
         }
+        let lease = try tailscaleIdentityLease(id)
+        guard tailscaleStartingIDs.insert(id).inserted else { throw err("This VPN is already starting.") }
+        defer {
+            tailscaleStartingIDs.remove(id)
+            tailscaleCancelledStarts.remove(id)
+        }
         await drainTailscaleStateBroker(id)
         guard let mgr = managers[id],
               mgr.protocolConfiguration is NETunnelProviderProtocol else { throw err("no such profile") }
@@ -150,7 +157,11 @@ extension VPNController {
         var options: [String: NSObject] = [:]
         options["tailscaleNodeStateBroker"] = true as NSNumber
         let nodeState = try await Task.detached {
-            try KeychainCredentialStore.credentialsForExport(profile: Self.tailscaleNodeStateProfile(id))?.password
+            do {
+                return try KeychainCredentialStore.credentialsForExport(profile: Self.tailscaleNodeStateProfile(id))?.password
+            } catch {
+                throw TailscaleIdentitySaveError(.read, cause: error)
+            }
         }.value
         if let nodeState { options["tailscaleNodeState"] = nodeState as NSString }
         let key = tailscaleAuthKey(for: id)
@@ -162,11 +173,15 @@ extension VPNController {
         guard let session = mgr.connection as? NETunnelProviderSession else {
             throw err("The VPN configuration isn't ready — try removing and re-creating it.")
         }
-        try session.startTunnel(options: options)
-        watchTailscaleNodeState(id, session: session)
+        guard !locallyRemovedProfileIDs.contains(id), !tailscaleCancelledStarts.contains(id),
+              session.status == .disconnected || session.status == .invalid else {
+            throw err("The connection changed before this VPN could start.")
+        }
+        try startWithInitialGateway(session, profile: id, options: options)
+        watchTailscaleNodeState(id, session: session, lease: lease)
         Self.log.log("tailscale startTunnel dispatched for \(id, privacy: .public)")
         resyncStatuses()
-        watchTailscaleSignIn(id: id)
+        watchTailscaleSignIn(id: id, lease: lease)
     }
 
     /// Poll for the sign-in URL and open it in the profile's chosen browser.
@@ -178,10 +193,11 @@ extension VPNController {
         tailscaleSignInResults[id] = nil
     }
 
-    private func watchTailscaleSignIn(id: String, reauthenticating: Bool = false) {
+    private func watchTailscaleSignIn(id: String, lease: Installation.Lease, reauthenticating: Bool = false) {
         clearTailscaleSignIn(id: id)
         tailscaleSignInResults[id] = .preparing
         tailscaleSignInWatch[id] = Task { [weak self] in
+            defer { withExtendedLifetime(lease) {} }
             // Five minutes is longer than any legitimate registration (the user
             // has to read a consent page) and short enough that a wedged session
             // doesn't poll forever.
@@ -236,6 +252,10 @@ extension VPNController {
     func reauthenticateTailscale(id: String) async {
         guard tailscaleSignInResults[id] != .preparing, tailscaleSignInURL[id] == nil,
               let connection = managers[id]?.connection, connection.status == .connected else { return }
+        let lease: Installation.Lease
+        do { lease = try tailscaleIdentityLease(id) }
+        catch { report(error, profile: id); return }
+        defer { withExtendedLifetime(lease) {} }
         tailscaleSignInResults[id] = .preparing
         let data = await sendMessageData("tsreauth", to: id)
         guard tailscaleSignInResults[id] == .preparing,
@@ -246,7 +266,7 @@ extension VPNController {
             AccessibilityAnnouncer.sayNow("Could not start sign-in")
             return
         }
-        watchTailscaleSignIn(id: id, reauthenticating: true)
+        watchTailscaleSignIn(id: id, lease: lease, reauthenticating: true)
     }
 
     /// Re-open the current browser sign-in (the panel's button — the way back
@@ -295,6 +315,10 @@ extension VPNController {
     /// Apply a settings change to a *running* session so the user doesn't have
     /// to reconnect to switch exit node. Returns an error message, or nil.
     func pushTailscalePrefs(_ patch: TailscalePrefsPatch, id: String) async -> String? {
+        let lease: Installation.Lease
+        do { lease = try tailscaleIdentityLease(id) }
+        catch { return error.localizedDescription }
+        defer { withExtendedLifetime(lease) {} }
         guard let data = await sendMessageData("tsprefs:\(patch.jsonString())", to: id),
               let text = String(data: data, encoding: .utf8) else { return "The VPN didn't answer." }
         return text == "ok" ? nil : String(text.dropFirst("error: ".count))

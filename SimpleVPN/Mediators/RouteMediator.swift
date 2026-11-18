@@ -35,6 +35,8 @@ struct RouteProfileInfo: Sendable, Identifiable {
     let engaged: Bool          // connected/connecting/reasserting (owns routes early)
     let lastConnectedAt: Date? // recency, for the auto-promotion tiebreak
     let tailscaleHasExitNode: Bool
+    // During teardown/reassertion macOS can still have this interface's default.
+    var retainingRoutesDuringTransition = false
 }
 
 /// What the mediator needs the host (VPNController) to do on the live NE side. Kept
@@ -55,8 +57,8 @@ protocol RouteMediatorHost: AnyObject {
     /// Reconnect a profile (the needs-reconnect demotion fallback — no in-process
     /// engine needs it now that OpenConnect demotes live; kept for future engines).
     func routeReconnect(id: String) async
-    /// Trigger a stats poll; returns the engine's ground-truth `effectiveDefaultOwned`
-    /// (nil when not yet sampled). The poll also feeds `noteEngineDefaultOwned`.
+    /// Read the engine's ownership from telemetry. A cancelled sample must not
+    /// update the replacement session's engine facts.
     @discardableResult func routeSampleEffectiveOwned(id: String) async -> Bool?
     /// Config desire — redirect-gateway / exit node / SSL default. Only read when
     /// (re)building intents, so its per-profile cost stays off the hot read paths.
@@ -109,6 +111,7 @@ final class MultiTunnelRealizer: MediatorRealizer {
     /// for the ≤1-owner invariant.
     private var appliedRole: [String: GatewayRole] = [:]
     private var appliedPrefixes: [String: RouteApplyRequest] = [:]
+    private var writes: [String: UUID] = [:]
 
     init(host: RouteMediatorHost?, log: Logger) {
         self.host = host
@@ -116,9 +119,11 @@ final class MultiTunnelRealizer: MediatorRealizer {
     }
 
     /// Seed/refresh the cache from the engine's ground-truth ownership.
-    func seed(id: String, owned: Bool) { appliedRole[id] = owned ? .full : .split }
+    func seed(id: String, owned: Bool) {
+        if writes[id] == nil { appliedRole[id] = owned ? .full : .split }
+    }
     /// The engine's session ended — forget what we thought was applied.
-    func forget(id: String) { appliedRole[id] = nil; appliedPrefixes[id] = nil }
+    func forget(id: String) { appliedRole[id] = nil; appliedPrefixes[id] = nil; writes[id] = nil }
     /// Read-back for the mediator's applied-role introspection.
     func applied(_ id: String) -> GatewayRole? { appliedRole[id] }
 
@@ -129,8 +134,12 @@ final class MultiTunnelRealizer: MediatorRealizer {
         guard let host else { return .failed }
         guard force || appliedRole[id] != role else { return .skipped }
 
+        if kind == .tailscale, role == .full, !hasExitNode { return .skipped }
+        let token = UUID()
+        writes[id] = token
+        appliedRole[id] = nil // a failed reply does not prove the prior role survived
+        defer { if writes[id] == token { writes[id] = nil } }
         if kind == .tailscale {
-            if role == .full, !hasExitNode { return .skipped }   // not actually capable; leave as-is
             if let problem = await host.routeApplyTailscaleGateway(full: role == .full, to: id) {
                 log.error("gateway \(role.rawValue, privacy: .public) (tailscale) failed for \(id, privacy: .public): \(problem, privacy: .public)")
                 return .failed
@@ -138,20 +147,23 @@ final class MultiTunnelRealizer: MediatorRealizer {
             // Accepting prefs is not proof the new netmap reached macOS. Wait
             // for the settings writer's confirmed ownership before promotion.
             var confirmed = false
-            for _ in 0..<40 {
+            let deadline = ContinuousClock.now + .seconds(4)
+            repeat {
+                guard writes[id] == token else { return .failed }
                 if await host.routeSampleEffectiveOwned(id: id) == (role == .full) {
                     confirmed = true
                     break
                 }
                 do { try await Task.sleep(for: .milliseconds(100)) }
                 catch { return .failed }
-            }
-            guard confirmed else { return .failed }
+            } while ContinuousClock.now < deadline
+            guard confirmed, writes[id] == token else { return .failed }
             appliedRole[id] = role
             return .applied
         }
 
         let reply = await host.routeSendGateway(full: role == .full, to: id)
+        guard writes[id] == token else { return .failed }
         switch reply {
         case "ok":
             appliedRole[id] = role
@@ -167,7 +179,12 @@ final class MultiTunnelRealizer: MediatorRealizer {
 
     func applyPrefixes(_ request: RouteApplyRequest, to id: String, force: Bool) async -> Bool {
         if !force, appliedPrefixes[id] == request { return true }
-        guard let host, await host.routeApplyPrefixes(request, to: id) == "ok" else { return false }
+        guard let host else { return false }
+        let token = UUID()
+        writes[id] = token
+        appliedPrefixes[id] = nil
+        defer { if writes[id] == token { writes[id] = nil } }
+        guard await host.routeApplyPrefixes(request, to: id) == "ok", writes[id] == token else { return false }
         appliedPrefixes[id] = request
         return true
     }
@@ -234,6 +251,9 @@ final class RouteMediator {
     /// (CLI watch, intents, future Tcl) subscribes to.
     @ObservationIgnored var onOwnerChange: ((String?) -> Void)?
     @ObservationIgnored private var pendingFallbackFrom: String?
+    @ObservationIgnored private var establishingOwner: String?
+    @ObservationIgnored private var seedGeneration: [String: UUID] = [:]
+    @ObservationIgnored private var seedTasks: [String: Task<Void, Never>] = [:]
 
     /// The profile that owns the default route. nil ⇒ Direct. UI policy, not a secret.
     private(set) var defaultGatewayProfileID: String?
@@ -439,9 +459,6 @@ final class RouteMediator {
     /// gate at establish and ≤1-owner holds before (or without) the app reconciling.
     func predictedGatewayOwned(_ id: String) -> Bool {
         guard let info = info(id), gatewayRoleApplies(info.kind) else { return false }
-        // A native/SSH kind never carries the default; a Tailscale node's ownership
-        // rides its own prefs path, not this flag.
-        guard info.kind != .tailscale else { return false }
         refreshIntents()
         var prospective = RouteIntent(engine: id,
                                       advertisedPrefixes: host?.routeAdvertisedPrefixes(id: id) ?? [],
@@ -453,6 +470,23 @@ final class RouteMediator {
         return RouteArbiter.plan(intents: Array(all.values),
                                  policy: RoutePolicy(storedOwner: defaultGatewayProfileID,
                                                      userChoseDirect: gatewayUserChoseDirect)).owner == id
+    }
+
+    /// Reserve the initial default immediately around startTunnel(), after any
+    /// preference awaits. Profile notifications can lag behind a successful start.
+    func startWithGateway(for id: String, members: Set<String> = [],
+                          wantsDefault: Bool, start: (Bool) throws -> Void) rethrows {
+        let peers = (host?.routeProfiles ?? []).filter {
+            $0.id != id && !members.contains($0.id) && gatewayRoleApplies($0.kind)
+        }
+        let claim = wantsDefault && establishingOwner == nil
+            && !peers.contains { $0.engaged || $0.retainingRoutesDuringTransition }
+        if claim { establishingOwner = id }
+        do { try start(claim) }
+        catch {
+            if claim { establishingOwner = nil }
+            throw error
+        }
     }
 
     // MARK: - The user picked an owner (atomic strip → confirm → add)
@@ -495,6 +529,15 @@ final class RouteMediator {
         let desired = plan
         applyLoop.enqueue(desired, force: force) { [weak self] next, forced, revision in
             guard let self else { return false }
+            // An establishing owner can install a default before it sends its
+            // first Connected notification. A departing interface can retain its
+            // default until Disconnected. Wait for those lifecycle notifications.
+            if let owner = next.owner {
+                if let starting = self.establishingOwner, starting != owner { return false }
+                if self.host?.routeProfiles.contains(where: {
+                    $0.id != owner && $0.retainingRoutesDuringTransition && self.gatewayRoleApplies($0.kind)
+                }) == true { return false }
+            }
             let virtualIDs = self.host?.routeVirtualProfileIDs ?? []
             var virtualApplied = virtualIDs.isEmpty
             for step in next.orderedApplication {
@@ -565,7 +608,8 @@ final class RouteMediator {
     }
 
     private func applyVirtualPlan(_ plan: RoutePlan, members: Set<String>) async -> Bool {
-        guard await host?.routeApplyVirtualPlan(plan) == true else { return false }
+        let revision = applyLoop.requestedRevision
+        guard await host?.routeApplyVirtualPlan(plan) == true, applyLoop.isCurrent(revision) else { return false }
         for (id, role) in plan.roles where members.contains(id) {
             engineDefaultOwned[id] = role == .full
             realizer.seed(id: id, owned: role == .full)
@@ -582,7 +626,12 @@ final class RouteMediator {
     /// fallback with a toast.
     func handleStatusChange(id: String, connected: Bool, reasserting: Bool,
                             disconnected: Bool) {
+        if (connected || disconnected), establishingOwner == id { establishingOwner = nil }
         if connected || reasserting {
+            if reasserting {
+                realizer.forget(id: id)
+                engineDefaultOwned[id] = nil
+            }
             gatewayPendingReassert.remove(id)
             // Seed from ENGINE REALITY (async, over the stats IPC) so the applied-role
             // guard reflects reality; reconcile immediately too.
@@ -590,26 +639,49 @@ final class RouteMediator {
             reconcileGateway()
         } else if disconnected {
             let wasOwner = (id == defaultGatewayProfileID) || (id == effectiveGatewayOwner)
-            realizer.forget(id: id)
-            engineDefaultOwned[id] = nil
-            withdraw(engine: id)
+            forgetSession(id)
             if wasOwner { pendingFallbackFrom = id }
             reconcileGateway()
         }
     }
 
+    func forgetSession(_ id: String) {
+        if establishingOwner == id { establishingOwner = nil }
+        seedGeneration[id] = nil
+        seedTasks.removeValue(forKey: id)?.cancel()
+        gatewayPendingReassert.remove(id)
+        realizer.forget(id: id)
+        engineDefaultOwned[id] = nil
+        withdraw(engine: id)
+    }
+
     /// Seed the applied-role cache for a (re)connected profile from ENGINE REALITY. The
     /// effective state rides the stats IPC and can take a sample or two to settle, so
-    /// poll briefly; the host's stats poll records it via `noteEngineDefaultOwned`.
+    /// poll briefly and record it only while this session still owns the sample.
     private func seedGatewayRoleFromEngine(id: String) {
-        guard let info = info(id), gatewayRoleApplies(info.kind),
-              info.kind != .tailscale else { return }
-        Task { [weak self] in
-            guard let self else { return }
+        seedTasks.removeValue(forKey: id)?.cancel()
+        seedGeneration[id] = nil
+        guard let info = info(id), info.connected, gatewayRoleApplies(info.kind), info.kind != .tailscale else { return }
+        let generation = UUID()
+        seedGeneration[id] = generation
+        seedTasks[id] = Task { [weak self] in
+            defer {
+                if self?.seedGeneration[id] == generation {
+                    self?.seedGeneration[id] = nil
+                    self?.seedTasks[id] = nil
+                }
+            }
             for attempt in 0..<4 {
-                guard self.info(id)?.connected == true else { return }
-                if await self.host?.routeSampleEffectiveOwned(id: id) != nil { return }
-                try? await Task.sleep(for: .milliseconds(250 * (attempt + 1)))
+                guard !Task.isCancelled, let self, self.info(id)?.connected == true else { return }
+                let owned = await self.host?.routeSampleEffectiveOwned(id: id)
+                guard !Task.isCancelled, self.seedGeneration[id] == generation else { return }
+                if let owned {
+                    self.noteEngineDefaultOwned(id: id, owned: owned)
+                    return
+                }
+                if attempt < 3 {
+                    do { try await Task.sleep(for: .milliseconds(250 * (attempt + 1))) } catch { return }
+                }
             }
         }
     }
@@ -618,9 +690,9 @@ final class RouteMediator {
     /// Seeds the realizer cache and self-heals any desync. Called from the host's
     /// ~1 Hz stats poll, so a full/split that drifts out of band is corrected (RC4).
     func noteEngineDefaultOwned(id: String, owned: Bool) {
-        guard engineDefaultOwned[id] != owned else { return }
+        guard let info = info(id), gatewayRoleApplies(info.kind), info.engaged,
+              engineDefaultOwned[id] != owned else { return }
         engineDefaultOwned[id] = owned
-        guard let info = info(id), gatewayRoleApplies(info.kind), info.engaged else { return }
         realizer.seed(id: id, owned: owned)
         let wanted = GatewayPolicy.role(for: id, owner: effectiveGatewayOwner)
         if (owned ? GatewayRole.full : .split) != wanted { reconcileGateway() }

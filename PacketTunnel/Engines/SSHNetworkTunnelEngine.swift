@@ -278,6 +278,10 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
 
     /// Open and authenticate. MUST run on sshQueue.
     func agentRequest() -> SSHAgentSigningRequest? { lock.withLock { signingBroker }?.snapshot() }
+    func waitForAgentRequest(_ receive: @escaping SSHAgentSigningBroker.RequestHandler) {
+        guard let broker = lock.withLock({ signingBroker }) else { receive(nil); return }
+        broker.nextRequest(receive)
+    }
     func agentReply(_ response: SSHAgentSigningResponse) -> Bool { lock.withLock { signingBroker }?.reply(response) == true }
 
     private func openSession(_ config: SSHNetworkTunnelStartConfig) -> Error? {

@@ -5,6 +5,19 @@ import Testing
 @testable import SimpleVPN
 
 struct VirtualRoutingConfigTests {
+    @Test func deferredGatewayKeepsSpecificRoutesAndWithholdsCatchAllDNSUntilPromotion() {
+        var config = VirtualRoutingConfig(id: "pair", members: [member("a", dns: ["10.0.0.53"]), member("b")],
+                                          policy: .init(defaultOwner: "a"))
+        config.members[0].prefixes = ["10.0.0.0/24"]
+        config.members[1].prefixes = ["10.0.1.0/24"]
+        config.policy.rules = [.init(prefix: "10.0.0.53/32", port: "a")]
+        #expect(config.problem == nil)
+        let initial = config.initialPolicy(gatewayOwned: false)
+        #expect(!initial.capturesDefault && initial.defaultOwner.isEmpty)
+        #expect(initial.rules == [.init(prefix: "10.0.0.0/24", port: "a"), .init(prefix: "10.0.1.0/24", port: "b")])
+        #expect(config.initialPolicy(gatewayOwned: true) == config.policy)
+    }
+
     @Test func lossOfDefaultEgressRetainsCaptureUntilExplicitDirect() throws {
         let previous = VirtualRoutingPolicy(defaultOwner: "a")
         let unavailable = VirtualRouteApplyRequest(owner: "", retainUnavailableDefault: true, routes: [:]).applying(to: previous)

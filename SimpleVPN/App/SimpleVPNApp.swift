@@ -34,12 +34,13 @@ struct SimpleVPNApp: App {
     @State private var announcer: AccessibilityAnnouncer
     /// The CLI's socket (ControlServer): hosts the SAME dispatcher out-of-process.
     private let controlServer = ControlServer()
+    @AppStorage(publicIPLookupDefaultsKey) private var publicAddressLookup = true
     @State private var labels = LabelStore()
     @State private var ext: ExtensionController
     /// Self-healing for the system extension (ping → resession → upgrade →
     /// bounce → restart, consent-gated once anything is connected).
     @State private var extDoctor: ExtensionDoctor
-    @State private var evaluator = ProfileEvaluator()
+    @State private var evaluator: ProfileEvaluator
     @State private var policy = PolicyStore()
     @State private var manualRouter = ManualRouter()
     /// "Take me to that setting" — the one intent behind the related-settings
@@ -55,10 +56,10 @@ struct SimpleVPNApp: App {
     @State private var endpointProbes = EndpointProbeStore()
     @State private var topology = TopologyMonitor()
     @State private var compositions = CompositionStore()
-    @State private var tunnels = SubprocessTunnelStore()
-    @State private var tunnelManager = SubprocessTunnelManager()
-    @State private var nativeVPN = NativeVPNManager()
-    @State private var wireguard = WireGuardStore()
+    @State private var tunnels = SubprocessTunnelStore(loadSaved: !VPNController.usesEmptyProfileFixture)
+    @State private var tunnelManager: SubprocessTunnelManager
+    @State private var nativeVPN = NativeVPNManager(loadSaved: !VPNController.usesEmptyProfileFixture)
+    @State private var wireguard = WireGuardStore(loadSaved: VPNController.permitsLiveCredentialBrokers)
     @State private var reachability: ReachabilityMonitor
     /// One derivation of "what is this connection doing", shared by every surface.
     @State private var linkState: LinkStateMonitor
@@ -81,8 +82,24 @@ struct SimpleVPNApp: App {
         CrashDiagnostics.install()
         // linkState derives from the two stores, so it's built once here rather than
         // re-derived per surface (which is how the old per-view copies drifted).
+        let tunnelManager = SubprocessTunnelManager()
+        _tunnelManager = State(initialValue: tunnelManager)
         let vpn = VPNController()
+        tunnelManager.gatewayCoordinator = vpn
+        let evaluator = ProfileEvaluator()
+        _evaluator = State(initialValue: evaluator)
+        vpn.profileEvaluationProvider = { [weak vpn, weak evaluator] id in
+            guard let text = vpn?.ovpnText(id: id) else { return nil }
+            return evaluator?.evaluation(for: text)
+        }
+        vpn.allowsPasswordSaveEvaluator = { [weak vpn] id in
+            vpn?.profileEvaluation(for: id)?.allowPasswordSave ?? true
+        }
         let reach = ReachabilityMonitor()
+        vpn.profilesDidChange = { [weak reach, weak vpn] profiles in
+            let ids = Set(profiles.lazy.filter { $0.status == .connected }.map(\.id))
+            reach?.setConnectedProfiles(ids) { [weak vpn] id in await vpn?.fetchStats(id: id) }
+        }
         _vpn = State(initialValue: vpn)
         _reachability = State(initialValue: reach)
         _linkState = State(initialValue: LinkStateMonitor(vpn: vpn, reach: reach))
@@ -102,11 +119,38 @@ struct SimpleVPNApp: App {
         _ext = State(initialValue: ext)
         let doctor = ExtensionDoctor(vpn: vpn, ext: ext)
         _extDoctor = State(initialValue: doctor)
+        vpn.ensureExtensionReady = { [weak ext, weak doctor] in
+            guard let ext else { return false }
+            Task { [weak doctor] in await doctor?.checkUp(trigger: .connectGate) }
+            if ext.isActivated { return true }
+            if !ext.needsApproval { await ext.activate() }
+            if !ext.isActivated { Self.postApprovalToast(ext) }
+            return ext.isActivated
+        }
         dispatcher.engineAttention = { [weak doctor] in doctor?.connectBlockedMessage }
+        appDelegate.recoverSystemProxy = { [weak tunnelManager, weak vpn] in
+            Task {
+                if let error = await tunnelManager?.recoverSystemProxyAfterCrash() {
+                    vpn?.lastError = "Couldn’t restore the system SOCKS proxy. " + error
+                }
+            }
+        }
+    }
+
+    /// Deliberately jargon-free: this says what macOS wants and what to do, in the words
+    /// someone who just wants their VPN would use. "System extension" is our problem, not
+    /// theirs.
+    private static func postApprovalToast(_ ext: ExtensionController) {
+        ToastCenter.shared.post(
+            "macOS needs your permission before SimpleVPN can make VPN connections.",
+            symbol: "lock.shield", seconds: 12,
+            actionTitle: "Allow\u{2026}") {
+                Task { await ext.activate() }
+            }
     }
 
     var body: some Scene {
-        WindowGroup("SimpleVPN", id: "main") {
+        Window("SimpleVPN", id: "main") {
             ConnectionView(vpn: vpn, ext: ext, labels: labels)
                 .opensSSOWindow()
                 // Fills the diagnostic report's context from the environment, so a
@@ -137,13 +181,13 @@ struct SimpleVPNApp: App {
                 .environment(tunnels)
                 .environment(tunnelManager)
                 .environment(nativeVPN)
+                .onChange(of: publicAddressLookup) { publicIP.startMonitoring() }
                 .onChange(of: appDelegate.openBuffer.generation) {
                     // Finder double-click / Dock drop → the shared import pipeline.
                     vpn.handleImport(of: appDelegate.openBuffer.take())
                 }
                 .task {
                     let vpn = self.vpn
-                    let evaluator = self.evaluator
                     let tunnels = self.tunnels
                     let nativeVPN = self.nativeVPN
                     let tunnelManager = self.tunnelManager
@@ -164,33 +208,20 @@ struct SimpleVPNApp: App {
                     // Home (pre-VPN) vs egress (while connected) hinges on this.
                     // "Engaged", not "connected": the tunnel owns the default
                     // route before it says it is up.
-                    PublicIPMonitor.isVPNActive = { [weak vpn] in vpn?.anyEngaged ?? false }
+                    PublicIPMonitor.isVPNActive = { [weak vpn, weak nativeVPN, weak tunnelManager] in
+                        vpn?.anyEngaged == true || tunnelManager?.hasActive == true ||
+                            [.connecting, .connected, .reasserting, .disconnecting].contains(nativeVPN?.status ?? .invalid)
+                    }
                     // No VPN is speed-checked through its own tunnel.
                     endpointProbes.isProfileEngaged = { [weak vpn] id in
                         vpn?.isEngaged(id: id) ?? false
                     }
                     publicIP.startMonitoring()          // launch + every ~5 min
-                    controlServer.start(dispatcher: control)   // the CLI's socket
+                    if VPNController.permitsLiveCredentialBrokers { controlServer.start(dispatcher: control) }
                     vpn.routes.startMonitoring()        // PF_ROUTE default-route drift watch
                     vpn.dns.startMonitoring()           // SCDynamicStore DNS drift watch
                     vpn.proxies.startMonitoring()       // SCDynamicStore proxy drift watch
                     appDelegate.quitHandler = { reply in handleQuit(reply) }
-                    // Wire the no-save (auth-nocache) policy at launch, before ANY
-                    // surface — including the menu bar — can connect or persist
-                    // credentials. Previously this was set lazily on the first
-                    // main-window Connect, so menu-bar credential entry could save a
-                    // password the profile forbids saving.
-                    vpn.allowsPasswordSaveEvaluator = { [weak vpn, weak evaluator] id in
-                        guard let vpn, let evaluator, let text = vpn.ovpnText(id: id) else { return true }
-                        return evaluator.evaluation(for: text).allowPasswordSave
-                    }
-                    // Same wiring for the full evaluation: the connect flow
-                    // branches on autologin and static-challenge (see
-                    // VPNController.profileEvaluationProvider).
-                    vpn.profileEvaluationProvider = { [weak vpn, weak evaluator] id in
-                        guard let vpn, let evaluator, let text = vpn.ovpnText(id: id) else { return nil }
-                        return evaluator.evaluation(for: text)
-                    }
                     // What virtual machines and containers are running, for the
                     // connect-time "this VPN is about to cut that off" warning
                     // (`vm.warn-on-connect`). `liveInterfaces()` rather than
@@ -240,13 +271,12 @@ struct SimpleVPNApp: App {
                                 }
                                 return .imported(profileID: first.id, name: first.name)
                             case .pcf(let config, let secret, _):
-                                nativeVPN.save(config)
-                                if let secret {
-                                    try? KeychainCredentialStore.saveCredentials(
-                                        profile: "native.\(config.id)",
-                                        .init(username: config.username, password: secret))
+                                do {
+                                    try CiscoImport.storePCF(config, groupSecret: secret, save: nativeVPN.save)
+                                    return .imported(profileID: config.id, name: config.name)
+                                } catch {
+                                    return .invalid(reason: "The group secret could not be saved to the Mac keychain.")
                                 }
-                                return .imported(profileID: config.id, name: config.name)
                             case .unrecognized:
                                 return .invalid(reason: "That file isn't a recognisable Cisco .pcf or AnyConnect XML profile.")
                             }
@@ -259,19 +289,19 @@ struct SimpleVPNApp: App {
                     // real packet-tunnel profiles now (same ids, so their
                     // keychain keys carry over). Needs the managers loaded
                     // first to be idempotent across launches.
-                    await vpn.loadAll()
-                    await vpn.migrateLegacyWireGuardStore(wireguard)
+                    guard await vpn.loadForWindow() else { return }
+                    if VPNController.permitsLiveCredentialBrokers { await vpn.migrateLegacyWireGuardStore(wireguard) }
                     // Launch-time check-up, after loadAll so connected profiles
                     // are known: non-disruptive rungs run silently; anything
                     // that could drop a live tunnel stops for consent.
-                    await extDoctor.checkUp(trigger: .launch)
+                    if !VPNController.usesEmptyProfileFixture { await extDoctor.checkUp(trigger: .launch) }
                 }
-                .task { GeoIP.warm() }                 // parse the ~10 MB DB off-main
                 .tracksWindowActivity()
         }
         // `main` is a stable scene identity, so macOS restores position and any
         // manually chosen size. Until the first live resize, ConnectionView makes
         // a few content-state suggestions through its narrow SwiftUI window wrapper.
+        .defaultLaunchBehavior(defaultsBool(dockIconDefaultsKey, initially: true) ? .presented : .automatic)
         .defaultSize(width: 900, height: 660)
         .commands {
             // SimpleVPN ▸ Install CLI… — links the bundled `simplevpn` tool onto
@@ -280,7 +310,7 @@ struct SimpleVPNApp: App {
             CommandGroup(after: .appInfo) {
                 Button("Install CLI…") { CLIInstaller.install() }
             }
-            VPNCommands(vpn: vpn, updater: updaterController, settingsRouter: settingsRouter, creationRequests: creationRequests)
+            VPNCommands(vpn: vpn, tunnels: tunnelManager, nativeVPN: nativeVPN, updater: updaterController, settingsRouter: settingsRouter, creationRequests: creationRequests)
             DiagnosticsCommands(vpn: vpn, tunnels: tunnels)
         }
 
@@ -404,9 +434,6 @@ struct SimpleVPNApp: App {
         MenuBarExtra(isInserted: .constant(menuBarIconAtLaunch)) {
             MenuBarView(vpn: vpn, labels: labels)
                 .environment(publicIP)
-                .environment(endpointLocator)
-                .environment(endpointProbes)
-                .environment(topology)
                 .environment(compositions)
                 .environment(tunnels)
                 .environment(tunnelManager)
@@ -422,7 +449,10 @@ struct SimpleVPNApp: App {
                 // Menu-bar-only usage may never open the main window, so the
                 // label (alive whenever the icon is) wires the quit gate too —
                 // and watches for SSO sign-ins for the same reason.
-                .task { appDelegate.quitHandler = { reply in handleQuit(reply) } }
+                .task {
+                    appDelegate.quitHandler = { reply in handleQuit(reply) }
+                    await vpn.loadForWindow()
+                }
                 .opensSSOWindow()
         }
         .menuBarExtraStyle(.window)
@@ -435,9 +465,21 @@ struct SimpleVPNApp: App {
     /// local address == the tunnel's in-tunnel address; named for humans).
     private func handleQuit(_ reply: @escaping (Bool) -> Void) {
         let active = vpn.profiles.filter { UI.isActive($0.status) }
-        let nativeActive = nativeVPN.status == .connected || nativeVPN.status == .connecting
+        let nativeActive = UI.isActive(nativeVPN.status)
+        func finishQuit() async {
+            if let error = await tunnelManager.restoreSystemProxyForQuit() {
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "Couldn’t restore the system SOCKS proxy"
+                alert.informativeText = error + " You can review the SOCKS proxy in System Settings → Network."
+                alert.addButton(withTitle: "Keep SimpleVPN Open")
+                alert.addButton(withTitle: "Quit Anyway")
+                reply(alert.runModal() == .alertSecondButtonReturn)
+            } else { reply(true) }
+        }
         guard !active.isEmpty || tunnelManager.hasActive || nativeActive else {
-            reply(true); return
+            Task { await finishQuit() }
+            return
         }
 
         var tunnelAddrs: Set<String> = []
@@ -455,7 +497,7 @@ struct SimpleVPNApp: App {
                 await vpn.disconnectAllAndWait()
                 for id in tunnelManager.activeIDs { tunnelManager.disconnect(id) }
                 if nativeActive { nativeVPN.disconnect() }
-                reply(true)
+                await finishQuit()
             }
         }
         guard !apps.isEmpty else { disconnectAndGo(); return }
@@ -493,6 +535,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     let openBuffer = FileOpenBuffer()
 
+    var recoverSystemProxy: (() -> Void)?
+
     /// Set by SimpleVPNApp once the stores exist. Called on every quit attempt;
     /// must call the reply exactly once: true = go ahead (tunnels already
     /// disconnected), false = the user cancelled.
@@ -508,7 +552,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// quit path (⌘Q, Dock, last-window-close) funnels through here, where the
     /// handler disconnects — after a confirmation if apps are mid-use.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard !isDuplicateInstance, let quitHandler else { return .terminateNow }
+        guard VPNController.permitsLiveCredentialBrokers, !isDuplicateInstance, let quitHandler else { return .terminateNow }
         quitHandler { proceed in
             NSApp.reply(toApplicationShouldTerminate: proceed)
         }
@@ -576,8 +620,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // same bundle id, but is not the installed app and must not prevent the
         // installed app from launching. The test-host exception remains for a
         // test runner that happens to have launched the same installation.
-        let isTestHost = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
-            || ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil
+        let isTestHost = !VPNController.permitsLiveCredentialBrokers
         let ourPID = ProcessInfo.processInfo.processIdentifier
         if !isTestHost, let bundleID = Bundle.main.bundleIdentifier,
            let other = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
@@ -612,6 +655,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             return
         }
 
+        if !isTestHost { recoverSystemProxy?() }
+
         // Window-restoration safety net: macOS restores windows onto the display they
         // were last on. If that display identifier no longer exists ("invalid display
         // identifier" in SkyLight), the window is technically visible but appears
@@ -627,8 +672,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 }
 
 /// Menu-bar commands: a VPN menu with Manage… (⌘M-adjacent) and Disconnect (⇧⌘K).
+extension FocusedValues {
+    @Entry var selectedVPNTag: String?
+}
+
 private struct VPNCommands: Commands {
     @Bindable var vpn: VPNController
+    let tunnels: SubprocessTunnelManager
+    let nativeVPN: NativeVPNManager
+    @FocusedValue(\.selectedVPNTag) private var selectedTag
+
+    private var disconnectTarget: ConnectListing.DisconnectTarget? {
+        .resolve(selection: selectedTag, profileIsActive: { vpn.isEngaged(id: $0) },
+                 tunnelIsActive: tunnels.isActive, activeNativeID: UI.isActive(nativeVPN.status) ? nativeVPN.activeConfigID : nil)
+    }
+
     let updater: SPUStandardUpdaterController
     let settingsRouter: SettingsRouter
     @Environment(\.openWindow) private var openWindow
@@ -669,9 +727,16 @@ private struct VPNCommands: Commands {
             }
                 .keyboardShortcut("f", modifiers: [.command, .shift])
             Divider()
-            Button("Disconnect") { if let id = vpn.selectedID { vpn.disconnect(id: id) } }
-                .keyboardShortcut("k", modifiers: [.command, .shift])
-                .disabled(!(vpn.selected.map { UI.isActive($0.status) } ?? false))
+            Button("Disconnect") {
+                switch disconnectTarget {
+                case .profile(let id): vpn.disconnect(id: id)
+                case .tunnel(let id): tunnels.disconnect(id)
+                case .native: nativeVPN.disconnect()
+                case nil: break
+                }
+            }
+            .keyboardShortcut("k", modifiers: [.command, .shift])
+            .disabled(disconnectTarget == nil)
         }
     }
 }

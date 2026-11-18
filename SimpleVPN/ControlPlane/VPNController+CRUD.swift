@@ -15,6 +15,52 @@ import Foundation
 @preconcurrency import NetworkExtension
 import os
 
+/// Keychain and NetworkExtension have separate commits. Restore the prior
+/// verified blocks if either the replacement or the preference write fails.
+@MainActor
+enum OpenVPNConfigurationEdit {
+    enum Failure: LocalizedError {
+        case stale, unavailable, missing, verification, restore, incomplete(String)
+        var errorDescription: String? {
+            switch self {
+            case .stale: "This VPN’s saved keys changed after the editor opened. Reopen the editor before saving."
+            case .unavailable: "SimpleVPN couldn’t read this VPN’s saved keys. Check access to your login keychain and reopen the editor."
+            case .missing: "This VPN is missing saved OpenVPN keys. Restore them in Manage VPNs from the original configuration."
+            case .verification: "SimpleVPN couldn’t verify this VPN’s keys in your login keychain."
+            case .restore: "SimpleVPN couldn’t restore this VPN’s previous keys. Check your login keychain and the original configuration before connecting."
+            case .incomplete(let tag): "Close the <\(tag)> block with </\(tag)> before saving this configuration."
+            }
+        }
+    }
+
+    static func save(previous: [String: String], replacement: [String: String],
+                     read: () async throws -> [String: String],
+                     write: ([String: String]) async throws -> Void,
+                     commit: () async throws -> Void) async throws {
+        guard previous != replacement else { try await commit(); return }
+        var replaced = false
+        do {
+            try await write(replacement)
+            replaced = true
+            try await commit()
+        } catch {
+            // A refused write can leave the old item intact. Avoid requesting
+            // Keychain write access again when we can confirm that directly.
+            if !replaced, (try? await read()) == previous { throw error }
+            do { try await write(previous) } catch { throw Failure.restore }
+            throw error
+        }
+    }
+
+    static func checkOriginal(_ original: String, stored: String, keys: [String: String], replacement: [String: String]) throws {
+        // Older configurations can still contain inline keys pending migration.
+        let actual = keys.merging(OVPNSecretMaterial.split(stored).secrets) { _, inline in inline }
+        guard OVPNSecretMaterial.split(original).secrets == actual else { throw Failure.stale }
+        let missing = OVPNSecretMaterial.markedTags(in: stored).subtracting(actual.keys)
+        guard missing.isSubset(of: replacement.keys) else { throw Failure.missing }
+    }
+}
+
 extension VPNController {
 
     // MARK: CRUD
@@ -33,19 +79,12 @@ extension VPNController {
         // reuse an identifier from a profile removed earlier in this launch.
         locallyRemovedProfileIDs.remove(id)
         let split = OVPNSecretMaterial.split(ovpn)
-        var storedOVPN = ovpn
-        if !split.secrets.isEmpty {
-            if KeychainCredentialStore.saveAndVerifyOVPNInlineSecrets(profile: id, split.secrets) {
-                storedOVPN = split.config
-            } else {
-                // The file being imported may be the user's only copy of that key.
-                // Storing the profile intact is a leak; refusing the import, or
-                // storing it stripped, would be a loss. Import it, and SAY SO —
-                // `migrateInlineOVPNSecrets()` retries on the next load.
-                Self.log.error("import: keeping inline \(split.secrets.keys.sorted().joined(separator: ","), privacy: .public) in profile \(id, privacy: .public) — the keychain write could not be verified")
-                inlineSecretMigrationFailures[id] = "SimpleVPN couldn't copy this VPN's private key into your keychain, so the key is stored with the configuration instead. Make sure your login keychain is unlocked, then reopen SimpleVPN."
-            }
+        if let tag = split.unterminatedTag { throw OpenVPNConfigurationEdit.Failure.incomplete(tag) }
+        guard split.secrets.isEmpty || KeychainCredentialStore.saveAndVerifyOVPNInlineSecrets(profile: id, split.secrets) else {
+            KeychainCredentialStore.deleteOVPNInlineSecrets(profile: id)
+            throw err("Unlock your login keychain and import the original configuration again. SimpleVPN couldn’t save its private keys or sign-in details securely.")
         }
+        let storedOVPN = split.secrets.isEmpty ? ovpn : split.config
         let mgr = NETunnelProviderManager()
         let proto = NETunnelProviderProtocol()
         proto.providerBundleIdentifier = Self.providerBundleID
@@ -57,18 +96,22 @@ extension VPNController {
         mgr.isEnabled = true
         do {
             try await mgr.saveToPreferences()
-            try await mgr.loadFromPreferences()
         } catch {
-            // No profile, so the keychain item above belongs to nothing: a private
-            // key with no owner and nothing in the UI able to delete it.
             KeychainCredentialStore.deleteOVPNInlineSecrets(profile: id)
-            inlineSecretMigrationFailures.removeValue(forKey: id)
             throw error
         }
-        await loadAll()
+        await registerCreatedManager(mgr, id: id)
         selectedID = id
         Self.log.log("imported profile \(name, privacy: .public) id=\(id, privacy: .public)")
         return id
+    }
+
+    /// Saving creates the profile. Keep its manager available to the caller
+    /// even if the asynchronous enumeration fails or a newer one supersedes it.
+    func registerCreatedManager(_ manager: NETunnelProviderManager, id: String) async {
+        managers[id] = manager
+        await loadAll()
+        if managers[id] == nil, !locallyRemovedProfileIDs.contains(id) { managers[id] = manager }
     }
 
     /// Rename a target (id stays stable, so keychain/logo/labels are unaffected).
@@ -87,35 +130,83 @@ extension VPNController {
     /// out again before anything is persisted, which is what makes the Certificates
     /// tab, the Configuration tab, the Doctor's fix-apply and its undo all
     /// secret-free without any of them knowing about it.
-    func updateOVPN(id: String, ovpn: String, server: String) async throws {
+    func updateOVPN(id: String, ovpn: String, server: String, original: String? = nil) async throws {
         guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
-        guard let mgr = managers[id], let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { return }
+        let baseline = original ?? ovpnText(id: id)
         let split = OVPNSecretMaterial.split(ovpn)
-        if split.secrets.isEmpty {
-            // The user cleared the Private Key / TLS Key slot. Drop the stored copy
-            // too, or reassembly would put it straight back.
-            KeychainCredentialStore.deleteOVPNInlineSecrets(profile: id)
-        } else {
-            // Write-then-rewrite, never the other way round: refuse the save
-            // outright rather than persist a configuration whose key is now
-            // nowhere. The editor shows the error and does not dismiss.
-            guard KeychainCredentialStore.saveAndVerifyOVPNInlineSecrets(profile: id, split.secrets) else {
-                throw err("Couldn't save this VPN's private key to your keychain, so nothing was changed. Make sure your login keychain is unlocked, then save again.")
+        if let tag = split.unterminatedTag { throw OpenVPNConfigurationEdit.Failure.incomplete(tag) }
+        do {
+            let gate = openVPNConfigurationGate(for: id)
+            await gate.acquire()
+            defer { gate.release() }
+            guard let mgr = managers[id], !locallyRemovedProfileIDs.contains(id),
+                  let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol,
+                  let stored = proto.providerConfiguration?["ovpn"] as? String, let baseline else {
+                throw err("The VPN is no longer available.")
             }
+            func readKeys() async throws -> [String: String] {
+                try await Task.detached {
+                    try KeychainCredentialStore.ovpnInlineSecretsForExport(profile: id)
+                }.value
+            }
+            let previous: [String: String]
+            do { previous = try await readKeys() }
+            catch { throw OpenVPNConfigurationEdit.Failure.unavailable }
+            try OpenVPNConfigurationEdit.checkOriginal(baseline, stored: stored, keys: previous, replacement: split.secrets)
+            // A live-save of an unrelated setting needs neither a new key nor an NE write.
+            if previous == split.secrets, stored == split.config, proto.serverAddress == server { return }
+            try await OpenVPNConfigurationEdit.save(previous: previous, replacement: split.secrets, read: readKeys) { keys in
+                try await Task.detached {
+                    try KeychainCredentialStore.saveOVPNInlineSecrets(profile: id, keys)
+                    guard try KeychainCredentialStore.ovpnInlineSecretsForExport(profile: id) == keys else {
+                        throw OpenVPNConfigurationEdit.Failure.verification
+                    }
+                }.value
+            } commit: {
+                let oldConfiguration = proto.providerConfiguration
+                let oldServer = proto.serverAddress
+                var conf = oldConfiguration ?? [:]
+                conf["ovpn"] = split.config
+                conf["profile"] = id
+                proto.providerConfiguration = conf
+                proto.serverAddress = server
+                mgr.protocolConfiguration = proto
+                do { try await mgr.saveToPreferences() }
+                catch {
+                    proto.providerConfiguration = oldConfiguration
+                    proto.serverAddress = oldServer
+                    mgr.protocolConfiguration = proto
+                    throw error
+                }
+            }
+            // A refresh failure after a successful save must not roll back the new keys.
+            ovpnSecretsCache[id] = split.secrets
+            ovpnTextCache[id] = ovpn
         }
-        var conf = proto.providerConfiguration ?? [:]
-        conf["ovpn"] = split.config; conf["profile"] = id
-        proto.providerConfiguration = conf
-        proto.serverAddress = server
-        mgr.protocolConfiguration = proto
-        try await mgr.saveToPreferences()
-        try await mgr.loadFromPreferences()
         await loadAll()
     }
 
     func remove(id: String) async throws {
         guard !locallyRemovedProfileIDs.contains(id), let mgr = managers[id] else { return }
-        let kind = profiles.first(where: { $0.id == id })?.kind
+        let openVPN = (mgr.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["ovpn"] is String
+        do {
+            let gate = openVPN ? openVPNConfigurationGate(for: id) : nil
+            await gate?.acquire()
+            defer { gate?.release() }
+            guard let current = managers[id], !locallyRemovedProfileIDs.contains(id) else { return }
+            try await removeProfile(id: id, manager: current)
+        } catch {
+            await loadAll()
+            throw error
+        }
+        await loadAll()
+    }
+
+    private func removeProfile(id: String, manager mgr: NETunnelProviderManager) async throws {
+        let kind = isTailscale(id) ? .tailscale : profiles.first(where: { $0.id == id })?.kind
+        let lease = kind == .tailscale ? try tailscaleIdentityLease(id) : nil
+        defer { withExtendedLifetime(lease) {} }
+        if kind == .tailscale, tailscaleStartingIDs.contains(id) { throw err("Wait for this VPN to finish starting before removing it.") }
         connectionReservations.cancel(member: id)
         if kind == .wireGuard { await wireGuardConfigurationOperations.acquire() }
         defer { if kind == .wireGuard { wireGuardConfigurationOperations.release() } }
@@ -152,21 +243,27 @@ extension VPNController {
             // The preference removal did not stick, so allow the next refresh
             // to restore the real profile rather than leaving a phantom delete.
             locallyRemovedProfileIDs.remove(id)
-            await loadAll()
             throw error
         }
-        KeychainCredentialStore.deleteCredentials(profile: id)
-        KeychainCredentialStore.deleteProfileSecrets(profile: id)
-        KeychainCredentialStore.deleteOVPNInlineSecrets(profile: id)
-        KeychainCredentialStore.clearSession(profile: id)
-        KeychainCredentialStore.deleteCredentials(profile: Self.tailscaleKeyProfile(id))
-        KeychainCredentialStore.deleteCredentials(profile: Self.tailscaleNodeStateProfile(id))
-        KeychainCredentialStore.deleteCredentials(profile: Self.wireGuardKeyProfile(id))
-        KeychainCredentialStore.deleteCredentials(profile: Self.teleportKeyProfile(id))
-        KeychainCredentialStore.deleteWireGuardPeerSecrets(profile: id)
-        BiometricCredentialStore.delete(profile: id)
+        // The manager was hidden while preferences were being removed, so its
+        // final disconnected notification may never reach the mediators.
+        forgetRemovedNetworkProfiles([id])
+        ConfigSecretTransfer.deleteAll(id: id)
         FirstSuccessfulConnectionStore.clear(profile: id)
         ConnectionBaselineStore.clear(profile: id)
+        // Keep the tombstone through this refresh: NetworkExtension can briefly
+        // hand back the just-removed manager to another request in flight.
+    }
+
+    /// Also called when macOS removes a profile outside this app. Release
+    /// secrets and editor state in memory without deleting any Keychain items.
+    func forgetCachedProfile(_ id: String) {
+        credentialSaveTasks.removeValue(forKey: id)?.cancel()
+        transientCreds[id] = nil
+        preparedOnePasswordSignIns[id] = nil
+        setTypedSignInOnce(false, for: id)
+        sshNetworkTunnelConfigs[id] = nil
+        sshNetworkTunnelStatuses[id] = nil
         wireGuardConfigs[id] = nil
         wireGuardStatuses[id] = nil
         tailscaleConfigs[id] = nil
@@ -180,9 +277,13 @@ extension VPNController {
         ovpnTextCache[id] = nil
         inlineSecretMigrationFailures[id] = nil
         endpointsCache[id] = nil
-        // Keep the tombstone through this refresh: NetworkExtension can briefly
-        // hand back the just-removed manager to another request in flight.
-        await loadAll()
+        lastChange[id] = nil
+        credentialSources[id] = nil
+        authConfigs[id] = nil
+        overridesCache[id] = nil
+        customRoutingCache[id] = nil
+        uiPrefsCache[id] = nil
+        routingRulesCache[id] = nil
     }
 
     // MARK: Engine overrides (per-VPN OpenVPN settings)
@@ -200,7 +301,7 @@ extension VPNController {
     func setOverrides(_ overrides: OpenVPNOverrides, for id: String) async throws {
         guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
         guard let mgr = managers[id],
-              let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { return }
+              let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { throw err("The VPN is no longer available.") }
         var conf = proto.providerConfiguration ?? [:]
         var overrides = overrides
         // Org policy: keep everything inside the VPN is forced on and can't be cleared.
@@ -279,15 +380,20 @@ extension VPNController {
     }
 
     func setEndpointList(_ list: VPNEndpointList, for id: String) async {
+        do { try await persistEndpointList(list, for: id) }
+        catch { report(error, profile: id) }
+    }
+
+    func persistEndpointList(_ list: VPNEndpointList, for id: String) async throws {
         guard let mgr = managers[id],
-              let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { return }
+              let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { throw err("The VPN is no longer available.") }
         var conf = proto.providerConfiguration ?? [:]
         if let blob = list.encodedBlob() { conf["endpoints"] = blob }
         else { conf.removeValue(forKey: "endpoints") }
         proto.providerConfiguration = conf
         mgr.protocolConfiguration = proto
-        try? await mgr.saveToPreferences()
-        try? await mgr.loadFromPreferences()
+        try await mgr.saveToPreferences()
+        try await mgr.loadFromPreferences()
         endpointsCache[id] = list
     }
 
@@ -406,15 +512,20 @@ extension VPNController {
     }
 
     func setUIPrefs(_ prefs: VPNUIPrefs, for id: String) async {
+        do { try await persistUIPrefs(prefs, for: id) }
+        catch { report(error, profile: id) }
+    }
+
+    func persistUIPrefs(_ prefs: VPNUIPrefs, for id: String) async throws {
         guard let mgr = managers[id],
-              let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { return }
+              let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { throw err("The VPN is no longer available.") }
         var conf = proto.providerConfiguration ?? [:]
         if let blob = prefs.encodedBlob() { conf["uiprefs"] = blob }
         else { conf.removeValue(forKey: "uiprefs") }
         proto.providerConfiguration = conf
         mgr.protocolConfiguration = proto
-        try? await mgr.saveToPreferences()
-        try? await mgr.loadFromPreferences()
+        try await mgr.saveToPreferences()
+        try await mgr.loadFromPreferences()
         uiPrefsCache[id] = prefs
     }
 
@@ -517,7 +628,8 @@ extension VPNController {
     }
 
     func savedCredentials(id: String) -> KeychainCredentialStore.Credentials? {
-        KeychainCredentialStore.loadCredentials(profile: id)
+        guard !authConfig(for: id).protectWithBiometrics else { return nil }
+        return KeychainCredentialStore.loadCredentials(profile: id)
     }
 
     // MARK: The .ovpn text — two of them, and the difference is the point
@@ -587,8 +699,15 @@ extension VPNController {
     func migrateInlineOVPNSecrets() async {
         for profile in profiles where profile.kind == .openVPN {
             let id = profile.id
-            guard let stored = storedOVPNText(id: id), !stored.isEmpty else { continue }
+            let gate = openVPNConfigurationGate(for: id)
+            await gate.acquire()
+            defer { gate.release() }
+            guard !locallyRemovedProfileIDs.contains(id), let stored = storedOVPNText(id: id), !stored.isEmpty else { continue }
             let split = OVPNSecretMaterial.split(stored)
+            if let tag = split.unterminatedTag {
+                inlineSecretMigrationFailures[id] = OpenVPNConfigurationEdit.Failure.incomplete(tag).localizedDescription
+                continue
+            }
             guard !split.secrets.isEmpty else {
                 inlineSecretMigrationFailures.removeValue(forKey: id)
                 continue
@@ -598,7 +717,12 @@ extension VPNController {
 
             // What is inline wins over any earlier keychain copy — it is what the
             // engine has actually been connecting with.
-            var blocks = KeychainCredentialStore.loadOVPNInlineSecrets(profile: id) ?? [:]
+            var blocks: [String: String]
+            do { blocks = try KeychainCredentialStore.ovpnInlineSecretsForExport(profile: id) }
+            catch {
+                inlineSecretMigrationFailures[id] = OpenVPNConfigurationEdit.Failure.unavailable.localizedDescription
+                continue
+            }
             for (tag, body) in split.secrets { blocks[tag] = body }
 
             guard KeychainCredentialStore.saveAndVerifyOVPNInlineSecrets(profile: id, blocks) else {

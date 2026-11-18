@@ -35,6 +35,8 @@ struct BuildNumberTests {
         #expect(project.contains("- target: BuildNumber"))
         #expect(project.components(separatedBy: "name: Apply monotonic build number").count - 1 == 2,
                 "the app and its system extension must stamp the same allocated number")
+        #expect(project.components(separatedBy: "${CONFIGURATION_TEMP_DIR}/SimpleVPN-build-number").count - 1 == 2,
+                "overlapping builds must each stamp their own allocation")
         #expect(project.components(separatedBy: "Set :CFBundleVersion ${BUILD_NUMBER}").count - 1 == 2)
         #expect(project.components(separatedBy: "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)").count - 1 == 2,
                 "each phase must depend on Xcode's processed plist so it runs afterwards")

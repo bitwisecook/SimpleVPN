@@ -194,12 +194,9 @@ enum OnePasswordNative {
     /// Never put this in an error message, a user-facing string or the diagnostic
     /// report. It is a breadcrumb for whoever is looking at a live log, and nothing
     /// else.
-    private nonisolated static func loggableStderr(_ data: Data) -> String? {
-        guard !data.isEmpty,
-              let raw = String(data: data.prefix(8 * 1024), encoding: .utf8)
-        else { return nil }
+    private nonisolated static func loggableStderr(_ raw: String) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
+        guard !trimmed.isEmpty else { return "" }
         return SecretScrubber(policy: .logBundle).scrub(String(trimmed.prefix(1000)))
     }
 
@@ -212,63 +209,19 @@ enum OnePasswordNative {
         guard let helperURL else {
             throw OnePasswordNativeError.other("The 1Password helper is missing from the app bundle.")
         }
-        let processBox = OSAllocatedUnfairLock<Process?>(initialState: nil)
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { cont in
-                queue.async {
-                    let process = Process()
-                    process.executableURL = helperURL
-                    process.arguments = [mode]
-                    let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
-                    process.standardInput = inPipe
-                    process.standardOutput = outPipe
-                    // Captured rather than discarded — see `loggableStderr`.
-                    process.standardError = errPipe
-                    processBox.withLock { $0 = process }
-                    do {
-                        try process.run()
-                    } catch {
-                        // THE SPAWN WAS REFUSED — a distinct outcome from "the helper
-                        // answered no", and the whole reason `helperRefusedToStart`
-                        // exists. `probeAnswer()` retries on it; nothing treats it as a
-                        // verdict about 1Password.
-                        cont.resume(throwing: OnePasswordNativeError.helperRefusedToStart(
-                            error.localizedDescription))
-                        return
-                    }
-                    if let input { inPipe.fileHandleForWriting.write(input) }
-                    try? inPipe.fileHandleForWriting.close()
-                    DispatchQueue.global().asyncAfter(deadline: .now() + killAfter) {
-                        processBox.withLock { if $0 === process, process.isRunning { process.terminate() } }
-                    }
-                    // Drained on ANOTHER queue, concurrently with stdout. A helper that
-                    // wrote more than a pipe buffer to stderr while we blocked on stdout
-                    // would deadlock both ends — which is a far worse bug than the one
-                    // capturing stderr is here to help diagnose.
-                    let errBox = OSAllocatedUnfairLock<Data>(initialState: Data())
-                    let drained = DispatchSemaphore(value: 0)
-                    DispatchQueue.global().async {
-                        let bytes = errPipe.fileHandleForReading.readDataToEndOfFile()
-                        errBox.withLock { $0 = bytes }
-                        drained.signal()
-                    }
-                    let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-                    process.waitUntilExit()
-                    drained.wait()
-                    processBox.withLock { $0 = nil }
-                    if let said = loggableStderr(errBox.withLock({ $0 })) {
-                        log.debug("""
-                            opnative-helper \(mode, privacy: .public) \
-                            exit \(process.terminationStatus, privacy: .public) \
-                            stderr: \(said, privacy: .private)
-                            """)
-                    }
-                    cont.resume(returning: data)
-                }
-            }
-        } onCancel: {
-            processBox.withLock { $0?.terminate() }
+        let result = await LocalToolRunner.run(
+            executable: helperURL.path, arguments: [mode], deadline: killAfter,
+            stdin: input, runQueue: queue, stdoutLimit: 16 * 1024 * 1024,
+            summarizeStderr: { loggableStderr($0) })
+        try Task.checkCancellation()
+        if let cause = result.launchError {
+            throw OnePasswordNativeError.helperRefusedToStart(cause)
         }
+        if !result.stderr.isEmpty {
+            log.debug("opnative-helper \(mode, privacy: .public) exit \(result.exitCode, privacy: .public) stderr: \(result.stderr, privacy: .private)")
+        }
+        guard result.succeeded else { throw OnePasswordNativeError.badResponse }
+        return result.stdout
     }
 
     // nonisolated: the app target defaults to MainActor isolation, which would

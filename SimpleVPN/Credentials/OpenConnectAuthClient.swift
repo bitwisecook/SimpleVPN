@@ -18,6 +18,7 @@
 
 import Foundation
 import os
+import Darwin
 
 nonisolated enum OpenConnectAuthError: LocalizedError, Sendable {
     case helperMissing
@@ -28,6 +29,7 @@ nonisolated enum OpenConnectAuthError: LocalizedError, Sendable {
     /// The server's certificate failed verification and matched no pin.
     case certUntrusted(fingerprint: String)
     case badReply
+    case invalidSignInURL
     case gateway(kind: String, message: String)
 
     var errorDescription: String? {
@@ -46,6 +48,8 @@ nonisolated enum OpenConnectAuthError: LocalizedError, Sendable {
             "The server's certificate isn't trusted by macOS and doesn't match a pinned "
             + "certificate. If this gateway is yours, pin \(fingerprint) under "
             + "Security \u{25B8} Server certificate (SHA-256); otherwise do not connect."
+        case .invalidSignInURL:
+            "The gateway supplied an invalid sign-in link. Ask your VPN administrator for an HTTP or HTTPS sign-in address."
         case .badReply:
             "The sign-in helper sent an unreadable reply."
         case .gateway(_, let message):
@@ -98,60 +102,42 @@ nonisolated enum OpenConnectAuthClient {
         guard let helperURL = helper ?? helperURL else {
             throw OpenConnectAuthError.helperMissing
         }
-        let processBox = OSAllocatedUnfairLock<Process?>(initialState: nil)
+        let channel: OCAuthChannel
+        do { channel = try OCAuthChannel() }
+        catch { throw OpenConnectAuthError.launchFailed(error.localizedDescription) }
         return try await withTaskCancellationHandler {
+            if Task.isCancelled { throw OpenConnectAuthError.cancelled }
             let process = Process()
             process.executableURL = helperURL
-            let inPipe = Pipe(), outPipe = Pipe()
-            process.standardInput = inPipe
-            process.standardOutput = outPipe
+            process.standardInput = channel.child
+            process.standardOutput = channel.child
             process.standardError = FileHandle.nullDevice
-            processBox.withLock { $0 = process }
+            do { try process.run() }
+            catch { throw OpenConnectAuthError.launchFailed(error.localizedDescription) }
+            try? channel.child.close()
+            channel.process.withLock { $0 = process }
 
-            // Helper stdout → one Data per JSON line. The readability handler
-            // runs serially on the pipe's own dispatch source.
-            let lines = AsyncStream<Data> { continuation in
-                nonisolated(unsafe) var buffer = Data()
-                outPipe.fileHandleForReading.readabilityHandler = { handle in
-                    let chunk = handle.availableData
-                    guard !chunk.isEmpty else {
-                        handle.readabilityHandler = nil
-                        continuation.finish()
-                        return
-                    }
-                    buffer.append(chunk)
-                    while let nl = buffer.firstIndex(of: 0x0A) {
-                        let line = buffer.subdata(in: buffer.startIndex..<nl)
-                        buffer.removeSubrange(buffer.startIndex...nl)
-                        if !line.isEmpty { continuation.yield(line) }
-                    }
+            let timer = DispatchSource.makeTimerSource(queue: .global())
+            timer.setEventHandler { channel.stop() }
+            timer.schedule(deadline: .now() + killAfter)
+            timer.resume()
+            defer {
+                timer.cancel()
+                channel.stop()
+            }
+            if Task.isCancelled { throw OpenConnectAuthError.cancelled }
+
+            func send(_ message: OCAuthClientMessage) async throws {
+                do { try await channel.send(OCAuthJSON.encodeLine(message)) }
+                catch {
+                    if Task.isCancelled { throw OpenConnectAuthError.cancelled }
+                    throw OpenConnectAuthError.badReply
                 }
             }
+            try await send(.start(start))
 
-            do {
-                try process.run()
-            } catch {
-                processBox.withLock { $0 = nil }
-                throw OpenConnectAuthError.launchFailed(error.localizedDescription)
-            }
-            defer {
-                processBox.withLock { $0 = nil }
-                try? inPipe.fileHandleForWriting.close()
-                if process.isRunning { process.terminate() }
-            }
-            // Watchdog: a helper wedged past any reasonable sign-in gets killed.
-            DispatchQueue.global().asyncAfter(deadline: .now() + killAfter) {
-                processBox.withLock { if $0 === process, process.isRunning { process.terminate() } }
-            }
-
-            func send(_ message: OCAuthClientMessage) throws {
-                let data = try OCAuthJSON.encodeLine(message)
-                inPipe.fileHandleForWriting.write(data)
-            }
-            try send(.start(start))
-
-            var refusedCert: OCAuthCert?
-            for await line in lines {
+            while let line = try? await channel.nextLine() {
+                if Task.isCancelled { throw OpenConnectAuthError.cancelled }
                 guard let event = try? OCAuthJSON.decode(OCAuthEvent.self, from: line) else {
                     throw OpenConnectAuthError.badReply
                 }
@@ -159,40 +145,86 @@ nonisolated enum OpenConnectAuthClient {
                 case .progress(_, let message):
                     handlers.progress(message)
                 case .openURL(let url):
+                    guard let target = URL(string: url), SSOAuthModel.accepts(target) else {
+                        throw OpenConnectAuthError.invalidSignInURL
+                    }
                     log.log("SSO sign-in URL raised — opening the browser")
                     await handlers.openURL(url)
                 case .form(let form):
                     switch await handlers.answerForm(form) {
                     case .answers(let answers):
-                        try send(.answers(answers))
+                        try await send(.answers(answers))
                     case .cancel(let unanswered):
-                        try? send(.cancel)
+                        try? await send(.cancel)
                         throw unanswered.isEmpty
                             ? OpenConnectAuthError.cancelled
                             : OpenConnectAuthError.formUnanswered(unanswered)
                     }
                 case .cert(let cert):
-                    let accepted = await handlers.decideCert(cert)
-                    if !accepted { refusedCert = cert }
-                    try send(.accept(accepted))
+                    guard await handlers.decideCert(cert) else {
+                        try? await send(.accept(false))
+                        throw OpenConnectAuthError.certUntrusted(fingerprint: cert.fingerprint)
+                    }
+                    try await send(.accept(true))
                 case .done(let done):
                     return done
                 case .error(let kind, let message):
-                    if let refusedCert {
-                        throw OpenConnectAuthError.certUntrusted(fingerprint: refusedCert.fingerprint)
-                    }
                     if kind == OCAuthErrorKind.cancelled { throw OpenConnectAuthError.cancelled }
                     throw OpenConnectAuthError.gateway(kind: kind, message: message)
                 }
             }
             // EOF without done/error: killed (watchdog/cancel) or crashed.
             if Task.isCancelled { throw OpenConnectAuthError.cancelled }
-            if let refusedCert {
-                throw OpenConnectAuthError.certUntrusted(fingerprint: refusedCert.fingerprint)
-            }
             throw OpenConnectAuthError.badReply
         } onCancel: {
-            processBox.withLock { $0?.terminate() }
+            channel.stop()
+        }
+    }
+}
+
+
+/// A private full-duplex socket lets cancellation interrupt either a blocked read
+/// or a write to a helper that has stopped reading. Pulling one frame at a time
+/// leaves backpressure with the kernel while a browser or form handler awaits.
+private nonisolated final class OCAuthChannel: Sendable {
+    let child: FileHandle
+    let process = OSAllocatedUnfairLock<Process?>(initialState: nil)
+    private let parent: FileHandle
+    private let queue = DispatchQueue(label: "com.bragi0.SimpleVPN.ocauth-io", qos: .userInitiated)
+    private let reader = OSAllocatedUnfairLock(initialState: OCAuthLineReader())
+
+    init() throws {
+        var fds: [Int32] = [-1, -1]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else { throw POSIXError(.EIO) }
+        parent = FileHandle(fileDescriptor: fds[0], closeOnDealloc: true)
+        child = FileHandle(fileDescriptor: fds[1], closeOnDealloc: true)
+        var enabled: Int32 = 1
+        guard fcntl(fds[0], F_SETFD, FD_CLOEXEC) == 0,
+              fcntl(fds[1], F_SETFD, FD_CLOEXEC) == 0,
+              setsockopt(fds[0], SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout.size(ofValue: enabled))) == 0 else {
+            throw POSIXError(.EIO)
+        }
+    }
+
+    func send(_ message: Data) async throws {
+        try await withCheckedThrowingContinuation { cont in
+            queue.async { cont.resume(with: Result { try self.parent.write(contentsOf: message) }) }
+        }
+    }
+
+    func nextLine() async throws -> Data? {
+        try await withCheckedThrowingContinuation { cont in
+            queue.async {
+                cont.resume(with: Result { try self.reader.withLock { try $0.next(from: self.parent) } })
+            }
+        }
+    }
+
+    func stop() {
+        _ = shutdown(parent.fileDescriptor, SHUT_RDWR)
+        process.withLock { running in
+            if let running, running.isRunning { kill(running.processIdentifier, SIGKILL) }
+            running = nil
         }
     }
 }

@@ -12,7 +12,7 @@
 # OpenSSL is built from verified source by build-openssl.sh.
 set -euo pipefail
 
-PIN=0abc8313b8fe5f63dbebc10d53094952957845d9   # openvpn3 revision (core 3.12) — bump deliberately
+PIN=0c1ce172fe918b05463d71e682a0c2f2d8fe7899   # openvpn3 revision (core 3.12) — bump deliberately
 # Keep IDENTICAL across all three engine scripts (see build-openconnect for why:
 # three statically-bundled OpenSSL copies land in one binary; version skew between
 # them is a linker/ABI hazard). Bump all three together.
@@ -23,7 +23,7 @@ OPENSSL_PIN="4.1.0"
 # pinned on the same policy as OpenSSL — bump deliberately, never float — but
 # separately, because unlike OpenSSL they exist in ONE engine and carry no
 # cross-engine ABI hazard: this pin is about reproducibility, not corruption.
-BREW_PINS="asio=1.38.2 fmt=12.2.0 xxhash=0.8.4 lz4=1.10.0"
+BREW_PINS="asio=1.38.2 fmt=12.2.1 xxhash=0.8.4 lz4=1.11.1"
 MIN=26.0                                        # macOS deployment target
 ARCH=arm64
 

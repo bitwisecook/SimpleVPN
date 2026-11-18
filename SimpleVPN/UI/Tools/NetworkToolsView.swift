@@ -132,6 +132,7 @@ struct NetworkToolsView: View {
     @State private var latency = LatencyMonitor()
     @State private var latencyTarget: (host: String, boundIf: UInt32)?
     @State private var running = false
+    @State private var measuredOnNetwork: String?
     @State private var hops: [NetworkProbes.TraceHop] = []
     @State private var hopNames: [Int: String] = [:]
     @State private var dnsAnswers: [DNSAnswer] = []
@@ -209,15 +210,19 @@ struct NetworkToolsView: View {
         // split-horizon name resolves somewhere else entirely on the next one.
         // One re-run per settle (the fingerprint is already debounced), and only
         // when there is something on screen to invalidate.
-        .onChange(of: NetworkMemory.shared.current?.key) { _, _ in
-            guard !target.trimmingCharacters(in: .whitespaces).isEmpty,
-                  running || hasResults else { return }
-            run()
+        .onChange(of: NetworkMemory.shared.current?.key) {
+            if windowVisible, running, measuredOnNetwork != NetworkMemory.shared.current?.key { run() }
         }
         // Initial focus: the target field — the window exists to test an address.
         .onAppear { targetFocused = true }
         .liveWindowTask { await topo?.watchWhileVisible() } // classify the path using the routing table
-        .onChange(of: windowVisible) { updateLatencySampling() }
+        .onChange(of: windowVisible) {
+            if windowVisible, running, measuredOnNetwork != NetworkMemory.shared.current?.key {
+                run()
+            } else {
+                updateLatencySampling()
+            }
+        }
         .onDisappear {
             stop()                          // cancel latency/traceroute/DNS/resolve/MTU
             ladderRunner.cancel()           // …and drop whatever key material it held
@@ -1272,6 +1277,7 @@ struct NetworkToolsView: View {
         guard !host.isEmpty else { return }
         stop()          // cancel any in-flight run so its late results can't land on the new target
         running = true
+        measuredOnNetwork = NetworkMemory.shared.current?.key
         // Reset per-run state so a new target never shows the previous run's hops,
         // reverse-DNS labels, or nodes.
         hops = []; hopNames = [:]; dnsAnswers = []; targetNode = nil; dnsServerNode = nil
@@ -1297,6 +1303,7 @@ struct NetworkToolsView: View {
 
     private func stop() {
         running = false
+        tracing = false
         latencyTarget = nil
         latency.stop()
         for t in probeTasks { t.cancel() }
@@ -1319,8 +1326,9 @@ struct NetworkToolsView: View {
         let port = Int(probePortText.trimmingCharacters(in: .whitespaces)) ?? defaultProbePort
         let transport = probeTransport
         let kind = probeKind
+        probeRunning = true
         probeTask = Task {
-            probeRunning = true
+            guard !Task.isCancelled else { return }
             defer { if !Task.isCancelled { probeRunning = false } }
             // The VPN Probe asks a VPN server what it is, so it must go out the
             // PHYSICAL egress — never through a tunnel (least of all the one it's
@@ -1328,6 +1336,7 @@ struct NetworkToolsView: View {
             // the step-by-step ladder uses, so the two never contradict. 0 ⇒ no
             // non-tunnel interface, which honestly falls back to normal routing.
             let boundIf = await Task.detached { NetworkIdentity.physicalEgressBoundIf() }.value
+            guard !Task.isCancelled else { return }
             let result = await VPNProbe.fingerprint(host: host, port: port,
                                                     proto: transport, hint: kind, boundIf: boundIf)
             guard !Task.isCancelled else { return }
@@ -1336,6 +1345,7 @@ struct NetworkToolsView: View {
         // Always, alongside every probe: a sign-in page in the way makes every other
         // result here a lie about the real network.
         portalTask = Task {
+            guard !Task.isCancelled else { return }
             let result = await ConnectionDiagnostics.captivePortalProbe()
             guard !Task.isCancelled else { return }
             portal = PortalCheck(detected: result.detected, url: result.url)
@@ -1354,6 +1364,7 @@ struct NetworkToolsView: View {
     }
 
     private func runMTU(_ host: String) async {
+        guard !Task.isCancelled else { return }
         mtuRunning = true
         // Only clear the flag if we are still the current probe — a superseded task
         // resuming late must not switch off the spinner of the one that replaced it.
@@ -1385,8 +1396,11 @@ struct NetworkToolsView: View {
     }
 
     private func runTraceroute(_ host: String) async {
-        tracing = true; defer { tracing = false }
+        guard !Task.isCancelled else { return }
+        tracing = true
+        defer { if !Task.isCancelled { tracing = false } }
         let ip = await NetworkProbes.resolve(host: host).v4.first ?? host
+        guard !Task.isCancelled else { return }
         let result = await NetworkProbes.traceroute(host: ip, boundIf: egressBoundIf)
         guard !Task.isCancelled else { return }
         hops = result
@@ -1401,11 +1415,13 @@ struct NetworkToolsView: View {
     }
 
     private func runDNS(_ host: String) async {
+        guard !Task.isCancelled else { return }
         let servers = NetworkProbes.systemDNSServers()
         guard !servers.isEmpty else { return }
         // What the OS actually resolves (getaddrinfo) — used to mark which resolver
         // the answer came from (split-DNS / MagicDNS means it isn't always the first).
         let osAnswer = await NetworkProbes.resolve(host: host).v4.first
+        guard !Task.isCancelled else { return }
         let boundIf = egressBoundIf
         // Ask every resolver in parallel so one slow/unreachable server can't stall.
         let collected = await withTaskGroup(of: (Int, NetworkProbes.DNSResult?, String?).self) { group -> [(Int, NetworkProbes.DNSResult?, String?)] in

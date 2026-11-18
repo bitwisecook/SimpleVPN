@@ -14,6 +14,25 @@ import Testing
 
 struct NativeVPNSecretsTests {
 
+    @MainActor @Test func ciscoImportStoresTheGroupKeySeparatelyFromTheUserPassword() throws {
+        let input = "[main]\nHost=vpn.example\nUsername=alex\nGroupPwd=group-test-value"
+        guard case let .pcf(config, secret, _) = CiscoImport.parsePCF(input, name: "Import test") else {
+            Issue.record("Expected an IPsec configuration")
+            return
+        }
+        let group = NativeVPNSecrets.groupPSKProfile(config.id)
+        let password = NativeVPNSecrets.baseProfile(config.id)
+        defer {
+            KeychainCredentialStore.deleteCredentials(profile: group)
+            KeychainCredentialStore.deleteCredentials(profile: password)
+        }
+        var saved: NativeVPNConfig?
+        try CiscoImport.storePCF(config, groupSecret: secret) { saved = $0 }
+        #expect(saved == config)
+        #expect(KeychainCredentialStore.loadCredentials(profile: group)?.password == secret)
+        #expect(KeychainCredentialStore.loadCredentials(profile: password) == nil)
+    }
+
     @Test func clearingASecretDeletesItInsteadOfLeavingTheOldOne() {
         // IKEv2: emptying the password/PSK field removes the stored secret. The
         // OTHER kinds' rows are `.leave` — IKEv2 has no field for them, so

@@ -55,7 +55,7 @@ if [ -z "$VERSION" ]; then
 fi
 
 if ! command -v dmgbuild >/dev/null; then
-  echo "FATAL: install dmgbuild==1.6.7 in a Python virtual environment and put it on PATH."
+  echo "FATAL: install dmgbuild==2.0.0 in a Python virtual environment and put it on PATH."
   exit 1
 fi
 

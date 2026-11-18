@@ -218,7 +218,7 @@ jobs:
       # step that ran vendor-supplied tooling, that reasoning would change and
       # this belongs back in `engines` with the cache extended to match.
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: Vendor/onepassword-native/src/go.mod
           cache: false
@@ -273,7 +273,7 @@ jobs:
             VERSION="$(awk -F'"' '/MARKETING_VERSION:/ {print $2; exit}' project.yml)"
           fi
           python3 -m venv "$RUNNER_TEMP/simplevpn-dmg-tools"
-          "$RUNNER_TEMP/simplevpn-dmg-tools/bin/pip" install dmgbuild==1.6.7
+          "$RUNNER_TEMP/simplevpn-dmg-tools/bin/pip" install dmgbuild==2.0.0
           export PATH="$RUNNER_TEMP/simplevpn-dmg-tools/bin:$PATH"
           Tools/build-release-dmg.sh "$VERSION"
           DMG="build/dist/SimpleVPN-${VERSION}-arm64.dmg"

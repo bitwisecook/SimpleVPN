@@ -82,8 +82,8 @@ enum OpenConnectSettings {
         .init(id: "oc.socks-port", name: "Local SOCKS Port",
               summary: "Where on this Mac the tunnel offers its proxy — point apps at 127.0.0.1 and this port. Give each tunnel its own port.",
               group: .traffic, default: 1080),
-        .init(id: "oc.system-proxy", name: "Route Mac Traffic Through This Proxy",
-              summary: "Points the whole Mac at the tunnel's proxy while connected (asks for your admin password) and puts things back on disconnect.",
+        .init(id: "oc.system-proxy", name: "Use as System SOCKS Proxy",
+              summary: "Apps that use the macOS SOCKS proxy can use this tunnel. macOS may ask for administrator approval.",
               group: .traffic, default: false),
         // THE SAME WORDS as `wg.local-lan`, `px.local-lan` and `sshnet.local-lan`,
         // to the character (AGENTS.md glossary: one concept, one name). It is one

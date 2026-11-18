@@ -49,7 +49,7 @@ private func ocOpenBrowser(_ vpninfo: OpaquePointer?, _ uri: UnsafePointer<CChar
 final class OCAuthSession {
     private let input: FileHandle
     private let output: FileHandle
-    private var inputBuffer = Data()
+    private var reader = OCAuthLineReader()
     private var vpninfo: OpaquePointer?
     private var start: OCAuthStart?
     private var cancelled = false
@@ -258,8 +258,11 @@ final class OCAuthSession {
     // MARK: Wire plumbing
 
     private func emit(_ event: OCAuthEvent) {
-        guard let line = try? OCAuthJSON.encodeLine(event) else { return }
-        output.write(line)
+        do {
+            try output.write(contentsOf: OCAuthJSON.encodeLine(event))
+        } catch {
+            exit(0)
+        }
     }
 
     private func exitWithError(kind: String, message: String) -> Never {
@@ -276,17 +279,6 @@ final class OCAuthSession {
     /// One `\n`-terminated line from stdin, blocking. nil on EOF (the app went
     /// away — every caller treats that as a cancel).
     private func readLine_() -> Data? {
-        while true {
-            if let nl = inputBuffer.firstIndex(of: 0x0A) {
-                let line = inputBuffer.subdata(in: inputBuffer.startIndex..<nl)
-                inputBuffer.removeSubrange(inputBuffer.startIndex...nl)
-                if line.isEmpty { continue }
-                return line
-            }
-            var chunk = [UInt8](repeating: 0, count: 4096)
-            let n = read(input.fileDescriptor, &chunk, chunk.count)
-            guard n > 0 else { return nil }
-            inputBuffer.append(contentsOf: chunk[0..<n])
-        }
+        try? reader.next(from: input)
     }
 }

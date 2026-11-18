@@ -29,6 +29,48 @@ struct OpenConnectArgvTests {
         SubprocessTunnelManager.openconnectArgs(for: config(mutate))
     }
 
+    @Test func tunnelLogJoinsPipeFragmentsAndBoundsPendingDelivery() {
+        var buffer = TunnelProcess.OutputBuffer()
+        let partial = buffer.append(Data("Failed to parse proxy 'http://alex:fi".utf8))
+        #expect(!partial)
+        let completed = buffer.append(Data("xture@proxy.test'\nConfigured as test\n".utf8))
+        #expect(completed)
+        let batch = buffer.take()
+        #expect(batch.ready)
+        #expect(batch.lines.count == 2)
+        #expect(!batch.lines.joined().contains("fixture"))
+        let burst = buffer.append(Data(String(repeating: "row\n", count: 301).utf8))
+        #expect(burst)
+        let alreadyScheduled = buffer.append(Data("another\n".utf8))
+        #expect(!alreadyScheduled)
+        #expect(buffer.take().lines.count == 300)
+    }
+
+    @Test func privateTransportConfigLeavesStdinAvailableForTheVPNCookie() throws {
+        let config = try #require(try SubprocessTunnelManager.openconnectPrivateConfig(
+            keyPassphrase: "=with spaces", proxy: "http://alex:example@proxy.test:8080"))
+        let channel = try TunnelProcess.configChannel(config)
+        let child = Process(), input = Pipe()
+        child.executableURL = URL(fileURLWithPath: "/bin/cat")
+        child.arguments = ["/dev/fd/2", "-"]
+        child.standardInput = input
+        child.standardOutput = channel.child
+        child.standardError = channel.child
+        try child.run()
+        try channel.child.close()
+        let cookie = Data("test-cookie\n".utf8)
+        try input.fileHandleForWriting.write(contentsOf: cookie)
+        try input.fileHandleForWriting.close()
+        let received = try channel.reader.readToEnd()
+        child.waitUntilExit()
+        #expect(child.terminationStatus == 0)
+        #expect(received == config + cookie)
+        #expect(String(decoding: config, as: UTF8.self) == "key-password==with spaces\nproxy=http://alex:example@proxy.test:8080\n")
+        #expect(throws: (any Error).self) {
+            try SubprocessTunnelManager.openconnectPrivateConfig(keyPassphrase: "line one\nline two", proxy: nil)
+        }
+    }
+
     // MARK: The picker decides — not whatever file paths are lying around
 
     /// The bug: with method = Password and stale certificate paths, openconnect
@@ -158,11 +200,11 @@ struct OpenConnectArgvTests {
     /// The config is persisted unencrypted and the address lands on the tool's
     /// command line, where `ps` shows it to every local process.
     @Test func aPasswordInAnAddressIsRefused() {
-        #expect(SubprocessTunnelManager.passwordInAddress("https://user:secret@vpn.example.com"))
-        #expect(SubprocessTunnelManager.passwordInAddress("user:secret@vpn.example.com"))
+        #expect(SubprocessTunnelConfig.passwordInAddress("https://user:secret@vpn.example.com"))
+        #expect(SubprocessTunnelConfig.passwordInAddress("user:secret@vpn.example.com"))
         // A bare username is not a secret — ssh targets use it routinely.
-        #expect(!SubprocessTunnelManager.passwordInAddress("alex@ssh.example.com"))
-        #expect(!SubprocessTunnelManager.passwordInAddress("https://vpn.example.com/path@x"))
+        #expect(!SubprocessTunnelConfig.passwordInAddress("alex@ssh.example.com"))
+        #expect(!SubprocessTunnelConfig.passwordInAddress("https://vpn.example.com/path@x"))
 
         #expect(SubprocessTunnelManager.addressCredentialReason(config {
             $0.server = "https://user:secret@vpn.example.com"
@@ -170,10 +212,10 @@ struct OpenConnectArgvTests {
         #expect(SubprocessTunnelManager.addressCredentialReason(config {
             $0.proxyMode = .manual; $0.proxyURL = "http://user:secret@proxy.example.com:8080"
         }) != nil)
-        // Not a manual proxy ⇒ the URL isn't used, so it can't leak.
+        // Inactive fields are also serialized with the rest of the configuration.
         #expect(SubprocessTunnelManager.addressCredentialReason(config {
             $0.proxyMode = .systemDefault; $0.proxyURL = "http://user:secret@proxy.example.com:8080"
-        }) == nil)
+        }) != nil)
         #expect(SubprocessTunnelManager.addressCredentialReason(config { _ in }) == nil)
     }
 

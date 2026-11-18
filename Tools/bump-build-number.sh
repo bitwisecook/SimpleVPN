@@ -14,15 +14,11 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_FILE="$REPO/BUILDNUMBER"
 PROJECT_FILE="$REPO/project.yml"
-LOCK_DIR="$REPO/build/.build-number.lock"
-
+# Keep the descriptor open for the whole allocation. macOS releases the lock
+# when the process exits, including after an interruption.
 mkdir -p "$REPO/build"
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  echo "FATAL: another SimpleVPN build is allocating a build number" >&2
-  echo "       (stale after an unclean kill? remove $LOCK_DIR)" >&2
-  exit 1
-fi
-trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
+exec 9>>"$REPO/build/build-number.lock"
+/usr/bin/lockf 9
 
 CURRENT="$(tr -d '[:space:]' < "$BUILD_FILE")"
 case "$CURRENT" in
@@ -68,4 +64,10 @@ if ! grep -q "CURRENT_PROJECT_VERSION: \"$NEXT\"" "$PROJECT_FILE"; then
 fi
 
 printf '%s\n' "$NEXT" > "$BUILD_FILE"
+# A second Xcode invocation can advance the repository counter before both
+# targets have signed. Each build reads its allocation from its own intermediates.
+if [ -n "${CONFIGURATION_TEMP_DIR:-}" ]; then
+  mkdir -p "$CONFIGURATION_TEMP_DIR"
+  printf '%s\n' "$NEXT" > "$CONFIGURATION_TEMP_DIR/SimpleVPN-build-number"
+fi
 echo "$NEXT"

@@ -10,6 +10,7 @@ package pxengine
 import (
 	"context"
 	"io"
+	"sync/atomic"
 
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
@@ -20,22 +21,23 @@ import (
 // and a good balance for a proxied stream.
 const copyBufSize = 32 * 1024
 
-// copyCounted copies src->dst and returns the byte count. A dedicated helper
-// (rather than io.Copy) so the byte total feeds the status counters directly.
-func copyCounted(dst io.Writer, src io.Reader) int64 {
+// Count each completed write so live throughput includes long-lived flows.
+func copyCounted(dst io.Writer, src io.Reader, counter *atomic.Int64) error {
 	buf := make([]byte, copyBufSize)
-	var total int64
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {
-			w, werr := dst.Write(buf[:n])
-			total += int64(w)
-			if werr != nil {
-				return total
+			w, writeErr := dst.Write(buf[:n])
+			counter.Add(int64(w))
+			if writeErr != nil {
+				return writeErr
+			}
+			if w != n {
+				return io.ErrShortWrite
 			}
 		}
 		if err != nil {
-			return total
+			return err
 		}
 	}
 }
@@ -78,6 +80,5 @@ func (st *engineState) handleTCP(r *tcp.ForwarderRequest) {
 	r.Complete(false)
 
 	guestConn := gonet.NewTCPConn(&wq, ep)
-	st.activeFlows.Add(1)
-	go st.pipe(guestConn, proxyConn)
+	st.startRelay(guestConn, proxyConn)
 }

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import Foundation
+import NetworkExtension
 import Testing
 
 @testable import SimpleVPN
@@ -15,6 +16,28 @@ struct MainConnectionEnvironmentTests {
 
     private func source(_ path: String) throws -> String {
         try String(contentsOf: Self.repoRoot.appendingPathComponent(path), encoding: .utf8)
+    }
+
+    @Test("menu commands match the state VoiceOver announces")
+    func menuCommandSemantics() {
+        #expect(MenuVPNAction(status: .connected, paused: true) == .resume)
+        #expect(MenuVPNAction(status: .reasserting, paused: false) == .disconnect)
+        #expect(MenuVPNAction(status: .connecting, paused: false) == .cancel)
+        #expect(MenuVPNAction(status: .disconnecting, paused: false) == .waiting)
+        #expect(MenuVPNAction(status: .disconnected, paused: false) == .connect)
+    }
+
+    @Test("a server-required challenge needs input, while a failed connection keeps its own error")
+    func quickConnectSeparatesMissingInputFromFailure() async {
+        let vpn = VPNController()
+        let id = UUID().uuidString
+        vpn.profileEvaluationProvider = { _ in ProfileEvaluation(staticChallenge: "Verification code") }
+        #expect(await vpn.quickConnect(id: id) == .needsInput)
+        #expect(vpn.failure == nil)
+
+        vpn.profileEvaluationProvider = { _ in ProfileEvaluation(autologin: true) }
+        #expect(await vpn.quickConnect(id: id) == .failed)
+        #expect(vpn.failureProfileID == id)
     }
 
     @Test("the main window receives every store and live manager it displays")
@@ -72,7 +95,8 @@ struct MainConnectionEnvironmentTests {
         let route = try #require(seed.range(of: "settingsRouter?.route?.profileID"))
         let fallback = try #require(seed.range(of: "initial = vpn.selectedID.flatMap"))
         #expect(route.lowerBound < fallback.lowerBound)
-        #expect(manage.contains(".onChange(of: order.allTags) { seedInitialSelection() }"))
+        #expect(manage.contains(".onChange(of: order.allTags)"))
+        #expect(manage.contains("guard seeded else { seedInitialSelection(); return }"))
         #expect(seed.contains("if selection != nil { seeded = true; return }"))
         let available = try #require(seed.range(of: "guard let initial else { return }"))
         let commit = try #require(seed.range(of: "selection = initial"))

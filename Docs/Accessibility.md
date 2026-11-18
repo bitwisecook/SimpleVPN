@@ -74,8 +74,8 @@ actually on.
    onHover-only, or drag-only affordances; macOS `Form`s render no affordance for
    `.onDelete`, so every deletable row also has a visible trash/remove button.
 8. **Visual accommodations.**
-   - *Reduce Motion*: house rule everywhere (dot rhythms become static opacities, eases
-     become instant).
+   - *Reduce Motion*: status dots update without the brief transition pulse, and eases
+     become instant.
    - *Differentiate Without Color*: color is never the only carrier. The dots swap to
      per-state SF-symbol shapes; route-diagram edges get per-status dash rhythms
      (`EdgeStatus.accessibleDash`: paused = long strokes, down = dots, captive portal =

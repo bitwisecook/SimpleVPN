@@ -72,8 +72,7 @@ extension VPNController {
         mgr.localizedDescription = name
         mgr.isEnabled = true
         try await mgr.saveToPreferences()
-        try await mgr.loadFromPreferences()
-        await loadAll()
+        await registerCreatedManager(mgr, id: id)
         selectedID = id
         Self.log.log("created ssh network tunnel id=\(id, privacy: .public)")
         return id
@@ -290,8 +289,6 @@ extension VPNController {
             let local = LocalNetworkCarveOut.live()
             if !local.isEmpty { options[LocalNetworkCarveOut.optionKey] = local as NSArray }
         }
-        // Establish-time default-gateway ownership, same as OpenVPN (RC3).
-        options["gatewayOwned"] = predictedGatewayOwned(id) as NSNumber
 
         mgr.isEnabled = true
         try await mgr.saveToPreferences()
@@ -306,7 +303,7 @@ extension VPNController {
             guard state.canSignIn, let socket=state.socketPath else { throw err(state.summary) }
             agentSocket=socket; options["sshAgentBroker"] = true as NSNumber
         }
-        try session.startTunnel(options: options)
+        try startWithInitialGateway(session, profile: id, options: options)
         if let agentSocket { watchSSHAgentSigning(id, session:session, socket:agentSocket) }
         Self.log.log("ssh network tunnel startTunnel dispatched for \(id, privacy: .public)")
         resyncStatuses()

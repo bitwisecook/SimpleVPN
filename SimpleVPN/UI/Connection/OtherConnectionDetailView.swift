@@ -106,6 +106,7 @@ struct OtherConnectionDetailView: View {
     let need: ConnectNeed?
     /// Anything the engine said last time — a failure message or a caution.
     let engineNote: String?
+    let replacementWarning: String?
     /// A password-capable tunnel can be completed here.  Configuration faults
     /// still use the normal precise-settings banner below.
     let inlineSignIn: AnyView?
@@ -133,6 +134,10 @@ struct OtherConnectionDetailView: View {
                             reveal: need.settingID.map { id in { reveal(id) } },
                             openSettings: openSettings)
                     }
+                }
+                if let replacementWarning {
+                    Label(replacementWarning, systemImage: "arrow.triangle.swap")
+                        .font(.callout).fixedSize(horizontal: false, vertical: true)
                 }
                 if let engineNote {
                     Label(engineNote, systemImage: "exclamationmark.circle.fill")
@@ -173,16 +178,10 @@ struct OtherConnectionDetailView: View {
 
     @ViewBuilder private var action: some View {
         if isActive {
-            Button("Disconnect", action: stop)
+            let title = dot == .busy ? "Cancel connecting" : "Disconnect"
+            Button(title, action: stop)
                 .buttonStyle(.bordered).tint(.red)
-                // NAMED WITH THE CONNECTION, like the sidebar's per-row controls and
-                // unlike the detail header of an NE profile. That difference is
-                // load-bearing: `VPNCommands`' VPN ▸ Disconnect acts on the SELECTED
-                // NE PROFILE and cannot stop a subprocess tunnel, so a bare
-                // "Disconnect" here would claim the menu item's scope while meaning
-                // something else (VoiceOverWalkthroughTests step 8 reads exactly that
-                // distinction).
-                .accessibilityLabel("Disconnect \(name)")
+                .accessibilityLabel(title)
                 .accessibilityValue(dot.accessibilityDescription)
         } else if inlineSignIn == nil {
             // DISABLED, NEVER ABSENT. An absent button is indistinguishable from a
@@ -192,7 +191,7 @@ struct OtherConnectionDetailView: View {
                 .buttonStyle(.glassProminent)
                 .disabled(need != nil)
                 .accessibilityLabel("Connect \(name)")
-                .help(need?.sentence ?? "Connect \(name)")
+                .help(need?.sentence ?? replacementWarning ?? "Connect \(name)")
                 // The status word from the ONE vocabulary first, then the reason —
                 // every Connect control in this window reports the live state in its
                 // value, and `ConnectNeed.spokenValue` is the single place that

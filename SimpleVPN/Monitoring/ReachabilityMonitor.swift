@@ -20,10 +20,20 @@ final class ReachabilityMonitor {
 
     /// Live health per connected profile id. Absent ⇒ not connected / not yet sampled.
     private(set) var health: [String: Health] = [:]
+    /// Status indicators care about transitions, not the increasing stall age.
+    private(set) var stalledProfiles: Set<String> = []
 
     /// Latest full stats per connected profile — the world map reads each VPN's
     /// server endpoint from here to plot the hops (home → VPN(s) → egress).
     private(set) var latestStats: [String: TunnelStats] = [:]
+
+    struct TunnelAddresses: Equatable {
+        let ipv4: String?
+        let ipv6: String?
+    }
+
+    /// Address rows depend on these values instead of the traffic samples.
+    private(set) var tunnelAddresses: [String: TunnelAddresses] = [:]
 
     /// Shared throughput history per profile — the single backing for EVERY graph
     /// (main window, inspector, menu-bar sparkline) so the series persists across
@@ -57,44 +67,49 @@ final class ReachabilityMonitor {
 
     private struct Track { var prev: TunnelStats?; var lastRx: Date?; var txSinceRx: Int64 = 0 }
     private var track: [String: Track] = [:]
-    private var task: Task<Void, Never>?
+    @ObservationIgnored private var samplers: [String: Task<Void, Never>] = [:]
+    var isSampling: Bool { !samplers.isEmpty }
+    deinit { for sampler in samplers.values { sampler.cancel() } }
     private static let stallThreshold: TimeInterval = 8
     private static let interval: Duration = .seconds(1)   // 1 Hz: smooth enough to back the graphs
 
-    /// Idempotent: safe to call from several always-alive surfaces (menu-bar label,
-    /// main window). The first caller wins; later calls are no-ops until stopped.
-    func start(connectedIDs: @escaping () -> [String],
-               fetch: @escaping (String) async -> TunnelStats?) {
-        guard task == nil else { return }
-        task = Task { [weak self] in
-            while !Task.isCancelled {
-                guard let self else { return }
-                let ids = Set(connectedIDs())
-                for k in self.health.keys where !ids.contains(k) { self.health[k] = nil }
-                for k in self.track.keys where !ids.contains(k) { self.track[k] = nil }
-                for k in self.latestStats.keys where !ids.contains(k) { self.latestStats[k] = nil }
-                for k in self.history.keys where !ids.contains(k) { self.history[k] = nil }
-                for id in ids {
-                    if let s = await fetch(id) { self.latestStats[id] = s; self.ingest(id: id, s) }
+    /// Invoked on connection changes. A disconnected Mac has no sampler or timer.
+    func setConnectedProfiles(_ ids: Set<String>, fetch: @escaping @MainActor (String) async -> TunnelStats?) {
+        let connectedIDs = Set(samplers.keys)
+        guard connectedIDs != ids else { return }
+        for id in connectedIDs.subtracting(ids) {
+            samplers.removeValue(forKey: id)?.cancel()
+            health[id] = nil
+            stalledProfiles.remove(id)
+            track[id] = nil
+            latestStats[id] = nil
+            tunnelAddresses[id] = nil
+            history[id] = nil
+        }
+        // Each provider has its own IPC timeout. A slow provider must not
+        // postpone another VPN's health updates or restart its in-flight read.
+        for id in ids.subtracting(connectedIDs) {
+            samplers[id] = Task { [weak self] in
+                while !Task.isCancelled {
+                    let sample = await fetch(id)
+                    guard !Task.isCancelled else { return }
+                    if let sample { self?.record(sample, for: id) }
+                    do { try await Task.sleep(for: Self.interval, tolerance: .milliseconds(100)) }
+                    catch { return }
                 }
-                try? await Task.sleep(for: Self.interval)
             }
         }
     }
 
-    func stop() { task?.cancel(); task = nil }
+    private func record(_ sample: TunnelStats, for id: String) {
+        latestStats[id] = sample
+        let addresses = TunnelAddresses(ipv4: sample.tunnelIPv4, ipv6: sample.tunnelIPv6)
+        if tunnelAddresses[id] != addresses { tunnelAddresses[id] = addresses }
+        ingest(id: id, sample)
+    }
 
     func health(for id: String) -> Health? { health[id] }
-    func isStalled(_ id: String) -> Bool { if case .stalled = health[id] { return true }; return false }
-
-    /// The most severe health across all connected tunnels (stalled > quiet >
-    /// healthy) — for a single at-a-glance menu-bar indicator.
-    var worst: Health? {
-        health.values.max { severity($0) < severity($1) }
-    }
-    private func severity(_ h: Health) -> Int {
-        switch h { case .stalled: 2; case .quiet: 1; case .healthy: 0 }
-    }
+    func isStalled(_ id: String) -> Bool { stalledProfiles.contains(id) }
 
     private func ingest(id: String, _ s: TunnelStats) {
         var t = track[id] ?? Track()
@@ -125,6 +140,11 @@ final class ReachabilityMonitor {
 
     private func publishHealth(_ value: Health, for id: String) {
         if health[id] != value { health[id] = value }
+        if case .stalled = value {
+            if !stalledProfiles.contains(id) { stalledProfiles.insert(id) }
+        } else if stalledProfiles.contains(id) {
+            stalledProfiles.remove(id)
+        }
     }
 }
 

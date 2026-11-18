@@ -6,6 +6,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"net/netip"
+
+	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 )
 
 var (
@@ -189,15 +191,7 @@ func parse(raw []byte, quote bool) (packet, error) {
 }
 
 func sum(raw []byte) uint16 {
-	var value uint32
-	for len(raw) >= 2 {
-		value += uint32(binary.BigEndian.Uint16(raw))
-		raw = raw[2:]
-	}
-	if len(raw) == 1 {
-		value += uint32(raw[0]) << 8
-	}
-	return fold(value)
+	return checksum.Checksum(raw, 0)
 }
 
 func fold(value uint32) uint16 {
@@ -213,8 +207,8 @@ func (p packet) pseudoSum() uint32 {
 }
 
 // RFC 1624 update also works for a quoted TCP header whose payload is absent.
-// A complete packet's checksums are subsequently rebuilt, including ICMPv6's
-// pseudo header. UDP's optional IPv4 zero checksum remains zero.
+// Address-only translation requires no second pass over the validated payload.
+// ICMP errors additionally change an embedded quote and rebuild the outer checksum.
 func (p *packet) replaceAddress(source bool, address netip.Addr) {
 	offset, old := p.dstOffset, p.dst
 	if source {

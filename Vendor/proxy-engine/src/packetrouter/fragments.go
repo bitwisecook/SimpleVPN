@@ -12,8 +12,14 @@ import (
 	"time"
 )
 
+// An empty port identifies capture input. Registered VPN port IDs are nonempty.
+type fragmentScope struct {
+	port       string
+	generation uint64
+}
+
 type fragmentKey struct {
-	scope    string
+	scope    fragmentScope
 	src, dst netip.Addr
 	id       uint32
 	protocol byte
@@ -44,7 +50,7 @@ type reassembler struct {
 	bytes  int
 }
 
-func fragmentInfo(raw []byte, scope string) (fragmentKey, fragmentMeta, int, bool, int, bool, error) {
+func fragmentInfo(raw []byte, scope fragmentScope) (fragmentKey, fragmentMeta, int, bool, int, bool, error) {
 	k := fragmentKey{scope: scope}
 	m := fragmentMeta{}
 	if len(raw) < 20 || len(raw) > 65535 {
@@ -103,10 +109,14 @@ func fragmentInfo(raw []byte, scope string) (fragmentKey, fragmentMeta, int, boo
 // No fragment is forwarded until the complete datagram is validated. Overlap
 // kills the entire group. All scopes share strict context, segment and memory
 // ceilings; peer/generation are part of the incoming scope.
-func (a *reassembler) accept(raw []byte, scope string) ([]byte, *fragmentMeta, bool, error) {
+func (a *reassembler) accept(raw []byte, scope fragmentScope) ([]byte, *fragmentMeta, bool, error) {
 	k, meta, offset, more, at, fragmented, err := fragmentInfo(raw, scope)
-	if err != nil || !fragmented {
-		return raw, nil, false, err
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if !fragmented {
+		// Translation mutates this buffer and the selected VPN can queue it.
+		return bytes.Clone(raw), nil, false, nil
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -198,7 +208,8 @@ func (a *reassembler) accept(raw []byte, scope string) ([]byte, *fragmentMeta, b
 	if end != group.total || group.header == nil {
 		return nil, nil, true, nil
 	}
-	packet := append([]byte(nil), group.header...)
+	packet := make([]byte, len(group.header), len(group.header)+group.total)
+	copy(packet, group.header)
 	for _, part := range group.parts {
 		packet = append(packet, part.data...)
 	}
@@ -211,7 +222,8 @@ func (a *reassembler) accept(raw []byte, scope string) ([]byte, *fragmentMeta, b
 		binary.BigEndian.PutUint16(packet[10:], ^sum(packet[:meta.at]))
 	}
 	a.remove(k)
-	return packet, &meta, false, nil
+	original := group.meta
+	return packet, &original, false, nil
 }
 
 func (a *reassembler) close() {

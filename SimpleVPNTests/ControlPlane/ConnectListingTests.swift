@@ -79,6 +79,31 @@ struct ConnectListingTests {
     /// Note what is NOT a parameter of `rowTags`: anything about running. The bug was
     /// only expressible because the view could reach a live manager while deciding
     /// what to draw.
+    @Test func disconnectUsesOnlyTheFocusedSelectionAndItsOwningStore() {
+        func target(_ tag: String?) -> ConnectListing.DisconnectTarget? {
+            .resolve(selection: tag, profileIsActive: { $0 == "shared" },
+                     tunnelIsActive: { $0 == "shared" }, activeNativeID: "shared")
+        }
+        #expect(target("shared") == .profile("shared"))
+        #expect(target("tunnel:shared") == .tunnel("shared"))
+        #expect(target("native:shared") == .native("shared"))
+        #expect(target("native:other") == nil)
+        #expect(target("tunnel:other") == nil)
+        #expect(target("new-vpn:") == nil)
+        #expect(target(nil) == nil)
+    }
+
+    @Test func selectionFollowsSurvivingRowsAcrossInventoryChanges() {
+        let previous = ["office", "native:home", "tunnel:lab"]
+        #expect(ConnectListing.selection(afterRemovingFrom: previous, available: ["office", "tunnel:lab"],
+                                         selected: "native:home") == "tunnel:lab")
+        #expect(ConnectListing.selection(afterRemovingFrom: previous, available: ["native:home"],
+                                         selected: "office") == "native:home")
+        #expect(ConnectListing.selection(afterRemovingFrom: [], available: previous,
+                                         selected: "native:home") == "native:home")
+        #expect(ConnectListing.selection(afterRemovingFrom: previous, available: [], selected: "office") == nil)
+    }
+
     @Test func everyKindAppears() {
         let profileKinds = VPNKind.allCases.filter { $0.transport == .packetTunnel }
         // The packet-tunnel kinds are NE profiles, identified by their own ids. The KIND

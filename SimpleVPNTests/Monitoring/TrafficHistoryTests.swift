@@ -42,6 +42,68 @@ struct TrafficHistoryTests {
         { i in i == spikeAt ? (in: spike, out: spike / 2) : (in: inRate, out: outRate) }
     }
 
+    @MainActor
+    @Test func aSlowProfileDoesNotDelayAnotherProfileOrRestartOnListChanges() async {
+        let monitor = ReachabilityMonitor()
+        var pending: CheckedContinuation<Void, Never>?
+        var originalWasCancelled: Bool?
+        var secondProfiles: [String] = []
+        monitor.setConnectedProfiles(["slow"]) { _ in
+            await withCheckedContinuation { pending = $0 }
+            originalWasCancelled = Task.isCancelled
+            return nil
+        }
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(2)
+        while pending == nil && clock.now < deadline { await Task.yield() }
+        guard let pending else { Issue.record("The initial request did not start"); return }
+
+        monitor.setConnectedProfiles(["slow", "healthy"]) { id in
+            secondProfiles.append(id)
+            return nil
+        }
+        while !secondProfiles.contains("healthy") && clock.now < deadline { await Task.yield() }
+        pending.resume()
+        while originalWasCancelled == nil && clock.now < deadline { await Task.yield() }
+        monitor.setConnectedProfiles([]) { _ in nil }
+        #expect(secondProfiles == ["healthy"])
+        #expect(originalWasCancelled == false)
+    }
+
+    @MainActor
+    @Test("the last disconnect removes the sampler and discards its in-flight result")
+    func samplingStopsOnDisconnect() async {
+        let monitor = ReachabilityMonitor()
+        #expect(!monitor.isSampling)
+        let (requests, began) = AsyncStream<Void>.makeStream()
+        let (completed, ended) = AsyncStream<Void>.makeStream()
+        var pending: CheckedContinuation<TunnelStats?, Never>?
+        let sample = TunnelStats(profile: "home", timestamp: 2, connectedSince: 1, reconnects: 0,
+                                 bytesIn: 32, bytesOut: 8, serverEndpoint: "", tunnelIPv4: "",
+                                 dnsServers: [], proxies: [])
+        monitor.setConnectedProfiles(["home"]) { _ in
+            defer { ended.yield(()) }
+            return await withCheckedContinuation { continuation in
+                pending = continuation
+                began.yield(())
+            }
+        }
+        var started = requests.makeAsyncIterator()
+        _ = await started.next()
+        #expect(monitor.isSampling)
+        monitor.setConnectedProfiles([]) { _ in
+            Issue.record("An idle tunnel requested a sample")
+            return nil
+        }
+        pending?.resume(returning: sample)
+        var completion = completed.makeAsyncIterator()
+        _ = await completion.next()
+        ended.finish()
+        began.finish()
+        #expect(!monitor.isSampling)
+        #expect(monitor.stats(for: "home") == nil)
+    }
+
     // MARK: Full resolution
 
     @Test func tierZeroKeepsEverySampleAtOneSecond() throws {
@@ -63,6 +125,20 @@ struct TrafficHistoryTests {
         #expect(last.maxOut == 118)
         #expect(h.latest?.avgIn == 59)
         #expect(h.newestTime == epoch.addingTimeInterval(59))
+    }
+
+    @Test func aFreshConnectionShowsItsFirstSampleImmediately() {
+        var history = TrafficHistory()
+        let first = epoch.addingTimeInterval(7)
+        history.record(inRate: 8_000, outRate: 0, at: first)
+        #expect(history.samples(in: first...first).map(\.avgIn) == [8_000])
+        #expect(history.peak(in: first...first) == 8_000)
+
+        let second = first.addingTimeInterval(1)
+        history.record(inRate: 12_000, outRate: 0, at: second)
+        #expect(history.oldestTime == first)
+        #expect(history.samples(in: first...second).map(\.interval) == [1, 1])
+        #expect(history.peak(in: first...second) == 12_000)
     }
 
     @Test func samplesArrivingOutOfOrderAreIgnored() {

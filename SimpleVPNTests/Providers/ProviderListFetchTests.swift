@@ -38,15 +38,13 @@ struct ProviderListFetchPolicyTests {
         #expect(refusal?.sentence.contains("Settings") == true)
     }
 
-    /// "Only while connected" is ON by default, so the ordinary path routes the
-    /// request through the provider's own exit — where they learn essentially nothing
-    /// new, because they are already carrying the traffic.
+    /// This preference gates the time of the request. macOS selects its route.
     @Test("waiting for the tunnel is the default, and it says why")
     func waitsForTheTunnelByDefault() {
         let c = Self.allowed([])          // nothing connected
         let refusal = ProviderListFetchPolicy.refusal(for: VPNServiceProviderCatalog.mullvad, c)
         #expect(refusal == .waitingForTunnel)
-        #expect(refusal?.sentence.contains("your own address") == true)
+        #expect(refusal?.sentence.contains("Connect first") == true)
     }
 
     /// Connected to that provider ⇒ nothing in the way.

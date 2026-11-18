@@ -78,7 +78,7 @@ final class LinkStateMonitor {
     /// once: a captive portal explains every other symptom, so it wins; an explicit
     /// user pause outranks a stall (of course it isn't passing traffic); a stall only
     /// means anything while the tunnel is nominally up.
-    func state(for id: String) -> State {
+    func state(for id: String, includeStallAge: Bool = true) -> State {
         guard let profile = vpn.profiles.first(where: { $0.id == id }) else { return .disconnected }
         if vpn.captivePortalSuspected, vpn.incidents[id] != nil { return .captivePortal }
         if vpn.pausedProfiles.contains(id) { return .paused }
@@ -86,7 +86,12 @@ final class LinkStateMonitor {
         case .connecting: return .connecting
         case .disconnecting: return .disconnecting
         case .connected:
-            if case .stalled(let s) = reach?.health(for: id) { return .stalled(seconds: s) }
+            if reach?.isStalled(id) == true {
+                if includeStallAge, case .stalled(let seconds) = reach?.health(for: id) {
+                    return .stalled(seconds: seconds)
+                }
+                return .stalled(seconds: nil)
+            }
             return .connected
         case .reasserting:
             // NE is re-establishing: that IS the impaired-but-connected case.
@@ -95,10 +100,9 @@ final class LinkStateMonitor {
         }
     }
 
-    /// The dot presentation. Goes through DotState so the colour/rhythm mapping stays
-    /// the single one it already is — this only decides which DotState to ask for.
+    /// The dot observes transitions without subscribing to the changing stall age.
     func dot(for id: String) -> DotState {
-        switch state(for: id) {
+        switch state(for: id, includeStallAge: false) {
         case .captivePortal: .captivePortal
         case .paused: .paused
         case .stalled: .degraded

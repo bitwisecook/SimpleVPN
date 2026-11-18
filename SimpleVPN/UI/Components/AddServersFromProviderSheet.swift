@@ -73,7 +73,7 @@ struct AddServersFromProviderSheet: View {
     /// that are actually up, matched on the SHIPPED suffix.
     private var connectedProviders: Set<VPNServiceProviderID> {
         ProviderListFetchPolicy.connected(
-            hosts: vpn.profiles.filter { vpn.isEngaged(id: $0.id) }.map(\.server))
+            hosts: vpn.profiles.filter { $0.status == .connected && !vpn.pausedProfiles.contains($0.id) }.map(\.server))
     }
 
     private var refusal: ProviderListFetchPolicy.Refusal? {
@@ -104,6 +104,9 @@ struct AddServersFromProviderSheet: View {
         .padding(18)
         .resizablePanel(idealWidth: 460, idealHeight: 520)
         .onDisappear { task?.cancel() }
+        .onChange(of: refusal) {
+            if refusal != nil { task?.cancel() }
+        }
         .confirmationDialog(ProviderPickerCopy.consentTitle(provider),
                             isPresented: $consenting, titleVisibility: .visible) {
             Button(ProviderPickerCopy.consentConfirm(provider)) {
@@ -113,7 +116,7 @@ struct AddServersFromProviderSheet: View {
             Button("Not Now", role: .cancel) {}
         } message: {
             Text(ProviderPickerCopy.consentMessage(
-                provider, throughTunnel: connectedProviders.contains(provider.id)))
+                provider, connectedToProvider: connectedProviders.contains(provider.id)))
         }
         // THE APPROVAL FLOW. Held here rather than in the fetch: producing a diff
         // changes nothing, and the only thing that can apply a held one is the
@@ -282,6 +285,7 @@ struct AddServersFromProviderSheet: View {
     }
 
     private func start() {
+        if let refusal { failure = refusal.sentence; return }
         failure = nil
         progress = ProviderFetchProgress(stage: .contacting)
         showsIndicator = false
@@ -295,6 +299,7 @@ struct AddServersFromProviderSheet: View {
             }
             defer { reveal.cancel(); task = nil; showsIndicator = false }
             do {
+                if let refusal { failure = refusal.sentence; return }
                 let fresh = try await ProviderListFetcher.shared.fetch(provider) { p in
                     progress = p
                 }
@@ -305,6 +310,7 @@ struct AddServersFromProviderSheet: View {
                 // `ProviderListUpdateSheet`, which is the only place in the app that
                 // can pass `confirmed: true`. Declining that sheet leaves this state
                 // exactly as this line found it.
+                guard !Task.isCancelled, refusal == nil else { return }
                 let diff = ProviderServerListDiff.between(stored: stored, incoming: fresh)
                 guard !diff.needsConfirmation else {
                     announce(ProviderFetchOutcome
@@ -324,16 +330,15 @@ struct AddServersFromProviderSheet: View {
                 // Already in the user's words, and every one of them names the fix
                 // and says nothing has been changed. A raw `URLError` shown here is
                 // how somebody ends up reading "cancelled".
-                announce(.failed(failure.sentence))
+                if !Task.isCancelled { announce(.failed(failure.sentence)) }
             } catch {
-                announce(.failed(ProviderFetchOutcome.cancelled.sentence(provider: provider)))
+                if !Task.isCancelled { announce(.failed(ProviderFetchOutcome.cancelled.sentence(provider: provider))) }
             }
         }
     }
 
     private func stop() {
         task?.cancel()
-        task = nil
         showsIndicator = false
         announce(.cancelled)
     }

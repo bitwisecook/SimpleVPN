@@ -248,7 +248,7 @@
   <a href="#ssh-password">Password</a>
   <a href="#ssh-mode">Mode</a>
   <a href="#ssh-socks-port">Local SOCKS Port</a>
-  <a href="#ssh-system-proxy">Route Mac Traffic</a>
+  <a href="#ssh-system-proxy">System SOCKS Proxy</a>
   <a href="#ssh-forwards">Port Forwards</a>
   <a href="#ssh-strict-host-key">Host Key Checking</a>
   <a href="#ssh-pinned-host-key">Pinned Host Key</a>
@@ -283,7 +283,7 @@
   <a href="#oc-version-string">Client Version String</a>
   <a href="#oc-reconnect-timeout">Reconnect Timeout</a>
   <a href="#oc-socks-port">Local SOCKS Port</a>
-  <a href="#oc-system-proxy">Route Mac Traffic</a>
+  <a href="#oc-system-proxy">System SOCKS Proxy</a>
   <a href="#oc-local-lan">Allow local network access</a>
   <a href="#oc-mtu">MTU</a>
   <a href="#oc-base-mtu">Base MTU</a>
@@ -956,11 +956,11 @@ exports that explicitly include secrets; an ordinary export requires pairing aga
 
 <h2 id="ssh-socks-port">Local SOCKS Port</h2>
 <p class="default">Default: 1080.</p>
-<p>Where on this Mac the tunnel offers its proxy: point apps (or the whole Mac, below) at <code>127.0.0.1</code> and this port while connected. Two tunnels can't share a port — give each its own.</p>
+<p>Where on this Mac the tunnel offers its proxy: point apps at <code>127.0.0.1</code> and this port while connected. Two tunnels can't share a port — give each its own.</p>
 
-<h2 id="ssh-system-proxy">Route Mac Traffic Through This Proxy</h2>
+<h2 id="ssh-system-proxy">Use as System SOCKS Proxy</h2>
 <p class="default">Default: off.</p>
-<p>Points the active network service's SOCKS proxy at the tunnel while it's connected (macOS asks for your admin password), and restores the old setting on disconnect. Flipping it while connected applies immediately. Off, only apps you point at the proxy yourself use the tunnel.</p>
+<p>Lets apps that use the macOS SOCKS proxy connect through this tunnel. macOS may ask for administrator approval. SimpleVPN follows the primary network service when you switch networks. If several tunnels request this setting, the most recently enabled one takes over. Disconnecting it returns control to the previous tunnel. After the last tunnel disconnects, SimpleVPN restores the original SOCKS settings unless you or another app have changed them. If SimpleVPN quits unexpectedly, reopen it to restore the previous settings.</p>
 
 <h2 id="ssh-forwards">Port Forwards</h2>
 <p class="default">Optional.</p>
@@ -1106,7 +1106,7 @@ who wants them.</p>
 
 <h2 id="oc-prefer-in-process">Run In-Process</h2>
 <p class="default">Default: off — the <code>openconnect</code> command-line tool runs the VPN.</p>
-<p>Carries this VPN with SimpleVPN's own built-in OpenConnect engine, as a full system tunnel, instead of launching the <code>openconnect</code> tool. As a system tunnel it routes the whole Mac by itself, so no <a href="#oc-socks-port">SOCKS proxy</a> is opened and <a href="#oc-system-proxy">Route Mac Traffic Through This Proxy</a> has nothing to do.</p>
+<p>Carries this VPN with SimpleVPN's own built-in OpenConnect engine, as a full system tunnel, instead of launching the <code>openconnect</code> tool. As a system tunnel it routes the whole Mac by itself, so no <a href="#oc-socks-port">SOCKS proxy</a> is opened and <a href="#oc-system-proxy">Use as System SOCKS Proxy</a> has nothing to do.</p>
 <p>The built-in engine deliberately carries only what it can carry exactly: the server, the realm, a pinned certificate, the sign-in browser and your credentials. Any other setting on this screen — a port, a <a href="#oc-cafile">CA file</a>, a <a href="#oc-client-cert">client certificate</a>, a <a href="#oc-csd-wrapper">host-checker wrapper</a>, a connection proxy, <a href="#oc-compression">compression</a>, <a href="#oc-pfs">PFS</a>, an <a href="#oc-mtu">MTU</a>, a <a href="#oc-reconnect-timeout">timeout</a> or <a href="#oc-extra-args">extra arguments</a> — sends the connection back to the tool, and the editor says so rather than letting the toggle look effective. Silently dropping one of those would connect with weaker settings than you configured.</p>
 <div class="warn">Newer than the subprocess path. Check it against your own gateway before relying on it.</div>
 
@@ -1150,12 +1150,12 @@ who wants them.</p>
 
 <h2 id="oc-socks-port">Local SOCKS Port</h2>
 <p class="default">Default: 1080.</p>
-<p>Where on this Mac the tunnel offers its proxy: OpenConnect hands the tunnel to <code>ocproxy</code>, which listens on <code>127.0.0.1</code> and this port. That is what makes these VPNs work without administrator rights — nothing touches the system's network configuration. Point apps at the proxy, or turn on <a href="#oc-system-proxy">Route Mac Traffic Through This Proxy</a> to point the whole Mac at it. Two tunnels can't share a port, so give each its own.</p>
+<p>Where on this Mac the tunnel offers its proxy: OpenConnect hands the tunnel to <code>ocproxy</code>, which listens on <code>127.0.0.1</code> and this port. That is what makes these VPNs work without administrator rights — nothing touches the system's network configuration. Point apps at the proxy, or turn on <a href="#oc-system-proxy">Use as System SOCKS Proxy</a> for apps that follow the macOS SOCKS proxy setting. Two tunnels can't share a port, so give each its own.</p>
 <p>With <a href="#oc-prefer-in-process">Run In-Process</a> in effect there is no proxy at all — the tunnel carries the whole Mac directly — and this setting doesn't apply.</p>
 
-<h2 id="oc-system-proxy">Route Mac Traffic Through This Proxy</h2>
+<h2 id="oc-system-proxy">Use as System SOCKS Proxy</h2>
 <p class="default">Default: off.</p>
-<p>Points the active network service's SOCKS proxy at the tunnel while it's connected (macOS asks for your admin password), and restores the old setting on disconnect. Flipping it while connected applies immediately. Off, only apps you point at the <a href="#oc-socks-port">proxy</a> yourself use the tunnel.</p>
+<p>Lets apps that use the macOS SOCKS proxy connect through this tunnel. macOS may ask for administrator approval. SimpleVPN follows the primary network service when you switch networks. If several tunnels request this setting, the most recently enabled one takes over. Disconnecting it returns control to the previous tunnel. After the last tunnel disconnects, SimpleVPN restores the original SOCKS settings unless you or another app have changed them. If SimpleVPN quits unexpectedly, reopen it to restore the previous settings.</p>
 
 <h2 id="oc-local-lan">Allow local network access</h2>
 <p class="default">Default: off.</p>

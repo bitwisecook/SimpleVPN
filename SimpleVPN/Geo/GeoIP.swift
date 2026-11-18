@@ -6,8 +6,7 @@
 //  (MMDB spec 2.0) reader sufficient for DB-IP Country Lite / GeoLite2-Country
 //  files, a static ISO 3166-1 centroid/name/flag table, and the app-side
 //  EndpointLocator that turns profile endpoints into map pins (DNS → GeoIP →
-//  centroid) with a 7-day persistent host cache. No third-party code; the whole
-//  DB (~10 MB) loads into memory — no mmap games.
+//  centroid) with a 7-day persistent host cache.
 //
 
 import Foundation
@@ -20,7 +19,7 @@ import Darwin
 /// and enough of the data section to walk a map to `country.iso_code`.
 nonisolated struct GeoIPDatabase: Sendable {
 
-    private let bytes: [UInt8]
+    private let bytes: Data
     private let nodeCount: Int
     private let recordSize: Int     // bits per record: 24 / 28 / 32
     private let ipVersion: Int      // 4 or 6 (DB-IP ships 6, v4 stored at ::/96)
@@ -35,11 +34,14 @@ nonisolated struct GeoIPDatabase: Sendable {
 
     /// Also the test seam — fixtures construct tiny synthetic DBs in memory.
     init?(data: Data) {
-        let all = [UInt8](data)
-        // Metadata marker \xAB\xCD\xEF"MaxMind.com", last occurrence wins.
-        let marker: [UInt8] = [0xAB, 0xCD, 0xEF] + Array("MaxMind.com".utf8)
-        guard let markerStart = Self.lastIndex(of: marker, in: all) else { return nil }
-        let meta = markerStart + marker.count   // metadata map; also its pointer base
+        // Keep mapped file storage for the lifetime of the database. A slice
+        // supplied by a caller may need rebasing because MMDB offsets start at zero.
+        let all = data.startIndex == 0 ? data : Data(data)
+        let marker = Data([0xAB, 0xCD, 0xEF]) + Data("MaxMind.com".utf8)
+        // MMDB puts its metadata in the final 128 KiB. A malformed database
+        // must not make the first lookup scan the entire file.
+        let tail = max(0, all.count - 128 * 1024)..<all.count
+        guard let meta = all.range(of: marker, options: .backwards, in: tail)?.upperBound else { return nil }
         guard let ncOffset = Self.mapValue(forKey: "node_count", at: meta, base: meta, in: all),
               let rsOffset = Self.mapValue(forKey: "record_size", at: meta, base: meta, in: all),
               let ivOffset = Self.mapValue(forKey: "ip_version", at: meta, base: meta, in: all),
@@ -121,8 +123,8 @@ nonisolated struct GeoIPDatabase: Sendable {
 
     private struct Control { var type: Int; var size: Int; var payload: Int }
 
-    private static func control(at offset: Int, in bytes: [UInt8]) -> Control? {
-        guard offset < bytes.count else { return nil }
+    private static func control(at offset: Int, in bytes: Data) -> Control? {
+        guard offset >= 0, offset < bytes.count else { return nil }
         var type = Int(bytes[offset]) >> 5
         var size = Int(bytes[offset]) & 0x1F
         var p = offset + 1
@@ -151,7 +153,7 @@ nonisolated struct GeoIPDatabase: Sendable {
 
     /// Resolve a pointer field to its absolute target offset (`base` = start of
     /// the section pointers are relative to: data section, or metadata map).
-    private static func pointerTarget(_ c: Control, base: Int, in bytes: [UInt8]) -> Int? {
+    private static func pointerTarget(_ c: Control, base: Int, in bytes: Data) -> Int? {
         let ss = (c.size >> 3) & 0x3
         let vvv = UInt64(c.size & 0x7)
         guard let tail = uintBE(at: c.payload, count: ss + 1, in: bytes) else { return nil }
@@ -166,7 +168,7 @@ nonisolated struct GeoIPDatabase: Sendable {
     }
 
     /// Follow pointer chains to the concrete value's control data.
-    private static func dereference(at offset: Int, base: Int, in bytes: [UInt8]) -> Control? {
+    private static func dereference(at offset: Int, base: Int, in bytes: Data) -> Control? {
         var offset = offset
         for _ in 0..<16 {                       // bound against corrupt files
             guard let c = control(at: offset, in: bytes) else { return nil }
@@ -178,22 +180,22 @@ nonisolated struct GeoIPDatabase: Sendable {
     }
 
     /// Offset just past the value at `offset` (never follows pointers).
-    private static func skipValue(at offset: Int, in bytes: [UInt8]) -> Int? {
-        guard let c = control(at: offset, in: bytes) else { return nil }
+    private static func skipValue(at offset: Int, in bytes: Data, depth: Int = 0) -> Int? {
+        guard depth < 64, let c = control(at: offset, in: bytes) else { return nil }
         switch c.type {
         case 1:                                 // pointer: control + 1–4 bytes
             return c.payload + ((c.size >> 3) & 0x3) + 1
         case 7:                                 // map: size × (key, value)
             var o = c.payload
             for _ in 0..<(c.size * 2) {
-                guard let next = skipValue(at: o, in: bytes) else { return nil }
+                guard let next = skipValue(at: o, in: bytes, depth: depth + 1) else { return nil }
                 o = next
             }
             return o
         case 11:                                // array: size values
             var o = c.payload
             for _ in 0..<c.size {
-                guard let next = skipValue(at: o, in: bytes) else { return nil }
+                guard let next = skipValue(at: o, in: bytes, depth: depth + 1) else { return nil }
                 o = next
             }
             return o
@@ -204,13 +206,13 @@ nonisolated struct GeoIPDatabase: Sendable {
         }
     }
 
-    private static func string(at offset: Int, base: Int, in bytes: [UInt8]) -> String? {
+    private static func string(at offset: Int, base: Int, in bytes: Data) -> String? {
         guard let c = dereference(at: offset, base: base, in: bytes), c.type == 2,
               c.payload + c.size <= bytes.count else { return nil }
         return String(decoding: bytes[c.payload..<(c.payload + c.size)], as: UTF8.self)
     }
 
-    private static func uint(at offset: Int, base: Int, in bytes: [UInt8]) -> UInt64? {
+    private static func uint(at offset: Int, base: Int, in bytes: Data) -> UInt64? {
         guard let c = dereference(at: offset, base: base, in: bytes),
               c.type == 5 || c.type == 6 || c.type == 9, c.size <= 8 else { return nil }
         return uintBE(at: c.payload, count: c.size, in: bytes)
@@ -218,7 +220,7 @@ nonisolated struct GeoIPDatabase: Sendable {
 
     /// Offset of the value for `key` in the map at `offset`, or nil.
     private static func mapValue(forKey key: String, at offset: Int, base: Int,
-                                 in bytes: [UInt8]) -> Int? {
+                                 in bytes: Data) -> Int? {
         guard let c = dereference(at: offset, base: base, in: bytes), c.type == 7 else { return nil }
         var o = c.payload
         for _ in 0..<c.size {
@@ -231,24 +233,11 @@ nonisolated struct GeoIPDatabase: Sendable {
         return nil
     }
 
-    private static func uintBE(at offset: Int, count: Int, in bytes: [UInt8]) -> UInt64? {
+    private static func uintBE(at offset: Int, count: Int, in bytes: Data) -> UInt64? {
         guard count >= 0, count <= 8, offset >= 0, offset + count <= bytes.count else { return nil }
         var v: UInt64 = 0
         for i in 0..<count { v = v << 8 | UInt64(bytes[offset + i]) }
         return v
-    }
-
-    private static func lastIndex(of needle: [UInt8], in haystack: [UInt8]) -> Int? {
-        guard haystack.count >= needle.count, !needle.isEmpty else { return nil }
-        var i = haystack.count - needle.count
-        outer: while i >= 0 {
-            for j in 0..<needle.count where haystack[i + j] != needle[j] {
-                i -= 1
-                continue outer
-            }
-            return i
-        }
-        return nil
     }
 
     /// Network-order address bytes: 4 for dotted-quad IPv4, 16 for IPv6.
@@ -269,9 +258,8 @@ nonisolated struct GeoIPDatabase: Sendable {
 /// map pins just don't show. Tools/fetch-geoip.sh maintains the bundled copy
 /// (Vendor/geoip/dbip-country-lite.mmdb, DB-IP Country Lite, CC-BY-4.0).
 enum GeoIP {
-    // nonisolated so the first lookup never has to hop to (and block) the main
-    // actor while the DB parses. `warm()` forces that one-time parse onto a
-    // background thread at launch so no lookup ever pays for it inline.
+    // The first lookup maps the file and reads its metadata. Tree pages are
+    // faulted in only for the addresses the user actually looks up.
     nonisolated static let shared: GeoIPDatabase? = load()
 
     private nonisolated static func load() -> GeoIPDatabase? {
@@ -279,9 +267,7 @@ enum GeoIP {
             .flatMap { GeoIPDatabase(url: $0) }
     }
 
-    static func warm() {
-        Task.detached(priority: .utility) { _ = GeoIP.shared }
-    }
+
 }
 
 // MARK: - Country centroids / names / flags

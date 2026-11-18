@@ -127,25 +127,31 @@ nonisolated struct TrafficHistory: Sendable {
     /// chart cross an hour boundary without a visible seam or a doubled line.
     /// Result is ordered oldest → newest with strictly increasing `start`.
     func samples(in range: ClosedRange<Date>) -> [Bucket] {
-        // Where each finer tier takes over, rounded UP to the coarser tier's grid.
-        var handover = [Date?](repeating: nil, count: tiers.count)
-        for i in 0..<(tiers.count - 1) {
-            guard let oldest = tiers[i].oldest?.start else { continue }
-            handover[i] = Self.align(oldest, to: tiers[i + 1].interval, rounding: .up)
-        }
+        var result: [Bucket] = []
+        forEachBucket(in: range) { result.append($0) }
+        return result
+    }
 
-        var out: [Bucket] = []
-        // Coarsest first so the output comes out in time order.
-        for i in stride(from: tiers.count - 1, through: 0, by: -1) {
-            // This tier serves from its own handover point (or the start of the
-            // request) up to the point the next finer tier takes over.
-            let lower = handover[i].map { max($0, range.lowerBound) } ?? range.lowerBound
-            let upper = i > 0 ? (handover[i - 1] ?? Date.distantFuture) : Date.distantFuture
-            guard lower < upper else { continue }
-            out.append(contentsOf: tiers[i].buckets(overlapping: lower, before: upper,
-                                                    notAfter: range.upperBound))
+    // Closed buckets cascade immediately. Until a ring evicts its first bucket,
+    // it still holds the complete history at this resolution.
+    private var coarsestRequiredTier: Int {
+        tiers.firstIndex(where: { !$0.hasEvicted }) ?? (tiers.count - 1)
+    }
+
+    private func forEachBucket(in range: ClosedRange<Date>, _ visit: (Bucket) -> Void) {
+        var startOfTier: Date?
+        for i in (0...coarsestRequiredTier).reversed() {
+            let lower = max(range.lowerBound, startOfTier ?? range.lowerBound)
+            // Round the finer tier's oldest sample up to this tier's grid.
+            // Empty tiers have no handover until samples cascade into them.
+            startOfTier = i > 0 ? tiers[i - 1].oldest.map {
+                Self.align($0.start, to: tiers[i].interval, rounding: .up)
+            } : nil
+            let upper = startOfTier ?? Date.distantFuture
+            if lower < upper, lower <= range.upperBound {
+                tiers[i].forEachBucket(overlapping: lower, before: upper, notAfter: range.upperBound, visit)
+            }
         }
-        return out
     }
 
     /// The newest `count` full-resolution (1 s) buckets — the shape the old flat
@@ -161,7 +167,7 @@ nonisolated struct TrafficHistory: Sendable {
     /// on data arriving instead of needing a poller of its own.
     var newestTime: Date? { tiers[0].newest?.start }
     var oldestTime: Date? {
-        for i in stride(from: tiers.count - 1, through: 0, by: -1) {
+        for i in (0...coarsestRequiredTier).reversed() {
             if let t = tiers[i].oldest?.start { return t }
         }
         return nil
@@ -176,7 +182,9 @@ nonisolated struct TrafficHistory: Sendable {
     /// Highest rate in either direction anywhere in `range`, floored at 1 KB/s so
     /// an idle graph doesn't scale itself to noise.
     func peak(in range: ClosedRange<Date>) -> Double {
-        max(1_024, samples(in: range).map(\.peak).max() ?? 0)
+        var maximum = 1_024.0
+        forEachBucket(in: range) { maximum = max(maximum, $0.peak) }
+        return maximum
     }
 
     // MARK: - Bucket alignment
@@ -215,6 +223,7 @@ nonisolated struct TrafficHistory: Sendable {
         let capacity: Int
         private var storage: [Accum] = []
         private var head = 0
+        private(set) var hasEvicted = false
 
         init(interval: TimeInterval, capacity: Int) {
             self.interval = interval
@@ -233,6 +242,7 @@ nonisolated struct TrafficHistory: Sendable {
             if storage.count < capacity {
                 storage.append(a)                 // never wrapped yet ⇒ head is 0
             } else {
+                hasEvicted = true
                 storage[head] = a
                 head = (head + 1) % capacity
             }
@@ -259,17 +269,22 @@ nonisolated struct TrafficHistory: Sendable {
         /// and that begin no later than `notAfter`. Half-open on `upper` is what
         /// makes the tier handover exact: the bucket ending exactly AT the handover
         /// belongs to the coarse tier, the one starting there to the fine tier.
-        func buckets(overlapping lower: Date, before upper: Date, notAfter: Date) -> [Bucket] {
-            guard !storage.isEmpty else { return [] }
-            var out: [Bucket] = []
-            for i in 0..<storage.count {
-                let a = element(i)
-                if a.start > notAfter { break }          // ordered ⇒ nothing later qualifies
-                guard a.start < upper else { break }
-                guard a.start.addingTimeInterval(interval) > lower else { continue }
-                out.append(a.bucket(interval: interval))
+        func forEachBucket(overlapping lower: Date, before upper: Date, notAfter: Date,
+                           _ visit: (Bucket) -> Void) {
+            // The logical order remains sorted when the ring wraps. Skip the
+            // hours of retained samples preceding a small visible time window.
+            var low = 0
+            var high = storage.count
+            while low < high {
+                let mid = low + (high - low) / 2
+                if element(mid).start.addingTimeInterval(interval) <= lower { low = mid + 1 }
+                else { high = mid }
             }
-            return out
+            for i in low..<storage.count {
+                let a = element(i)
+                guard a.start <= notAfter, a.start < upper else { break }
+                visit(a.bucket(interval: interval))
+            }
         }
     }
 }

@@ -59,7 +59,7 @@ fi
 # lz4 is statically linked into this engine as well, so it is pinned on the same
 # policy as OpenSSL (see build-openvpn3-xcframework.sh's BREW_PINS block): a
 # `brew upgrade` between two rebuilds must not change the shipped binary quietly.
-LZ4_PIN="1.10.0"
+LZ4_PIN="1.11.1"
 have_lz4="$(awk '/^Version:/ {print $2; exit}' "$LZ4/lib/pkgconfig/liblz4.pc")"
 if [ "$have_lz4" != "$LZ4_PIN" ]; then
   echo "FATAL: lz4 is ${have_lz4:-not installed} but the pin is $LZ4_PIN."

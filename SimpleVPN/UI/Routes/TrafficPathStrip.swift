@@ -56,8 +56,9 @@ struct TrafficPathStrip: View {
         // announced by AccessibilityAnnouncer (gatewayChanged), never here,
         // so a switch is spoken exactly once.
         .accessibilityElement()
+        .accessibilityAddTraits(.isImage)
         .accessibilityLabel("Internet traffic path")
-        .accessibilityValue(blocked ? "Internet traffic is blocked; the selected VPN is unavailable" : pathDescription(ownerName: ownerName))
+        .accessibilityValue(blocked ? "Internet traffic is blocked because the selected VPN is unavailable" : pathDescription(ownerName: ownerName))
         // A switch (or an owner-disconnect fallback) is exactly a change of the
         // effective owner — animate on that, then settle. onChange only, so the
         // strip's first appearance draws still.

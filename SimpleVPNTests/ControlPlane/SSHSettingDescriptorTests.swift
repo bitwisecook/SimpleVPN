@@ -14,6 +14,29 @@ import Testing
 
 @MainActor
 struct SSHSettingDescriptorTests {
+    @Test func privateAskpassAnswersOnlyTheMatchingHopAndPromptOnce() throws {
+        let id = "alex@vpn.example"
+        let session = try SSHAskpass(target: .init(identity: id, password: "target secret"),
+                                     jump: .init(identity: id, password: "jump secret"))
+        let target = session.environment
+        var jump = target
+        jump[SSHAskpass.hopKey] = "jump"
+        #expect(SSHAskpass.response(prompt: "Enter passphrase for key", environment: jump) == nil)
+        #expect(SSHAskpass.response(prompt: "(alex@other.example) Password: ", environment: target) == nil)
+        #expect(SSHAskpass.response(prompt: id + "'s password: ", environment: jump) == Data("jump secret".utf8))
+        #expect(SSHAskpass.response(prompt: "(" + id + ") Password: ", environment: target) == Data("target secret".utf8))
+        #expect(SSHAskpass.response(prompt: id + "'s password: ", environment: jump) == nil)
+    }
+
+    @Test func discoveryReportsOnlyTheRemoteHandshake() {
+        let local = "debug1: Local version string SSH-2.0-OpenSSH_10.3"
+        #expect(EndpointDiscovery.sshIdentificationSummary(local).isEmpty)
+        let server = "debug1: Remote protocol version 2.0, remote software version OpenSSH_9.7"
+        let methods = "debug1: Authentications that can continue: publickey,password"
+        #expect(EndpointDiscovery.sshIdentificationSummary([local, server, methods].joined(separator: "\n"))
+            == "OpenSSH_9.7\npublickey,password")
+    }
+
 
     // MARK: Catalog shape
 

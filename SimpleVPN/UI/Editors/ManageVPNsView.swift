@@ -25,6 +25,7 @@ struct ManageVPNsView: View {
     @State private var creationFailure: UserFacingError?
     private static let newVPNTag = "new-vpn:"
     @State private var selection: String?
+    @State private var selectionBeforeAdding: String?
     @FocusState private var sidebarFocused: Bool
     /// The app-wide "Find a Setting…" sheet (⌘⇧F, or the toolbar).
     @State private var showFindSetting = false
@@ -187,6 +188,7 @@ struct ManageVPNsView: View {
         // right for the user, useless as a handle. The scene id ("manage") is
         // the stable handle; AppKit publishes it as the window's AX identifier.
         .navigationTitle("Manage VPNs")
+        .focusedSceneValue(\.selectedVPNTag, selection)
     }
 
     private var documentPresentationContent: some View {
@@ -280,7 +282,11 @@ struct ManageVPNsView: View {
         // documents for a cross-tab reveal. `selectProfileForRoute` acts at most once
         // per generation, so having two callers is free.
         .onAppear { selectProfileForRoute() }
-        .onChange(of: order.allTags) { seedInitialSelection() }
+        .onChange(of: order.allTags) { oldTags, newTags in
+            guard seeded else { seedInitialSelection(); return }
+            guard selection != Self.newVPNTag else { return }
+            selection = ConnectListing.selection(afterRemovingFrom: oldTags, available: newTags, selected: selection)
+        }
         .alert("No VPN for that setting", isPresented: unroutableAlertPresented) {
             Button("OK", role: .cancel) { settingsRouter?.unroutableMessage = nil }
         } message: { Text(settingsRouter?.unroutableMessage ?? "") }
@@ -318,8 +324,9 @@ struct ManageVPNsView: View {
     }
 
     private func loadInitialState() async {
-        await vpn.loadAll()
-        compositions.prune(existingProfileIDs: Set(vpn.profiles.map(\.id)))
+        if await vpn.loadForWindow() {
+            compositions.prune(existingProfileIDs: Set(vpn.profiles.map(\.id)))
+        }
         seedInitialSelection()
     }
 
@@ -790,13 +797,19 @@ struct ManageVPNsView: View {
         selection = nil
         switch target {
         case let .tunnel(id, _):
-            tunnelManager.disconnect(id); tunnels.remove(id)
+            tunnelManager.disconnect(id)
+            tunnels.remove(id)
+            vpn.customRoutingCache[id] = nil
+            CustomRoutingFallbackStore().clear(id)
         case let .native(id, _):
             Task {
                 if !(await nativeVPN.remove(id)) { vpn.lastError = nativeVPN.lastError }
             }
         case let .profile(id, _):
-            Task { try? await vpn.remove(id: id) }
+            Task {
+                do { try await vpn.remove(id: id) }
+                catch { vpn.report(error, profile: id) }
+            }
         case let .composition(id, _):
             Task {
                 do { try await vpn.removeVirtualComposition(id); compositions.remove(id) }
@@ -1040,16 +1053,11 @@ struct ManageVPNsView: View {
             if let first = configs.first { selection = Self.tunnelTag + first.id }
             ciscoNote = "Imported \(configs.count) Cisco AnyConnect server\(configs.count == 1 ? "" : "s"). Connect uses OpenConnect — install it with: brew install openconnect."
         case .pcf(let config, let secret, let note):
-            nativeVPN.save(config)
-            if let secret {
-                do { try KeychainCredentialStore.saveCredentials(profile: "native.\(config.id)",
-                                                                 .init(username: config.username, password: secret)) }
-                catch {
-                    selection = Self.nativeTag + config.id
-                    ciscoNote = "The profile was imported, but its sign-in secret could not be stored. Enter it in Sign-In before connecting."
-                    vpn.report(error)
-                    return
-                }
+            do {
+                try CiscoImport.storePCF(config, groupSecret: secret, save: nativeVPN.save)
+            } catch {
+                ciscoNote = "The VPN could not be imported because its group secret could not be saved to the Mac keychain."
+                return
             }
             selection = Self.nativeTag + config.id
             ciscoNote = note ?? "Imported the Cisco IPsec profile “\(config.name)”. It uses the native IPsec transport."
@@ -1097,6 +1105,7 @@ struct ManageVPNsView: View {
     }
 
     private func beginAddingVPN() {
+        if selection != Self.newVPNTag { selectionBeforeAdding = selection }
         if newVPN == nil { newVPN = VPNSetupDraft() }
         selection = Self.newVPNTag
     }
@@ -1108,7 +1117,8 @@ struct ManageVPNsView: View {
     private func cancelNewVPN() {
         newVPN = nil
         setupFile = nil
-        selection = order.allTags.first
+        selection = ConnectListing.selection(afterRemovingFrom: [], available: order.allTags, selected: selectionBeforeAdding)
+        selectionBeforeAdding = nil
     }
 
     /// The selected VPN, when it is one servers can be added to from a file.

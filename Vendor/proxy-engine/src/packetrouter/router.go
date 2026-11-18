@@ -7,7 +7,6 @@
 package packetrouter
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -23,7 +22,8 @@ type Port struct {
 	Addresses  []netip.Addr
 	Allowed    []netip.Prefix
 	MTU        int
-	Send       func([]byte) bool
+	// Send receives an owned packet and may retain it after returning.
+	Send func([]byte) bool
 }
 
 type Rule struct {
@@ -238,8 +238,7 @@ func (r *Router) drop(reason string) bool { r.stats.Drops[reason]++; return fals
 func key(p packet) tuple                  { return tuple{p.src, p.dst, p.srcPort, p.dstPort, p.protocol} }
 func flipped(k tuple) tuple               { return tuple{k.dst, k.src, k.dstPort, k.srcPort, k.protocol} }
 
-func (r *Router) expire() {
-	now := r.now()
+func (r *Router) expire(now time.Time) {
 	if now.Sub(r.lastGC) < time.Second {
 		return
 	}
@@ -265,13 +264,14 @@ func (r *Router) Forward(raw []byte) bool {
 	if closed {
 		return false
 	}
-	normalized, original, pending, normalizationError := r.fragments.accept(raw, "capture")
+	normalized, original, pending, normalizationError := r.fragments.accept(raw, fragmentScope{})
 	if pending {
 		return true
 	}
-	p, err := parse(bytes.Clone(normalized), false)
-	if normalizationError != nil {
-		err = normalizationError
+	var p packet
+	err := normalizationError
+	if err == nil {
+		p, err = parse(normalized, false)
 	}
 	r.mu.Lock()
 	if r.closed {
@@ -291,7 +291,8 @@ func (r *Router) Forward(raw []byte) bool {
 	if p.icmpError {
 		return r.forwardError(p)
 	}
-	r.expire()
+	now := r.now()
+	r.expire(now)
 	k := key(p)
 	f := r.flows[k]
 	// A retransmitted SYN belongs to the existing flow. A different initial
@@ -357,21 +358,24 @@ func (r *Router) Forward(raw []byte) bool {
 		r.mu.Unlock()
 		return result
 	}
-	f.lastSeen = r.now()
-	f.observeTCP(p, 1, r.now())
+	f.lastSeen = now
+	f.observeTCP(p, 1, now)
 	// Build feedback from the original capture addresses, before translating.
 	var tooBig []byte
 	if len(p.raw) > port.MTU {
 		tooBig = mtuError(p, port.MTU)
 	}
 	p.replaceAddress(true, f.translated)
-	p.fixTransportChecksum()
-	packets, fragmentationError := fragmentPacket(p, port.MTU, original)
-	if fragmentationError != nil {
-		r.drop("packet exceeds VPN MTU")
-		r.mu.Unlock()
-		r.output(tooBig)
-		return false
+	packets := [][]byte{p.raw}
+	if len(p.raw) > port.MTU {
+		var err error
+		packets, err = fragmentPacket(p, port.MTU, original)
+		if err != nil {
+			r.drop("packet exceeds VPN MTU")
+			r.mu.Unlock()
+			r.output(tooBig)
+			return false
+		}
 	}
 	r.mu.Unlock()
 	accepted := true
@@ -401,13 +405,14 @@ func (r *Router) Return(id string, generation uint64, raw []byte) bool {
 		return result
 	}
 	r.mu.Unlock()
-	normalized, _, pending, normalizationError := r.fragments.accept(raw, fmt.Sprintf("VPN:%d:%s:%d", len(id), id, generation))
+	normalized, _, pending, normalizationError := r.fragments.accept(raw, fragmentScope{id, generation})
 	if pending {
 		return true
 	}
-	p, err := parse(bytes.Clone(normalized), false)
-	if normalizationError != nil {
-		err = normalizationError
+	var p packet
+	err := normalizationError
+	if err == nil {
+		p, err = parse(normalized, false)
 	}
 	r.mu.Lock()
 	if r.closed {
@@ -425,7 +430,8 @@ func (r *Router) Return(id string, generation uint64, raw []byte) bool {
 		r.mu.Unlock()
 		return result
 	}
-	r.expire()
+	now := r.now()
+	r.expire(now)
 	if p.icmpError {
 		return r.returnError(id, generation, p)
 	}
@@ -435,10 +441,9 @@ func (r *Router) Return(id string, generation uint64, raw []byte) bool {
 		r.mu.Unlock()
 		return result
 	}
-	f.lastSeen = r.now()
-	f.observeTCP(p, 2, r.now())
+	f.lastSeen = now
+	f.observeTCP(p, 2, now)
 	p.replaceAddress(false, f.key.src)
-	p.fixTransportChecksum()
 	r.stats.PacketsIn++
 	r.mu.Unlock()
 	r.output(p.raw)

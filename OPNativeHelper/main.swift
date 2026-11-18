@@ -30,10 +30,32 @@ import Foundation
 
 func emit(_ cString: UnsafeMutablePointer<CChar>?) {
     if let cString {
-        FileHandle.standardOutput.write(Data(String(cString: cString).utf8))
-        OPNativeFree(cString)
+        defer { OPNativeFree(cString) }
+        let bytes = Data(bytesNoCopy: cString, count: strlen(cString), deallocator: .none)
+        try? FileHandle.standardOutput.write(contentsOf: bytes)
     } else {
-        FileHandle.standardOutput.write(Data(#"{"error":{"kind":"other","message":"empty reply from SDK shim"}}"#.utf8))
+        replyError("empty reply from SDK shim", kind: "other")
+    }
+}
+
+func replyError(_ message: String, kind: String = "badRequest") {
+    let reply = ["error": ["kind": kind, "message": message]]
+    if let data = try? JSONEncoder().encode(reply) {
+        try? FileHandle.standardOutput.write(contentsOf: data)
+    }
+}
+
+func request() -> String? {
+    var bytes = Data()
+    do {
+        while let chunk = try FileHandle.standardInput.read(upToCount: 16384), !chunk.isEmpty {
+            guard bytes.count + chunk.count <= 1024 * 1024 else { return nil }
+            bytes.append(chunk)
+        }
+        guard !bytes.contains(0) else { return nil }
+        return String(data: bytes, encoding: .utf8)
+    } catch {
+        return nil
     }
 }
 
@@ -41,22 +63,14 @@ let mode = CommandLine.arguments.dropFirst().first ?? ""
 switch mode {
 case "probe":
     emit(OPNativeProbe())
-case "resolve":
-    let request = FileHandle.standardInput.readDataToEndOfFile()
-    let requestString = String(data: request, encoding: .utf8) ?? ""
-    emit(OPNativeResolve(requestString))
-case "item":
-    let request = FileHandle.standardInput.readDataToEndOfFile()
-    let requestString = String(data: request, encoding: .utf8) ?? ""
-    emit(OPNativeGetItem(requestString))
-case "list":
-    let request = FileHandle.standardInput.readDataToEndOfFile()
-    let requestString = String(data: request, encoding: .utf8) ?? ""
-    emit(OPNativeList(requestString))
-case "lookup":
-    let request = FileHandle.standardInput.readDataToEndOfFile()
-    let requestString = String(data: request, encoding: .utf8) ?? ""
-    emit(OPNativeLookup(requestString))
+case "resolve", "item", "list", "lookup":
+    guard let input = request() else { replyError("unreadable request"); exit(0) }
+    switch mode {
+    case "resolve": emit(OPNativeResolve(input))
+    case "item": emit(OPNativeGetItem(input))
+    case "list": emit(OPNativeList(input))
+    default: emit(OPNativeLookup(input))
+    }
 default:
     FileHandle.standardError.write(Data("usage: opnative-helper probe|resolve|item|list|lookup\n".utf8))
     exit(2)

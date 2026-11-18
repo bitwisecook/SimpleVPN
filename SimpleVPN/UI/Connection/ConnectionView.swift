@@ -32,9 +32,7 @@ struct ConnectionView: View {
     @Bindable var labels: LabelStore
     @Environment(\.openWindow) private var openWindow
     @Environment(VPNCreationRequests.self) private var creationRequests
-    @Environment(ReachabilityMonitor.self) private var reach: ReachabilityMonitor?
     @Environment(LinkStateMonitor.self) private var link: LinkStateMonitor?
-    @Environment(ExtensionDoctor.self) private var extDoctor: ExtensionDoctor?
     @Environment(SubprocessTunnelManager.self) private var tunnelManager: SubprocessTunnelManager
     @Environment(SubprocessTunnelStore.self) private var tunnels: SubprocessTunnelStore
     @Environment(NativeVPNManager.self) private var nativeVPN: NativeVPNManager
@@ -86,9 +84,10 @@ struct ConnectionView: View {
     private var windowLayoutMode: MainWindowLayoutMode {
         guard hasCompletedInitialConfigurationLoad else { return .loading }
         let sidebar = columnVisibility != .detailOnly
-        let onboarding = (ext.needsApproval || ext.needsApplicationsInstallation) && !ext.isActivated
-            || hasNothingConfigured
-            || vpn.selected.map { !FirstSuccessfulConnectionStore.hasSucceeded(profile: $0.id) } == true
+        let onboarding = hasNothingConfigured || (otherSelection == nil && vpn.selected.map {
+            ((!ext.isActivated && (ext.needsApproval || ext.needsApplicationsInstallation)) && !UI.isActive($0.status))
+                || !FirstSuccessfulConnectionStore.hasSucceeded(profile: $0.id)
+        } == true)
         if onboarding { return sidebar ? .onboardingWithSidebar : .onboarding }
         if sidebar && showInspector { return .sidebarAndInspector }
         if sidebar { return .sidebar }
@@ -110,7 +109,7 @@ struct ConnectionView: View {
 
     /// Whether the single native personal VPN slot is in use right now.
     private var nativeBackendActive: Bool {
-        nativeVPN.status == .connected || nativeVPN.status == .connecting
+        UI.isActive(nativeVPN.status)
     }
 
     // MARK: - The connections that are not NE profiles
@@ -137,6 +136,7 @@ struct ConnectionView: View {
         let isActive: Bool
         /// The engine's last word: a failure message or a caution. nil when quiet.
         let note: String?
+        var replacementWarning: String? = nil
         let connect: () -> Void
         let stop: () -> Void
     }
@@ -182,20 +182,15 @@ struct ConnectionView: View {
                 scope: ConnectionScope.of(native: c), portSummary: nil,
                 dot: isActive ? .from(status: nativeVPN.status) : .off,
                 isActive: isActive,
-                note: isActive ? nativeVPN.lastError : nil,
+                note: nativeVPN.connectionError(for: c.id),
+                replacementWarning: nativeVPN.replacementWarning(for: c.id),
                 connect: { [weak nativeVPN] in
                     guard let nativeVPN else { return }
-                    let secrets = NativeVPNReadiness.storedSecrets(for: c)
-                    // The same three inputs the editor's own Connect gathers — the
-                    // stored secrets and this profile's Custom Routing proxy — read
-                    // here rather than passed in, so connecting from the list and
-                    // connecting from the editor start the tunnel identically.
-                    let proxy = nativeProxySettings(for: c.id)
-                    Task { await nativeVPN.connect(c, secret: secrets.base,
-                                                   sharedSecret: secrets.groupPSK,
-                                                   proxy: proxy) }
+                    Task { await vpn.connectNative(c, using: nativeVPN) }
                 },
-                stop: { [weak nativeVPN] in nativeVPN?.disconnect() }))
+                stop: { [weak nativeVPN] in
+                    if nativeVPN?.activeConfigID == c.id { nativeVPN?.disconnect() }
+                }))
         }
         return rows
     }
@@ -229,8 +224,12 @@ struct ConnectionView: View {
         let order = ConnectOrder.of(vpn: vpn, tunnels: tunnels, native: nativeVPN)
         let tags = order.tags(in: scope)
         if !tags.isEmpty {
+            let profilesByTag = Dictionary(vpn.profiles.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            let othersByTag = Dictionary(otherConnections.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             Section {
-                ForEach(tags, id: \.self) { tag in sidebarRow(for: tag) }
+                ForEach(tags, id: \.self) { tag in
+                    sidebarRow(profile: profilesByTag[tag], other: othersByTag[tag])
+                }
                     // Routed through `ConnectOrder.move` — the same `ReorderCommands` the
                     // buttons and menu items use, so the index maths, the refusals and the
                     // spoken announcement cannot fork into a second implementation. The
@@ -257,13 +256,13 @@ struct ConnectionView: View {
     /// settings routes all select by these, so a tag that moved with a row would break
     /// a route from the other window. `ConnectOrder` therefore orders tags and never
     /// mints them.
-    @ViewBuilder private func sidebarRow(for tag: String) -> some View {
-        if let p = vpn.profiles.first(where: { $0.id == tag }) {
+    @ViewBuilder private func sidebarRow(profile: VPNController.Profile?, other: OtherConnection?) -> some View {
+        if let p = profile {
             VPNSidebarRow(vpn: vpn, profile: p, labelDefs: labels.labels(for: p.id), dotState: rowDot(p))
                 .tag(p.id)
                 .serverConfigurationDropTarget(profile: p, request: $serverFilesRequest)
                 .contextMenu { sidebarMenu(p) }
-        } else if let row = otherConnections.first(where: { $0.id == tag }) {
+        } else if let row = other {
             otherConnectionRow(row)
                 .tag(row.id)
                 .contextMenu { otherSidebarMenu(row) }
@@ -298,8 +297,9 @@ struct ConnectionView: View {
                 // state in its value (rule 1). The words come from DotState, which is the
                 // status vocabulary — there is no NEVPNStatus behind a subprocess or
                 // native tunnel to read instead.
-                SidebarActionCircle(symbol: "stop.fill", tint: .red, help: "Disconnect",
-                                    label: "Disconnect \(row.name)",
+                let title = row.dot == .busy ? "Cancel connecting" : "Disconnect"
+                SidebarActionCircle(symbol: row.dot == .busy ? "xmark.circle.fill" : "stop.fill", tint: .red, help: title,
+                                    label: "\(title) \(row.name)",
                                     value: row.dot.accessibilityDescription,
                                     action: row.stop)
             } else {
@@ -318,8 +318,16 @@ struct ConnectionView: View {
                     // sentence after it is what makes the disabled state actionable
                     // rather than merely dimmed.
                     value: need?.spokenValue ?? row.dot.accessibilityDescription,
-                    disabled: need != nil, action: row.connect)
+                    disabled: need != nil, action: { connectFromSidebar(row) })
             }
+        }
+    }
+
+    private func connectFromSidebar(_ row: OtherConnection) {
+        if row.id == ConnectListing.tag(forNative: row.configID), nativeVPN.replacementWarning(for: row.configID) != nil {
+            listSelection.wrappedValue = row.id
+        } else {
+            row.connect()
         }
     }
 
@@ -330,9 +338,9 @@ struct ConnectionView: View {
     @ViewBuilder private func otherSidebarMenu(_ row: OtherConnection) -> some View {
         let need = row.isActive ? nil : otherNeeds[row.id]
         if row.isActive {
-            Button("Disconnect", action: row.stop)
+            Button(row.dot == .busy ? "Cancel Connecting" : "Disconnect", action: row.stop)
         } else {
-            Button("Connect", action: row.connect)
+            Button("Connect") { connectFromSidebar(row) }
                 .disabled(need != nil)
                 .help(need?.sentence ?? "Connect \(row.name)")
         }
@@ -360,23 +368,17 @@ struct ConnectionView: View {
         openWindow(id: "manage")
     }
 
-    /// This native VPN's Custom Routing proxy, as `NEVPNManager` wants it. Mirrors
-    /// `NativeVPNView.nativeProxySettings()` — one committed source, read at connect
-    /// time from the stored profile rather than from an editor's draft.
-    private func nativeProxySettings(for profileID: String) -> NEProxySettings? {
-        let auth = loadCustomRoutingProxyAuthFields(profileID: profileID)
-        return vpn.customRouting(for: profileID).proxy.nativeApplyRequest(
-            username: auth.username.isEmpty ? nil : auth.username,
-            password: auth.password.isEmpty ? nil : auth.password)?
-            .makeNEProxySettings()
-    }
-
     /// Recompute what every non-profile connection still needs.
     ///
     /// One sweep of the installed command-line tools (rather than one per row), and
     /// at most one keychain query per row — see `SubprocessTunnelReadiness.liveFacts`.
     private func refreshOtherNeeds() {
-        let installed = TunnelCLI.installed()
+        guard !tunnels.tunnels.isEmpty || !nativeVPN.configs.isEmpty else {
+            if !otherNeeds.isEmpty { otherNeeds = [:] }
+            return
+        }
+        let installed: Set<TunnelCLI> = tunnels.tunnels.contains { !SubprocessTunnelManager.willRunInProcess($0) }
+            ? TunnelCLI.installed() : []
         let capability = !nativeVPN.needsEntitlement
         var needs: [String: ConnectNeed] = [:]
         for t in tunnels.tunnels {
@@ -402,14 +404,15 @@ struct ConnectionView: View {
     /// the main pane for that case; genuine configuration/transport faults retain
     /// the precise “Fix This…” route.
     private func inlineSignIn(for row: OtherConnection) -> AnyView? {
-        guard let tunnel = tunnels.tunnels.first(where: { $0.id == row.configID }),
+        guard row.id == ConnectListing.tag(forTunnel: row.configID),
+              let tunnel = tunnels.tunnels.first(where: { $0.id == row.configID }),
               tunnel.kind.isSSLVPN,
               SubprocessTunnelManager.openconnectAuthMode(tunnel) == "password",
               !row.isActive
         else { return nil }
         let need = otherNeeds[row.id]
-        guard !tunnel.isOTPRequirementLocked
-                || need?.readiness == .needsSignIn || need?.readiness == .needsCode
+        guard need?.readiness != .blocked,
+              !tunnel.isOTPRequirementLocked || need?.readiness == .needsSignIn || need?.readiness == .needsCode
         else { return nil }
         return AnyView(SubprocessTunnelInlineSignIn(
             config: tunnel, store: tunnels, manager: tunnelManager))
@@ -426,24 +429,13 @@ struct ConnectionView: View {
         openWindow(id: "manage")
     }
 
-    /// Deliberately jargon-free: this says what macOS wants and what to do, in the words
-    /// someone who just wants their VPN would use. "System extension" is our problem, not
-    /// theirs.
-    private static func postApprovalToast(_ ext: ExtensionController) {
-        ToastCenter.shared.post(
-            "macOS needs your permission before SimpleVPN can make VPN connections.",
-            symbol: "lock.shield", seconds: 12,
-            actionTitle: "Allow\u{2026}") {
-                Task { await ext.activate() }
-            }
-    }
-
     private var connectedTailscaleIDs: [String] {
         vpn.profiles.filter { $0.kind == .tailscale && $0.status == .connected }.map(\.id)
     }
 
     var body: some View {
         content
+            .focusedSceneValue(\.selectedVPNTag, listSelection.wrappedValue)
             .adaptiveMainWindowSizing(windowLayoutMode)
             .toasts()
             .navigationTitle("SimpleVPN")
@@ -459,37 +451,13 @@ struct ConnectionView: View {
                 }
             }
             .task {
-                await vpn.loadAll()
+                await vpn.loadForWindow()
                 // Resolve the first stable window shape before publishing the
                 // loaded state, avoiding an automatic→detail-only intermediate
                 // resize for the overwhelmingly common one-VPN case.
                 showInspector = inspectorOpenByDefault
                 selectSoleConnectionIfNeeded()
                 hasCompletedInitialConfigurationLoad = true
-                // Deliberately NOT ext.activate() here: activating raises a macOS
-                // approval dialog, and a first launch should show the app, not a security
-                // prompt for something the user hasn't asked for yet. VPNController does
-                // it on the first connect (see ensureExtensionReady).
-                let doctor = extDoctor
-                let extensionManager = ext
-                vpn.ensureExtensionReady = { [weak extensionManager, weak doctor] in
-                    guard let ext = extensionManager else { return true }
-                    // The connect gate doubles as a doctor trigger: a wedged
-                    // engine should be noticed the moment someone reaches for
-                    // it. Fire-and-forget — the doctor single-flights and
-                    // debounces, and its non-disruptive rungs never block or
-                    // interrupt the connect that's about to run.
-                    Task { [weak doctor] in await doctor?.checkUp(trigger: .connectGate) }
-                    if ext.isActivated { return true }
-                    // Ask ONCE. If approval is already outstanding, re-firing would put
-                    // the same dialog up on every connect attempt, which trains people to
-                    // dismiss it — the ActivationPrompt banner and its Retry button are
-                    // the deliberate second chance.
-                    if ext.needsApproval { Self.postApprovalToast(ext); return false }
-                    await ext.activate()
-                    if !ext.isActivated { Self.postApprovalToast(ext) }
-                    return ext.isActivated
-                }
                 ToastCenter.shared.openWindow = { openWindow(id: $0) }
                 // Did we die last time? Offer to report it, once, with the details
                 // already gathered (see CrashDiagnostics).
@@ -504,13 +472,6 @@ struct ConnectionView: View {
                     reports: pendingCrashes,
                     facts: IssueReport.gather(vpn: vpn, tunnels: tunnels,
                                               nativeVPN: nativeVPN, wireguard: nil))
-            }
-            .task {
-                // Also drive the app-wide reachability monitor from the main window
-                // (start() is idempotent) so sidebar stall dots and the map don't
-                // depend solely on the menu-bar label's lifecycle.
-                reach?.start(connectedIDs: { vpn.profiles.filter { $0.status == .connected }.map(\.id) },
-                             fetch: { await vpn.fetchStats(id: $0) })
             }
             // (SSO sign-in requests raise the in-app window from app scope now —
             // see SSOWindowOpener in SimpleVPNApp — so they surface even when
@@ -615,10 +576,7 @@ struct ConnectionView: View {
             // The three startup states cross-fade into each other (dropping a config
             // morphs the empty page into the real window) rather than hard-cutting.
             Group {
-                if (ext.needsApproval || ext.needsApplicationsInstallation) && !ext.isActivated {
-                    ActivationPrompt(ext: ext)
-                        .transition(reduceMotion ? AnyTransition.opacity : AnyTransition(.blurReplace))
-                } else if hasNothingConfigured {
+                if hasNothingConfigured {
                     EmptyVPNsPrompt(importAction: { showImporter = true },
                                     manageAction: { beginAddingVPN() },
                                     dropAction: { vpn.handleImport(of: $0) })
@@ -697,14 +655,18 @@ struct ConnectionView: View {
                 if let row = selectedOther {
                     OtherConnectionDetailView(
                         name: row.name, kind: row.kind, dot: row.dot, isActive: row.isActive,
-                        need: otherNeeds[row.id], engineNote: row.note,
+                        need: otherNeeds[row.id], engineNote: row.note, replacementWarning: row.replacementWarning,
                         inlineSignIn: inlineSignIn(for: row),
                         connect: row.connect, stop: row.stop,
                         reveal: { revealSetting($0, profileID: row.configID) },
-                        openSettings: { openWindow(id: "manage") })
+                        openSettings: { openSettings(for: row) })
                         .id(row.id)
-                } else if let p = vpn.selected {
-                    ConnectionDetailView(vpn: vpn, profile: p).id(p.id)
+                } else if otherSelection == nil, let p = vpn.selected {
+                    if (ext.needsApproval || ext.needsApplicationsInstallation) && !ext.isActivated && !UI.isActive(p.status) {
+                        ActivationPrompt(ext: ext)
+                    } else {
+                        ConnectionDetailView(vpn: vpn, profile: p).id(p.id)
+                    }
                 } else {
                     ContentUnavailableView("Select a VPN", systemImage: "network")
                 }
@@ -713,7 +675,7 @@ struct ConnectionView: View {
                 Group {
                     if !showInspector {
                         Color.clear.accessibilityHidden(true)
-                    } else if let p = vpn.selected {
+                    } else if otherSelection == nil, let p = vpn.selected {
                         ConnectionInspectorView(vpn: vpn, profile: p).id(p.id)
                     } else {
                         ContentUnavailableView("Live Details", systemImage: "chart.line.uptrend.xyaxis",
@@ -745,11 +707,16 @@ struct ConnectionView: View {
             // A tunnel can be added while this window is already open. Do not
             // override a real selection, but make the first and only connection
             // usable as soon as it exists.
+            let current = listSelection.wrappedValue
+            let next = ConnectListing.selection(afterRemovingFrom: oldTags, available: newTags, selected: current)
+            if current != next { listSelection.wrappedValue = next }
             selectSoleConnectionIfNeeded()
+            applyRequestedSelection()
             // A second VPN is the point where navigation becomes useful. Reveal
             // it once, while preserving later manual sidebar choices.
             if oldTags.count < 2 && newTags.count > 1 { columnVisibility = .all }
         }
+        .onChange(of: vpn.requestedConnectionTag, initial: true) { applyRequestedSelection() }
         // What each non-profile connection still needs, gathered OUT of `body` (it
         // costs a keychain query per row) and refreshed at every moment the answer
         // could have changed: the configs themselves, and the engines' live state —
@@ -776,6 +743,12 @@ struct ConnectionView: View {
         // deliberately left alone.
     }
 
+    private func applyRequestedSelection() {
+        guard let tag = vpn.requestedConnectionTag, connectionTags.contains(tag) else { return }
+        listSelection.wrappedValue = tag
+        vpn.requestedConnectionTag = nil
+    }
+
     /// Select the one connection, regardless of which backing store owns it.
     /// `listSelection` translates the prefixed tags for us, keeping
     /// `vpn.selectedID` reserved for actual NE profiles.
@@ -784,7 +757,7 @@ struct ConnectionView: View {
                                                 tunnels: tunnels.tunnels,
                                                 native: nativeVPN.configs)
         else { return }
-        if vpn.selectedID == nil, otherSelection == nil {
+        if listSelection.wrappedValue != tag {
             listSelection.wrappedValue = tag
         }
         columnVisibility = .detailOnly
@@ -797,7 +770,9 @@ struct ConnectionView: View {
 
     /// Right-click actions on a sidebar VPN: the whole lifecycle plus settings.
     @ViewBuilder private func sidebarMenu(_ p: VPNController.Profile) -> some View {
-        if UI.isActive(p.status) {
+        if vpn.displayStatus(for: p.id) == .connecting {
+            Button("Cancel Connecting") { vpn.disconnect(id: p.id) }
+        } else if UI.isActive(p.status) {
             if vpn.pausedProfiles.contains(p.id) {
                 Button("Resume") { Task { await vpn.resume(id: p.id) } }
             } else if p.status == .connected, vpn.uiPrefs(for: p.id).allowPause {
@@ -806,11 +781,11 @@ struct ConnectionView: View {
             Button("Disconnect") { vpn.disconnect(id: p.id) }
         } else if p.status == .disconnected || p.status == .invalid {
             Button("Connect") {
-                vpn.selectedID = p.id
+                listSelection.wrappedValue = p.id
                 Task {
                     // Full credentials on file → straight through; otherwise the
                     // detail form is already showing for typing.
-                    await vpn.connectWithSavedCredentials(id: p.id)
+                    if await vpn.quickConnect(id: p.id) == .needsInput { vpn.nudgeCredentials(id: p.id) }
                 }
             }
         }
@@ -825,8 +800,15 @@ struct ConnectionView: View {
         }
         ProbeVPNMenuItem(vpn: vpn, profile: p)
         Button("Settings…") {
-            vpn.selectedID = p.id
-            openWindow(id: "manage")
+            let anchor: String
+            switch p.kind {
+            case .wireGuard: anchor = vpn.usesTeleport(kind: p.kind, profileID: p.id) ? "wg.teleport-invite" : "wg.endpoint"
+            case .tailscale: anchor = "ts.preset"
+            case .proxyTunnel: anchor = "px.address"
+            case .sshNetworkTunnel: anchor = "sshnet.server"
+            default: anchor = "openvpn.server"
+            }
+            revealSetting(anchor, profileID: p.id)
         }
     }
 }
@@ -849,8 +831,8 @@ private struct ActivationPrompt: View {
             }
         } actions: {
             if ext.needsApplicationsInstallation {
-                InstalledSimpleVPNHandoff()
-                .buttonStyle(.glassProminent)
+                InstalledSimpleVPNHandoff(alignment: .center)
+                    .buttonStyle(.glassProminent)
             } else {
                 Button("Activate Extension") { Task { await ext.activate() } }
                     .buttonStyle(.glassProminent)
@@ -892,6 +874,7 @@ private struct EmptyVPNsPrompt: View {
     /// instructions instead of trying (and failing) to present the import panel from
     /// a dense row of explanatory text.
     @State private var providerPath: [VPNServiceProviderID] = []
+    @State private var showsProviders = false
 
     var body: some View {
         NavigationStack(path: $providerPath) {
@@ -937,16 +920,35 @@ private struct EmptyVPNsPrompt: View {
             // Four concise choices. Every explanation — including Proton's import-
             // only path — belongs on the provider's second page, so none of these
             // reads as an inert text block and none is disabled.
-            DisclosureGroup("I use a VPN service") {
+            DisclosureGroup(isExpanded: $showsProviders) {
                 ProviderPickerSection(title: ProviderPickerCopy.firstRunSectionTitle,
                                       detail: ProviderPickerCopy.firstRunDetail,
                                       showsDetails: false,
                                       allowsBlockedSelection: true,
                                       action: { providerPath.append($0.id) })
                     .padding(.top, 12)
+            } label: {
+                // macOS gives its disclosure triangle a small click target.
+                // Let a click anywhere on the visible label expand the choices.
+                Text("I use a VPN service")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture { showsProviders.toggle() }
             }
             .frame(maxWidth: 460)
 
         }
+    }
+}
+
+extension VPNController {
+    /// Menu and connection window use the same stored secrets and proxy routing.
+    func connectNative(_ config: NativeVPNConfig, using manager: NativeVPNManager) async {
+        let secrets = NativeVPNReadiness.storedSecrets(for: config)
+        let auth = loadCustomRoutingProxyAuthFields(profileID: config.id)
+        let proxy = customRouting(for: config.id).proxy.nativeApplyRequest(
+            username: auth.username.isEmpty ? nil : auth.username,
+            password: auth.password.isEmpty ? nil : auth.password)?.makeNEProxySettings()
+        await manager.connect(config, secret: secrets.base, sharedSecret: secrets.groupPSK, proxy: proxy)
     }
 }

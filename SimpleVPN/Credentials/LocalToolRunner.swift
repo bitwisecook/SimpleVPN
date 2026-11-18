@@ -47,6 +47,7 @@ nonisolated struct LocalToolResult: Sendable {
     /// and dense enough to be a password.
     var stderr: String
     var timedOut: Bool
+    var launchError: String? = nil
 
     var succeeded: Bool { exitCode == 0 && !timedOut }
     /// stdout as text, trimmed. Still secret-bearing.
@@ -156,23 +157,40 @@ nonisolated enum LocalToolRunner {
         return nil
     }
 
-    /// A regular, executable file whose directory isn't writable by the world or
-    /// by an unrelated group. The directory check is the one that matters: a
-    /// group- or world-writable directory on the list means anyone could drop a
-    /// binary in it and have this app run it.
+    /// Check both the program and the directories used to reach it, including
+    /// intermediate symlinks such as Homebrew and pipx create. A sticky shared
+    /// ancestor is safe when the next entry is owned by this user or root.
     static func isSafeExecutable(atPath path: String) -> Bool {
         let fm = FileManager.default
-        var st = stat()
-        guard stat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG,
-              fm.isExecutableFile(atPath: path) else { return false }
-        var dir = stat()
-        let parent = (path as NSString).deletingLastPathComponent
-        guard stat(parent, &dir) == 0 else { return false }
-        // World-writable is always wrong. Group-writable is allowed only for the
-        // admin group (80), which is how Homebrew's own prefix ships.
-        if (dir.st_mode & S_IWOTH) != 0 { return false }
-        if (dir.st_mode & S_IWGRP) != 0 && dir.st_gid != 80 && dir.st_gid != 0 { return false }
-        return true
+        guard path.hasPrefix("/"), fm.isExecutableFile(atPath: path) else { return false }
+        var remaining = Array(path.split(separator: "/").reversed())
+        var parent = "/"
+        var links = 0
+        while let component = remaining.popLast() {
+            if component == "." { continue }
+            if component == ".." {
+                parent = (parent as NSString).deletingLastPathComponent
+                continue
+            }
+            let current = (parent as NSString).appendingPathComponent(String(component))
+            var info = stat()
+            guard lstat(current, &info) == 0, info.st_uid == 0 || info.st_uid == geteuid() else { return false }
+            let type = info.st_mode & S_IFMT
+            if type == S_IFLNK {
+                links += 1
+                guard links <= 32, let destination = try? fm.destinationOfSymbolicLink(atPath: current) else { return false }
+                if destination.hasPrefix("/") { parent = "/" }
+                remaining.append(contentsOf: destination.split(separator: "/").reversed())
+                continue
+            }
+            let stickyDirectory = type == S_IFDIR && info.st_mode & S_ISVTX != 0
+            guard info.st_mode & S_IWOTH == 0 || stickyDirectory else { return false }
+            guard info.st_mode & S_IWGRP == 0 || info.st_gid == 0 || info.st_gid == 80 || stickyDirectory else { return false }
+            if remaining.isEmpty { return type == S_IFREG }
+            guard type == S_IFDIR else { return false }
+            parent = current
+        }
+        return false
     }
 
     /// The environment a vendor tool is run with: the bare minimum, built from
@@ -194,6 +212,11 @@ nonisolated enum LocalToolRunner {
         ]
     }
 
+    private struct RunState: Sendable {
+        var cancelled = false
+        var waiting: CheckedContinuation<LocalToolResult, Never>?
+    }
+
     /// Run `executable` with `arguments`. Never pass a secret in `arguments`.
     ///
     /// `deadline` is a hard kill: the child is terminated, then SIGKILLed if it
@@ -210,20 +233,40 @@ nonisolated enum LocalToolRunner {
     static func run(executable: String, arguments: [String],
                     deadline: TimeInterval = 12,
                     environment: [String: String]? = nil,
-                    stdin: Data? = nil) async -> LocalToolResult {
+                    stdin: Data? = nil,
+                    runQueue: DispatchQueue? = nil,
+                    stdoutLimit: Int = 4 * 1024 * 1024,
+                    summarizeStderr: @escaping @Sendable (String) -> String = { LocalToolRunner.scrub($0) }
+    ) async -> LocalToolResult {
         guard executable.hasPrefix("/"), isSafeExecutable(atPath: executable) else {
             return LocalToolResult(exitCode: -1, stdout: Data(),
-                                   stderr: "not an approved tool location", timedOut: false)
+                                   stderr: "not an approved tool location", timedOut: false, launchError: "Not an approved tool location.")
         }
         let environment = environment ?? childEnvironment()
-        let cancelled = OSAllocatedUnfairLock<Bool>(initialState: false)
+        let state = OSAllocatedUnfairLock(initialState: RunState())
+        let cancellation = LocalToolResult(exitCode: -1, stdout: Data(), stderr: "cancelled", timedOut: false)
+        // Wake poll immediately on task cancellation and process exit, including
+        // a child that closes both output pipes before it exits.
+        let wake = Pipe()
+        let signal: @Sendable () -> Void = {
+            var byte: UInt8 = 1
+            _ = Darwin.write(wake.fileHandleForWriting.fileDescriptor, &byte, 1)
+        }
         return await withTaskCancellationHandler {
             await withCheckedContinuation { (cont: CheckedContinuation<LocalToolResult, Never>) in
-                queue.async {
-                    guard !cancelled.withLock({ $0 }) else {
-                        cont.resume(returning: LocalToolResult(exitCode: -1, stdout: Data(), stderr: "cancelled", timedOut: false))
-                        return
+                let queued = state.withLock { state in
+                    guard !state.cancelled else { return false }
+                    state.waiting = cont
+                    return true
+                }
+                guard queued else { cont.resume(returning: cancellation); return }
+                (runQueue ?? queue).async {
+                    let waiting = state.withLock { state in
+                        let pending = state.waiting
+                        state.waiting = nil
+                        return pending
                     }
+                    guard let cont = waiting else { return }
                     let process = Process()
                     process.executableURL = URL(fileURLWithPath: executable)
                     process.arguments = arguments
@@ -233,9 +276,10 @@ nonisolated enum LocalToolRunner {
                     process.standardOutput = output
                     process.standardError = errors
                     process.environment = environment
+                    process.terminationHandler = { _ in signal() }
                     do { try process.run() }
                     catch {
-                        cont.resume(returning: LocalToolResult(exitCode: -1, stdout: Data(), stderr: "couldn’t start", timedOut: false))
+                        cont.resume(returning: LocalToolResult(exitCode: -1, stdout: Data(), stderr: "couldn’t start", timedOut: false, launchError: error.localizedDescription))
                         return
                     }
                     try? output.fileHandleForWriting.close()
@@ -271,10 +315,10 @@ nonisolated enum LocalToolRunner {
                         }
                     }
                     while true {
-                        drain(outFD, into: &out, maximum: 4 * 1024 * 1024, eof: &outEOF)
+                        drain(outFD, into: &out, maximum: max(0, stdoutLimit), eof: &outEOF)
                         drain(errFD, into: &err, maximum: 64 * 1024, eof: &errEOF)
                         let now = ProcessInfo.processInfo.systemUptime
-                        let isCancelled = cancelled.withLock { $0 }
+                        let isCancelled = state.withLock { $0.cancelled }
                         if now >= limit { timedOut = true }
                         if (timedOut || isCancelled || exceeded), terminatedAt == nil {
                             terminatedAt = now
@@ -298,21 +342,57 @@ nonisolated enum LocalToolRunner {
                             }
                         }
                         if !process.isRunning && outEOF && errEOF { break }
-                        Thread.sleep(forTimeInterval: 0.005)
+                        if !inputClosed, inputOffset == stdin?.count {
+                            try? input?.fileHandleForWriting.close()
+                            inputClosed = true
+                        }
+                        var ready = [pollfd(fd: wake.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0)]
+                        if !outEOF { ready.append(pollfd(fd: outFD, events: Int16(POLLIN), revents: 0)) }
+                        if !errEOF { ready.append(pollfd(fd: errFD, events: Int16(POLLIN), revents: 0)) }
+                        if !inputClosed, let inFD {
+                            ready.append(pollfd(fd: inFD, events: Int16(POLLOUT), revents: 0))
+                        }
+                        let nextDeadline = terminatedAt.map { $0 + 2 } ?? limit
+                        let timeout = Int32(max(0, ceil((nextDeadline - ProcessInfo.processInfo.systemUptime) * 1000)))
+                        let count = nfds_t(ready.count)
+                        if poll(&ready, count, timeout) > 0, ready[0].revents != 0 {
+                            _ = Darwin.read(ready[0].fd, &buffer, buffer.count)
+                        }
                     }
                     try? output.fileHandleForReading.close()
                     try? errors.fileHandleForReading.close()
                     if !inputClosed { try? input?.fileHandleForWriting.close() }
-                    let wasCancelled = cancelled.withLock { $0 }
+                    let wasCancelled = state.withLock { $0.cancelled }
                     let exit = process.isRunning ? -1 : process.terminationStatus
+                    var diagnostic = String(decoding: err, as: UTF8.self)
+                    if !diagnostic.isEmpty, let stdin, !stdin.isEmpty, stdin.count <= 65536,
+                       let inputText = String(data: stdin, encoding: .utf8) {
+                        // CLI-backed sources can supply a passphrase as one input line.
+                        // Even a short one must stay private if the tool echoes it.
+                        let line = inputText.trimmingCharacters(in: .newlines)
+                        if line.contains(where: \.isNewline) {
+                            diagnostic = "The tool reported a problem with the request."
+                        } else if !line.isEmpty {
+                            diagnostic = diagnostic.replacingOccurrences(of: line, with: "••••")
+                        }
+                    }
                     cont.resume(returning: LocalToolResult(
                         exitCode: exceeded || wasCancelled ? -1 : exit,
-                        stdout: exceeded || wasCancelled ? Data() : out,
-                        stderr: exceeded ? "tool output exceeded its limit" : wasCancelled ? "cancelled" : scrub(String(decoding: err, as: UTF8.self)),
+                        stdout: exceeded || wasCancelled || timedOut ? Data() : out,
+                        stderr: exceeded ? "tool output exceeded its limit" : wasCancelled ? "cancelled" : summarizeStderr(diagnostic),
                         timedOut: timedOut))
                 }
             }
-        } onCancel: { cancelled.withLock { $0 = true } }
+        } onCancel: {
+            let pending = state.withLock { state in
+                state.cancelled = true
+                let pending = state.waiting
+                state.waiting = nil
+                return pending
+            }
+            pending?.resume(returning: cancellation)
+            signal()
+        }
     }
 
     /// What a failure may say out loud: the first line of stderr, shortened, with
@@ -321,7 +401,9 @@ nonisolated enum LocalToolRunner {
     /// diagnostic bundle.
     static func scrub(_ stderr: String, limit: Int = 200) -> String {
         let firstLine = stderr.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
-        let redacted = firstLine.split(separator: " ").map { word -> String in
+        guard !firstLine.isEmpty else { return "" }
+        let cleaned = SecretScrubber(policy: .errorDetail).scrub(firstLine)
+        let redacted = cleaned.split(separator: " ").map { word -> String in
             // Long, mixed-character, punctuation-bearing runs are what passwords
             // and tokens look like; plain words and paths are not.
             let dense = word.count >= 12

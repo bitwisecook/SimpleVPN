@@ -90,6 +90,13 @@ nonisolated enum ConfigImportGuard {
                     + "(\u{201C}\(value)\u{201D}). SimpleVPN has no such setting and won\u{2019}t take one "
                     + "from a file."
             }
+            if let dot = e.key.firstIndex(of: "."), let address = e.value.stringValue {
+                let namespace = String(e.key[...dot])
+                if ConfigFieldNaming.addressFields.contains(where: { ConfigFieldNaming.id(field: $0, namespace: namespace) == e.key }),
+                   SubprocessTunnelConfig.passwordInAddress(address) {
+                    return "Enter the address and password separately."
+                }
+            }
             if let token = unsafeToken(in: e.value) {
                 return "one of its settings (\(e.key)) contains \u{201C}\(token)\u{201D}, which would stop "
                     + "SimpleVPN checking who it is talking to. SimpleVPN has no such setting and "
@@ -271,15 +278,15 @@ enum ConfigImport {
         // Renaming somebody's label out from under them is a silent destruction of
         // the thing that organises their sidebar.
         if let labels = root[ConfigDocumentKeys.labels]?.listValue {
-            let existing = Set(current.labels.map(\.id))
+            var known = Set(current.labels.map(\.id))
             for value in labels {
                 guard let map = value.mapValue, let label = decode(ConfigLabel.self, from: map) else {
                     plan.refusals.append(.init(subject: "A label",
                                                reason: "one of the labels in the file isn\u{2019}t readable."))
                     continue
                 }
-                if existing.contains(label.id) { plan.keptLabels.append(label.name) }
-                else { plan.newLabels.append(label) }
+                if known.insert(label.id).inserted { plan.newLabels.append(label) }
+                else { plan.keptLabels.append(label.name) }
             }
         }
 
@@ -358,8 +365,11 @@ enum ConfigImport {
                                       server: map[ConfigDocumentKeys.server]?.stringValue ?? "")
         if let secrets = map[ConfigDocumentKeys.secrets] {
             guard let fields = secrets.mapValue else { return .failure("its secret section isn't readable.") }
-            do { vpn.secrets = try ConfigSecretTransfer.validated(fields) }
-            catch { return .failure("its secret section contains an unknown or malformed credential.") }
+            do { vpn.secrets = try ConfigSecretTransfer.validated(fields, kind: kind) }
+            catch { return .failure("its secret section contains a malformed credential or one for a different VPN type.") }
+        }
+        if SubprocessTunnelConfig.passwordInAddress(vpn.server) {
+            return .failure("Enter the server address and password separately.")
         }
         vpn.labelIDs = map[ConfigDocumentKeys.labelIDs]?.stringList ?? []
 
@@ -396,6 +406,14 @@ enum ConfigImport {
                 config.name = name
                 config.kind = kind
                 if config.server.isEmpty { config.server = vpn.server }
+                guard config.sshExtraOptions.isEmpty, config.extraArgs.isEmpty,
+                      config.csdWrapper.isEmpty, config.samlBrowser.isEmpty else {
+                    return .failure("Configure command-line options and helper programs locally on this Mac.")
+                }
+                guard !SubprocessTunnelConfig.passwordInAddress(config.proxyURL),
+                      !SubprocessTunnelConfig.passwordInAddress(config.server) else {
+                    return .failure("Enter addresses and passwords separately.")
+                }
                 vpn.subprocess = config.normalized()
             }
         } catch {
@@ -405,14 +423,32 @@ enum ConfigImport {
         if let signIn = map[ConfigDocumentKeys.signIn]?.mapValue {
             do { vpn.auth = try apply(signIn, onto: VPNAuthConfig(), namespace: "signin.") }
             catch { return .failure("its sign-in settings contain an invalid value.") }
-            if let source = signIn["signin.source"] { vpn.credentialSourceJSON = source }
+            if let source = signIn["signin.source"] {
+                guard let sourceMap = source.mapValue, let decoded = decodeCredentialSource(sourceMap) else {
+                    return .failure("its sign-in source could not be read.")
+                }
+                vpn.credentialSource = decoded
+            }
+        }
+        vpn.auth = ConfigSecretTransfer.importedAuth(vpn.auth, secrets: vpn.secrets)
+        if vpn.auth?.protectWithBiometrics == true {
+            guard kind == .openVPN else {
+                return .failure("This VPN type cannot use a Touch ID-protected sign-in.")
+            }
+            vpn.secrets = ConfigSecretTransfer.protectSignIn(in: vpn.secrets, required: true)
         }
         if let routing = map[ConfigDocumentKeys.customRouting]?.mapValue {
             guard let value = decode(CustomRoutingProfile.self, from: routing) else { return .failure("its custom routing settings contain an invalid value.") }
+            if [value.proxy.manualURL, value.proxy.pacURL].compactMap({ $0 }).contains(where: SubprocessTunnelConfig.passwordInAddress) {
+                return .failure("Enter the routing proxy address and password separately.")
+            }
             vpn.customRouting = value
         }
         if let endpoints = map[ConfigDocumentKeys.endpoints]?.mapValue {
             guard let value = decode(VPNEndpointList.self, from: endpoints) else { return .failure("its endpoint list contains an invalid value.") }
+            guard !value.endpoints.contains(where: { SubprocessTunnelConfig.passwordInAddress($0.host) }) else {
+                return .failure("Enter endpoint addresses and passwords separately.")
+            }
             vpn.endpoints = value
         }
         if let prefs = map[ConfigDocumentKeys.interfacePrefs]?.mapValue {
@@ -433,6 +469,10 @@ enum ConfigImport {
                               settings: ConfigMap, vpn: ConfigSnapshot.VPN) -> [String] {
         var out: [String] = []
         if !server.isEmpty { out.append("Server address: \(server)") }
+        if let source = vpn.credentialSource,
+           source.kind != .manual, !source.reference.isEmpty {
+            out.append("Connecting will request the linked sign-in from \(source.kind.displayName).")
+        }
         if !vpn.secrets.isEmpty {
             out.append("Contains \(vpn.secrets.entries.count) credential record(s); import saves them to your Keychain.")
         }
@@ -457,6 +497,7 @@ enum ConfigImport {
             ("ssh.strict-host-key", "Host key checking"),
             ("ssh.pinned-host-key", "Pinned host key"),
             ("ssh.proxy-jump", "Jump host"),
+            ("oc.server", "Server address"),
             ("oc.pinned-server-cert", "Pinned server certificate"),
             ("oc.cafile", "Certificate authority file"),
             ("oc.pfs", "Require perfect forward secrecy"),
@@ -546,6 +587,22 @@ enum ConfigImport {
 
     private static func isText(_ value: ConfigValue) -> Bool {
         switch value { case .string, .text: return true; default: return false }
+    }
+
+    /// The field map points into the vault item. Only recognized roles can select
+    /// a field, and only their identifiers are imported into the source.
+    static func decodeCredentialSource(_ map: ConfigMap) -> CredentialSource? {
+        var settings = map
+        settings["fieldMap"] = nil
+        guard var source = decode(CredentialSource.self, from: settings) else { return nil }
+        if let value = map["fieldMap"] {
+            guard let fields = value.mapValue else { return nil }
+            for entry in fields.entries where AuthKind(rawValue: entry.key) != nil {
+                guard isText(entry.value), let identifier = entry.value.stringValue else { return nil }
+                source.fieldMap[entry.key] = identifier
+            }
+        }
+        return source
     }
 
     /// A structural section back into its type, through the app's own decoder.

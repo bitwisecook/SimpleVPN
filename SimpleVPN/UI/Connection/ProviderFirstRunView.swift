@@ -105,8 +105,8 @@ struct ProviderFirstRunView: View {
             // A successful import creates a profile and the app swaps this empty
             // page for the normal VPN UI. Until then these stages are honestly
             // unavailable, using words and a lock as well as dimming.
-            waitingStep(number: 3, step: steps[2])
-            waitingStep(number: 4, step: steps[3])
+            setupStep(number: 3, step: steps[2], waitsForImport: true)
+            setupStep(number: 4, step: steps[3], waitsForImport: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(18)
@@ -115,27 +115,19 @@ struct ProviderFirstRunView: View {
         .accessibilityLabel("Setup steps")
     }
 
-    private func setupStep(number: Int, step: UserFacingError.Step) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 9) {
-            Image(systemName: "\(number).circle.fill")
-                .foregroundStyle(.tint)
-                .accessibilityHidden(true)
+    private func setupStep(number: Int, step: UserFacingError.Step, waitsForImport: Bool = false) -> some View {
+        let prefix = waitsForImport
+            ? "Step \(number), unavailable until you import a configuration."
+            : "Step \(number)."
+        let spokenText = [prefix, step.text, step.note].compactMap { $0 }
+            .joined(separator: " ").replacingOccurrences(of: "**", with: "")
+        return HStack(alignment: .firstTextBaseline, spacing: 9) {
+            Image(systemName: waitsForImport ? "lock.circle" : "\(number).circle.fill")
+                .foregroundStyle(waitsForImport ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tint))
             stepText(step)
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Step \(number). \(step.text.replacingOccurrences(of: "**", with: ""))")
-    }
-
-    private func waitingStep(number: Int, step: UserFacingError.Step) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 9) {
-            Image(systemName: "lock.circle")
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            stepText(step)
-        }
-        .opacity(0.52)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Step \(number), unavailable until you import a configuration. \(step.text.replacingOccurrences(of: "**", with: ""))")
+        .opacity(waitsForImport ? 0.52 : 1)
+        .accessibilityRepresentation { Text(verbatim: spokenText) }
     }
 
     private func stepText(_ step: UserFacingError.Step) -> some View {

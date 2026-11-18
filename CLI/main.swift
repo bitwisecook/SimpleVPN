@@ -17,6 +17,15 @@
 import Foundation
 import Darwin
 
+// OpenSSH supplies one prompt when it launches this executable as SSH_ASKPASS.
+if ProcessInfo.processInfo.environment[SSHAskpass.directoryKey] != nil {
+    guard CommandLine.arguments.count == 2,
+          let answer = SSHAskpass.response(prompt: CommandLine.arguments[1],
+                                           environment: ProcessInfo.processInfo.environment) else { exit(1) }
+    FileHandle.standardOutput.write(answer)
+    exit(0)
+}
+
 // MARK: - Usage
 
 let usageText = """

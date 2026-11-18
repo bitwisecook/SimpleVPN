@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
@@ -71,6 +72,9 @@ func (st *engineState) serveUDP(guest *gonet.UDPConn, dstHost string, dstPort in
 	if st.up != nil && st.up.kind == proxySOCKS5 {
 		if err := st.serveUDPviaSOCKS(guest, dstHost, dstPort); err != nil {
 			// SOCKS UDP unavailable: DNS still deserves to work.
+			if st.ctx.Err() != nil {
+				return
+			}
 			if dstPort == dnsPort {
 				st.serveDNSoverTCP(guest, dstHost, dstPort)
 				return
@@ -108,15 +112,17 @@ func (st *engineState) serveDNSoverTCP(guest *gonet.UDPConn, resolverHost string
 		if err != nil {
 			return
 		}
-		query := make([]byte, n)
-		copy(query, buf[:n])
+		query := buf[:n]
 		st.dnsQueries.Add(1)
 		st.bytesUp.Add(int64(n))
 
 		ctx, cancel := context.WithTimeout(st.ctx, dialTimeout)
-		resp, derr := dnsOverTCP(ctx, st.up, st.dialer, resolverHost, resolverPort, query)
+		resp, derr := dnsOverTCP(ctx, st.flowDial, st.dialer, resolverHost, resolverPort, query)
 		cancel()
 		if derr != nil {
+			if st.ctx.Err() != nil {
+				return
+			}
 			st.setLastError("dns %s failed: %v", resolverAddress(resolverHost, resolverPort), derr)
 			continue
 		}
@@ -132,7 +138,7 @@ func (st *engineState) serveDNSoverTCP(guest *gonet.UDPConn, resolverHost string
 // serveUDPviaSOCKS sets up an association and relays the flow. It returns an
 // error (without having relayed anything) when the proxy will not grant UDP, so
 // the caller can fall back for DNS. Once relaying begins it runs until idle.
-func (st *engineState) serveUDPviaSOCKS(guest *gonet.UDPConn, dstHost string, dstPort int) error {
+func (st *engineState) serveUDPviaSOCKS(guest net.Conn, dstHost string, dstPort int) error {
 	// Control connection: negotiate, then UDP ASSOCIATE. It must stay open for
 	// the lifetime of the association (the proxy tears the relay down when it
 	// closes).
@@ -143,6 +149,8 @@ func (st *engineState) serveUDPviaSOCKS(guest *gonet.UDPConn, dstHost string, ds
 		return err
 	}
 	closeCtrl := func() { ctrl.Close() }
+	stopHandshake := context.AfterFunc(st.ctx, closeCtrl)
+	defer stopHandshake()
 
 	_ = ctrl.SetDeadline(time.Now().Add(dialTimeout))
 	if err := socks5Negotiate(ctrl, st.up.username, st.up.password); err != nil {
@@ -187,21 +195,24 @@ func (st *engineState) serveUDPviaSOCKS(guest *gonet.UDPConn, dstHost string, ds
 
 	// From here the flow is live; tear down control + relay together on exit.
 	done := make(chan struct{})
-	var once bool
-	closeAll := func() {
-		if once {
-			return
-		}
-		once = true
+	closeAll := sync.OnceFunc(func() {
 		close(done)
 		relayConn.Close()
 		closeCtrl()
-	}
+		guest.Close()
+	})
+	stopHandshake()
+	stopCancel := context.AfterFunc(st.ctx, closeAll)
+	defer stopCancel()
+	var workers sync.WaitGroup
+	workers.Add(2)
+	defer workers.Wait()
 	defer closeAll()
 
 	// The control connection carries no data, but if the proxy closes it the
 	// association is dead — watch for that and tear down.
 	go func() {
+		defer workers.Done()
 		var b [1]byte
 		_ = ctrl.SetReadDeadline(time.Time{})
 		_, _ = ctrl.Read(b[:]) // blocks until EOF/error
@@ -210,6 +221,7 @@ func (st *engineState) serveUDPviaSOCKS(guest *gonet.UDPConn, dstHost string, ds
 
 	// relay -> guest: strip the SOCKS UDP header, deliver the payload.
 	go func() {
+		defer workers.Done()
 		buf := make([]byte, maxPacketSize)
 		for {
 			_ = relayConn.SetReadDeadline(time.Now().Add(udpIdleTimeout))

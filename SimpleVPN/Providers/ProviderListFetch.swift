@@ -54,7 +54,7 @@ nonisolated enum ProviderListSettings {
     static let onlyWhenConnectedKey = "providerLists.onlyWhenConnected"
     /// Which providers the user has said yes to, one at a time. Consenting to
     /// Mullvad is not consenting to Nord.
-    static let consentedKey = "providerLists.consented"
+    static let consentedKey = "providerLists.consented.routeDisclosure"
 
     static var enabled: Bool { UserDefaults.standard.bool(forKey: enabledKey) }
 
@@ -128,10 +128,9 @@ nonisolated enum ProviderListFetchPolicy {
                     + "cannot check that a list really came from them. Until it does, it will not ask."
             case .waitingForTunnel:
                 "SimpleVPN is set to ask this provider for its server list only while you are "
-                    + "connected to it, so the request comes from the VPN rather than from your own "
-                    + "address. Connect first, or change that in Settings \u{25B8} General \u{25B8} Privacy."
+                    + "connected to it. Connect first, or change that in Settings \u{25B8} General \u{25B8} Privacy."
             case .needsConsent:
-                "SimpleVPN has not contacted this provider before."
+                "Review what this provider will receive before getting its server list."
             }
         }
     }
@@ -168,11 +167,8 @@ nonisolated enum ProviderListFetchPolicy {
 
     /// Which providers a set of live tunnel server addresses belongs to.
     ///
-    /// The one place the feature can be meaningfully better than a browser: if a
-    /// tunnel to that provider is already up, the request leaves through their own
-    /// exit and they learn essentially nothing new — they are already carrying the
-    /// traffic. Matched on the SHIPPED hostname suffix, so a hostname a payload
-    /// supplied can never widen what counts as "connected to Mullvad".
+    /// Match the shipped suffixes. A connected server satisfies the timing
+    /// preference. macOS still selects the route to the list service.
     static func connected(hosts: [String]) -> Set<VPNServiceProviderID> {
         var out: Set<VPNServiceProviderID> = []
         for host in hosts.map({ $0.lowercased() }) {

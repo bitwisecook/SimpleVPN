@@ -531,6 +531,52 @@ struct DiagnosticReportModelTests {
         #expect(!m.previewText.contains("8.10.60"))
     }
 
+    @Test func restartingThenClosingDropsThePreviousReportAndDraft() {
+        let m = model()
+        m.answers.whatWentWrong = "Details from the previous VPN"
+        m.previewText = "Manual edits"
+        m.markPreviewEdited()
+        #expect(m.hasDraft)
+
+        let request = DiagnosticReportRequest(kind: .ssh, profileID: "another", reason: .connectFailure)
+        m.restart(with: request)
+        #expect(m.request == request && m.gathering)
+        #expect(m.payload == nil && m.previewText.isEmpty && !m.hasDraft)
+        m.cancelGathering()
+        #expect(!m.gathering)
+    }
+
+    @Test func closingDropsALateAssemblyResult() async throws {
+        let m = model()
+        let built = try #require(m.payload)
+        let (started, signalStart) = AsyncStream<Void>.makeStream()
+        let (release, signalRelease) = AsyncStream<Void>.makeStream()
+        let gather = m.startGathering { _, _, _ in
+            signalStart.finish()
+            for await _ in release {}
+            return built
+        }
+        for await _ in started {}
+        m.previewText = "Current draft"
+        m.cancelGathering()
+        signalRelease.finish()
+        await gather.value
+        #expect(!m.gathering)
+        #expect(m.previewText == "Current draft")
+    }
+
+    @Test func answersTypedDuringGatherAreIncludedInTheFirstPreview() async throws {
+        let m = model()
+        let built = try #require(m.payload)
+        let gather = m.startGathering { _, _, _ in built }
+        m.answers.whatWentWrong = "New text while gathering"
+        m.answersChanged()
+        await gather.value
+        #expect(m.previewText.contains("New text while gathering"))
+        #expect(!m.gathering)
+        m.cancelGathering()
+    }
+
     @Test func aProgrammaticRenderIsNotMistakenForAUserEdit() {
         let m = model()
         m.renderPreview()

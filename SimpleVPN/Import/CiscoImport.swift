@@ -58,6 +58,15 @@ enum CiscoImport {
         }
     }
 
+    /// A PCF GroupPwd authenticates the group. The user enters their separate XAuth password.
+    @MainActor static func storePCF(_ config: NativeVPNConfig, groupSecret: String?, save: (NativeVPNConfig) -> Void) throws {
+        if let groupSecret {
+            try KeychainCredentialStore.saveCredentials(profile: NativeVPNSecrets.groupPSKProfile(config.id),
+                                                       .init(username: "", password: groupSecret))
+        }
+        save(config)
+    }
+
     // MARK: .pcf
 
     static func parsePCF(_ text: String, name: String) -> Result {
@@ -83,7 +92,7 @@ enum CiscoImport {
         let cleartext = kv["GroupPwd"].flatMap { $0.isEmpty ? nil : $0 }
         var note: String?
         if cleartext == nil, let enc = kv["enc_GroupPwd"], !enc.isEmpty {
-            note = "This profile stores its group secret obfuscated (enc_GroupPwd). SimpleVPN can't reverse Cisco's scheme — paste the plain group secret, or decode it with a Cisco group-password tool. Imported: enc_GroupPwd=\(enc.prefix(12))…"
+            note = "This profile contains an obfuscated group secret. Enter the original group secret in Sign-In before connecting."
         }
         return .pcf(config: c, cleartextSecret: cleartext, note: note)
     }

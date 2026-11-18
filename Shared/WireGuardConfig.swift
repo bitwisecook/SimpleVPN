@@ -1042,7 +1042,7 @@ final class WireGuardStore {
     private(set) var lastError: String?
     private static let key = "wireguard.v1"
 
-    init() { load() }
+    init(loadSaved: Bool = true) { if loadSaved { load() } }
 
     /// Save a config. Secrets never reach UserDefaults on ANY save path: the
     /// private key and preshared key (if set) move into the keychain under

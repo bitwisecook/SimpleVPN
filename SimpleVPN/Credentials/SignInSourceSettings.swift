@@ -765,8 +765,7 @@ nonisolated enum VendorFieldValidation: Sendable, Equatable {
         case .notExecutable:
             "Problem: that isn\u{2019}t a program SimpleVPN can run."
         case .unsafeDirectory:
-            "Problem: anyone using this Mac can replace files in that folder, so SimpleVPN "
-            + "won\u{2019}t run it. Move the program somewhere only you can write to."
+            "Problem: another user can change this program or its location. Move the program to a folder only you can change and check its permissions."
         case .notASocket:
             "Problem: there\u{2019}s no connection point at that path. It appears while the app "
             + "is running."

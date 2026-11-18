@@ -14,9 +14,7 @@ import SwiftUI
 enum OnePasswordTOTPClock {
     static let period: TimeInterval = 30
 
-    /// The fraction of the current code's life still available. This keeps the
-    /// progress arc fluid between integer labels and resets exactly at each
-    /// Unix-time TOTP boundary.
+    /// The fraction of the current code's life still available.
     static func remainingFraction(at date: Date) -> Double {
         let elapsed = date.timeIntervalSince1970
             .truncatingRemainder(dividingBy: period)
@@ -32,27 +30,34 @@ enum OnePasswordTOTPClock {
 }
 
 struct OnePasswordVerificationCountdown: View {
-    @Environment(\.liveVisualPolicy) private var liveVisuals
+    @Environment(\.windowShowsLiveContent) private var windowVisible
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: liveVisuals.frameInterval(normalFramesPerSecond: 60))) { context in
-            let remaining = OnePasswordTOTPClock.displaySecondsRemaining(at: context.date)
-            let fraction = OnePasswordTOTPClock.remainingFraction(at: context.date)
-            ZStack {
-                Circle().stroke(.quaternary, lineWidth: 3)
-                Circle()
-                    .trim(from: 0, to: fraction)
-                    .stroke(.tint, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                Text("\(remaining)")
-                    .font(.caption2.monospacedDigit().weight(.semibold))
+        Group {
+            if windowVisible {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    dial(at: context.date)
+                }
+            } else {
+                Color.clear.accessibilityHidden(true)
             }
-            .frame(width: 28, height: 28)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Verification code changes in \(remaining) seconds")
         }
-        .help(liveVisuals.isLowPowerModeEnabled
-              ? "The verification-code ring updates at 20 frames per second in Low Power Mode."
-              : "The verification-code ring updates at 60 frames per second.")
+        .frame(width: 28, height: 28)
+    }
+
+    private func dial(at date: Date) -> some View {
+        let remaining = OnePasswordTOTPClock.displaySecondsRemaining(at: date)
+        let fraction = OnePasswordTOTPClock.remainingFraction(at: date)
+        return ZStack {
+            Circle().stroke(.quaternary, lineWidth: 3)
+            Circle()
+                .trim(from: 0, to: fraction)
+                .stroke(.tint, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+            Text("\(remaining)")
+                .font(.caption2.monospacedDigit().weight(.semibold))
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Verification code changes in \(remaining) seconds")
     }
 }

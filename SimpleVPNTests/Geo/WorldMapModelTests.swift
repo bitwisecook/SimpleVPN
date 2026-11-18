@@ -110,6 +110,11 @@ struct GlobeCameraTests {
     private let tokyo = MapPin(id: "vpn", kind: .endpoint(selected: true), lat: 35.6762, lon: 139.6503,
                                title: "Tokyo VPN", subtitle: "Japan")
 
+    @Test func simultaneousGlobeSurfacesShareTheirImageBacking() {
+        let first = GlobeTextureImages.forDisplay()
+        #expect(first === GlobeTextureImages.forDisplay())
+    }
+
     @Test func defaultOrientationCentresTheActiveGreatCircle() {
         var camera = GlobeCamera()
         camera.orient(from: london, to: tokyo)

@@ -12,6 +12,7 @@
 
 import Foundation
 import NetworkExtension
+import Security
 import Testing
 @testable import SimpleVPN
 
@@ -555,5 +556,51 @@ struct TailscaleNetworkSettingsTests {
         #expect(c.mtu == TailscaleStartConfig.defaultMTU)
         #expect(!c.carriesDefaultRoute)
         #expect(TailscaleTunnelConfig.decode(json: "]not json[") == nil)
+    }
+}
+
+@MainActor
+struct TailscaleIdentityPersistenceTests {
+    @Test func testProcessesCannotTakeOverLiveCredentials() {
+        for marker in ["XCTestConfigurationFilePath", "XCTestBundlePath", "SIMPLEVPN_UI_TEST",
+                       "SIMPLEVPN_UI_TEST_SUPPRESS_DNS_PROXY_ACTIVATION"] {
+            #expect(!VPNController.permitsLiveCredentialBrokers(in: [marker: "1"]))
+        }
+        #expect(VPNController.permitsLiveCredentialBrokers(in: [:]))
+    }
+
+    @Test func reattachingToAnAlreadySavedIdentityDoesNotWrite() throws {
+        try TailscaleIdentityPersistence.persist("fixture", checkingExisting: true) {
+            "fixture"
+        } write: { _ in Issue.record("A verified existing identity was rewritten") }
+    }
+
+    @Test func aNewIdentityMustBeReadBackExactly() throws {
+        var record: String?
+        try TailscaleIdentityPersistence.persist("updated", checkingExisting: true) {
+            record
+        } write: { record = $0 }
+        #expect(record == "updated")
+        do {
+            try TailscaleIdentityPersistence.persist("next", checkingExisting: false) { "unexpected" } write: { _ in }
+            Issue.record("Accepted an identity with a mismatched read-back")
+        } catch let failure as TailscaleIdentitySaveError {
+            #expect(failure.step == .verify)
+            #expect(failure.canRetry)
+            #expect(failure.errorDescription?.contains("unexpected") == false)
+        }
+    }
+
+    @Test func readFailurePreservesTheIdentityAndReportsTheAccessFailure() {
+        do {
+            try TailscaleIdentityPersistence.persist("replacement", checkingExisting: true) {
+                throw NSError(domain: NSOSStatusErrorDomain, code: Int(errSecAuthFailed))
+            } write: { _ in Issue.record("Overwrote an unreadable identity") }
+            Issue.record("Accepted an unreadable identity")
+        } catch let failure as TailscaleIdentitySaveError {
+            #expect(failure.step == .read)
+            #expect(!failure.canRetry)
+            #expect(failure.errorDescription?.contains("didn’t grant access") == true)
+        } catch { Issue.record("Unexpected error type") }
     }
 }

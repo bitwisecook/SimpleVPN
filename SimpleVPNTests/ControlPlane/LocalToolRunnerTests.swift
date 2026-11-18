@@ -35,6 +35,34 @@ struct LocalToolProcessBoundsTests {
         #expect(result.stderr == "cancelled")
         #expect(clock.now - began < .seconds(3.5))
     }
+    @Test func cancellingAQueuedRequestDoesNotWaitForTheActivePrompt() async throws {
+        let queue = DispatchQueue(label: "credential-test-prompt")
+        let gate = DispatchSemaphore(value: 0)
+        queue.async { _ = gate.wait(timeout: .now() + 3) }
+        defer { gate.signal() }
+        let clock = ContinuousClock()
+        let task = Task {
+            await LocalToolRunner.run(executable: "/bin/cat", arguments: [], runQueue: queue)
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        let began = clock.now
+        task.cancel()
+        let result = await task.value
+        #expect(!result.succeeded)
+        #expect(result.stdout.isEmpty)
+        #expect(clock.now - began < .seconds(1))
+    }
+
+    @Test func echoedInputAndPasswordsInDiagnosticURLsStayPrivate() async {
+        let result = await LocalToolRunner.run(executable: "/bin/sh", arguments: [
+            "-c", "read -r line; printf 'refused %s at https://user:pencil@example.test/' \"$line\" >&2; exit 1"
+        ], stdin: Data("cabin\n".utf8))
+        #expect(!result.succeeded)
+        #expect(result.stderr.contains("refused"))
+        #expect(!result.stderr.contains("cabin"))
+        #expect(!result.stderr.contains("pencil"))
+    }
+
     @Test func stdinIsBoundedAndReachesTheTool() async {
         let bytes = Data(repeating: 97, count: 100000)
         let result = await LocalToolRunner.run(executable: "/bin/cat", arguments: [], deadline: 5, stdin: bytes)

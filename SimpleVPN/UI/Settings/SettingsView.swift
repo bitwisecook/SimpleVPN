@@ -190,7 +190,7 @@ private struct ExtensionsSettings: View {
                     .font(.callout).foregroundStyle(.secondary)
                 BrowserPicker(selection: $appBrowser)
                     .onChange(of: appBrowser) { BrowserDefaults.appDefault = appBrowser }
-                Text("The browser (and profile) SimpleVPN uses for SAML/SSO sign-in when a VPN needs one. Each VPN can override this; the default is your system default browser.")
+                Text("Used for SSL VPNs that sign in through a browser. You can choose a different browser or browser profile for each VPN.")
                     .font(.callout).foregroundStyle(.secondary)
                 Toggle("Check how quick each server is", isOn: $endpointProbing)
                     .onChange(of: endpointProbing) { if !endpointProbing { probes?.clear() } }
@@ -225,10 +225,7 @@ private struct ExtensionsSettings: View {
             }
             Section("Privacy") {
                 Toggle("Look up my public address", isOn: $publicIPLookup)
-                    .onChange(of: publicIPLookup) {
-                        if publicIPLookup { Task { await publicIP?.refresh() } }
-                        else { publicIP?.clear() }
-                    }
+
                 Text("Shows \u{201C}your connection appears from…\u{201D} and the map's you-are-here pin by asking an internet service what address it sees. Off means no such requests are ever made.")
                     .font(.callout).foregroundStyle(.secondary)
 
@@ -240,6 +237,7 @@ private struct ExtensionsSettings: View {
                     if ipProviderID == IPLookupProvider.customID {
                         TextField("IPv4 URL (plain-text body)", text: $ipCustomV4,
                                   prompt: Text("https://api4.ipify.org"))
+                            .onSubmit { Task { await publicIP?.refresh() } }
                             .autocorrectionDisabled()
                             .lineLimit(1)
                         TextField("IPv6 URL (optional)", text: $ipCustomV6,

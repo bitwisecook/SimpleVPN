@@ -64,7 +64,7 @@ func TestFragmentedDatagramsAreReassembledTranslatedAndReturned(t *testing.T) {
 		var receiver reassembler
 		var whole []byte
 		for _, part := range fragments {
-			data, _, pending, err := receiver.accept(part, "peer")
+			data, _, pending, err := receiver.accept(part, fragmentScope{"peer", 1})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -106,14 +106,14 @@ func TestOverlappingFragmentsKillTheWholeDatagram(t *testing.T) {
 		t.Fatal(err)
 	}
 	var a reassembler
-	if _, _, pending, err := a.accept(parts[0], "capture"); !pending || err != nil {
+	if _, _, pending, err := a.accept(parts[0], fragmentScope{}); !pending || err != nil {
 		t.Fatal("first fragment")
 	}
-	if _, _, _, err := a.accept(parts[0], "capture"); err == nil {
+	if _, _, _, err := a.accept(parts[0], fragmentScope{}); err == nil {
 		t.Fatal("overlap was accepted")
 	}
 	for _, part := range parts[1:] {
-		if _, _, _, err := a.accept(part, "capture"); err == nil {
+		if _, _, _, err := a.accept(part, fragmentScope{}); err == nil {
 			t.Fatal("overlapping group resumed")
 		}
 	}

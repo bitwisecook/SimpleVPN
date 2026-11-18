@@ -44,7 +44,17 @@ private final class DelayedRouteHost: RouteMediatorHost {
     }
     func routeApplyTailscaleGateway(full: Bool, to id: String) async -> String? { nil }
     func routeReconnect(id: String) async {}
-    func routeSampleEffectiveOwned(id: String) async -> Bool? { nil }
+    var holdSample = false
+    var releaseSample: CheckedContinuation<Void, Never>?
+    let sampleStarted = AsyncStream<Void>.makeStream()
+    let sampleFinished = AsyncStream<Bool>.makeStream()
+    func routeSampleEffectiveOwned(id: String) async -> Bool? {
+        guard holdSample else { return nil }
+        holdSample = false
+        await withCheckedContinuation { releaseSample = $0; sampleStarted.continuation.yield(()) }
+        sampleFinished.continuation.yield(Task.isCancelled)
+        return false
+    }
     func routeWantsFullTunnel(id: String) -> Bool { true }
     func routeAdvertisedPrefixes(id: String) -> [String] { ["10.0.0.0/8"] }
 }
@@ -56,7 +66,19 @@ private final class DNSApplyHost: DNSMediatorHost {
     var reply: String? = "ok"
     var calls = 0
     var reconnects = 0
-    func dnsApply(_ request: DNSApplyRequest?, to id: String) async -> String? { calls += 1; return reply }
+    var holdNext = false
+    let events = AsyncStream<Void>.makeStream()
+    var release: CheckedContinuation<Void, Never>?
+    var requests: [DNSApplyRequest?] = []
+    func dnsApply(_ request: DNSApplyRequest?, to id: String) async -> String? {
+        calls += 1
+        requests.append(request)
+        if holdNext {
+            holdNext = false
+            await withCheckedContinuation { release = $0; events.continuation.yield(()) }
+        }
+        return reply
+    }
     func dnsReconnect(id: String) async { reconnects += 1 }
 }
 
@@ -103,6 +125,100 @@ struct MediatorApplyIntegrationTests {
         #expect(mediator.lastApplyError != nil)
         #expect(host.virtualPlans.last?.userChoseDirect == true)
     }
+    @Test func overlappingStartsAndDepartingGatewayWaitForOwnership() async {
+        let host = DelayedRouteHost()
+        let mediator = RouteMediator(preferences: nil)
+        mediator.host = host
+        let connected = host.routeProfiles
+        host.routeProfiles = []
+        var initial: [Bool] = []
+        mediator.startWithGateway(for: "a", wantsDefault: true) { initial.append($0) }
+        mediator.startWithGateway(for: "b", wantsDefault: true) { initial.append($0) }
+        #expect(initial == [true, false])
+        host.routeProfiles = [connected[1]] // the split session became ready first
+        await mediator.setDefaultGateway(to: "b")
+        #expect(host.writes.isEmpty)
+        host.routeProfiles = connected
+        mediator.handleStatusChange(id: "a", connected: true, reasserting: false, disconnected: false)
+        await mediator.waitUntilIdle()
+        #expect(host.writes == [.split("a"), .full("b")])
+
+        var leaving = RouteProfileInfo(id: "b", name: "b", kind: .wireGuard, connected: false,
+                                      engaged: false, lastConnectedAt: nil, tailscaleHasExitNode: false)
+        leaving.retainingRoutesDuringTransition = true
+        host.routeProfiles = [connected[0], leaving]
+        await mediator.setDefaultGateway(to: "a")
+        #expect(!host.writes.contains(.full("a")))
+        host.routeProfiles = [connected[0]]
+        mediator.handleStatusChange(id: "b", connected: false, reasserting: false, disconnected: true)
+        await mediator.waitUntilIdle()
+        #expect(host.writes.last == .full("a"))
+    }
+
+    @Test func removingAnEstablishingProfileReleasesItsClaimAndCancelsOutstandingSeeds() async {
+        let host = DelayedRouteHost()
+        let mediator = RouteMediator(preferences: nil)
+        mediator.host = host
+        let connected = host.routeProfiles[0]
+        host.routeProfiles = []
+        var initial: [Bool] = []
+        mediator.startWithGateway(for: "a", wantsDefault: true) { initial.append($0) }
+        mediator.forgetSession("a")  // preferences removal without an NE callback
+        mediator.startWithGateway(for: "b", wantsDefault: true) { initial.append($0) }
+        #expect(initial == [true, true])
+        mediator.forgetSession("b")
+
+        host.routeProfiles = [connected]
+        host.holdSample = true
+        var started = host.sampleStarted.stream.makeAsyncIterator()
+        mediator.handleStatusChange(id: "a", connected: true, reasserting: false, disconnected: false)
+        await started.next()
+        mediator.forgetSession("a")
+        mediator.handleStatusChange(id: "a", connected: true, reasserting: false, disconnected: false)
+        await mediator.waitUntilIdle()
+        var finished = host.sampleFinished.stream.makeAsyncIterator()
+        host.releaseSample?.resume()
+        #expect(await finished.next() == true)
+        #expect(mediator.engineDefaultOwned["a"] == true)
+    }
+
+    @Test func lateGatewayAckCannotSeedReplacementSession() async {
+        let host = DelayedRouteHost()
+        let realizer = MultiTunnelRealizer(host: host, log: Logger(subsystem: "test", category: "route"))
+        host.holdFirst = true
+        let old = Task { await realizer.apply(.full, to: "a", kind: .wireGuard, hasExitNode: false) }
+        var events = host.events.stream.makeAsyncIterator()
+        await events.next()
+        realizer.forget(id: "a")
+        host.release?.resume()
+        #expect(await old.value == .failed)
+        #expect(realizer.applied("a") == nil)
+        #expect(await realizer.apply(.full, to: "a", kind: .wireGuard, hasExitNode: false) == .applied)
+        #expect(host.writes == [.full("a"), .full("a")])
+    }
+
+    @Test func expiredDNSReplyCannotSkipReapplyOrLeaveAnUnconfirmedResolver() async {
+        let host = DNSApplyHost()
+        host.dnsProfiles = [.init(id: "a", name: "a", kind: .wireGuard, connected: true, engaged: true,
+                                  lastConnectedAt: nil, resolvers: [], searchDomains: [], matchDomains: [], wantsCatchAll: true)]
+        let realizer = DNSRealizer(host: host, log: Logger(subsystem: "test", category: "dns"))
+        let plan = DNSArbiter.plan(intents: [.init(engine: "a", resolvers: ["10.0.0.53"], wantsCatchAll: true)],
+                                   policy: .init(defaultOwner: "a"))
+        host.holdNext = true
+        let old = Task { await realizer.apply(plan, force: false) }
+        var events = host.events.stream.makeAsyncIterator()
+        await events.next()
+        realizer.forget(id: "a")
+        host.release?.resume()
+        #expect(await old.value == false)
+        host.reply = nil
+        #expect(await realizer.apply(plan, force: false) == false)
+        host.reply = "ok"
+        let empty = DNSArbiter.plan(intents: [], policy: .init(defaultOwner: nil))
+        #expect(await realizer.apply(empty, force: false))
+        #expect(host.requests == [plan.applyRequests()["a"], plan.applyRequests()["a"], nil])
+    }
+
     @Test func partiallyFailedProxySwitchCannotSuppressRestoreOfPreviousOwner() async {
         let host = ProxyApplyHost()
         let realizer = ProxyRealizer(host: host, log: Logger(subsystem: "SimpleVPN.tests", category: "proxy"))

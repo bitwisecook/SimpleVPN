@@ -69,21 +69,7 @@ struct NativeVPNView: View {
         return need.sentence
     }
 
-    /// The OTHER native config currently occupying macOS's single personal-VPN
-    /// slot, if any — connecting this one replaces it, so Connect names it.
-    private var activeOtherNativeName: String? {
-        guard let activeID = manager.activeConfigID, activeID != draft.id,
-              manager.status == .connected || manager.status == .connecting
-                || manager.status == .reasserting
-        else { return nil }
-        let name = manager.configs.first { $0.id == activeID }?.name
-            .trimmingCharacters(in: .whitespaces) ?? ""
-        return name.isEmpty ? "the other native VPN" : name
-    }
-
-    private var replacesActiveVPNCaption: String? {
-        activeOtherNativeName.map { "Will disconnect \($0) first." }
-    }
+    private var replacesActiveVPNCaption: String? { manager.replacementWarning(for: draft.id) }
 
     private var connectHelp: String {
         [replacesActiveVPNCaption, missingFieldCaption ?? "Push this configuration into macOS and connect."]
@@ -530,7 +516,10 @@ struct NativeVPNView: View {
                 nativeStatus
                 Spacer()
                 if isActive {
-                    Button("Disconnect") { manager.disconnect() }.buttonStyle(.bordered).tint(.red)
+                    Button(manager.status == .connecting ? "Cancel Connecting" : "Disconnect") {
+                        if manager.activeConfigID == draft.id { manager.disconnect() }
+                    }
+                    .buttonStyle(.bordered).tint(.red)
                 } else {
                     Button("Connect") {
                         save()
@@ -566,6 +555,8 @@ struct NativeVPNView: View {
     @ViewBuilder private var nativeStatus: some View {
         switch manager.status {
         case .connected where isActive: Label("Connected", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+        case .reasserting where isActive:
+            Label("Reconnecting…", systemImage: "arrow.clockwise.circle")
         case .connecting where isActive:
             HStack(spacing: 6) { ProgressView().controlSize(.small).accessibilityHidden(true); Text("Connecting…") }
                 .accessibilityElement(children: .combine)

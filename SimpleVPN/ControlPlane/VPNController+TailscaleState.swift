@@ -1,15 +1,132 @@
 // Copyright 2026 James Deucker (bitwisecook)
 // SPDX-License-Identifier: GPL-3.0-only
+import AppKit
 import Foundation
+import Security
 @preconcurrency import NetworkExtension
+
+/// Only operation names and Security status codes may leave the private channel.
+nonisolated struct TailscaleIdentitySaveError: LocalizedError {
+    enum Step: String { case read, save, verify }
+    let step: Step
+    let status: OSStatus?
+
+    init(_ step: Step, cause: Error? = nil) {
+        self.step = step
+        if let error = cause as NSError?, error.domain == NSOSStatusErrorDomain {
+            status = OSStatus(exactly: error.code)
+        } else { status = nil }
+    }
+
+    var canRetry: Bool {
+        status != errSecAuthFailed && status != errSecUserCanceled && status != errSecInteractionNotAllowed
+    }
+
+    var errorDescription: String? {
+        let summary = "SimpleVPN couldn’t \(step.rawValue) this VPN’s identity in your login keychain."
+        switch status {
+        case errSecInteractionNotAllowed:
+            return summary + " Open Keychain Access, check that the login keychain is unlocked, then reconnect."
+        case errSecAuthFailed, errSecUserCanceled:
+            return summary + " macOS didn’t grant access. Reconnect and allow SimpleVPN to use the saved identity."
+        case let code?:
+            let detail = SecCopyErrorMessageString(code, nil) as String? ?? "Keychain error"
+            return summary + " \(detail) (OSStatus \(code))."
+        case nil:
+            return summary + (step == .verify ? " The saved copy could not be confirmed." : "")
+        }
+    }
+}
+
+nonisolated enum TailscaleIdentityPersistence {
+    /// Reattaching to the same snapshot only needs a read. Never acknowledge
+    /// a new value until a separate Keychain read returns the exact bytes.
+    static func persist(_ state: String, checkingExisting: Bool,
+                        read: () throws -> String?, write: (String) throws -> Void) throws {
+        if checkingExisting {
+            do {
+                if let existing = try read(), existing.utf8.elementsEqual(state.utf8) { return }
+            } catch { throw TailscaleIdentitySaveError(.read, cause: error) }
+        }
+        do { try write(state) } catch { throw TailscaleIdentitySaveError(.save, cause: error) }
+        let confirmed: String?
+        do { confirmed = try read() } catch { throw TailscaleIdentitySaveError(.verify, cause: error) }
+        guard let confirmed, confirmed.utf8.elementsEqual(state.utf8) else { throw TailscaleIdentitySaveError(.verify) }
+    }
+}
 
 extension VPNController {
     nonisolated static func tailscaleNodeStateProfile(_ id: String) -> String { "tailscale.state.\(id)" }
 
+    func tailscaleIdentityLease(_ id: String) throws -> Installation.Lease {
+        guard Self.permitsLiveCredentialBrokers else {
+            throw err("This test instance cannot manage a live VPN identity.")
+        }
+        return try tailscaleBrokerLeases.acquire(id)
+    }
+
+    /// An extension may return nil while its engine starts. Probe off the
+    /// profile-loading path and keep a single probe in flight per profile.
+    func attachTailscaleNodeState(_ id: String) {
+        guard Self.permitsLiveCredentialBrokers, !tailscaleStartingIDs.contains(id),
+              tailscaleStateBrokers[id] == nil, !locallyRemovedProfileIDs.contains(id),
+              !tailscaleProbingIDs.contains(id) else { return }
+        let lease: Installation.Lease
+        do { lease = try tailscaleIdentityLease(id) }
+        catch TailscaleBrokerLeases.BrokerError.owned {
+            // Close the race where the owner exits just before registration.
+            if watchTailscalePeerExit() { attachTailscaleNodeState(id) }
+            return
+        }
+        catch { return }
+        tailscaleProbingIDs.insert(id)
+        Task { [weak self] in
+            guard let self else { return }
+            defer { tailscaleProbingIDs.remove(id) }
+            let deadline = ContinuousClock.now + .seconds(8)
+            repeat {
+                guard let session = managers[id]?.connection as? NETunnelProviderSession,
+                      UI.isActive(session.status), !locallyRemovedProfileIDs.contains(id),
+                      !tailscaleStartingIDs.contains(id), tailscaleStateBrokers[id] == nil else { return }
+                if let bytes = await sendSessionMessageData(TailscaleNodeState.request(after: nil), session: session, timeout: 2),
+                   TailscaleNodeState.decodeReply(bytes, after: nil) != nil,
+                   managers[id]?.connection === session, UI.isActive(session.status),
+                   !locallyRemovedProfileIDs.contains(id), !tailscaleStartingIDs.contains(id) {
+                    watchTailscaleNodeState(id, session: session, lease: lease)
+                    return
+                }
+                do { try await Task.sleep(for: .milliseconds(350)) } catch { return }
+            } while ContinuousClock.now < deadline
+        }
+    }
+
+    /// If a competing owner crashes while this app is open, NE may continue to
+    /// show Connected. Its process-exit notification is the handoff trigger.
+    private func watchTailscalePeerExit() -> Bool {
+        guard tailscalePeerExitObserver == nil, let bundleID = Bundle.main.bundleIdentifier else { return false }
+        let applicationKey = NSWorkspace.applicationUserInfoKey
+        tailscalePeerExitObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let app = notification.userInfo?[applicationKey] as? NSRunningApplication,
+                  app.bundleIdentifier == bundleID else { return }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                for profile in self.profiles where profile.kind == .tailscale && UI.isActive(profile.status) {
+                    self.attachTailscaleNodeState(profile.id)
+                }
+            }
+        }
+        return true
+    }
+
     func migrateLegacyTailscaleIdentity(_ id: String) async {
         if let pending = tailscaleIdentityMigrations[id] { await pending.value; return }
-        guard !locallyRemovedProfileIDs.contains(id) else { return }
-        let task = Task { await performLegacyTailscaleMigration(id) }
+        guard !locallyRemovedProfileIDs.contains(id), let lease = try? tailscaleIdentityLease(id) else { return }
+        let task = Task {
+            defer { withExtendedLifetime(lease) {} }
+            await performLegacyTailscaleMigration(id)
+        }
         tailscaleIdentityMigrations[id] = task
         await task.value
         tailscaleIdentityMigrations[id] = nil
@@ -57,58 +174,93 @@ extension VPNController {
         await task?.value
     }
 
-    func watchTailscaleNodeState(_ id: String, session: NETunnelProviderSession) {
+    func watchTailscaleNodeState(_ id: String, session: NETunnelProviderSession, lease: Installation.Lease) {
         guard tailscaleStateBrokers[id] == nil else { return }
         let epoch = UUID()
         tailscaleStateBrokerEpochs[id] = epoch
         tailscaleStateBrokers[id] = Task { [weak self] in
+            defer { withExtendedLifetime(lease) {} }
             defer {
                 if self?.tailscaleStateBrokerEpochs[id] == epoch {
                     self?.tailscaleStateBrokers[id] = nil
                     self?.tailscaleStateBrokerEpochs[id] = nil
                 }
             }
-            var acknowledged: UInt64?
-            var misses = 0
-            let started = Date()
+            var acknowledged: TailscaleNodeState.Cursor?
+            var verified: TailscaleNodeState.Cursor?
+            var saveFailures = 0
+            var requestFullSnapshot = false
+            let clock = ContinuousClock()
+            let started = clock.now
+            var lastReply = started
+            var warnedAboutTransport = false
             var observedActive = false
             while !Task.isCancelled {
-                guard let self else { return }
+                guard let self, self.tailscaleStateBrokerEpochs[id] == epoch else { return }
                 if UI.isActive(session.status) { observedActive = true }
-                if (session.status == .disconnected || session.status == .invalid),
-                   observedActive || Date().timeIntervalSince(started) > 12 { return }
-                guard let bytes = await self.sendSessionMessageData(Data("tsstate".utf8), session: session, timeout: 2), !Task.isCancelled,
-                      let state = try? JSONDecoder().decode(TailscaleNodeState.self, from: bytes), state.isValid else {
-                    misses += 1
-                    if misses >= 5 {
-                        self.lastError = "The VPN could not save its identity in your Keychain. The connection was stopped."
-                        session.stopVPNTunnel(); return
-                    }
-                    do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
-                    continue
-                }
-                misses = 0
-                if acknowledged != state.revision {
-                    do {
-                        try await Task.detached {
-                            let account = Self.tailscaleNodeStateProfile(id)
-                            try KeychainCredentialStore.saveCredentials(profile: account, .init(username: "node-state", password: state.data))
-                            guard try KeychainCredentialStore.credentialsForExport(profile: account)?.password == state.data else {
-                                throw NSError(domain: "SimpleVPN.Keychain", code: 1,
-                                    userInfo: [NSLocalizedDescriptionKey: "The saved VPN identity could not be verified."])
+                if session.status == .disconnecting { return }
+                if session.status == .disconnected || session.status == .invalid,
+                   observedActive || clock.now - started > .seconds(12) { return }
+
+                let requestedCursor = requestFullSnapshot ? nil : acknowledged
+                let request = TailscaleNodeState.request(after: requestedCursor)
+                let bytes = await self.sendSessionMessageData(request, session: session, timeout: 2)
+                guard !Task.isCancelled, self.tailscaleStateBrokerEpochs[id] == epoch else { return }
+                let response = bytes.flatMap { TailscaleNodeState.decodeReply($0, after: requestedCursor) }
+                requestFullSnapshot = response == nil || response == .starting
+                var delay = Duration.milliseconds(250)
+                switch response {
+                case .snapshot(let state):
+                    lastReply = clock.now
+                    warnedAboutTransport = false
+                    let cursor = state.cursor
+                    if verified != cursor {
+                        let checkExisting = verified == nil
+                        let account = Self.tailscaleNodeStateProfile(id)
+                        do {
+                            try await Task.detached {
+                                try TailscaleIdentityPersistence.persist(state.data, checkingExisting: checkExisting) {
+                                    try KeychainCredentialStore.credentialsForExport(profile: account)?.password
+                                } write: { data in
+                                    try KeychainCredentialStore.saveCredentials(profile: account, .init(username: "node-state", password: data))
+                                }
+                            }.value
+                            verified = cursor
+                            saveFailures = 0
+                        } catch {
+                            guard !Task.isCancelled, self.tailscaleStateBrokerEpochs[id] == epoch,
+                                  UI.isActive(session.status) else { return }
+                            let failure = error as? TailscaleIdentitySaveError ?? TailscaleIdentitySaveError(.save)
+                            Self.log.error("Tailscale identity \(failure.step.rawValue, privacy: .public) failed, OSStatus \(failure.status.map(String.init) ?? "unavailable", privacy: .public)")
+                            saveFailures += 1
+                            if !failure.canRetry || saveFailures >= 3 {
+                                self.report(failure, profile: id)
+                                session.stopVPNTunnel()
+                                return
                             }
-                        }.value
-                        guard !Task.isCancelled else { return }
-                        let ack = await self.sendSessionMessageData(Data("tsstate:ack:\(state.revision)".utf8), session: session, timeout: 2)
-                        if ack.flatMap({ String(data: $0, encoding: .utf8) }) == "ok" {
-                            acknowledged = state.revision
                         }
-                    } catch {
-                        self.lastError = "Your Keychain could not save this VPN's identity. Unlock your Keychain before reconnecting."
-                        session.stopVPNTunnel(); return
+                    }
+                    guard !Task.isCancelled, self.tailscaleStateBrokerEpochs[id] == epoch else { return }
+                    if verified == cursor, acknowledged != cursor {
+                        let ack = await self.sendSessionMessageData(state.acknowledgement, session: session, timeout: 2)
+                        if ack == Data("ok".utf8) { acknowledged = cursor }
+                    } else if acknowledged == cursor { delay = .seconds(1) }
+                case .unchanged:
+                    lastReply = clock.now
+                    warnedAboutTransport = false
+                    delay = .seconds(1)
+                case .starting, nil:
+                    // A startup or transport delay says nothing about Keychain.
+                    // The engine itself enforces the deadline on a pending write.
+                    if clock.now - lastReply >= .seconds(15) {
+                        if !warnedAboutTransport {
+                            Self.log.error("Tailscale extension has not supplied its identity snapshot; retrying")
+                            warnedAboutTransport = true
+                        }
+                        delay = .seconds(1)
                     }
                 }
-                do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+                do { try await Task.sleep(for: delay) } catch { return }
             }
         }
     }

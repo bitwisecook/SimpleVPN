@@ -186,17 +186,15 @@ nonisolated enum ProviderPickerCopy {
     /// Three things, in the order somebody cares about them: who gets contacted, what
     /// they learn, and what SimpleVPN will NOT do — the last because "will this sign
     /// me in / send them my details?" is the question a person actually has.
-    static func consentMessage(_ p: VPNServiceProvider, throughTunnel: Bool) -> String {
+    static func consentMessage(_ p: VPNServiceProvider, connectedToProvider: Bool) -> String {
         let host = p.listURL?.host() ?? p.displayName
         var out = "SimpleVPN will make one request to \(host) and read the list of servers "
             + "\(p.displayName) publishes. "
-        out += throughTunnel
-            ? "You are connected to \(p.displayName) right now, so the request goes out through "
-                + "their own network \u{2014} they learn nothing they are not already carrying."
-            : "You are not connected to \(p.displayName), so they will see your real address and "
-                + "roughly when you asked. You can connect first and try again instead."
-        out += "\n\nNothing about you is sent: no account, no name, no sign-in. SimpleVPN cannot "
-            + "sign you in to \(p.displayName) and will not ask them for anything else."
+        out += connectedToProvider
+            ? "Your VPN is connected. macOS routing determines whether this request uses it. "
+            : "Your VPN is disconnected. "
+        out += "The provider sees the public address used for the request and when it arrives. "
+            + "SimpleVPN sends no account details and cannot sign you in."
         if let size = downloadSize(p) { out += " \(size)" }
         return out
     }

@@ -420,6 +420,34 @@ func fakeSOCKS5UDP(t *testing.T) string {
 	return ln.Addr().String()
 }
 
+func TestUDPCancellationClosesIdleAssociation(t *testing.T) {
+	addr := fakeSOCKS5UDP(t)
+	up, _ := parseUpstream("socks5://"+addr, "", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	st := &engineState{ctx: ctx, up: up, dialer: &net.Dialer{}}
+	guest, app := net.Pipe()
+	defer app.Close()
+	done := make(chan error, 1)
+	go func() { done <- st.serveUDPviaSOCKS(guest, "192.0.2.1", 1234) }()
+	_ = app.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := app.Write([]byte("hi")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(app, make([]byte, 2)); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("idle UDP relay was not closed")
+	}
+}
+
 func TestSOCKS5UDPAssociateGrant(t *testing.T) {
 	// Exercise just the control-plane grant: negotiate + ASSOCIATE returns a
 	// relay without error (the full data-plane relay needs the netstack, tested
@@ -474,5 +502,126 @@ func TestSOCKS5CommandNotSupported(t *testing.T) {
 	conn.Write(req)
 	if _, _, err := readSocksReply(conn); err == nil || !strings.Contains(err.Error(), "not supported") {
 		t.Fatalf("expected 'command not supported', got %v", err)
+	}
+}
+
+// A greeting can arrive in the same TCP segment as the proxy's reply.
+// An unsuccessful response, on the other hand, must never drain a stalled body.
+func TestConnectResponseBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name, response, greeting string
+		ok                       bool
+	}{
+		{"greeting", "HTTP/1.1 200 OK\r\n\r\nSSH-2.0-fixture\r\n", "SSH-2.0-fixture\r\n", true},
+		{"oversized", "HTTP/1.1 200 OK\r\nX: " + strings.Repeat("a", maxConnectHeaders) + "\r\n\r\n", "", false},
+		{"unfinished error body", "HTTP/1.1 407 Denied\r\nContent-Length: 1000\r\n\r\n", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, server := net.Pipe()
+			defer client.Close()
+			defer server.Close()
+			go func() {
+				_, _ = http.ReadRequest(bufio.NewReader(server))
+				_, _ = io.WriteString(server, tc.response)
+			}()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				conn, err := httpConnect(client, "example.test", 22, "", "")
+				if tc.ok != (err == nil) {
+					t.Errorf("unexpected handshake result: %v", err)
+					return
+				}
+				if tc.ok {
+					got := make([]byte, len(tc.greeting))
+					if _, err := io.ReadFull(conn, got); err != nil || string(got) != tc.greeting {
+						t.Errorf("greeting = %q, %v", got, err)
+					}
+				}
+			}()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				client.Close()
+				<-done
+				t.Fatal("handshake remained blocked")
+			}
+		})
+	}
+}
+
+// Wait until a real loopback peer has received the request, then leave its
+// response outstanding as the VPN disconnects.
+func TestCancelledProxyExchangeReleasesSocket(t *testing.T) {
+	for _, mode := range []string{"CONNECT", "UDP ASSOCIATE", "DNS response"} {
+		t.Run(mode, func(t *testing.T) {
+			listener, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			up, err := parseUpstream("http://"+listener.Addr().String(), "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() {
+				switch mode {
+				case "CONNECT":
+					conn, err := up.dialThrough(ctx, &net.Dialer{}, "example.test", 443)
+					if conn != nil {
+						conn.Close()
+					}
+					done <- err
+				case "UDP ASSOCIATE":
+					up.kind = proxySOCKS5
+					guest, app := net.Pipe()
+					defer app.Close()
+					defer guest.Close()
+					st := &engineState{ctx: ctx, up: up, dialer: &net.Dialer{}}
+					done <- st.serveUDPviaSOCKS(guest, "192.0.2.1", 443)
+				case "DNS response":
+					_, err := dnsOverTCP(ctx, up, &net.Dialer{}, "192.0.2.53", 53, []byte{1, 2})
+					done <- err
+				}
+			}()
+			_ = listener.(*net.TCPListener).SetDeadline(time.Now().Add(3 * time.Second))
+			server, err := listener.Accept()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer server.Close()
+			_ = server.SetDeadline(time.Now().Add(3 * time.Second))
+			br := bufio.NewReader(server)
+			switch mode {
+			case "UDP ASSOCIATE":
+				_, err = io.ReadFull(br, make([]byte, 3))
+			default:
+				_, err = http.ReadRequest(br)
+				if err == nil && mode == "DNS response" {
+					_, err = io.WriteString(server, "HTTP/1.1 200 OK\r\n\r\n")
+					if err == nil {
+						_, err = io.ReadFull(br, make([]byte, 4))
+					}
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			cancel()
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatal("cancelled exchange succeeded")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("exchange did not exit on cancellation")
+			}
+			if _, err := br.ReadByte(); err != io.EOF {
+				t.Fatalf("cancelled socket still open: %v", err)
+			}
+		})
 	}
 }

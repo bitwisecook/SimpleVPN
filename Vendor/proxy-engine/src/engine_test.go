@@ -9,6 +9,8 @@ package pxengine
 
 import (
 	"encoding/json"
+	"io"
+	"net"
 	"testing"
 	"time"
 
@@ -116,4 +118,38 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+func TestIdleRelayStopsAndPublishesLiveCounts(t *testing.T) {
+	up, _ := parseUpstream("socks5://127.0.0.1:1", "", "")
+	st, err := buildEngine(up, 1500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guest, local := net.Pipe()
+	upstream, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+	st.startRelay(guest, upstream)
+	go func() { _, _ = local.Write([]byte("hello")) }()
+	if _, err := io.ReadFull(remote, make([]byte, 5)); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for st.bytesUp.Load() != 5 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if st.bytesUp.Load() != 5 {
+		t.Error("established relay did not report bytes while open")
+	}
+	stopped := make(chan struct{})
+	go func() { stopEngine(st); close(stopped) }()
+	select {
+	case <-stopped:
+		if st.activeFlows.Load() != 0 {
+			t.Error("stopped engine still has active relays")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("engine stop waited for an idle upstream")
+	}
 }

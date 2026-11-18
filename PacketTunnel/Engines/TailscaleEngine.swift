@@ -73,6 +73,7 @@ final class TailscaleEngine: @unchecked Sendable {
 
     /// The engine currently wired to the C callbacks.
     private static let callbacks = EngineCallbackRegistry<TailscaleEngine>()
+    private let stateGeneration = UUID()
     private var handle: UInt64 = 0
     private var callbackContext: UInt64 = 0
     private var starting = false
@@ -262,7 +263,7 @@ final class TailscaleEngine: @unchecked Sendable {
         if event.state == "StatePersistenceFailed" {
             guard !lock.withLock({ stopped }) else { return }
             delegate?.tailscaleEngine(self, didFailWithError: NSError(domain: "SimpleVPN.Tailscale", code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Your Keychain did not save this VPN's identity. Keep SimpleVPN running and unlock your Keychain before reconnecting."]))
+                userInfo: [NSLocalizedDescriptionKey: "The VPN stopped because SimpleVPN didn’t confirm that its updated identity was saved in time. Keep SimpleVPN open when reconnecting."]))
             return
         }
         let state = TailscaleBackendState(engineName: event.state)
@@ -393,13 +394,30 @@ final class TailscaleEngine: @unchecked Sendable {
     }
 
     /// Credential channel only. Never attach this value to stats or diagnostics.
-    func nodeStateSnapshot() -> String? {
-        let owned = lock.withLock { stopped ? 0 : handle }
-        return owned == 0 ? nil : Self.takeString(TSNodeState(owned))
+    func nodeStateReply(after cursor: TailscaleNodeState.Cursor?) -> Data? {
+        let (owned, stopped) = lock.withLock { (handle, self.stopped) }
+        guard !stopped else { return nil }
+        guard owned != 0 else { return Data("starting".utf8) }
+        let wire: UnsafeMutablePointer<CChar>?
+        if let cursor, cursor.generation == stateGeneration {
+            wire = TSNodeStateSince(owned, cursor.revision)
+            if wire == nil { return Data("unchanged:\(cursor.wireValue)".utf8) }
+        } else {
+            wire = TSNodeState(owned)
+        }
+        guard let wire else { return nil }
+        defer { TSFree(wire) }
+        let bytes = Data(bytes: wire, count: strlen(wire))
+        guard var state = try? JSONDecoder().decode(TailscaleNodeState.self, from: bytes) else { return nil }
+        state.generation = stateGeneration
+        return try? JSONEncoder().encode(state)
     }
-    func acknowledgeNodeState(_ revision: UInt64) -> Bool {
+
+    func acknowledgeNodeState(_ cursor: TailscaleNodeState.Cursor) -> Bool {
+        guard cursor.generation == nil || cursor.generation == stateGeneration else { return false }
         let owned = lock.withLock { stopped ? 0 : handle }
         guard owned != 0 else { return false }
+        let revision = cursor.revision
         let text = Self.takeString(TSAckNodeState(owned, revision))
         return Self.engineError(from: text, fallback: "The VPN identity was not saved.") == nil
     }

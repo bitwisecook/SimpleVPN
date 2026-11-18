@@ -26,6 +26,7 @@
 //
 
 import Foundation
+import Darwin
 
 // MARK: - app → helper
 
@@ -242,13 +243,53 @@ nonisolated enum OCAuthErrorKind {
 /// One JSON object per `\n`-terminated line. JSONEncoder never emits raw
 /// newlines (they're escaped inside strings), so encode-then-append is safe.
 nonisolated enum OCAuthJSON {
+    static let maximumFrameBytes = 1024 * 1024
+
     static func encodeLine<T: Encodable>(_ value: T) throws -> Data {
         var data = try JSONEncoder().encode(value)
+        guard data.count <= maximumFrameBytes else { throw CocoaError(.fileReadTooLarge) }
         data.append(0x0A)
         return data
     }
     static func decode<T: Decodable>(_ type: T.Type, from line: Data) throws -> T {
         try JSONDecoder().decode(type, from: line)
+    }
+}
+
+/// Single-reader framing for both ends of the local helper conversation.
+nonisolated struct OCAuthLineReader {
+    private var remaining = Data()
+    private var scratch = [UInt8](repeating: 0, count: 8192)
+
+    mutating func next(from handle: FileHandle) throws -> Data? {
+        var line = Data()
+        while true {
+            if remaining.isEmpty {
+                // A socket may remain open while the helper waits for our reply.
+                // Consume the currently available bytes with a single read.
+                let count = scratch.withUnsafeMutableBytes {
+                    Darwin.read(handle.fileDescriptor, $0.baseAddress, $0.count)
+                }
+                if count < 0 && errno == EINTR { continue }
+                guard count >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                guard count > 0 else {
+                    guard line.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+                    return nil
+                }
+                remaining = Data(scratch.prefix(count))
+            }
+            let end = remaining.firstIndex(of: 0x0A) ?? remaining.endIndex
+            guard line.count + (end - remaining.startIndex) <= OCAuthJSON.maximumFrameBytes else {
+                throw CocoaError(.fileReadTooLarge)
+            }
+            line.append(remaining[remaining.startIndex..<end])
+            if end < remaining.endIndex {
+                remaining = remaining.suffix(from: end + 1)
+                if !line.isEmpty { return line }
+            } else {
+                remaining.removeAll()
+            }
+        }
     }
 }
 

@@ -111,7 +111,7 @@ nonisolated enum EndpointDiscovery {
         guard let ssh = TunnelCLI.ssh.resolvedPath else { return nil }
         guard await ConnectionDiagnostics.tcpReachable(host: host, port: port, timeout: 4) else { return nil }
 
-        let args = ["-v",
+        let args = ["-v", "-F", "/dev/null",
                     "-o", "BatchMode=yes",
                     "-o", "PreferredAuthentications=none",
                     "-o", "PubkeyAuthentication=no",
@@ -120,22 +120,12 @@ nonisolated enum EndpointDiscovery {
                     "-o", "ConnectTimeout=6",
                     "-p", "\(port)",
                     "endpoint-probe@\(host)"]
-        let out = await runProcess(ssh, args, timeout: 12)
-        let text = out.stdout + "\n" + out.stderr
-
-        var facts: [String: String] = [:]
-        if let sw = firstMatch(#"remote software version (\S+)"#, in: text) { facts["software"] = sw }
-        // "Permission denied (publickey,password,keyboard-interactive)." or
-        // "Authentications that can continue: publickey,password"
-        let methods = firstMatch(#"Permission denied \(([^)]*)\)"#, in: text)
-            ?? firstMatch(#"Authentications that can continue: (\S+)"#, in: text)
-        if let methods, !methods.isEmpty { facts["authMethods"] = methods }
-
-        // We reached an SSH server if it spoke SSH at all.
-        let spokeSSH = text.contains("SSH-2.0") || text.contains("remote software version")
-            || facts["authMethods"] != nil
-        guard spokeSSH else { return nil }
-
+        let result = await LocalToolRunner.run(executable: ssh, arguments: args, deadline: 12,
+                                              summarizeStderr: Self.sshIdentificationSummary)
+        let fields = result.stderr.components(separatedBy: "\n")
+        guard fields.count == 2, !fields[0].isEmpty else { return nil }
+        var facts = ["software": fields[0]]
+        if !fields[1].isEmpty { facts["authMethods"] = fields[1] }
         let sw = facts["software"] ?? "SSH server"
         let methodText = facts["authMethods"].map { " · accepts \($0)" } ?? ""
         return DiscoveryCandidate(
@@ -144,6 +134,14 @@ nonisolated enum EndpointDiscovery {
             title: "SSH — \(sw)",
             detail: "SSH tunnel endpoint\(methodText). Choose SOCKS, port forwards or a network tunnel after creating it.",
             facts: facts)
+    }
+
+    /// Extract only the remote handshake and authentication methods. A local SSH
+    /// banner also contains "SSH-2.0", even when the peer never speaks SSH.
+    static func sshIdentificationSummary(_ log: String) -> String {
+        guard let software = firstMatch(#"(?m)^debug1: Remote protocol version [0-9.]+, remote software version ([A-Za-z0-9._+-]{1,100})(?:[ \r]|$)"#, in: log) else { return "" }
+        let methods = firstMatch(#"(?m)^debug1: Authentications that can continue: ([a-z0-9@.,_-]{1,256})(?:\r|$)"#, in: log) ?? ""
+        return software + "\n" + methods
     }
 
     // MARK: - SSL-VPN (TLS + HTTP fingerprint)

@@ -178,13 +178,26 @@ func TSStopInstance(handle C.uint64_t) *C.char {
 //
 //export TSNodeState
 func TSNodeState(handle C.uint64_t) *C.char {
+	return tsNodeStateSince(handle, nil)
+}
+
+//export TSNodeStateSince
+func TSNodeStateSince(handle C.uint64_t, revision C.uint64_t) *C.char {
+	previous := uint64(revision)
+	return tsNodeStateSince(handle, &previous)
+}
+
+func tsNodeStateSince(handle C.uint64_t, previous *uint64) *C.char {
 	owned, ok := tsInstances.Get(uint64(handle))
 	if !ok || owned.state.identity == nil {
 		return fail("unavailable", "node identity unavailable")
 	}
-	snapshot, err := owned.state.identity.snapshot()
+	snapshot, unchanged, err := owned.state.identity.snapshotSince(previous)
 	if err != nil {
 		return fail("unavailable", "node identity unavailable")
+	}
+	if unchanged {
+		return nil
 	}
 	return cJSON(snapshot)
 }

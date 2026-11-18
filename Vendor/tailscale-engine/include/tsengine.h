@@ -40,6 +40,8 @@ char *TSCreateInstance(const char *configJSON, uint64_t context,
 char *TSStopInstance(uint64_t handle);
 // Private user-Keychain broker, not status. Returned state contains credentials.
 char *TSNodeState(uint64_t handle);
+/* NULL only when this revision is still current and acknowledged. */
+char *TSNodeStateSince(uint64_t handle, uint64_t revision);
 char *TSAckNodeState(uint64_t handle, uint64_t revision);
 char *TSStatusInstance(uint64_t handle);
 char *TSReauthenticateInstance(uint64_t handle);

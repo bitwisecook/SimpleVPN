@@ -275,6 +275,63 @@ struct OpenConnectAuthClientTests {
         }
     }
 
+    @Test func aDoneMessageCannotOverrideACertificateRefusal() async throws {
+        let helper = try writeMockHelper("""
+        read -r start || exit 0
+        printf '%s\\n' '{"cert":{"fingerprint":"fixture-pin","details":"","reason":"fixture"}}'
+        read -r decision || exit 0
+        printf '%s\\n' '{"done":{"cookie":"fixture","servercert":"fixture","connect-url":"https://fixture"}}'
+        """)
+        defer { try? FileManager.default.removeItem(at: helper) }
+        do {
+            _ = try await OpenConnectAuthClient.authenticate(
+                start: .init(server: "fixture", vpnProtocol: "gp"),
+                handlers: .init(answerForm: { _ in .cancel(unanswered: []) }, openURL: { _ in }),
+                helper: helper, killAfter: 2)
+            Issue.record("expected the certificate refusal to end sign-in")
+        } catch OpenConnectAuthError.certUntrusted(let fingerprint) {
+            #expect(fingerprint == "fixture-pin")
+        }
+    }
+
+    @Test @MainActor func browserArgumentsOnlyIdentifyTheChosenProfile() {
+        #expect(BrowserCatalog.profileArguments(for: .chromium, profile: "Profile 2") == ["--profile-directory=Profile 2"])
+        #expect(BrowserCatalog.profileArguments(for: .chromium, profile: "../Other") == [])
+        #expect(BrowserCatalog.profileArguments(for: .firefox, profile: "Work") == ["-P", "Work"])
+        #expect(BrowserCatalog.profileArguments(for: .safari, profile: "Work") == [])
+    }
+
+    @Test func rejectsNonWebSignInWithoutOpeningIt() async throws {
+        let helper = try writeMockHelper("""
+        read -r start || exit 0
+        printf '%s\\n' '{"open-url":"fixture-handler://local"}'
+        """)
+        defer { try? FileManager.default.removeItem(at: helper) }
+        do {
+            _ = try await OpenConnectAuthClient.authenticate(
+                start: .init(server: "fixture", vpnProtocol: "gp"),
+                handlers: .init(answerForm: { _ in .cancel(unanswered: []) },
+                                openURL: { _ in Issue.record("unexpected browser open") }),
+                helper: helper, killAfter: 2)
+            Issue.record("expected the invalid sign-in URL to be refused")
+        } catch OpenConnectAuthError.invalidSignInURL {}
+    }
+
+    @Test func rejectsAnOversizedUnterminatedFrame() async throws {
+        let helper = try writeMockHelper("""
+        read -r start || exit 0
+        exec /bin/dd if=/dev/zero bs=1048576 count=2
+        """)
+        defer { try? FileManager.default.removeItem(at: helper) }
+        do {
+            _ = try await OpenConnectAuthClient.authenticate(
+                start: .init(server: "fixture", vpnProtocol: "gp"),
+                handlers: .init(answerForm: { _ in .cancel(unanswered: []) }, openURL: { _ in }),
+                helper: helper, killAfter: 3)
+            Issue.record("expected the oversized frame to be refused")
+        } catch OpenConnectAuthError.badReply {}
+    }
+
     @Test func helperVanishingMidConversationFailsCleanly() async throws {
         let helper = try writeMockHelper("""
         read -r start || exit 0

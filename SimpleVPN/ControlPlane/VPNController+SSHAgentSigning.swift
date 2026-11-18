@@ -16,15 +16,29 @@ extension VPNController {
             let started=Date(); var observedActive=false
             let transport: any SSHAgentTransport
             do { transport=try await Task.detached { try SSHAgentSystemEnvironment(timeout:120).connect(toSocketAt:socket) }.value }
-            catch { self?.lastError="Your SSH agent could not be reached."; session.stopVPNTunnel(); return }
+            catch {
+                guard !Task.isCancelled else { return }
+                self?.lastError="Your SSH agent could not be reached."; session.stopVPNTunnel(); return
+            }
             defer { transport.close() }
+            // The provider holds one reply until libssh needs the agent. A
+            // watchdog renews it if NE loses the reply across sleep or a restart.
             while !Task.isCancelled {
                 guard let self else { return }
                 if UI.isActive(session.status) { observedActive=true }
                 if session.status == .disconnected || session.status == .invalid {
                     if observedActive || Date().timeIntervalSince(started)>12 { return }
                 }
-                if let bytes=await self.sendSessionMessageData(Data("sshnetagent:request".utf8),session:session,timeout:2),
+                var bytes = await self.sendSessionMessageData(Data("sshnetagent:wait".utf8),
+                                                              session: session, timeout: 60)
+                guard !Task.isCancelled else { return }
+                if bytes == nil {
+                    // An active extension from a previous build responds nil
+                    // to the new message. Its original snapshot remains usable.
+                    bytes = await self.sendSessionMessageData(Data("sshnetagent:request".utf8),
+                                                              session: session, timeout: 2)
+                }
+                if let bytes,
                    let request=try? JSONDecoder().decode(SSHAgentSigningRequest.self,from:bytes), !Task.isCancelled {
                     guard (5...262148).contains(request.request.count), [UInt8(11),13].contains(request.request[4]) else {
                         self.lastError="The VPN sent an invalid signing request."; session.stopVPNTunnel(); return
@@ -44,8 +58,9 @@ extension VPNController {
                        let text=String(data:data,encoding:.utf8) {
                         _=await self.sendSessionMessageData(Data(("sshnetagent:reply:"+text).utf8),session:session,timeout:2)
                     }
+                    continue
                 }
-                do { try await Task.sleep(for:.milliseconds(30)) } catch { return }
+                do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
             }
         }
     }

@@ -149,8 +149,7 @@ struct TailscaleView: View {
                     // browser because Tailscale's login often needs passkeys or a
                     // password manager living there; the in-app window is also offered.
                     BrowserPicker(selection: $draft.signInBrowser,
-                                  systemDefaultLabel: "Default browser (\(BrowserCatalog.osDefaultName))",
-                                  showsAppDefaultLink: true)
+                                  systemDefaultLabel: "Default browser (\(BrowserCatalog.osDefaultName))")
                 }
             }
 
@@ -284,7 +283,7 @@ struct TailscaleView: View {
         .padding(.top, 10)
         .navigationTitle(name.isEmpty ? "Tailscale" : name)
         .task { loadOnce() }
-        .liveWindowTask(id: profileID) { await pollStatus() }
+        .liveWindowTask(id: connectedProfileID) { await pollStatus() }
         // LIVE SAVE — no confirming button in any editor now. See `SettingCommit`.
         .savesSettingsLive { Task { await save() } }
         // RED ON THE FIELD THAT IS HOLDING THE CONNECTION UP — see `SettingNeeds`.
@@ -441,12 +440,15 @@ struct TailscaleView: View {
 
     /// Live status while this editor is open: the exit-node list and the
     /// sign-in state only exist inside a running session.
+    private var connectedProfileID: String? {
+        vpn.profiles.first(where: { $0.id == profileID })?.status == .connected ? profileID : nil
+    }
+
     private func pollStatus() async {
+        guard connectedProfileID != nil else { return }
         while !Task.isCancelled {
-            if vpn.profiles.first(where: { $0.id == profileID })?.status == .connected {
-                await vpn.refreshTailscaleStatus(id: profileID)
-            }
-            try? await Task.sleep(for: .seconds(2))
+            await vpn.refreshTailscaleStatus(id: profileID)
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
         }
     }
 

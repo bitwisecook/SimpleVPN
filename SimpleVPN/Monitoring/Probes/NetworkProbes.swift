@@ -14,7 +14,7 @@
 //    • Path-MTU sizing: don't-fragment ICMP echoes binary-searched for the boundary
 //      (the single sizer in the app — ConnectionDiagnostics forwards to it), plus the
 //      TCP-family MSS/blackhole evidence that unprivileged code can honestly gather.
-//  All blocking socket work runs on a detached task; callers await results.
+//  Blocking socket and resolver calls run on a dedicated dispatch queue.
 //
 
 import Foundation
@@ -37,7 +37,8 @@ nonisolated enum NetworkProbes {
 
     /// A/AAAA for a host (numeric strings). Empty on failure.
     static func resolve(host: String) async -> (v4: [String], v6: [String]) {
-        await Task.detached(priority: .userInitiated) {
+        guard !Task.isCancelled else { return ([], []) }
+        return await onProbeQueue {
             var hints = addrinfo(ai_flags: 0, ai_family: AF_UNSPEC, ai_socktype: SOCK_STREAM,
                                  ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil, ai_addr: nil, ai_next: nil)
             var res: UnsafeMutablePointer<addrinfo>?
@@ -56,13 +57,14 @@ nonisolated enum NetworkProbes {
                 node = n.pointee.ai_next
             }
             return (v4, v6)
-        }.value
+        }
     }
 
     /// Reverse (PTR) name for an IP, or nil. Uses getnameinfo (honours the system
     /// resolver, including VPN-pushed DNS).
     static func reverseLookup(ip: String) async -> String? {
-        await Task.detached(priority: .userInitiated) {
+        guard !Task.isCancelled else { return nil }
+        return await onProbeQueue {
             var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
             var rc: Int32 = -1
             if ip.contains(":") {
@@ -79,7 +81,7 @@ nonisolated enum NetworkProbes {
             guard rc == 0 else { return nil }
             let name = String(cBuffer: host)
             return name.isEmpty ? nil : name
-        }.value
+        }
     }
 
     // MARK: - Blocking-syscall plumbing
@@ -188,47 +190,61 @@ nonisolated enum NetworkProbes {
     /// stops at the destination's echo-reply or maxHops.
     static func traceroute(host: String, maxHops: Int = 30, timeout: TimeInterval = 2,
                            boundIf: UInt32 = 0) async -> [TraceHop] {
-        await Self.onProbeQueue {
-            var addr = sockaddr_in(); addr.sin_family = sa_family_t(AF_INET)
-            guard inet_pton(AF_INET, host, &addr.sin_addr) == 1 else { return [] }
-            var hops: [TraceHop] = []
-            let ident = UInt16.random(in: 0...UInt16.max)
-            for ttl in 1...maxHops {
-                let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)
-                if fd < 0 { break }
-                Self.bindEgress(fd, to: boundIf, v6: false)
-                var t = Int32(ttl)
-                setsockopt(fd, IPPROTO_IP, IP_TTL, &t, socklen_t(MemoryLayout<Int32>.size))
-                var tv = Self.recvTimeval(timeout)
-                setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        guard isIPv4Literal(host) else { return [] }
+        let ident = UInt16.random(in: 0...UInt16.max)
+        return await traceHops(to: host, maxHops: maxHops) { ttl in
+            await onProbeQueue {
+                traceHop(host: host, ttl: ttl, ident: ident, timeout: timeout, boundIf: boundIf)
+            }
+        }
+    }
 
-                let packet = Self.icmpEcho(id: ident, seq: UInt16(ttl))
-                let start = Date()
-                _ = packet.withUnsafeBytes { buf in
-                    withUnsafePointer(to: &addr) {
-                        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                            sendto(fd, buf.baseAddress, buf.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-                        }
-                    }
-                }
-                var from = sockaddr_storage(); var fromLen = socklen_t(MemoryLayout<sockaddr_storage>.size)
-                var rbuf = [UInt8](repeating: 0, count: 1500)
-                let n = withUnsafeMutablePointer(to: &from) {
-                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { fp in
-                        recvfrom(fd, &rbuf, rbuf.count, 0, fp, &fromLen)
-                    }
-                }
-                close(fd)
-                if n > 0 {
-                    let ip = Self.addrString(&from)
-                    hops.append(TraceHop(ttl: ttl, ip: ip, rttMS: Date().timeIntervalSince(start) * 1000))
-                    if ip == host { break }   // reached the destination
-                } else {
-                    hops.append(TraceHop(ttl: ttl, ip: nil, rttMS: nil))
+    /// Keep the loop in the caller's task. Only one hop can still be waiting for
+    /// its socket when the user stops the test or closes Network Tools.
+    static func traceHops(to host: String, maxHops: Int,
+                          measure: (Int) async -> TraceHop?) async -> [TraceHop] {
+        guard maxHops > 0 else { return [] }
+        var hops: [TraceHop] = []
+        for ttl in 1...min(maxHops, 255) {
+            guard !Task.isCancelled, let hop = await measure(ttl), !Task.isCancelled else { break }
+            hops.append(hop)
+            if hop.ip == host { break }
+        }
+        return hops
+    }
+
+    private static func traceHop(host: String, ttl: Int, ident: UInt16,
+                                 timeout: TimeInterval, boundIf: UInt32) -> TraceHop? {
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        guard inet_pton(AF_INET, host, &addr.sin_addr) == 1 else { return nil }
+        let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        Self.bindEgress(fd, to: boundIf, v6: false)
+        var t = Int32(ttl)
+        setsockopt(fd, IPPROTO_IP, IP_TTL, &t, socklen_t(MemoryLayout<Int32>.size))
+        var tv = Self.recvTimeval(timeout)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+        let packet = Self.icmpEcho(id: ident, seq: UInt16(ttl))
+        let start = Date()
+        _ = packet.withUnsafeBytes { buf in
+            withUnsafePointer(to: &addr) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    sendto(fd, buf.baseAddress, buf.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
                 }
             }
-            return hops
         }
+        var from = sockaddr_storage(); var fromLen = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        var rbuf = [UInt8](repeating: 0, count: 1500)
+        let n = withUnsafeMutablePointer(to: &from) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { fp in
+                recvfrom(fd, &rbuf, rbuf.count, 0, fp, &fromLen)
+            }
+        }
+        guard n > 0 else { return TraceHop(ttl: ttl, ip: nil, rttMS: nil) }
+        return TraceHop(ttl: ttl, ip: addrString(&from), rttMS: Date().timeIntervalSince(start) * 1000)
     }
 
     // MARK: - DNS over UDP (we control which server answers)
@@ -444,8 +460,9 @@ nonisolated enum NetworkProbes {
         // packet on a lossy path would otherwise be read as "too big" and drag the
         // whole binary search down with it.
         func probe(_ payload: Int, df: Bool = true) async -> SizedEcho {
+            guard !Task.isCancelled else { return .silence }
             let first = await onProbeQueue { sizedEcho(ip: ip, payload: payload, df: df, timeout: timeout, boundIf: boundIf) }
-            guard first == .silence else { return first }
+            guard first == .silence, !Task.isCancelled else { return first }
             return await onProbeQueue { sizedEcho(ip: ip, payload: payload, df: df, timeout: timeout, boundIf: boundIf) }
         }
 
@@ -569,7 +586,7 @@ nonisolated enum NetworkProbes {
                                     timeout: TimeInterval = 6, boundIf: UInt32 = 0) async -> TransportMTUResult {
         let ip = await resolve(host: host).v4.first ?? host
         var out = TransportMTUResult(target: ip, port: port, proto: proto)
-        guard proto.isTCP, isIPv4Literal(ip) else { return out }
+        guard !Task.isCancelled, proto.isTCP, isIPv4Literal(ip) else { return out }
 
         // Pass 1: connect and read the MSS. For TLS/HTTP also do the small exchange
         // on this same connection so "small works" is established on one path.

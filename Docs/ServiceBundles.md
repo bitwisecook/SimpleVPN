@@ -560,11 +560,9 @@ Concretely 📐:
   `api.nordvpn.com`, `configs.ipvanish.com` — says what the provider learns, and says what the app
   will *not* do (no account, no sign-in, nothing sent about you). One provider at a time: consenting
   to Mullvad is not consenting to Nord.
-- **Prefer to refresh through the tunnel.** If a VPN to that provider is connected, the fetch goes
-  out of the provider's own exit and they learn essentially nothing new — they are already carrying
-  your traffic. If nothing is connected, the sheet says plainly that the provider will see your real
-  address, and offers to wait until you next connect. This is the one place the feature can be
-  meaningfully better than a browser, and it costs nothing.
+- **By default, wait for a connection to the provider.** macOS selects the route to the list
+  service. With split routing, the provider may see the Mac’s usual public address even while its VPN
+  is connected. The consent sheet explains this before the request.
 - **An import setting cannot turn it on.** `ConfigAppSettings.Entry.importable = false`, the same
   treatment `app.location` already has, for the same reason: a file that could flip an opt-in would
   turn "opt in" into "opt in on somebody else's behalf".
@@ -575,7 +573,7 @@ Two settings, both needing stable ids and `manual.html` anchors or `ManualAnchor
 | id | Default | Copy |
 |---|---|---|
 | `app.provider-lists` | **off** | "Get server lists from VPN providers — Lets you fill in a VPN's server list from Mullvad's, NordVPN's or IPVanish's own published list. Nothing is fetched until you ask for it, and SimpleVPN never signs you in to a provider. Default: off." |
-| `app.provider-lists-only-connected` | **on** | "Only refresh while connected — Waits until you are connected to that provider before asking it for its server list, so the request comes from the VPN rather than from your own address. Default: on." |
+| `app.provider-lists-only-connected` | **on** | "Only refresh while connected — Waits until you are connected to that provider before asking it for its server list, and macOS chooses the route to the list service. Default: on." |
 
 ---
 
@@ -609,8 +607,7 @@ this section; the list below marks each piece.
   catalogue, **a redirect off that host refused rather than followed**, a 32 MB cap enforced against
   what arrived rather than only against what was declared, and no authentication-challenge callback
   anywhere in the file (its absence is what guarantees verification cannot be switched off). Off by
-  default, per-provider consent, MDM can forbid it (`DisableProviderLists`), and it prefers to go out
-  through that provider's own tunnel.
+  default, per-provider consent, MDM can forbid it (`DisableProviderLists`), and by default it waits for a connection to that provider.
 - **`ProviderFetchProgress`** — four named stages, determinate **only** where the server sent a
   `Content-Length`, nothing drawn under about a second, cancellable leaving the stored list exactly
   as it was. `ProgressView` lives only in the sheet, which never animates its own geometry, and its

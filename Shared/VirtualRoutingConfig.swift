@@ -51,6 +51,20 @@ nonisolated struct VirtualRoutingConfig: Codable, Sendable, Equatable {
         return nil
     }
 
+    /// A second active interface may still own the default. Start with only
+    /// member prefixes until the mediator confirms the previous owner's demotion.
+    func initialPolicy(gatewayOwned: Bool) -> VirtualRoutingPolicy {
+        guard !gatewayOwned, policy.capturesDefault else { return policy }
+        var initial = policy
+        initial.defaultOwner = ""
+        initial.captureDefault = false
+        initial.rules = members.flatMap { member in
+            member.prefixes.filter { TailscaleNetworkSettings.parse($0)?.isDefaultRoute == false }
+                .map { .init(prefix: $0, port: member.id) }
+        }
+        return initial
+    }
+
     func settings(policy: VirtualRoutingPolicy, endpoints: [String],
                   dns: DNSApplyRequest?, proxy: NEProxySettings? = nil) -> NEPacketTunnelNetworkSettings? {
         var capture = WireGuardConfig()

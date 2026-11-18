@@ -53,8 +53,11 @@ and DNS decision is expressed as `NEPacketTunnelNetworkSettings`** — nothing s
 writes a `pf` rule, or installs a privileged helper. The routing table is only ever *read*
 (`PFRouteMonitor`, for drift). The one system-wide write outside NetworkExtension is on a path that
 has no tunnel at all: the subprocess SOCKS kinds optionally point the primary network service's SOCKS
-proxy at their local port with `networksetup`, which prompts for admin and is restored on
-disconnect.
+proxy at their local port. A serial SystemConfiguration preferences transaction changes only
+the SOCKS fields. The most recently enabled tunnel owns the proxy. On handoff, disconnect,
+network changes, and quit, SimpleVPN checks ownership before restoring a service’s settings.
+Before changing preferences it saves the prior SOCKS fields in the login Keychain. After a crash,
+the next launch recovers the previous settings if the service still has SimpleVPN’s proxy.
 
 ---
 

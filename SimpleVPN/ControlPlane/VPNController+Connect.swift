@@ -34,10 +34,10 @@ extension VPNController {
         }
     }
 
-    // MARK: Transient credentials (menu-bar inline entry)
+    // MARK: Transient sign-in fields
 
 
-    /// The dropdown's starting point for a profile: anything mid-typing, else
+    /// The form starts with any edits already in memory, then uses
     /// the saved credentials, else empty.
     func transientCredentials(for id: String) -> TransientCredentials {
         if let existing = transientCreds[id] { return existing }
@@ -55,11 +55,13 @@ extension VPNController {
     /// keychain shortly after typing stops. "Remember" means remembered, not
     /// "remembered only if you happened to connect before quitting".
     func setTransientCredentials(_ creds: TransientCredentials, for id: String) {
+        guard !locallyRemovedProfileIDs.contains(id) else { return }
         transientCreds[id] = creds
-        persistTask?.cancel()
-        persistTask = Task { [weak self] in
+        credentialSaveTasks[id]?.cancel()
+        credentialSaveTasks[id] = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(600))
             guard !Task.isCancelled else { return }
+            self?.credentialSaveTasks[id] = nil
             self?.persistIfRemembered(id: id)
         }
     }
@@ -67,17 +69,23 @@ extension VPNController {
     private func persistIfRemembered(id: String) {
         let c = transientCredentials(for: id)
         guard remembersPassword(for: id),
-              allowsPasswordSave(id: id),
               !c.username.isEmpty, !c.password.isEmpty else { return }
-        // Typing an OTP also lands here — don't rewrite an unchanged
-        // username/password to the keychain on every pause in typing.
-        if let saved = savedCredentials(id: id),
-           saved.username == c.username, saved.password == c.password { return }
         do {
-            try KeychainCredentialStore.saveCredentials(profile: id, .init(username: c.username, password: c.password))
+            try saveOrdinarySignIn(id: id, username: c.username, password: c.password)
         } catch {
             Self.log.error("saveCredentials failed for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// Every ordinary password write, including the editor and Connect, observes the
+    /// same protection decision. The protected item also covers a preferences save in flight.
+    func saveOrdinarySignIn(id: String, username: String, password: String) throws {
+        guard !locallyRemovedProfileIDs.contains(id), allowsPasswordSave(id: id),
+              !authConfig(for: id).protectWithBiometrics,
+              !BiometricCredentialStore.exists(profile: id) else { return }
+        if let saved = savedCredentials(id: id),
+           saved.username == username && saved.password == password { return }
+        try KeychainCredentialStore.saveCredentials(profile: id, .init(username: username, password: password))
     }
 
     // MARK: Credential source (manual / 1Password / Apple Passwords / KeePassXC)
@@ -103,7 +111,7 @@ extension VPNController {
         guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
         preparedOnePasswordSignIns.removeValue(forKey: id)
         guard let mgr = managers[id],
-              let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { return }
+              let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { throw err("The VPN is no longer available.") }
         var conf = proto.providerConfiguration ?? [:]
         if let blob = source.encodedBlob() { conf["credsource"] = blob }
         else { conf.removeValue(forKey: "credsource") }
@@ -161,11 +169,14 @@ extension VPNController {
     /// is saved") is false the moment it is made. The transient (mid-typing)
     /// copy stays: the user may be in the middle of connecting.
     func forgetSavedSignIn(id: String) {
+        credentialSaveTasks.removeValue(forKey: id)?.cancel()
         KeychainCredentialStore.deleteCredentials(profile: id)
         BiometricCredentialStore.delete(profile: id)
         var auth = authConfig(for: id)
-        guard auth.protectWithBiometrics else { return }
+        guard auth.protectWithBiometrics || auth.rememberCredentials else { return }
+        auth.rememberCredentials = false
         auth.protectWithBiometrics = false
+        authConfigs[id] = auth
         Task { try? await setAuthConfig(auth, for: id) }
     }
 
@@ -199,6 +210,7 @@ extension VPNController {
         let name = profiles.first { $0.id == id }?.name ?? "the VPN"
         let provider = BiometricCredentialProvider(reason: "update the sign-in for \(name)")
         let raw = try await provider.resolve(profile: id, fields: [.username, .password])
+        guard !locallyRemovedProfileIDs.contains(id), BiometricCredentialStore.exists(profile: id) else { return }
         try BiometricCredentialStore.save(profile: id, .init(
             username: raw.username ?? "", password: raw.password ?? "",
             totpSecret: secret?.isEmpty == true ? nil : secret))
@@ -210,6 +222,9 @@ extension VPNController {
     /// needs the secret back, which itself takes one Touch ID prompt (unless the
     /// live session state already has it).
     func setBiometricProtection(_ on: Bool, for id: String, totpSecret: String? = nil) async throws {
+        guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
+        guard !locallyRemovedProfileIDs.contains(id) else { return }
+        credentialSaveTasks.removeValue(forKey: id)?.cancel()
         var auth = authConfig(for: id)
         let name = profiles.first { $0.id == id }?.name ?? "the VPN"
         if on {
@@ -225,6 +240,7 @@ extension VPNController {
                 username: username, password: password, totpSecret: totpSecret))
             // The plain-keychain copy would defeat the point of the gate.
             KeychainCredentialStore.deleteCredentials(profile: id)
+            transientCreds[id] = nil
             // Touch ID is a stronger form of remembering this sign-in, not an
             // exception to the user's "Save password" choice. Keeping these
             // facts together means every surface can truthfully show Save
@@ -244,6 +260,10 @@ extension VPNController {
             // A protected credential was necessarily saved. Preserve that
             // choice when moving it back to the ordinary keychain.
             auth.rememberCredentials = true
+            auth.protectWithBiometrics = false
+            guard !locallyRemovedProfileIDs.contains(id) else { return }
+            try await setAuthConfig(auth, for: id)
+            guard !locallyRemovedProfileIDs.contains(id) else { return }
             if allowsPasswordSave(id: id) {
                 try KeychainCredentialStore.saveCredentials(profile: id, .init(
                     username: raw.username ?? "", password: raw.password ?? ""))
@@ -253,8 +273,6 @@ extension VPNController {
             live.password = raw.password ?? live.password
             transientCreds[id] = live
             BiometricCredentialStore.delete(profile: id)
-            auth.protectWithBiometrics = false
-            try await setAuthConfig(auth, for: id)
             Self.log.log("biometric protection OFF for \(id, privacy: .public)")
         }
     }
@@ -271,7 +289,7 @@ extension VPNController {
     func setAuthConfig(_ auth: VPNAuthConfig, for id: String) async throws {
         guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
         guard let mgr = managers[id],
-              let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { return }
+              let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { throw err("The VPN is no longer available.") }
         var conf = proto.providerConfiguration ?? [:]
         if let blob = auth.encodedBlob() {
             conf["auth"] = blob
@@ -316,8 +334,7 @@ extension VPNController {
         // funnels through this method, so this one check covers the detail pane,
         // sidebar, menu bar, compositions, CLI and intents alike.
         if let why = controlDenied(.connect(profile: id)) { throw err(why) }
-        guard let mgr = managers[id],
-              mgr.protocolConfiguration is NETunnelProviderProtocol else {
+        guard managers[id]?.protocolConfiguration is NETunnelProviderProtocol else {
             throw err("no such profile")
         }
 
@@ -366,7 +383,17 @@ extension VPNController {
         }
 
         if remember, !engine.username.isEmpty {
-            try KeychainCredentialStore.saveCredentials(profile: id, .init(username: engine.username, password: raw.password ?? ""))
+            if authConfig(for: id).protectWithBiometrics {
+                // A settings-only import can request protection before a password
+                // exists. Populate it on explicit sign-in, after editing is done.
+                if !locallyRemovedProfileIDs.contains(id), allowsPasswordSave(id: id),
+                   !BiometricCredentialStore.exists(profile: id), let password = raw.password, !password.isEmpty {
+                    try BiometricCredentialStore.save(profile: id, .init(username: engine.username, password: password))
+                    transientCreds[id] = nil
+                }
+            } else {
+                try saveOrdinarySignIn(id: id, username: engine.username, password: raw.password ?? "")
+            }
         }
         // Session secrets ride startTunnel options — in-memory through the NE
         // session. The extension runs as root in the system context and cannot
@@ -393,7 +420,25 @@ extension VPNController {
         // the material only ever exists in memory there. Same handoff as every other
         // per-profile secret, for the same reason: the extension runs as root in the
         // system context and cannot read the user's keychain.
-        let inlineSecrets = ovpnSecrets(for: id)
+        let configurationGate = openVPNConfigurationGate(for: id)
+        await configurationGate.acquire()
+        defer { configurationGate.release() }
+        guard !locallyRemovedProfileIDs.contains(id), let mgr = managers[id],
+              let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else {
+            throw err("The VPN is no longer available.")
+        }
+        let required = OVPNSecretMaterial.markedTags(in: proto.providerConfiguration?["ovpn"] as? String ?? "")
+        var inlineSecrets = ovpnSecrets(for: id)
+        if !required.isEmpty || !inlineSecrets.isEmpty {
+            do {
+                inlineSecrets = try await Task.detached {
+                    try KeychainCredentialStore.ovpnInlineSecretsForExport(profile: id)
+                }.value
+            } catch { throw OpenVPNConfigurationEdit.Failure.unavailable }
+            guard required.isSubset(of: inlineSecrets.keys) else {
+                throw OpenVPNConfigurationEdit.Failure.missing
+            }
+        }
         if !inlineSecrets.isEmpty {
             options["ovpnInlineSecrets"] = inlineSecrets as NSDictionary
             // Tag names only — the contents are the secret, the names are not.
@@ -416,11 +461,6 @@ extension VPNController {
             if !local.isEmpty { options[LocalNetworkCarveOut.optionKey] = local as NSArray }
         }
 
-        // Default-gateway ownership travels with the session so the extension sets
-        // its suppress gate at establish — the ≤1-owner invariant then holds from
-        // the very first tun build, before (or without) the app reconciling (RC3).
-        options["gatewayOwned"] = predictedGatewayOwned(id) as NSNumber
-
         mgr.isEnabled = true
         do {
             try await mgr.saveToPreferences()
@@ -436,7 +476,7 @@ extension VPNController {
             throw err("The VPN configuration isn't ready — try removing and re-importing it.")
         }
         do {
-            try session.startTunnel(options: options)
+            try startWithInitialGateway(session, profile: id, options: options)
             Self.log.log("startTunnel dispatched for \(id, privacy: .public) (status now \(Self.statusText(mgr.connection.status), privacy: .public))")
         } catch {
             // Without this line a failed start is invisible in a log capture —
@@ -603,78 +643,47 @@ extension VPNController {
         return inputs
     }
 
-    /// Connect unattended (menu / sidebar quick-connect). Uses a configured
-    /// password manager when it can run without typing, else remembered
-    /// credentials. Returns false when a fresh OTP or manual entry is needed —
-    /// the caller then sends the user to the credential form.
+    enum QuickConnectOutcome: Equatable {
+        case started, needsInput, failed
+    }
+
     @discardableResult
     func connectWithSavedCredentials(id: String) async -> Bool {
-        if isTailscale(id) {
-            do { try await connectTailscale(id: id); return true }
-            catch { report(error, profile: id); return false }
-        }
-        if isProxyTunnel(id) {
-            // A no-auth proxy connects unattended; an auth proxy connects with
-            // its stored credentials (there is no OTP to type).
-            do { try await connectProxyTunnel(id: id); return true }
-            catch { report(error, profile: id); return false }
-        }
-        if isWireGuard(id) {
-            // The keys are stored, so a WireGuard connect never needs typing.
-            do { try await connectWireGuard(id: id); return true }
-            catch { report(error, profile: id); return false }
-        }
-        if isSSHNetworkTunnel(id) {
-            // Everything is stored (password / key / certificate, plus the pinned
-            // host key), so this connects unattended — EXCEPT the first connect to
-            // a server whose key nobody has looked at yet, which throws with the
-            // fingerprint and sends the user to "Check and Trust". Trust on first
-            // use must never happen while the user is looking elsewhere.
-            do { try await connectSSHNetworkTunnel(id: id); return true }
-            catch { report(error, profile: id); return false }
-        }
-        // Autologin: nothing to look up — the profile's certificate IS the sign-in.
-        if isAutologin(id) {
-            do {
+        await quickConnect(id: id) == .started
+    }
+
+    /// A connection error has already been reported. Only a missing sign-in
+    /// should open and focus the credential fields.
+    func quickConnect(id: String) async -> QuickConnectOutcome {
+        do {
+            if isTailscale(id) {
+                try await connectTailscale(id: id)
+            } else if isProxyTunnel(id) {
+                try await connectProxyTunnel(id: id)
+            } else if isWireGuard(id) {
+                try await connectWireGuard(id: id)
+            } else if isSSHNetworkTunnel(id) {
+                try await connectSSHNetworkTunnel(id: id)
+            } else if isAutologin(id) {
                 try await connect(id: id, using: ManualCredentialProvider(username: "", password: "", otp: ""),
                                   request: .usernamePassword, remember: false)
-                return true
-            } catch {
-                report(error, profile: id)
-                return false
+            } else {
+                let auth = effectiveAuthConfig(for: id)
+                if let provider = managerProvider(for: id) {
+                    guard authSatisfaction(for: id).connectsUnattended else { return .needsInput }
+                    try await connect(id: id, using: provider, request: auth.request, remember: false)
+                } else {
+                    guard !typedSignInOnce.contains(id), credentialSource(for: id).kind == .manual,
+                          !auth.protectWithBiometrics, !auth.requiresOTP,
+                          let saved = savedCredentials(id: id), !saved.password.isEmpty else { return .needsInput }
+                    let provider = ManualCredentialProvider(username: saved.username, password: saved.password, otp: "")
+                    try await connect(id: id, using: provider, request: .usernamePassword, remember: false)
+                }
             }
-        }
-        let auth = effectiveAuthConfig(for: id)
-
-        // A password manager can auto-connect when the profile needs no OTP, or
-        // when it can supply the OTP itself (1Password/KeePassXC TOTP; the
-        // Touch ID store with a saved authenticator secret). Apple Passwords
-        // can't provide an OTP, so an OTP profile still needs the form.
-        if let provider = managerProvider(for: id) {
-            // ONE answer to "can this source serve unattended?", read from the same
-            // method the connect form's warning reads. It used to be re-derived here
-            // from `effectiveCredentialKind(...).suppliesOTP || biometricCanServe(...)`
-            // — the same question with a different set of inputs, in a different file,
-            // free to disagree with the form the user was looking at.
-            guard authSatisfaction(for: id).connectsUnattended else { return false }
-            do {
-                try await connect(id: id, using: provider, request: auth.request, remember: false)
-                return true
-            } catch {
-                report(error, profile: id)
-                return false
-            }
-        }
-
-        guard !auth.requiresOTP,
-              let saved = savedCredentials(id: id), !saved.password.isEmpty else { return false }
-        let provider = ManualCredentialProvider(username: saved.username, password: saved.password, otp: "")
-        do {
-            try await connect(id: id, using: provider, request: .usernamePassword, remember: false)
-            return true
+            return .started
         } catch {
             report(error, profile: id)
-            return false
+            return .failed
         }
     }
 
@@ -896,6 +905,10 @@ extension VPNController {
     /// Disconnect and immediately reconnect (used to apply saved settings changes).
     /// Never called automatically — only from the user's explicit Reconnect action.
     func reconnect(id: String) async {
+        let lease: Installation.Lease?
+        do { lease = isTailscale(id) ? try tailscaleIdentityLease(id) : nil }
+        catch { report(error, profile: id); return }
+        defer { withExtendedLifetime(lease) {} }
         // Don't tear down a working tunnel we can't bring back unattended: a
         // profile needing a fresh OTP (a one-time code can't be reused) or a
         // password that was never saved would be left silently disconnected — and
@@ -933,6 +946,7 @@ extension VPNController {
         if isWireGuard(id) { return true }
         if isAutologin(id) { return true }   // the certificate is the sign-in
         let auth = effectiveAuthConfig(for: id)
+        if auth.protectWithBiometrics { return false }
         if managerProvider(for: id) != nil {
             // 1Password owns an interactive approval / Touch ID prompt.  Its
             // credentials are available to an explicit Connect click, never to
@@ -954,25 +968,26 @@ extension VPNController {
     /// lives in the system extension and would happily outlive the app, which
     /// is how "I quit and it was still connected" happened.
     func disconnectAllAndWait() async {
-        for p in profiles where p.status != .disconnected && p.status != .invalid {
+        let managed = Set(profiles.filter {
+            $0.kind != .tailscale || tailscaleBrokerLeases.current($0.id) != nil
+        }.map(\.id))
+        for p in profiles where managed.contains(p.id) && p.status != .disconnected && p.status != .invalid {
             disconnect(id: p.id)
         }
         for _ in 0..<50 {   // ≤5 s
-            let stillActive = profiles.contains { $0.status != .disconnected && $0.status != .invalid }
+            let stillActive = profiles.contains { managed.contains($0.id) && $0.status != .disconnected && $0.status != .invalid }
             if !stillActive { break }
             try? await Task.sleep(for: .milliseconds(100))
         }
     }
 
-    /// Menu-bar "Disconnect and Quit". Termination then flows through the app
-    /// delegate's quit handler, which finds nothing left active and proceeds.
-    func disconnectAllAndQuit() async {
-        await disconnectAllAndWait()
-        NSApplication.shared.terminate(nil)
-    }
-
     func disconnect(id: String) {
         if let why = controlDenied(.disconnect(profile: id)) { lastError = why; return }
+        let lease: Installation.Lease?
+        do { lease = isTailscale(id) ? try tailscaleIdentityLease(id) : nil }
+        catch { report(error, profile: id); return }
+        defer { withExtendedLifetime(lease) {} }
+        if tailscaleStartingIDs.contains(id) { tailscaleCancelledStarts.insert(id) }
         connectionReservations.cancel(member: id)
         clearTailscaleSignIn(id: id)
         if disconnectVirtualMember(id) { return }

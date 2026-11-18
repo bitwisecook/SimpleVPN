@@ -36,6 +36,58 @@ nonisolated enum KeychainCredentialStore {
         var privateKeyPassword: String? = nil
     }
 
+    static func profileAccounts(id: String) -> [(String, String)] {
+        [("teleport", "teleport.\(id)"), ("credentials", id), ("wireguard", "wg.\(id)"), ("tailscale", "tailscale.\(id)"),
+         ("tailscale-state", "tailscale.state.\(id)"),
+         ("native-http-proxy", "native.proxy.http.\(id)"),
+         ("native-https-proxy", "native.proxy.https.\(id)"),
+         ("ssh-network", "sshnet.\(id)"), ("tunnel", "tunnel.\(id)"),
+         ("tunnel-proxy", "tunnel.\(id).proxy"), ("tunnel-jump", "tunnel.\(id).jump"),
+         ("tunnel-passphrase", "tunnel.\(id).privateKey"), ("ssh-key", "tunnel.\(id).sshKey"),
+         ("native", "native.\(id)"), ("native-secret", "native.\(id).secret"),
+         ("native-ppp", "native.\(id).ppp")]
+    }
+
+    static let protectedService = "com.bragi0.SimpleVPN.protected"
+
+    static func deleteProtectedCredentials(profile: String) {
+        SecItemDelete(dataProtectionQuery(service: protectedService, account: profile) as CFDictionary)
+    }
+
+    /// Every storage role allowed in a portable document belongs to the profile,
+    /// including records imported for a different engine.
+    static func deleteAllProfileData(profile id: String) {
+        for (_, account) in profileAccounts(id: id) { deleteCredentials(profile: account) }
+        // These retired records survive upgrades and are erased on explicit deletion.
+        deleteCredentials(profile: "tunnel.\(id).token")
+        deleteCredentials(profile: "tunnel.\(id).pkcs11")
+        deleteProfileSecrets(profile: id)
+        deleteOVPNInlineSecrets(profile: id)
+        deleteWireGuardPeerSecrets(profile: id)
+        deleteCustomRoutingProxyAuth(profile: id)
+        deleteProtectedCredentials(profile: id)
+        deleteNativeSecret(account: "native.\(id)")
+        deleteNativeSecret(account: "native.\(id).psk")
+        clearSession(profile: id)
+    }
+
+    private static let socksRecoveryService = "com.bragi0.SimpleVPN.system-socks-recovery"
+
+    static func saveSOCKSRecovery(_ data: Data) throws {
+        try set(service: socksRecoveryService, account: "primary-service", data: data)
+    }
+
+    static func loadSOCKSRecovery() throws -> Data? {
+        try read(service: socksRecoveryService, account: "primary-service").data
+    }
+
+    static func removeSOCKSRecovery() throws {
+        let status = SecItemDelete(appQuery(service: socksRecoveryService, account: "primary-service") as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+        }
+    }
+
     // MARK: Persistent base credentials (username + base password, no OTP)
 
     static func saveCredentials(profile: String, _ creds: Credentials) throws {

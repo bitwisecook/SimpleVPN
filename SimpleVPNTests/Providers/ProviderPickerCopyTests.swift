@@ -33,8 +33,8 @@ struct ProviderPickerCopyTests {
                     ProviderPickerCopy.detail(p),
                     ProviderPickerCopy.consentTitle(p),
                     ProviderPickerCopy.consentConfirm(p),
-                    ProviderPickerCopy.consentMessage(p, throughTunnel: true),
-                    ProviderPickerCopy.consentMessage(p, throughTunnel: false),
+                    ProviderPickerCopy.consentMessage(p, connectedToProvider: true),
+                    ProviderPickerCopy.consentMessage(p, connectedToProvider: false),
                     ProviderPickerCopy.firstRunTitle(p),
                     ProviderPickerCopy.firstRunActionTitle(p),
                     ProviderPickerCopy.firstRunSummary(p),
@@ -115,8 +115,8 @@ struct ProviderPickerCopyTests {
     @Test("the consent sheet states outright that SimpleVPN cannot sign you in")
     func consentStatesTheLimit() {
         for p in VPNServiceProviderCatalog.all where p.blocked == nil {
-            for throughTunnel in [true, false] {
-                #expect(ProviderPickerCopy.consentMessage(p, throughTunnel: throughTunnel)
+            for connectedToProvider in [true, false] {
+                #expect(ProviderPickerCopy.consentMessage(p, connectedToProvider: connectedToProvider)
                     .contains("cannot sign you in"),
                         "\(p.displayName)'s sheet does not say SimpleVPN cannot sign you in")
             }
@@ -205,7 +205,7 @@ struct ProviderPickerCopyTests {
     func consentNamesTheHost() throws {
         for p in VPNServiceProviderCatalog.all where p.blocked == nil {
             let host = try #require(p.listURL?.host())
-            #expect(ProviderPickerCopy.consentMessage(p, throughTunnel: false).contains(host),
+            #expect(ProviderPickerCopy.consentMessage(p, connectedToProvider: false).contains(host),
                     "\(p.displayName)'s sheet does not name \(host)")
         }
     }
@@ -216,15 +216,15 @@ struct ProviderPickerCopyTests {
     @Test("the sheet says what the provider learns, and it differs through the tunnel")
     func consentSaysWhatTheyLearn() {
         let p = VPNServiceProviderCatalog.mullvad
-        let outside = ProviderPickerCopy.consentMessage(p, throughTunnel: false)
-        let inside = ProviderPickerCopy.consentMessage(p, throughTunnel: true)
-        #expect(outside.contains("real address"))
-        #expect(inside.contains("their own network"))
+        let outside = ProviderPickerCopy.consentMessage(p, connectedToProvider: false)
+        let inside = ProviderPickerCopy.consentMessage(p, connectedToProvider: true)
+        #expect(outside.contains("public address"))
+        #expect(inside.contains("macOS routing"))
         #expect(outside != inside)
         // Both say what will NOT happen, because "will this sign me in?" is the
         // question somebody actually has.
         for text in [outside, inside] {
-            #expect(text.contains("Nothing about you is sent"))
+            #expect(text.contains("sends no account details"))
             #expect(text.contains("cannot sign you in"))
         }
     }
@@ -261,7 +261,7 @@ struct ProviderPickerCopyTests {
         }
         // Nord is the big one, and the sheet says so before asking.
         #expect(ProviderPickerCopy.consentMessage(VPNServiceProviderCatalog.nordVPN,
-                                                  throughTunnel: true).contains("MB"))
+                                                  connectedToProvider: true).contains("MB"))
     }
 
     /// The first-run page is deliberately only the question and the four names. Its

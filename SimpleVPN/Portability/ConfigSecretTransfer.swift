@@ -13,38 +13,54 @@ nonisolated enum ConfigSecretMode: String, CaseIterable, Sendable {
 /// derived from the newly assigned profile ID, never taken from an input file.
 enum ConfigSecretTransfer {
     static func accounts(id: String) -> [(String, String)] {
-        [("teleport", "teleport.\(id)"), ("credentials", id), ("wireguard", "wg.\(id)"), ("tailscale", "tailscale.\(id)"),
-         ("tailscale-state", "tailscale.state.\(id)"),
-         ("native-http-proxy", "native.proxy.http.\(id)"),
-         ("native-https-proxy", "native.proxy.https.\(id)"),
-         ("ssh-network", "sshnet.\(id)"), ("tunnel", "tunnel.\(id)"),
-         ("tunnel-proxy", "tunnel.\(id).proxy"), ("tunnel-jump", "tunnel.\(id).jump"),
-         ("tunnel-passphrase", "tunnel.\(id).privateKey"), ("ssh-key", "tunnel.\(id).sshKey"),
-         ("native", "native.\(id)"), ("native-secret", "native.\(id).secret"),
-         ("native-ppp", "native.\(id).ppp")]
+        KeychainCredentialStore.profileAccounts(id: id)
     }
 
-    static func collect(id: String, mode: ConfigSecretMode, authenticationContext: LAContext? = nil) async throws -> ConfigMap {
+    /// Restrict both reads and writes to the sign-ins this kind can actually use.
+    /// Routing proxy credentials apply to every profile independently of its engine.
+    static func roles(for kind: VPNKind) -> Set<String> {
+        let roles: Set<String> = switch kind {
+        case .openVPN: ["credentials", "protected", "profile-secrets"]
+        case .wireGuard: ["wireguard", "wireguard-peers", "teleport"]
+        case .tailscale: ["tailscale", "tailscale-state"]
+        case .proxyTunnel: ["credentials"]
+        case .sshNetworkTunnel: ["ssh-network"]
+        case .ikev2, .ipsec, .l2tp: ["native", "native-ppp", "native-secret", "native-http-proxy", "native-https-proxy"]
+        case .ssh: ["tunnel", "tunnel-jump", "ssh-key"]
+        case .ciscoAnyConnect, .fortinet, .f5apm, .globalProtect, .juniper, .pulse, .arrayNetworks:
+            ["tunnel", "tunnel-proxy", "tunnel-passphrase"]
+        }
+        return roles.union(["routing-proxy"])
+    }
+
+    static func deleteAll(id: String) {
+        KeychainCredentialStore.deleteAllProfileData(profile: id)
+    }
+
+    static func collect(id: String, kind: VPNKind, mode: ConfigSecretMode, protectSignIn: Bool = false,
+                        authenticationContext: LAContext? = nil) async throws -> ConfigMap {
         guard mode != .omit else { return ConfigMap() }
         var secrets = ConfigMap()
-        for (role, account) in accounts(id: id) {
+        let allowed = roles(for: kind)
+        let protected = allowed.contains("protected") ? BiometricCredentialStore.info(profile: id) : (exists: false, hasTOTP: false)
+        for (role, account) in accounts(id: id) where allowed.contains(role) {
+            if role == "credentials", protectSignIn || protected.exists { continue }
             if let credentials = try KeychainCredentialStore.credentialsForExport(profile: account) {
                 secrets.put(role, .map(secretMap(credentials)))
             }
         }
-        if let value = try KeychainCredentialStore.profileSecretsForExport(profile: id), !value.isEmpty {
+        if allowed.contains("profile-secrets"), let value = try KeychainCredentialStore.profileSecretsForExport(profile: id), !value.isEmpty {
             secrets.put("profile-secrets", .map(secretMap(value)))
         }
         if let value = try KeychainCredentialStore.routingProxyAuthForExport(profile: id) {
             secrets.put("routing-proxy", .map(secretMap(value)))
         }
-        let peers = try KeychainCredentialStore.wireGuardPeerSecretsForExport(profile: id)
-        if !peers.isEmpty {
+        if allowed.contains("wireguard-peers") {
+            let peers = try KeychainCredentialStore.wireGuardPeerSecretsForExport(profile: id)
             var map = ConfigMap()
             for key in peers.keys.sorted() { map.put(key, .string(peers[key]!)) }
-            secrets.put("wireguard-peers", .map(map))
+            if !map.isEmpty { secrets.put("wireguard-peers", .map(map)) }
         }
-        let protected = BiometricCredentialStore.info(profile: id)
         if protected.exists {
             if mode == .include {
                 let context = authenticationContext ?? LAContext()
@@ -62,7 +78,7 @@ enum ConfigSecretTransfer {
                 secrets.put("protected", .map(map))
             }
         }
-        return secrets
+        return mode == .placeholders ? placeholders(secrets) : secrets
     }
 
     /// This explicit sidecar is the sole exception to settings-map redaction.
@@ -93,9 +109,39 @@ enum ConfigSecretTransfer {
         return output
     }
 
-    static func validated(_ secrets: ConfigMap) throws -> ConfigMap {
+    /// Older exports may have only the sign-in preference or only the protected
+    /// record. Either is sufficient to retain the user's protection choice.
+    static func importedAuth(_ auth: VPNAuthConfig?, secrets: ConfigMap) -> VPNAuthConfig? {
+        guard auth?.protectWithBiometrics == true || secrets["protected"] != nil else { return auth }
+        var protected = auth ?? VPNAuthConfig()
+        protected.protectWithBiometrics = true
+        protected.rememberCredentials = true
+        return protected
+    }
+
+    static func protectSignIn(in secrets: ConfigMap, required: Bool) -> ConfigMap {
+        guard required || secrets["protected"] != nil,
+              let ordinary = secrets["credentials"]?.mapValue else { return secrets }
+        var result = secrets
+        result["credentials"] = nil
+        if result["protected"] == nil {
+            var signIn = ConfigMap()
+            signIn.put("username", ordinary["username"])
+            signIn.put("password", ordinary["password"])
+            result.put("protected", .map(signIn))
+        }
+        // Legacy base records could also contain independent engine passwords.
+        var engine = result["profile-secrets"]?.mapValue ?? ConfigMap()
+        for field in ["privateKeyPassword", "proxyPassword"] where engine[field] == nil {
+            engine.put(field, ordinary[field])
+        }
+        if !engine.isEmpty { result.put("profile-secrets", .map(engine)) }
+        return result
+    }
+
+    static func validated(_ secrets: ConfigMap, kind: VPNKind) throws -> ConfigMap {
         let credentialRoles = Set(accounts(id: "").map { $0.0 })
-        let roles = credentialRoles.union(["profile-secrets", "routing-proxy", "wireguard-peers", "protected"])
+        let roles = roles(for: kind)
         var output = ConfigMap()
         for entry in secrets.entries {
             guard roles.contains(entry.key), let fields = entry.value.mapValue else { throw invalid() }
@@ -126,10 +172,11 @@ enum ConfigSecretTransfer {
         return output
     }
 
-    static func save(_ secrets: ConfigMap, id: String) throws {
-        let validated = try validated(secrets)
+    static func save(_ secrets: ConfigMap, id: String, kind: VPNKind, protectSignIn: Bool = false) throws {
+        let validated = try Self.protectSignIn(in: validated(secrets, kind: kind), required: protectSignIn)
         let accountMap = Dictionary(uniqueKeysWithValues: accounts(id: id))
-        for entry in validated.entries {
+        let hasProtection = validated["credentials"] != nil && (validated["protected"] != nil || BiometricCredentialStore.exists(profile: id))
+        for entry in validated.entries where entry.key != "credentials" || !hasProtection {
             guard let fields = entry.value.mapValue else { continue }
             let data = try JSONSerialization.data(withJSONObject: fields.jsonRepresentation)
             if let account = accountMap[entry.key] {
@@ -149,6 +196,7 @@ enum ConfigSecretTransfer {
                 case "protected":
                     try BiometricCredentialStore.save(profile: id,
                         JSONDecoder().decode(BiometricCredentialStore.ProtectedCredentials.self, from: data))
+                    KeychainCredentialStore.deleteCredentials(profile: id)
                 default: throw invalid()
                 }
             }
@@ -158,6 +206,7 @@ enum ConfigSecretTransfer {
     /// Create the replacement with mode 0600 before writing any secret bytes.
     /// rename keeps both the write and replacement atomic on this filesystem.
     static func write(_ text: String, to url: URL) throws {
+        if let refusal = ConfigTransfer.policyRefusal { throw invalid(refusal) }
         let temporary = url.deletingLastPathComponent().appendingPathComponent(".simplevpn-export-\(UUID().uuidString)")
         let fd = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode_t(0o600))
         guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }

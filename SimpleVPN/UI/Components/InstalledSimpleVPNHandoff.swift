@@ -4,11 +4,12 @@
 import SwiftUI
 
 struct InstalledSimpleVPNHandoff: View {
+    var alignment: HorizontalAlignment = .leading
     @State private var isOpening = false
     @State private var showOpenError = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: alignment, spacing: 8) {
             LabeledContent("Opened from") {
                 Text(Bundle.main.executableURL?.path ?? Bundle.main.bundlePath)
                     .textSelection(.enabled)

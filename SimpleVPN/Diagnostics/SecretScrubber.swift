@@ -276,7 +276,7 @@ nonisolated struct SecretScrubber: Sendable {
 
     /// `scheme://user:password@host`. The userinfo goes; the host survives to be
     /// dealt with by the hostname pass, so the sentence still says WHERE.
-    private func redactCredentialedURLs(_ s: String) -> String {
+    func redactCredentialedURLs(_ s: String) -> String {
         replace(s, #"\b([a-z][a-z0-9+.\-]*)://([^\s/:@]+):([^\s/@]+)@"#) { _, groups in
             "\(groups.first.flatMap { $0 } ?? "scheme")://\(self.goneAs("redacted-userinfo"))@"
         }

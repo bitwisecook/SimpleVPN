@@ -118,3 +118,37 @@ func TestNodeStateDistinguishesEmptyValueFromRemoval(t *testing.T) {
 		t.Fatal("deleted empty value retained")
 	}
 }
+
+func TestNodeStateUnchangedAndLegacyAckAreBoundToCurrentEngine(t *testing.T) {
+	makeStore := func() *keychainState {
+		s, err := newKeychainState("", filepath.Join(t.TempDir(), "missing"), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(s.close)
+		return s
+	}
+	first, second := makeStore(), makeStore()
+	if err := first.WriteState("node", []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.WriteState("node", []byte("second")); err != nil {
+		t.Fatal(err)
+	}
+	firstState, _ := first.snapshot()
+	secondState, _ := second.snapshot()
+	if err := second.ack(firstState.Revision); err == nil {
+		t.Fatal("a legacy acknowledgement from the old engine released the new identity")
+	}
+	snapshot, unchanged, err := second.snapshotSince(&secondState.Revision)
+	if err != nil || unchanged || snapshot != secondState {
+		t.Fatal("an unacknowledged revision must return the complete snapshot")
+	}
+	if err := second.ack(secondState.Revision); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, unchanged, err = second.snapshotSince(&secondState.Revision)
+	if err != nil || !unchanged || snapshot.Data != "" {
+		t.Fatal("an acknowledged unchanged revision should return no credential payload")
+	}
+}

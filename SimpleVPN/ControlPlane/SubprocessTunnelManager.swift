@@ -17,7 +17,7 @@
 //                             kinds go this way; the extension dispatches on
 //                             `VPNKind.openconnectProtocol` and always has.
 //  Everything else is one child process: we build its argv, feed the password headlessly
-//  (SSH via a locked-down SSH_ASKPASS script, OpenConnect via --passwd-on-stdin), watch
+//  (SSH via a private one-shot FIFO for each hop, OpenConnect via --passwd-on-stdin), watch
 //  its output for the "up" signal, keep a rolling log, and — for SOCKS kinds — optionally
 //  point the active network service's SOCKS proxy at the local port while connected
 //  (restored on disconnect).
@@ -68,19 +68,11 @@ final class SubprocessTunnelManager {
         /// Per-forward status keyed by `forwardKey(line)` — drives the editor's
         /// live row badges while connected.
         var forwardStates: [String: ForwardPhase] = [:]
-        /// A non-fatal caution to keep visible even once connected — a certificate
-        /// about to expire, say.
-        ///
-        /// NOTHING WRITES IT TODAY, and that is worth saying rather than leaving to be
-        /// discovered: its only producer was the smartcard connect-time watcher (a PIN
-        /// counter running down), which went with smartcard sign-in
-        /// (Docs/AuthSecPKCS11.md). It is READ by `ConnectionView` and by the
-        /// subprocess editor, both of which render nothing for `nil`, so the seam is
-        /// harmless and is the obvious place for the next non-fatal caution. If none
-        /// arrives, delete it and both readers together — not one of the three.
+        /// A system SOCKS proxy change that needs attention.
         var caution: String? = nil
     }
 
+    @ObservationIgnored weak var gatewayCoordinator: VPNController?
     var dnsQueryStatusDidChange: (@MainActor () -> Void)?
     private(set) var live: [String: Live] = [:] { didSet { dnsQueryStatusDidChange?() } }
 
@@ -88,7 +80,11 @@ final class SubprocessTunnelManager {
     private var sshEngines: [String: SSHTunnelEngine] = [:]   // in-process libssh (SOCKS)
     private var inProcessNE: Set<String> = []                 // SSL VPNs running via the NE OpenConnect engine
     private var authTasks: [String: Task<Void, Never>] = [:]  // in-flight ocauth-helper sign-ins (SSO)
-    private var proxiedIDs: Set<String> = []                  // ids whose SOCKS proxy we pointed the system at
+    @ObservationIgnored private lazy var systemSOCKS = SystemSOCKSProxy { [weak self] id, error in
+        guard let self, live[id]?.caution != error else { return }
+        live[id]?.caution = error
+    }
+    private var proxyToggleWhileConnecting: [String: Bool] = [:]
     private var controlSockets: [String: String] = [:]       // ssh ControlMaster socket per tunnel (live -O ops)
     private static let log = Logger(subsystem: "com.bragi0.SimpleVPN", category: "subprocess")
 
@@ -109,8 +105,9 @@ final class SubprocessTunnelManager {
                  oneTimeCode: String? = nil) {
         guard tasks[config.id] == nil, sshEngines[config.id] == nil,
               !inProcessNE.contains(config.id), authTasks[config.id] == nil else { return }
+        proxyToggleWhileConnecting[config.id] = nil
         // A password embedded in the server or proxy address would be persisted
-        // unencrypted AND handed to the tool on its command line (`ps`-readable).
+        // unencrypted in the profile.
         if let reason = Self.addressCredentialReason(config) {
             live[config.id] = Live(status: .failed(reason))
             return
@@ -358,11 +355,8 @@ final class SubprocessTunnelManager {
     /// The secret half, as `startTunnel(options:)`. Read from the keychain at
     /// connect time and never retained.
     ///
-    /// NOTE the asymmetry with the subprocess, and it is in the user's favour:
-    /// `openconnect`'s CLI can only take a proxy password embedded in the `--proxy`
-    /// URL, where `ps` reads it, which is why `proxyPasswordInArgv` is an explicit
-    /// opt-in. In-process there is no argv, so the password travels in memory and
-    /// the opt-in is simply not consulted.
+    /// The saved proxy password opt-in applies to the external tool. The built-in
+    /// engine receives the saved password in its private session options.
     static func inProcessSecrets(_ c: SubprocessTunnelConfig) -> [String: NSObject] {
         var options: [String: NSObject] = [:]
         if openconnectAuthMode(c) == "certificate",
@@ -410,7 +404,7 @@ final class SubprocessTunnelManager {
             // `true` means "started", not "connected" — real progress (connecting /
             // connected / auth failure) arrives via NEVPNStatusDidChange events.
             let ok = await OpenConnectProfileStore.start(config, password: password,
-                                                          oneTimeCode: oneTimeCode) { [weak self] event in
+                                                          oneTimeCode: oneTimeCode, coordinator: self?.gatewayCoordinator) { [weak self] event in
                 self?.handleInProcessEvent(config.id, event)
             }
             guard let self else { return }
@@ -588,7 +582,7 @@ final class SubprocessTunnelManager {
             l.status = .connecting
             live[config.id] = l
             Task { [weak self] in
-                let ok = await OpenConnectProfileStore.start(config, password: nil, auth: auth) { [weak self] event in
+                let ok = await OpenConnectProfileStore.start(config, password: nil, auth: auth, coordinator: self?.gatewayCoordinator) { [weak self] event in
                     self?.handleInProcessEvent(config.id, event)
                 }
                 guard let self else { return }
@@ -837,9 +831,8 @@ final class SubprocessTunnelManager {
                 // row bound. Set them directly — the subprocess path reaches the
                 // same state by scraping a readiness line off stdout.
                 l.forwardStates = l.forwardStates.mapValues { $0 == .pending ? .active : $0 }
-                if inSOCKSMode, config.setSystemProxy {
-                    Self.setSystemSOCKS(port: config.socksPort, enabled: true)
-                    self.proxiedIDs.insert(config.id)
+                if inSOCKSMode, self.wantsSystemProxy(config) {
+                    self.systemSOCKS.request(config.id, port: config.socksPort)
                 }
                 self.live[config.id] = l
             } catch {
@@ -881,6 +874,19 @@ final class SubprocessTunnelManager {
             return
         }
         var args = baseArgs
+        var privateConfig: Data?
+        if config.kind.isSSLVPN {
+            let passphrase = command == nil && Self.openconnectAuthMode(config) == "certificate"
+                ? KeychainCredentialStore.loadCredentials(profile: "tunnel.\(config.id).privateKey")?.password : nil
+            do {
+                privateConfig = try Self.openconnectPrivateConfig(keyPassphrase: passphrase,
+                                                                 proxy: Self.proxyArgument(for: config))
+            } catch {
+                live[config.id] = Live(status: .failed(error.localizedDescription))
+                return
+            }
+            if privateConfig != nil { args.insert("--config=/dev/fd/2", at: 0) }
+        }
         // SSH runs as a ControlMaster so forwards can be added/cancelled live
         // (`ssh -S <socket> -O forward/cancel …`) without a reconnect.
         if config.kind == .ssh, let socket = Self.makeControlSocketPath(id: config.id) {
@@ -906,44 +912,56 @@ final class SubprocessTunnelManager {
                                log: initialLog,
                                forwardStates: initialForwards)
 
-        // SSH may prompt for two hosts (jump + target); a host-aware askpass
-        // returns the right password for whichever prompt ssh raises.
-        var askpass: [String: String] = [:]
+        var askpass: SSHAskpass?
+        var askpassPath: String?
         if config.kind == .ssh {
-            if let pw = password, !pw.isEmpty { askpass[config.server] = pw }
-            if config.useJumpHost, !config.jumpHost.isEmpty,
-               let jpw = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(config.id).jump")?.password,
-               !jpw.isEmpty {
-                askpass[config.jumpHost] = jpw
+            func credential(_ user: String, _ host: String, _ secret: String?) -> SSHAskpass.Credential? {
+                guard let secret, !secret.isEmpty else { return nil }
+                let identity = (user.isEmpty ? NSUserName() : user) + "@" + host
+                return SSHAskpass.Credential(identity: identity, password: secret)
+            }
+            let target = credential(config.username, config.server, password)
+            let jump = config.useJumpHost && !config.jumpHost.isEmpty
+                ? credential(config.jumpUsername, config.jumpHost, KeychainCredentialStore.loadCredentials(
+                    profile: "tunnel.\(config.id).jump")?.password) : nil
+            if target != nil || jump != nil {
+                do {
+                    guard let tool = CLIInstaller.bundledToolPath else { throw POSIXError(.ENOENT) }
+                    askpassPath = tool
+                    askpass = try SSHAskpass(target: target, jump: jump)
+                } catch {
+                    removeControlSocket(config.id)
+                    live[config.id] = Live(status: .failed("Couldn't prepare a private password prompt for SSH: \(error.localizedDescription)"))
+                    return
+                }
             }
         }
 
         let proc = TunnelProcess(
-            path: path, args: args, stdin: stdin,
-            askpassHostPasswords: askpass.isEmpty ? nil : askpass,
-            onLine: { [weak self] line, isReady in
-                guard let self else { return }
+            path: path, args: args, stdin: stdin, privateConfig: privateConfig,
+            askpass: askpass, askpassPath: askpassPath,
+            onOutput: { [weak self] process, lines, isReady in
+                guard let self, self.tasks[config.id] === process else { return }
                 var l = self.live[config.id] ?? Live()
-                l.log.append(line)
+                l.log.append(contentsOf: lines)
                 if l.log.count > 300 { l.log.removeFirst(l.log.count - 300) }
                 if isReady, l.status == .connecting {
                     l.status = .connected
                     // The initial argv forwards live or die with the session
                     // (ExitOnForwardFailure=yes) — ready means they all bound.
                     l.forwardStates = l.forwardStates.mapValues { $0 == .pending ? .active : $0 }
-                    if l.socksPort != nil && config.setSystemProxy {
-                        Self.setSystemSOCKS(port: config.socksPort, enabled: true)
-                        self.proxiedIDs.insert(config.id)
+                    if let port = l.socksPort, self.wantsSystemProxy(config) {
+                        self.systemSOCKS.request(config.id, port: port)
                     }
                 }
                 self.live[config.id] = l
             },
-            onExit: { [weak self] code in
-                guard let self else { return }
+            onExit: { [weak self] process, code in
+                guard let self, self.tasks[config.id] === process else { return }
                 var l = self.live[config.id] ?? Live()
                 // Restore only if WE pointed the system at this tunnel (and a
                 // manual disconnect hasn't already restored it).
-                if self.proxiedIDs.remove(config.id) != nil { Self.setSystemSOCKS(enabled: false) }
+                self.systemSOCKS.request(config.id, port: nil)
                 switch l.status {
                 case .connecting:
                     l.status = .failed("Exited before connecting (code \(code)). Check the log.")
@@ -964,12 +982,8 @@ final class SubprocessTunnelManager {
         // (OpenConnectAuthClient's cancellation handler), which also abandons
         // any browser page still waiting on the gateway.
         if let auth = authTasks.removeValue(forKey: id) { auth.cancel() }
-        // Restore the system SOCKS proxy first: TunnelProcess.stop() clears the
-        // termination handler, so onExit never runs for a manual disconnect —
-        // this is the only restore on that path (and the in-process engine has
-        // no exit path at all). proxiedIDs makes exit-path restores a no-op
-        // afterwards, so nothing double-toggles.
-        if proxiedIDs.remove(id) != nil { Self.setSystemSOCKS(enabled: false) }
+        proxyToggleWhileConnecting[id] = nil
+        systemSOCKS.request(id, port: nil)
         tasks[id]?.stop()
         tasks[id] = nil
         sshEngines[id]?.stop()
@@ -1027,18 +1041,21 @@ final class SubprocessTunnelManager {
         }
     }
 
-    /// Apply the system-proxy toggle to an already-connected SOCKS tunnel (the
-    /// setting normally only takes effect at connect time).
+    private func wantsSystemProxy(_ config: SubprocessTunnelConfig) -> Bool {
+        proxyToggleWhileConnecting.removeValue(forKey: config.id) ?? config.setSystemProxy
+    }
+
     func setSystemProxyLive(_ config: SubprocessTunnelConfig, enabled: Bool) {
         let id = config.id
-        guard status(id) == .connected, let port = live[id]?.socksPort else { return }
-        if enabled {
-            Self.setSystemSOCKS(port: port, enabled: true)
-            proxiedIDs.insert(id)
-        } else if proxiedIDs.remove(id) != nil {
-            Self.setSystemSOCKS(enabled: false)
+        if status(id) == .connecting {
+            proxyToggleWhileConnecting[id] = enabled
+        } else if status(id) == .connected, let port = live[id]?.socksPort {
+            systemSOCKS.request(id, port: enabled ? port : nil)
         }
     }
+
+    func recoverSystemProxyAfterCrash() async -> String? { await systemSOCKS.restore(afterCrash: true) }
+    func restoreSystemProxyForQuit() async -> String? { await systemSOCKS.restore(afterCrash: false) }
 
     /// Canonical state key for a forward line: normalized "FLAG spec" when it
     /// parses, the trimmed line itself otherwise (so an invalid row can still
@@ -1084,7 +1101,7 @@ final class SubprocessTunnelManager {
         let target = Self.sshTarget(config)
         Task { [weak self] in
             let r = await Task.detached {
-                Self.controlOp(["-O", "forward", "-\(fw.flag)", fw.spec, target], socket: socket)
+                Self.controlOp(["-O", "forward", "-\(fw.flag)", fw.spec, "--", target], socket: socket)
             }.value
             if r.code == 0 {
                 guard let self else { return }
@@ -1097,7 +1114,7 @@ final class SubprocessTunnelManager {
                 // Distinguish "forward refused" (port bound, bad spec) from
                 // "control connection gone" for an honest row message.
                 let alive = await Task.detached {
-                    Self.controlOp(["-O", "check", target], socket: socket).code == 0
+                    Self.controlOp(["-O", "check", "--", target], socket: socket).code == 0
                 }.value
                 let detail = r.output.split(whereSeparator: \.isNewline).last.map(String.init)
                 let why = alive
@@ -1117,7 +1134,7 @@ final class SubprocessTunnelManager {
         let target = Self.sshTarget(config)
         Task {
             let r = await Task.detached {
-                Self.controlOp(["-O", "cancel", "-\(fw.flag)", fw.spec, target], socket: socket)
+                Self.controlOp(["-O", "cancel", "-\(fw.flag)", fw.spec, "--", target], socket: socket)
             }.value
             if r.code != 0 {
                 Self.log.error("ssh -O cancel -\(fw.flag, privacy: .public) \(fw.spec, privacy: .public) failed: \(r.output, privacy: .public)")
@@ -1196,7 +1213,7 @@ final class SubprocessTunnelManager {
                 // Point-to-point tun (needs root here + PermitTunnel on the server).
                 a += ["-o", "Tunnel=point-to-point", "-w", "any:any"]
             }
-            a.append(sshTarget(c))
+            a += ["--", sshTarget(c)]
             return (ssh, a, nil)
 
         case _ where c.kind.isSSLVPN:
@@ -1443,28 +1460,16 @@ final class SubprocessTunnelManager {
         return "This VPN runs the openconnect tool, which can only give you a SOCKS proxy on port \(c.socksPort) — no interface, no routes and no DNS of its own. SimpleVPN's built-in engine carries it as a full system tunnel instead, and needs nothing installed. Turning this on closes port \(c.socksPort), so check nothing is pointed at it first."
     }
 
-    /// Whether an address carries a PASSWORD in its userinfo
-    /// ("https://user:secret@host"). A bare username ("alex@host", which ssh
-    /// accepts as a target) is not a secret and stays allowed.
-    static func passwordInAddress(_ raw: String) -> Bool {
-        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let scheme = s.range(of: "://") { s = String(s[scheme.upperBound...]) }
-        let authority = s.prefix { $0 != "/" }
-        guard let at = authority.lastIndex(of: "@") else { return false }
-        return authority[..<at].contains(":")
-    }
-
     /// Why an address in this config can't be used, or nil. These configs are
-    /// persisted unencrypted (UserDefaults) and the address is handed to the
-    /// tool on its command line, where any local process can read it with `ps` —
+    /// persisted unencrypted (UserDefaults),
     /// so a password embedded in one is refused, the same rule (and reason) as
     /// `ProxyTunnelConfig.upstreamProblem`. For the proxy it would also defeat
-    /// the explicit "include proxy password in process arguments" opt-in.
+    /// the opt-in to send the saved password to the external tool.
     static func addressCredentialReason(_ c: SubprocessTunnelConfig) -> String? {
-        if passwordInAddress(c.server) {
+        if SubprocessTunnelConfig.passwordInAddress(c.server) {
             return "Take the password out of the server address — put it in the Password field under Sign-In."
         }
-        if c.proxyMode == .manual, passwordInAddress(c.proxyURL) {
+        if SubprocessTunnelConfig.passwordInAddress(c.proxyURL) {
             return "Take the password out of the proxy address — put it in the proxy password field under Connection."
         }
         return nil
@@ -1514,13 +1519,7 @@ final class SubprocessTunnelManager {
         if mode == "certificate" {
             if !c.clientCertFile.isEmpty { a += ["--certificate=\((c.clientCertFile as NSString).expandingTildeInPath)"] }
             if !c.clientKeyFile.isEmpty { a += ["--sslkey=\((c.clientKeyFile as NSString).expandingTildeInPath)"] }
-            // Encrypted key / PKCS#12: the passphrase the editor stored under
-            // "tunnel.<id>.privateKey". --key-password is openconnect's only
-            // non-interactive way to take it (no stdin/file variant exists).
-            if let kp = KeychainCredentialStore.loadCredentials(profile: "tunnel.\(c.id).privateKey")?.password,
-               !kp.isEmpty {
-                a += ["--key-password=\(kp)"]
-            }
+
         }
         // Host-checker / endpoint posture (F5 EPA, Cisco CSD, GP/NC trojan):
         // a real wrapper wins over the skip; otherwise "disable" stubs it out.
@@ -1532,12 +1531,11 @@ final class SubprocessTunnelManager {
         if let d = c.forceDPD { a += ["--force-dpd=\(d)"] }
         if let m = c.ocMTU { a += ["--mtu=\(m)"] }
         if let bm = c.baseMTU { a += ["--base-mtu=\(bm)"] }
-        if let proxy = proxyArgument(for: c) { a += ["--proxy=\(proxy)"] }
         if let ocproxy = TunnelCLI.ocproxy.resolvedPath {
             a += ["--script-tun", "--script", "\(ocproxy) -D \(c.socksPort)"]
         }
         a += c.extraArgs
-        a.append(serverURL(for: c))
+        a += ["--", serverURL(for: c)]
         return a
     }
 
@@ -1565,12 +1563,11 @@ final class SubprocessTunnelManager {
         if let d = c.forceDPD { a += ["--force-dpd=\(d)"] }
         if let m = c.ocMTU { a += ["--mtu=\(m)"] }
         if let bm = c.baseMTU { a += ["--base-mtu=\(bm)"] }
-        if let proxy = proxyArgument(for: c) { a += ["--proxy=\(proxy)"] }
         if let ocproxy = TunnelCLI.ocproxy.resolvedPath {
             a += ["--script-tun", "--script", "\(ocproxy) -D \(c.socksPort)"]
         }
         a += c.extraArgs
-        a.append(auth.connectURL.isEmpty ? serverURL(for: c) : auth.connectURL)
+        a += ["--", auth.connectURL.isEmpty ? serverURL(for: c) : auth.connectURL]
         return (oc, a, Data((auth.cookie + "\n").utf8))
     }
 
@@ -1578,16 +1575,29 @@ final class SubprocessTunnelManager {
     /// (ssh runs ProxyCommand through the shell). Wraps in single quotes and
     /// escapes embedded single quotes.
     private static func shellQuote(_ s: String) -> String {
-        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        "'" + s.replacingOccurrences(of: "%", with: "%%").replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    /// The OpenConnect `--proxy` value for the config's proxy mode, or nil for
-    /// a direct connection (mode .none, or .systemDefault with none configured).
-    /// NOTE: openconnect's CLI only accepts proxy credentials embedded in the URL,
-    /// which any local process can read via `ps` — so the password rides argv ONLY
-    /// when the user opted in (proxyPasswordInArgv). Otherwise username-only: an
-    /// authenticating proxy will refuse with a clear 407 rather than leak the
-    /// password. The in-process engine (preferInProcess) never execs at all.
+    /// openconnect's line-oriented config reader trims leading spaces/tabs from
+    /// values. Reject unrepresentable secrets before launching or logging the tool.
+    static func openconnectPrivateConfig(keyPassphrase: String?, proxy: String?) throws -> Data? {
+        var lines = ""
+        for (option, value) in [("key-password", keyPassphrase), ("proxy", proxy)] {
+            guard let value, !value.isEmpty else { continue }
+            guard value.first != " ", value.first != "\t",
+                  !value.utf8.contains(where: { [0, 10, 13].contains($0) }) else {
+                throw NSError(domain: "OpenConnect", code: 1, userInfo: [NSLocalizedDescriptionKey:
+                    "The openconnect tool cannot read this \(option == "proxy" ? "proxy address" : "key passphrase") from its private configuration. Remove leading spaces or tabs and line breaks, or use the built-in engine."])
+            }
+            lines += "\(option)=\(value)\n"
+        }
+        guard lines.utf8.count <= 16_384 else {
+            throw NSError(domain: "OpenConnect", code: 2, userInfo: [NSLocalizedDescriptionKey:
+                "The proxy and key settings are too large for the openconnect tool’s private configuration."])
+        }
+        return lines.isEmpty ? nil : Data(lines.utf8)
+    }
+
     private static func proxyArgument(for c: SubprocessTunnelConfig) -> String? {
         switch c.proxyMode {
         case .none:
@@ -1596,12 +1606,12 @@ final class SubprocessTunnelManager {
             let raw = c.proxyURL.trimmingCharacters(in: .whitespaces)
             guard !raw.isEmpty else { return nil }
             guard !c.proxyUsername.isEmpty else { return raw }
-            // Inject user[:pass] after the scheme. Password from the keychain,
-            // and only with the explicit "include on argv" opt-in.
             let pw = c.proxyPasswordInArgv == true
-                ? (KeychainCredentialStore.loadCredentials(profile: "tunnel.\(c.id).proxy")?.password ?? "")
-                : ""
-            let cred = pw.isEmpty ? c.proxyUsername : "\(c.proxyUsername):\(pw)"
+                ? KeychainCredentialStore.loadCredentials(profile: "tunnel.\(c.id).proxy")?.password : nil
+            let credentialCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+            guard let user = c.proxyUsername.addingPercentEncoding(withAllowedCharacters: credentialCharacters),
+                  let pass = (pw ?? "").addingPercentEncoding(withAllowedCharacters: credentialCharacters) else { return nil }
+            let cred = pass.isEmpty ? user : "\(user):\(pass)"
             if let sep = raw.range(of: "://") {
                 return raw.replacingCharacters(in: sep.upperBound..<sep.upperBound, with: "\(cred)@")
             }
@@ -1727,7 +1737,7 @@ final class SubprocessTunnelManager {
             // be shell-quoted or a jump-host value like "x; curl … | sh" is RCE.
             // The jump hop gets the same host-key policy as the tunnel itself —
             // a hardcoded accept-new would silently weaken a "yes" config.
-            var inner = "ssh -o \(Self.shellQuote("StrictHostKeyChecking=\(c.strictHostKey)"))"
+            var inner = "/usr/bin/env \(SSHAskpass.hopKey)=jump /usr/bin/ssh -o \(Self.shellQuote("StrictHostKeyChecking=\(c.strictHostKey)"))"
             if !c.jumpIdentityFile.isEmpty {
                 // IdentitiesOnly so the CONFIGURED jump key is the one used —
                 // not whatever ~/.ssh/id_* or agent key happens to match first.
@@ -1736,7 +1746,10 @@ final class SubprocessTunnelManager {
             }
             if let jp = c.jumpPort { inner += " -p \(jp)" }
             let jumpTarget = c.jumpUsername.isEmpty ? c.jumpHost : "\(c.jumpUsername)@\(c.jumpHost)"
-            inner += " \(Self.shellQuote(jumpTarget)) -W %h:%p"
+            // Quote the configured destination as a value. OpenSSH substitutes %h
+            // after building ProxyCommand, too late to shell-escape its contents.
+            let forwardHost = c.server.hasPrefix("[") ? c.server : "[\(c.server)]"
+            inner += " -W \(Self.shellQuote("\(forwardHost):\(c.port ?? 22)")) -- \(Self.shellQuote(jumpTarget))"
             a += ["-o", "ProxyCommand=\(inner)"]
         }
         if c.compression { a.append("-C") }
@@ -1777,54 +1790,34 @@ final class SubprocessTunnelManager {
         return raw
     }
 
-    // MARK: System SOCKS proxy (needs admin — networksetup will prompt)
 
-    private static func setSystemSOCKS(port: Int = 0, enabled: Bool) {   // port unused when disabling
-        guard let ns = TunnelCLI.networksetup.resolvedPath,
-              let service = primaryNetworkService(ns) else { return }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: ns)
-        p.arguments = enabled
-            ? ["-setsocksfirewallproxy", service, "127.0.0.1", "\(port)"]
-            : ["-setsocksfirewallproxystate", service, "off"]
-        try? p.run(); p.waitUntilExit()
-    }
-
-    private static func primaryNetworkService(_ ns: String) -> String? {
-        // The service backing the default route — best-effort via the ordered list.
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: ns)
-        p.arguments = ["-listallnetworkservices"]
-        let pipe = Pipe(); p.standardOutput = pipe
-        guard (try? p.run()) != nil else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
-        let lines = (String(data: data, encoding: .utf8) ?? "")
-            .split(separator: "\n").map(String.init)
-            .filter { !$0.hasPrefix("An asterisk") && !$0.hasPrefix("*") }
-        return lines.first { $0.contains("Wi-Fi") } ?? lines.first
-    }
 }
 
 /// One supervised child process, reading merged stdout+stderr line-by-line and
 /// reporting the "connected" moment via a per-kind readiness marker. nonisolated:
 /// it lives on process/pipe callback threads, hopping to the MainActor only to
-/// deliver onLine/onExit.
+/// deliver output and exit events.
 nonisolated final class TunnelProcess: @unchecked Sendable {
     private let path: String
     private let args: [String]
-    private let stdin: Data?
-    private let askpassHostPasswords: [String: String]?
-    private let onLine: @MainActor (String, Bool) -> Void
-    private let onExit: @MainActor (Int32) -> Void
+    private var stdin: Data?
+    private var privateConfig: Data?
+    private var outputReader: FileHandle?
+    private var askpass: SSHAskpass?
+    private let askpassPath: String?
+    private let onOutput: @MainActor (TunnelProcess, [String], Bool) -> Void
+    private let output = OSAllocatedUnfairLock(initialState: OutputBuffer())
+    private let onExit: @MainActor (TunnelProcess, Int32) -> Void
     private var process: Process?
-    private var askpassURL: URL?
 
-    init(path: String, args: [String], stdin: Data?, askpassHostPasswords: [String: String]?,
-         onLine: @escaping @MainActor (String, Bool) -> Void,
-         onExit: @escaping @MainActor (Int32) -> Void) {
+    init(path: String, args: [String], stdin: Data?, privateConfig: Data?, askpass: SSHAskpass?, askpassPath: String?,
+         onOutput: @escaping @MainActor (TunnelProcess, [String], Bool) -> Void,
+         onExit: @escaping @MainActor (TunnelProcess, Int32) -> Void) {
         self.path = path; self.args = args; self.stdin = stdin
-        self.askpassHostPasswords = askpassHostPasswords
-        self.onLine = onLine; self.onExit = onExit
+        self.privateConfig = privateConfig
+        self.askpass = askpass
+        self.askpassPath = askpassPath
+        self.onOutput = onOutput; self.onExit = onExit
     }
 
     /// Readiness signatures across the tools we drive. The openconnect markers
@@ -1842,64 +1835,144 @@ nonisolated final class TunnelProcess: @unchecked Sendable {
         "Session authentication will expire",     // openconnect, post-auth banner
     ]
 
+    /// A pipe read can split both a UTF-8 scalar and a log line. Bound the partial
+    /// line and the pending main-actor delivery independently of the child's rate.
+    struct OutputBuffer: Sendable {
+        private var partial = Data()
+        private var skippingLongLine = false
+        private var queued: [String] = []
+        private var ready = false
+        private var deliveryScheduled = false
+        private let scrubber = SecretScrubber(policy: .errorDetail)
+
+        mutating func append(_ chunk: Data) -> Bool {
+            func finishLine() {
+                if !partial.isEmpty && !skippingLongLine {
+                    let raw = String(decoding: partial, as: UTF8.self)
+                    let line = raw.contains("://") && raw.contains("@") ? scrubber.redactCredentialedURLs(raw) : raw
+                    ready = ready || TunnelProcess.readyMarkers.contains { line.contains($0) }
+                    queued.append(line)
+                }
+                partial.removeAll(keepingCapacity: true)
+                skippingLongLine = false
+            }
+            for byte in chunk {
+                if byte == 10 || byte == 13 { finishLine() }
+                else if !skippingLongLine {
+                    if partial.count < 8192 { partial.append(byte) }
+                    else { partial.removeAll(keepingCapacity: true); skippingLongLine = true }
+                }
+            }
+            if chunk.isEmpty { finishLine() }
+            if queued.count > 300 { queued.removeFirst(queued.count - 300) }
+            guard !queued.isEmpty, !deliveryScheduled else { return false }
+            deliveryScheduled = true
+            return true
+        }
+
+        mutating func take() -> (lines: [String], ready: Bool) {
+            let batch = (queued, ready)
+            queued = []
+            ready = false
+            deliveryScheduled = false
+            return batch
+        }
+    }
+
+    @MainActor private func deliverOutput() {
+        let batch = output.withLock { $0.take() }
+        if batch.ready { askpass = nil }
+        if !batch.lines.isEmpty { onOutput(self, batch.lines, batch.ready) }
+    }
+
     func start() {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         var argv = args
         var env = ProcessInfo.processInfo.environment
 
-        // SSH password without a TTY: an askpass script that prints the password,
-        // forced on with SSH_ASKPASS_REQUIRE=force. Created 0700 atomically
-        // (O_CREAT|O_EXCL) and kept for the whole session — a jump-host chain may
-        // prompt well after start — then removed on exit/stop.
-        if let map = askpassHostPasswords, !map.isEmpty {
-            if let url = Self.writeAskpass(map) {
-                askpassURL = url
-                env["SSH_ASKPASS"] = url.path
+        if path.hasSuffix("ssh") {
+            argv = ["-v"] + argv
+            if let askpass, let askpassPath {
+                env.merge(askpass.environment) { _, current in current }
+                env["SSH_ASKPASS"] = askpassPath
                 env["SSH_ASKPASS_REQUIRE"] = "force"
                 env["DISPLAY"] = ":0"
-                argv = ["-v"] + argv   // -v so the readiness markers appear
             }
-        } else if path.hasSuffix("ssh") {
-            argv = ["-v"] + argv
         }
         p.arguments = argv
         p.environment = env
 
-        let outPipe = Pipe(), inPipe = Pipe()
-        p.standardOutput = outPipe
-        p.standardError = outPipe
+        let inPipe = Pipe()
         p.standardInput = inPipe
-
-        outPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            guard let self else { return }
-            let chunk = handle.availableData
-            guard !chunk.isEmpty, let text = String(data: chunk, encoding: .utf8) else { return }
-            for raw in text.split(whereSeparator: \.isNewline) {
-                let line = String(raw)
-                let ready = Self.readyMarkers.contains { line.contains($0) }
-                Task { @MainActor in self.onLine(line, ready) }
+        var childOutput: FileHandle?
+        let reader: FileHandle
+        if let privateConfig {
+            do {
+                // Darwin's /dev/fd/2 duplicates stderr. The socket is full duplex:
+                // the tool reads config up to EOF while its output travels back.
+                // stdin stays free for --passwd-on-stdin or --cookie-on-stdin.
+                let channel = try Self.configChannel(privateConfig)
+                reader = channel.reader
+                childOutput = channel.child
+                p.standardOutput = channel.child
+                p.standardError = channel.child
+            } catch {
+                Task { @MainActor in self.onOutput(self, ["Couldn't prepare private VPN settings."], false); self.onExit(self, -1) }
+                return
             }
+            self.privateConfig = nil
+        } else {
+            let outPipe = Pipe()
+            p.standardOutput = outPipe
+            p.standardError = outPipe
+            reader = outPipe.fileHandleForReading
+        }
+        outputReader = reader
+        reader.readabilityHandler = { [weak self] handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty { handle.readabilityHandler = nil }
+            guard let self, self.output.withLock({ $0.append(chunk) }) else { return }
+            Task { @MainActor in self.deliverOutput() }
         }
         p.terminationHandler = { [weak self] proc in
-            self?.cleanupAskpass()
             let code = proc.terminationStatus
-            Task { @MainActor in self?.onExit(code) }
+            Task { @MainActor in
+                guard let self else { return }
+                self.deliverOutput()
+                self.onExit(self, code)
+            }
         }
 
         do {
             try p.run()
+            try? childOutput?.close()
             if let data = stdin {
-                inPipe.fileHandleForWriting.write(data)
+                guard fcntl(inPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else { throw POSIXError(.EIO) }
+                try inPipe.fileHandleForWriting.write(contentsOf: data)
             }
             try? inPipe.fileHandleForWriting.close()
             process = p
-            // Askpass persists for the session (0700 in the user's temp dir) — a
-            // jump-host chain may prompt well after start; it's removed on exit.
+            stdin = nil
         } catch {
-            cleanupAskpass()
-            Task { @MainActor in self.onLine("Failed to launch: \(error.localizedDescription)", false); self.onExit(-1) }
+            reader.readabilityHandler = nil
+            if p.isRunning { p.terminate() }
+            stdin = nil
+            askpass = nil
+            Task { @MainActor in self.onOutput(self, ["Failed to launch: \(error.localizedDescription)"], false); self.onExit(self, -1) }
         }
+    }
+
+    static func configChannel(_ config: Data) throws -> (reader: FileHandle, child: FileHandle) {
+        var fds: [Int32] = [-1, -1]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else { throw POSIXError(.EIO) }
+        let reader = FileHandle(fileDescriptor: fds[0], closeOnDealloc: true)
+        let child = FileHandle(fileDescriptor: fds[1], closeOnDealloc: true)
+        guard fcntl(fds[0], F_SETFD, FD_CLOEXEC) == 0,
+              fcntl(fds[1], F_SETFD, FD_CLOEXEC) == 0,
+              config.withUnsafeBytes({ send(fds[0], $0.baseAddress, $0.count, MSG_DONTWAIT) }) == config.count,
+              shutdown(fds[0], SHUT_WR) == 0 else { throw POSIXError(.EIO) }
+        return (reader, child)
     }
 
     func stop() {
@@ -1913,40 +1986,8 @@ nonisolated final class TunnelProcess: @unchecked Sendable {
             if let p = process, p.isRunning { p.terminate() }
             process = nil
         }
-        cleanupAskpass()
+        askpass = nil
     }
 
-    /// A one-shot askpass keyed by host: ssh passes the prompt (which contains
-    /// "user@host") as $1, so we return the password for whichever host matches —
-    /// giving the jump hop and the target independent passwords. Single-entry
-    /// maps just return that password regardless of prompt.
-    private static func writeAskpass(_ hostPasswords: [String: String]) -> URL? {
-        func sq(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-        var body = "#!/bin/sh\nprompt=\"$*\"\n"
-        if hostPasswords.count == 1, let only = hostPasswords.values.first {
-            body += "printf %s \(sq(only))\n"
-        } else {
-            for (host, pw) in hostPasswords where !host.isEmpty {
-                body += "case \"$prompt\" in *\(sq(host))*) printf %s \(sq(pw)); exit 0;; esac\n"
-            }
-            // Fallback: first entry, so a mismatched prompt still yields something.
-            if let first = hostPasswords.values.first { body += "printf %s \(sq(first))\n" }
-        }
-        let dir = FileManager.default.temporaryDirectory
-        let url = dir.appendingPathComponent("svpn-askpass-\(UUID().uuidString).sh")
-        // Create with mode 0700 atomically (O_EXCL) — a write-then-chmod would
-        // leave a umask-permissions window while the password is already inside.
-        // fchmod after open covers a restrictive umask stripping the exec bit.
-        let fd = open(url.path, O_WRONLY | O_CREAT | O_EXCL, 0o700)
-        guard fd >= 0 else { return nil }
-        fchmod(fd, 0o700)
-        let data = Data(body.utf8)
-        let wrote = data.withUnsafeBytes { raw in write(fd, raw.baseAddress, raw.count) == raw.count }
-        close(fd)
-        guard wrote else { try? FileManager.default.removeItem(at: url); return nil }
-        return url
-    }
-    private func cleanupAskpass() {
-        if let url = askpassURL { try? FileManager.default.removeItem(at: url); askpassURL = nil }
-    }
+
 }

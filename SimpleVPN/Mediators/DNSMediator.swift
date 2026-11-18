@@ -85,10 +85,11 @@ final class DNSRealizer: MediatorRealizer {
 
     weak var host: DNSMediatorHost?
     private let log: Logger
-    /// The last plan this realizer wrote — so it can clear a participant that dropped
-    /// out of the plan and skip an unchanged decision (idempotent, mirrors ProxyRealizer).
-    private var lastPlan: DNSPlan?
     private var appliedRequests: [String: DNSApplyRequest] = [:]
+    // A lost reply may mean the engine wrote the request. Remember which
+    // participants may need an explicit clear even without a confirmed cache.
+    private var uncertain: Set<String> = []
+    private var writes: [String: UUID] = [:]
 
     init(host: DNSMediatorHost?, log: Logger) {
         self.host = host
@@ -97,8 +98,29 @@ final class DNSRealizer: MediatorRealizer {
 
     /// A session ended / the mediator reset — forget what we wrote (a fresh reconcile
     /// re-applies from scratch).
-    func forgetOwner() { lastPlan = nil; appliedRequests.removeAll() }
-    func forget(id: String) { lastPlan = nil; appliedRequests[id] = nil }
+    func invalidate(id: String) {
+        if appliedRequests[id] != nil || writes[id] != nil { uncertain.insert(id) }
+        appliedRequests[id] = nil
+        writes[id] = nil
+    }
+    func forget(id: String) { appliedRequests[id] = nil; uncertain.remove(id); writes[id] = nil }
+
+    private func write(_ request: DNSApplyRequest?, to id: String, host: DNSMediatorHost) async -> Bool {
+        let token = UUID()
+        writes[id] = token
+        uncertain.insert(id)
+        appliedRequests[id] = nil
+        let ack = await host.dnsApply(request, to: id)
+        guard writes[id] == token else { return false } // the session ended while awaiting its reply
+        writes[id] = nil
+        guard ack == "ok" else {
+            log.error("DNS apply not acknowledged for \(id, privacy: .public): \(ack ?? "no reply", privacy: .public)")
+            return false
+        }
+        appliedRequests[id] = request
+        uncertain.remove(id)
+        return true
+    }
 
     /// SOLE WRITER: realize the arbitrated split-DNS on EVERY participant via
     /// `dns:apply:`. STRIP participants that left the plan (clear their override) →
@@ -112,15 +134,14 @@ final class DNSRealizer: MediatorRealizer {
     func apply(_ plan: DNSPlan, force: Bool, isCurrent: @MainActor () -> Bool = { true }) async -> Bool {
         guard let host else { return false }
         let requests = plan.applyRequests()
-        guard force || requests != appliedRequests else { return true }
+        guard force || !uncertain.isEmpty || requests != appliedRequests else { return true }
         do {
-            for engine in Set(appliedRequests.keys).subtracting(requests.keys).sorted() {
+            for engine in Set(appliedRequests.keys).union(uncertain).subtracting(requests.keys).sorted() {
                 guard isCurrent() else { return false }
                 // A disconnected session no longer owns any resolver settings.
                 if host.dnsProfiles.contains(where: { $0.id == engine && $0.engaged }) {
-                    guard await host.dnsApply(nil, to: engine) == "ok" else { return false }
-                }
-                appliedRequests[engine] = nil
+                    guard await write(nil, to: engine, host: host) else { return false }
+                } else { forget(id: engine) }
             }
         }
         let order = requests.keys.sorted {
@@ -131,17 +152,9 @@ final class DNSRealizer: MediatorRealizer {
         for engine in order {
             guard isCurrent() else { return false }
             if !force, appliedRequests[engine] == requests[engine] { continue }
-            let ack = await host.dnsApply(requests[engine], to: engine)
-            guard ack == "ok" else {
-                log.error("DNS apply not acknowledged for \(engine, privacy: .public): \(ack ?? "no reply", privacy: .public)")
-                // Reconnecting the original config cannot realize this policy.
-                return false
-            }
-            appliedRequests[engine] = requests[engine]
+            guard await write(requests[engine], to: engine, host: host) else { return false }
         }
-        guard isCurrent() else { return false }
-        lastPlan = plan // cache only the completely acknowledged plan
-        return true
+        return isCurrent()
     }
 
 }
@@ -295,16 +308,22 @@ final class DNSMediator {
 
     // MARK: - Status hooks (from the host's NE observer)
 
-    func handleStatusChange(id: String, connected: Bool, disconnected: Bool) {
-        if connected {
-            refreshIntents()
+    func forgetSession(_ id: String) {
+        withdraw(engine: id)
+        realizer.forget(id: id)
+    }
+
+    func handleStatusChange(id: String, connected: Bool, disconnected: Bool, reasserting: Bool = false) {
+        if reasserting {
+            // The tunnel may rebuild its resolver settings without stopping.
+            realizer.invalidate(id: id)
+        } else if connected {
             // No forced reconnect on a fresh connect — the engine just pushed its DNS.
             // Sample the observed resolvers so the UI reflects reality promptly.
             reconcile()
             observeNow()
         } else if disconnected {
-            withdraw(engine: id)
-            realizer.forget(id: id)
+            forgetSession(id)
             reconcile()
             observeNow()
         }

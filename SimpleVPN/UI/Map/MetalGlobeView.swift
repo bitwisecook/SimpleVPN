@@ -185,7 +185,7 @@ struct MetalGlobeMapView: View {
     var onSelect: (String) -> Void = { _ in }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.liveVisualPolicy) private var liveVisuals
+    @Environment(\.windowShowsLiveContent) private var windowVisible
     @State private var camera = GlobeCamera()
     @State private var dragOrigin: GlobeCamera?
     @State private var rotationOrigin: GlobeCamera?
@@ -229,33 +229,27 @@ struct MetalGlobeMapView: View {
     }
 
     var body: some View {
-        // Update the terminator every minute from local UTC without affecting the
-        // interactive camera state. HeightFromWidth remains proposal-driven and
-        // never feeds geometry back into state during a resize.
-        TimelineView(.periodic(from: .now, by: liveVisuals.isLowPowerModeEnabled ? 300 : 60)) { timeline in
-            let sun = SolarPosition(date: timeline.date)
-            HeightFromWidth(ratio: surfaceAspectRatio) {
-                GeometryReader { geometry in
-                    ZStack {
-                        GlobeShaderSurface(camera: camera, sun: sun.vector)
-                        coastlineOverlay(in: geometry.size)
-                        countryBorderOverlay(in: geometry.size)
-                        routeOverlay(in: geometry.size)
-                        pinOverlay(in: geometry.size)
-                        resetControl
-                    }
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .overlay(RoundedRectangle(cornerRadius: 10)
-                        .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1))
-                    .contentShape(Rectangle())
-                    .gesture(orbitGesture)
-                    .simultaneousGesture(rotationGesture)
-                    .onAppear { orientIfNeeded(force: true) }
-                    .onChange(of: routeKey) { orientIfNeeded(force: false) }
+        HeightFromWidth(ratio: surfaceAspectRatio) {
+            GeometryReader { geometry in
+                ZStack {
+                    if windowVisible { GlobeShaderSurface(camera: camera) }
+                    coastlineOverlay(in: geometry.size)
+                    countryBorderOverlay(in: geometry.size)
+                    routeOverlay(in: geometry.size)
+                    pinOverlay(in: geometry.size)
+                    resetControl
                 }
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1))
+                .contentShape(Rectangle())
+                .gesture(orbitGesture)
+                .simultaneousGesture(rotationGesture)
+                .onAppear { orientIfNeeded(force: true) }
+                .onChange(of: routeKey) { orientIfNeeded(force: false) }
             }
-            .frame(maxWidth: maximumSurfaceWidth ?? .infinity)
         }
+        .frame(maxWidth: maximumSurfaceWidth ?? .infinity)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Interactive globe of VPN servers")
         .accessibilityValue(accessibilitySummary)
@@ -465,11 +459,13 @@ struct MetalGlobeMapView: View {
 /// pass and transparent city-light pass are deliberately separate.
 private struct GlobeShaderSurface: View {
     let camera: GlobeCamera
-    let sun: SIMD3<Double>
+    @Environment(\.liveVisualPolicy) private var liveVisuals
+    @StateObject private var textures = GlobeTextureImages.forDisplay()
+    @State private var sun = SolarPosition(date: .now).vector
 
     @ViewBuilder
     var body: some View {
-        if let day = GlobeTextureImages.day, let night = GlobeTextureImages.night {
+        if let day = textures.day, let night = textures.night {
             ZStack {
                 Rectangle().fill(ShaderLibrary.globeDay(
                     .boundingRect,
@@ -488,6 +484,12 @@ private struct GlobeShaderSurface: View {
                     .image(night)
                 ))
             }
+            .task(id: liveVisuals.isLowPowerModeEnabled) {
+                while !Task.isCancelled {
+                    sun = SolarPosition(date: .now).vector
+                    try? await Task.sleep(for: .seconds(liveVisuals.isLowPowerModeEnabled ? 300 : 60))
+                }
+            }
             .allowsHitTesting(false)
             .accessibilityHidden(true)
         } else {
@@ -502,9 +504,21 @@ private struct GlobeShaderSurface: View {
 /// SwiftUI to omit the shader texture argument when it cannot resolve the name.
 /// ImageIO gives the shader an explicit image while keeping this boundary free
 /// of AppKit and MetalKit views.
-private enum GlobeTextureImages {
-    static let day = load("blue-marble-2004-5400")
-    static let night = load("black-marble-2016-01deg")
+@MainActor
+final class GlobeTextureImages: ObservableObject {
+    // Share simultaneous globes without retaining the JPEG backings after the
+    // last visible surface has gone away.
+    private static weak var shared: GlobeTextureImages?
+
+    static func forDisplay() -> GlobeTextureImages {
+        if let shared { return shared }
+        let images = GlobeTextureImages()
+        shared = images
+        return images
+    }
+
+    let day = GlobeTextureImages.load("blue-marble-2004-5400")
+    let night = GlobeTextureImages.load("black-marble-2016-01deg")
 
     private static func load(_ name: String) -> Image? {
         guard let url = Bundle.main.url(forResource: name, withExtension: "jpg"),

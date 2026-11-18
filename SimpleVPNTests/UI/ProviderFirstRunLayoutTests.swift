@@ -20,8 +20,8 @@ struct ProviderFirstRunLayoutTests {
         #expect(source.contains("static let contentWidth: CGFloat = 760"))
         #expect(source.contains("ConfigurationDropTarget(isTargeted: isDropTargeted, maximumWidth: nil)"))
         #expect(source.contains("setupStep(number: 2, step: steps[1])"))
-        #expect(source.contains("waitingStep(number: 3, step: steps[2])"))
-        #expect(source.contains("waitingStep(number: 4, step: steps[3])"))
+        #expect(source.contains("setupStep(number: 3, step: steps[2], waitsForImport: true)"))
+        #expect(source.contains("setupStep(number: 4, step: steps[3], waitsForImport: true)"))
     }
 
     @Test func providerSetupOffersAnAccessibleScrollCue() throws {

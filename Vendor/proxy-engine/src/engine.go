@@ -79,6 +79,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -249,6 +250,8 @@ type engineState struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	pumpWG      sync.WaitGroup
+	relayMu     sync.Mutex
+	relayWG     sync.WaitGroup
 
 	// Counters (atomics: read by PXStatus off the data path).
 	activeFlows   atomic.Int64
@@ -569,36 +572,50 @@ func marshalStatus(sp statusPayload) string {
 
 // ---- TCP forwarding ---------------------------------------------------------
 
-// pipe copies between the guest connection and the proxy connection, counting
-// bytes each way, and closes both when either side ends. This is the whole data
-// path of a proxied TCP flow.
-func (st *engineState) pipe(guest, proxy net.Conn) {
-	defer st.activeFlows.Add(-1)
-	defer guest.Close()
-	defer proxy.Close()
+// Register the relay before starting it. Stop closes admission under the same
+// lock, so no goroutine can add to the wait group after shutdown begins.
+func (st *engineState) startRelay(guest, proxy net.Conn) {
+	st.relayMu.Lock()
+	if st.ctx.Err() != nil {
+		st.relayMu.Unlock()
+		guest.Close()
+		proxy.Close()
+		return
+	}
+	st.relayWG.Add(1)
+	st.activeFlows.Add(1)
+	st.relayMu.Unlock()
+	go st.pipe(guest, proxy)
+}
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-	// guest -> proxy
-	go func() {
-		defer wg.Done()
-		n := copyCounted(proxy, guest)
-		st.bytesUp.Add(n)
-		// Half-close so the peer sees EOF but the other direction can drain.
-		if cw, ok := proxy.(interface{ CloseWrite() error }); ok {
-			_ = cw.CloseWrite()
+func (st *engineState) pipe(guest, proxy net.Conn) {
+	defer st.relayWG.Done()
+	defer st.activeFlows.Add(-1)
+	closeBoth := sync.OnceFunc(func() {
+		guest.Close()
+		proxy.Close()
+	})
+	defer closeBoth()
+	stopCancel := context.AfterFunc(st.ctx, closeBoth)
+	defer stopCancel()
+
+	copyDirection := func(dst, src net.Conn, count *atomic.Int64) {
+		err := copyCounted(dst, src, count)
+		if err == io.EOF {
+			if half, ok := dst.(interface{ CloseWrite() error }); ok && half.CloseWrite() == nil {
+				return
+			}
 		}
-	}()
-	// proxy -> guest
+		closeBoth()
+	}
+
+	done := make(chan struct{})
 	go func() {
-		defer wg.Done()
-		n := copyCounted(guest, proxy)
-		st.bytesDown.Add(n)
-		if cw, ok := guest.(interface{ CloseWrite() error }); ok {
-			_ = cw.CloseWrite()
-		}
+		defer close(done)
+		copyDirection(proxy, guest, &st.bytesUp)
 	}()
-	wg.Wait()
+	copyDirection(guest, proxy, &st.bytesDown)
+	<-done
 }
 
 // addrFromTCPIP renders a netstack address as a dialable host string. IPv4 and
@@ -673,7 +690,9 @@ func stopEngine(st *engineState) {
 	// Cancel first so the outbound pump and every in-flight per-flow context
 	// unwind, then close the stack (which closes the channel endpoint and every
 	// gonet endpoint riding on it).
+	st.relayMu.Lock()
 	st.cancel()
+	st.relayMu.Unlock()
 	st.ep.Close()
 	st.stack.Close()
 
@@ -688,5 +707,6 @@ func stopEngine(st *engineState) {
 	// Reap the netstack's own goroutines so they do not accumulate across
 	// reconnects in this long-lived extension process.
 	st.stack.Wait()
+	st.relayWG.Wait()
 	st.stateOutput("stopped", "")
 }

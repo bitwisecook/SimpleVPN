@@ -154,6 +154,7 @@ extern char* TSUpdatePrefsInstance(uint64_t handle, char* patchJSON);
 extern char* TSReauthenticateInstance(uint64_t handle);
 extern char* TSStopInstance(uint64_t handle);
 extern char* TSNodeState(uint64_t handle);
+extern char* TSNodeStateSince(uint64_t handle, uint64_t revision);
 extern char* TSAckNodeState(uint64_t handle, uint64_t revision);
 extern char* VRCreateInstance(char* configuration, uint64_t context, VRPacketCallback packetOut);
 extern int VRPacketIn(uint64_t handle, void* bytes, int length);

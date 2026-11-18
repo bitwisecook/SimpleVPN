@@ -246,6 +246,7 @@ nonisolated enum OVPNSecretMaterial {
     struct Split: Equatable, Sendable {
         /// The configuration with every secret block replaced by a marker line.
         var config: String
+        var unterminatedTag: String?
         /// tag → block content, in the order the tags are declared above.
         var secrets: [String: String]
     }
@@ -257,22 +258,32 @@ nonisolated enum OVPNSecretMaterial {
     /// Lift every secret block out. Idempotent: splitting an already-split
     /// configuration finds nothing and returns it unchanged.
     static func split(_ ovpn: String) -> Split {
-        var lines = ovpn.components(separatedBy: "\n")
+        let lines = ovpn.components(separatedBy: "\n")
+        var output: [String] = []
+        output.reserveCapacity(lines.count)
         var secrets: [String: String] = [:]
-        for tag in secretTags {
-            var replacedOnce = false
-            while let open = lines.firstIndex(where: { norm($0) == "<\(tag)>" }),
-                  let close = lines[open...].firstIndex(where: { norm($0) == "</\(tag)>" }) {
-                let body = norm(lines[(open + 1)..<close].joined(separator: "\n"))
-                // First occurrence wins, which is what openvpn3 does with a
-                // duplicated block too. A later duplicate is dropped outright
-                // rather than left behind as a second copy of the secret.
-                if secrets[tag] == nil, !body.isEmpty { secrets[tag] = body }
-                lines.replaceSubrange(open...close, with: replacedOnce ? [] : [marker(for: tag)])
-                replacedOnce = true
+        var seen: Set<String> = []
+        var index = lines.startIndex
+        while index < lines.endIndex {
+            let line = norm(lines[index])
+            guard line.first == "<", line.last == ">",
+                  let tag = secretTags.first(where: { line == "<\($0)>" }) else {
+                output.append(lines[index])
+                index += 1
+                continue
             }
+            if seen.insert(tag).inserted { output.append(marker(for: tag)) }
+            let bodyStart = index + 1
+            let close = lines[bodyStart...].firstIndex { norm($0) == "</\(tag)>" }
+            let body = norm(lines[bodyStart..<(close ?? lines.endIndex)].joined(separator: "\n"))
+            if !body.isEmpty, secrets[tag] == nil { secrets[tag] = body }
+            // A partially typed or truncated credential still needs redaction.
+            guard let close else {
+                return Split(config: output.joined(separator: "\n"), unterminatedTag: tag, secrets: secrets)
+            }
+            index = close + 1
         }
-        return Split(config: lines.joined(separator: "\n"), secrets: secrets)
+        return Split(config: output.joined(separator: "\n"), secrets: secrets)
     }
 
     /// Drop the marker lines, so they never accumulate across a

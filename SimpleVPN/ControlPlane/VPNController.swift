@@ -24,6 +24,19 @@ import os
 final class VPNController {
 
     static let providerBundleID = "com.bragi0.SimpleVPN.PacketTunnel"
+    /// A UI test launches a separate application process. XCTest's unit-host
+    /// keys are not guaranteed to reach it, so the UI runner marks it explicitly.
+    nonisolated static let permitsLiveCredentialBrokers = permitsLiveCredentialBrokers(in: ProcessInfo.processInfo.environment)
+    // UI coverage of a first launch must work on Macs that already have saved VPNs.
+    nonisolated static let usesEmptyProfileFixture = ProcessInfo.processInfo.environment["SIMPLEVPN_UI_TEST"] == "1"
+        && ProcessInfo.processInfo.arguments.contains("-SimpleVPNEmptyProfileFixture")
+
+    nonisolated static func permitsLiveCredentialBrokers(in environment: [String: String]) -> Bool {
+        environment["XCTestConfigurationFilePath"] == nil && environment["XCTestBundlePath"] == nil
+            && environment["SIMPLEVPN_UI_TEST"] != "1"
+            && environment["SIMPLEVPN_UI_TEST_SUPPRESS_DNS_PROXY_ACTIVATION"] != "1"
+    }
+
     static let log = Logger(subsystem: "com.bragi0.SimpleVPN", category: "vpn")
 
     /// A saved VPN target, projected for the UI.
@@ -35,8 +48,13 @@ final class VPNController {
         var kind: VPNKind         // protocol family; absent in old configs ⇒ .openVPN
     }
 
-    private(set) var profiles: [Profile] = []
+    @ObservationIgnored var profilesDidChange: (([Profile]) -> Void)?
+    private(set) var profiles: [Profile] = [] {
+        didSet { profilesDidChange?(profiles) }
+    }
     var selectedID: Profile.ID?
+    /// A menu or repair action can target a row before the connection window exists.
+    var requestedConnectionTag: String?
     /// Profiles being removed are hidden immediately and must stay hidden while
     /// NetworkExtension finishes its asynchronous preferences write.  A stale
     /// concurrent `loadAll()` may still see the old manager for a moment; this
@@ -146,7 +164,21 @@ final class VPNController {
     var virtualStarts: [String: Date] = [:]
     var virtualObservedActive: Set<String> = []
     var connectionReservations = ConnectionReservations()
+    // Retain a gate only while an operation or one of its waiters needs it.
+    // A slow preferences write on one VPN must not delay another VPN's start.
+    @ObservationIgnored private let openVPNConfigurationGates = NSMapTable<NSString, AsyncOperationGate>.strongToWeakObjects()
+    func openVPNConfigurationGate(for id: String) -> AsyncOperationGate {
+        if let gate = openVPNConfigurationGates.object(forKey: id as NSString) { return gate }
+        let gate = AsyncOperationGate()
+        openVPNConfigurationGates.setObject(gate, forKey: id as NSString)
+        return gate
+    }
     @ObservationIgnored let wireGuardConfigurationOperations = AsyncOperationGate()
+    @ObservationIgnored let tailscaleBrokerLeases = TailscaleBrokerLeases()
+    @ObservationIgnored var tailscalePeerExitObserver: NSObjectProtocol?
+    @ObservationIgnored var tailscaleProbingIDs: Set<String> = []
+    @ObservationIgnored var tailscaleStartingIDs: Set<String> = []
+    @ObservationIgnored var tailscaleCancelledStarts: Set<String> = []
     @ObservationIgnored var tailscaleStateBrokers: [String: Task<Void, Never>] = [:]
     @ObservationIgnored var tailscaleStateBrokerEpochs: [String: UUID] = [:]
     @ObservationIgnored var tailscaleIdentityMigrations: [String: Task<Void, Never>] = [:]
@@ -199,7 +231,8 @@ final class VPNController {
     /// empty required field and gives it a little shake.
     private(set) var credentialNudge: [String: Int] = [:]
     func nudgeCredentials(id: String) {
-        selectedID = id                                   // bring the form on screen
+        requestedConnectionTag = id
+        selectedID = id
         credentialNudge[id, default: 0] += 1
     }
     /// One-shot claim: true exactly once per nudge. Lets the detail view react
@@ -283,7 +316,11 @@ final class VPNController {
         }
     }
 
-    deinit { networkWatch?.cancel() }
+    isolated deinit {
+        networkWatch?.cancel()
+        if let tailscalePeerExitObserver { NSWorkspace.shared.notificationCenter.removeObserver(tailscalePeerExitObserver) }
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+    }
 
     /// Store a fresh probe report for a profile (from the incident view's probe).
     func setProbeResult(_ report: DiagnosticsReport, for id: String) {
@@ -323,7 +360,7 @@ final class VPNController {
         status == .connected || status == .connecting || status == .reasserting
     }
 
-    var anyEngaged: Bool { profiles.contains { isEngaged(id: $0.id) } }
+    var anyEngaged: Bool { profiles.contains { Self.isEngaged($0.status) } }
 
     /// The status to DISPLAY — not the NE truth that drives routing/mediators.
     /// Tailscale reports `.connected` the instant its extension starts, but the node
@@ -393,15 +430,30 @@ final class VPNController {
 
     // MARK: Loading
 
-    func loadAll() async {
+    @ObservationIgnored private var windowLoad: Task<Bool, Never>?
+
+    /// The status item and initial windows may appear together. Their reads
+    /// can share one snapshot, while a write still requests its own fresh read.
+    @discardableResult
+    func loadForWindow() async -> Bool {
+        if let windowLoad { return await windowLoad.value }
+        let load = Task { await loadAll() }
+        windowLoad = load
+        let completed = await load.value
+        windowLoad = nil
+        return completed
+    }
+
+    @discardableResult
+    func loadAll() async -> Bool {
         loadRevision += 1
         let revision = loadRevision
         Self.log.log("loadAll")
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers.removeAll()
         do {
-            let mgrs = try await NETunnelProviderManager.loadAllFromPreferences()
-            guard revision == loadRevision else { return }
+            let mgrs = Self.usesEmptyProfileFixture ? [] : try await NETunnelProviderManager.loadAllFromPreferences()
+            guard revision == loadRevision else { return false }
             managers.removeAll()
             virtualManagers.removeAll()
             virtualMembers.removeAll()
@@ -420,7 +472,12 @@ final class VPNController {
                 // because NetworkExtension returned a slightly stale snapshot.
                 guard !locallyRemovedProfileIDs.contains(id) else { continue }
                 managers[id] = mgr
-                authConfigs[id] = VPNAuthConfig.decode(from: proto?.providerConfiguration?["auth"] as? Data)
+                let auth = VPNAuthConfig.decode(from: proto?.providerConfiguration?["auth"] as? Data)
+                if Self.permitsLiveCredentialBrokers, auth.protectWithBiometrics, authConfigs[id]?.protectWithBiometrics != true {
+                    // Earlier versions could leave a duplicate after enabling Touch ID.
+                    KeychainCredentialStore.deleteCredentials(profile: id)
+                }
+                authConfigs[id] = auth
                 overridesCache[id] = OpenVPNOverrides.decode(from: proto?.providerConfiguration?["overrides"] as? Data)
                 customRoutingCache[id] = CustomRoutingProfile.decode(from: proto?.providerConfiguration?["customrouting"] as? Data)
                 uiPrefsCache[id] = VPNUIPrefs.decode(from: proto?.providerConfiguration?["uiprefs"] as? Data)
@@ -432,10 +489,10 @@ final class VPNController {
                     // The secret inline blocks, and the reassembled configuration
                     // built from them once here rather than per view render. This is
                     // the ONLY keychain read on the path — see ovpnSecretsCache.
-                    let secrets = await Task.detached {
+                    let secrets: [String: String] = Self.permitsLiveCredentialBrokers ? await Task.detached {
                         KeychainCredentialStore.loadOVPNInlineSecrets(profile: id) ?? [:]
-                    }.value
-                    guard revision == loadRevision else { return }
+                    }.value : [:]
+                    guard revision == loadRevision else { return false }
                     ovpnSecretsCache[id] = secrets
                     if let stored = proto?.providerConfiguration?["ovpn"] as? String {
                         ovpnTextCache[id] = secrets.isEmpty
@@ -460,7 +517,7 @@ final class VPNController {
                 if kind == .wireGuard {
                     var config = WireGuardConfig.decode(from: proto?.providerConfiguration?["wireguard"] as? Data)
                     config.id = id
-                    if !ManagedPolicy.lockConfiguration,
+                    if Self.permitsLiveCredentialBrokers, !ManagedPolicy.lockConfiguration,
                        (!config.privateKey.isEmpty || !config.presharedKey.isEmpty || !config.extraPeerSecrets.isEmpty),
                        let proto {
                         do {
@@ -491,7 +548,9 @@ final class VPNController {
             }
             observeStatusChanges()
             routes.loadPreference()
+            let removed = Set(profiles.map(\.id)).subtracting(list.map(\.id))
             profiles = list.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            forgetRemovedNetworkProfiles(removed)
             resyncStatuses()
             if selectedID == nil || !profiles.contains(where: { $0.id == selectedID }) {
                 selectedID = profiles.first?.id
@@ -500,36 +559,35 @@ final class VPNController {
             // the keychain now — write, read back, compare, and only then rewrite
             // the stored configuration. See migrateInlineOVPNSecrets() for why that
             // order is not negotiable. A no-op once every profile is clean.
-            await migrateInlineOVPNSecrets()
+            if Self.permitsLiveCredentialBrokers { await migrateInlineOVPNSecrets() }
             // Test hosts must not broker a user's real connection credentials.
-            if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil,
-               ProcessInfo.processInfo.environment["XCTestBundlePath"] == nil {
+            if Self.permitsLiveCredentialBrokers {
                 for profile in profiles.filter({ $0.kind == .tailscale }) {
-                    guard revision == loadRevision else { return }
+                    guard revision == loadRevision else { return false }
                     if let session = managers[profile.id]?.connection as? NETunnelProviderSession {
-                        if UI.isActive(session.status), tailscaleStateBrokers[profile.id] == nil,
-                           let bytes = await sendSessionMessageData(Data("tsstate".utf8), session: session, timeout: 2),
-                           (try? JSONDecoder().decode(TailscaleNodeState.self, from: bytes))?.isValid == true {
-                            watchTailscaleNodeState(profile.id, session: session)
-                        } else if !UI.isActive(session.status) {
+                        if UI.isActive(session.status) {
+                            attachTailscaleNodeState(profile.id)
+                        } else {
                             await migrateLegacyTailscaleIdentity(profile.id)
                         }
                     }
                 }
             }
-            if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil,
-               ProcessInfo.processInfo.environment["XCTestBundlePath"] == nil {
+            if Self.permitsLiveCredentialBrokers {
                 for profile in profiles.filter({ $0.kind == .sshNetworkTunnel }) {
-                    guard revision == loadRevision else { return }
+                    guard revision == loadRevision else { return false }
                     await restoreSSHAgentSigning(profile.id)
                 }
             }
-            guard revision == loadRevision else { return }
+            guard revision == loadRevision else { return false }
             Self.log.log("loadAll: \(self.profiles.count) profile(s)")
             controlEventSink?(.profilesChanged)
+            return true
         } catch {
+            guard revision == loadRevision else { return false }
             lastError = "load failed: \(error.localizedDescription)"
             Self.log.error("loadAll failed: \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 
@@ -687,7 +745,7 @@ final class VPNController {
     /// next Connect, but never disk. The entry removes itself on first use and
     /// expires before the current verification-code window closes.
     @ObservationIgnored var preparedOnePasswordSignIns: [String: PreparedOnePasswordSignIn] = [:]
-    var persistTask: Task<Void, Never>?   // was private — internal for the +File split
+    @ObservationIgnored var credentialSaveTasks: [String: Task<Void, Never>] = [:]
 
     var credentialSources: [String: CredentialSource] = [:]   // was private(set) — internal for the +File split
 
@@ -812,6 +870,7 @@ final class VPNController {
     static let cancelCountsAsUnreachable: TimeInterval = 10
 
     private func startConnectWatchdog(id: String) {
+        if isTailscale(id), tailscaleBrokerLeases.current(id) == nil { return }
         guard connectWatchdogs[id] == nil else { return }   // already counting down
         connectAttemptStarted[id] = Date()
         let budget: Duration = profiles.first(where: { $0.id == id })?.kind == .sshNetworkTunnel
@@ -930,6 +989,7 @@ final class VPNController {
             clearTailscaleSignIn(id: id)
             if signInInterrupted { tailscaleSignInResults[id] = .failed }
         }
+        if UI.isActive(s), isTailscale(id) { attachTailscaleNodeState(id) }
         if s == .connecting {
             self.startConnectWatchdog(id: id)
             // Is a running virtual machine's network about to be swallowed by this
@@ -985,12 +1045,14 @@ final class VPNController {
         // .reasserting is included: a reconnect rebuilds the tun, so the role must
         // be re-read from engine truth and re-applied (RC5).
         if s == .connected || s == .reasserting || s == .disconnected || s == .invalid {
+            if s == .invalid { pushedNetworkState[id] = nil }
+            if s != .disconnected { networkStateSamples.invalidate() }
             routes.handleStatusChange(id: id,
                                       connected: s == .connected,
                                       reasserting: s == .reasserting,
                                       disconnected: s == .disconnected || s == .invalid)
             dns.handleStatusChange(id: id, connected: s == .connected,
-                                   disconnected: s == .disconnected || s == .invalid)
+                                   disconnected: s == .disconnected || s == .invalid, reasserting: s == .reasserting)
             proxies.handleStatusChange(id: id, connected: s == .connected,
                                        disconnected: s == .disconnected || s == .invalid)
         }

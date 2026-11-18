@@ -39,8 +39,8 @@ BREW_PINS="libfido2=1.17.0"
 # libcbor is a libfido2 dependency and Homebrew ships it dylib-only, so it is built
 # STATIC from source here. Pinned by tag AND by the tarball's SHA-256, exactly like
 # the libssh tarball above — the hash is the pin.
-CBOR_PIN="v0.14.0"
-CBOR_TARBALL_SHA256="a8c1516e741562cf95aa4479c64916c3d4d2623e24fdc35e414e2320e7300aae"
+CBOR_PIN="v0.15.0"
+CBOR_TARBALL_SHA256="c94145d3c22e67cff9a3325dc036b4545a49a42231553995be4947d52cf2ef57"
 MIN=26.0
 ARCH=arm64
 

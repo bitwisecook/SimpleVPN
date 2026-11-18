@@ -43,11 +43,12 @@ final class VirtualRoutingEngine: @unchecked Sendable {
     private var starting = false
     private var began = false
 
-    init(provider: PacketTunnelProvider, config: VirtualRoutingConfig) {
-        self.provider = provider; self.config = config; policy = config.policy
+    init(provider: PacketTunnelProvider, config: VirtualRoutingConfig, gatewayOwned: Bool) {
+        self.provider = provider; self.config = config
+        policy = config.initialPolicy(gatewayOwned: gatewayOwned)
         for member in config.members {
             prefixes[member.id] = member.prefixes
-            dns[member.id] = member.id == config.policy.defaultOwner
+            dns[member.id] = member.id == policy.defaultOwner
                 ? .init(servers: member.wireGuard.dns.filter(WireGuardConfig.isIPLiteral),
                         searchDomains: member.wireGuard.searchDomains, matchDomains: [""])
                 : .init()
@@ -97,6 +98,8 @@ final class VirtualRoutingEngine: @unchecked Sendable {
     }
 
     private func begin(_ start: VirtualRoutingStartConfig, completion: @escaping (Error?) -> Void) {
+        var effectiveStart = start
+        effectiveStart.policy = policy
         guard config.problem == nil,
               start.members.map(\.id) == config.members.map(\.id), start.policy == config.policy,
               zip(start.members, config.members).allSatisfy({ live, stored in
@@ -110,7 +113,7 @@ final class VirtualRoutingEngine: @unchecked Sendable {
                   return live.addresses == stored.wireGuard.addresses && live.wireGuard == expected
               }),
               start.captureAddresses == VirtualRoutingConfig.captureAddresses,
-              let data = try? JSONEncoder().encode(start), let text = String(data: data, encoding: .utf8) else {
+              let data = try? JSONEncoder().encode(effectiveStart), let text = String(data: data, encoding: .utf8) else {
             completion(Self.error("Invalid virtual connection configuration.")); return
         }
         let registered = Self.callbacks.register(self)

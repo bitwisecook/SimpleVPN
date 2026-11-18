@@ -54,6 +54,17 @@ enum ProxyMode: String, Codable, Sendable, CaseIterable {
 }
 
 struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
+    /// Whether an address carries a PASSWORD in its userinfo
+    /// ("https://user:secret@host"). A bare username ("alex@host", which ssh
+    /// accepts as a target) is not a secret and stays allowed.
+    nonisolated static func passwordInAddress(_ raw: String) -> Bool {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let scheme = s.range(of: "://") { s = String(s[scheme.upperBound...]) }
+        let authority = s.prefix { $0 != "/" }
+        guard let at = authority.lastIndex(of: "@") else { return false }
+        return authority[..<at].contains(":")
+    }
+
     var id: String = UUID().uuidString
     var name: String = "New Tunnel"
     var kind: VPNKind = .ssh
@@ -152,10 +163,8 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     var proxyMode: ProxyMode = .systemDefault
     var proxyURL = ""            // e.g. http://proxy:8080 or socks5://proxy:1080
     var proxyUsername = ""
-    // openconnect only accepts proxy credentials embedded in the --proxy URL,
-    // which any local process can read via `ps`. Off (nil/false, the default) the
-    // password is withheld from argv; the user opts in explicitly. Optional so
-    // configs saved before the field existed still decode.
+    // Keep the persisted key for existing profiles. A true value allows the
+    // external tool to receive the proxy password through a private descriptor.
     var proxyPasswordInArgv: Bool? = nil
     var disableDTLS = false      // --no-dtls (force TLS transport)
     var reconnectTimeout: Int? = nil  // --reconnect-timeout <seconds>
@@ -618,14 +627,13 @@ extension VPNKind {
 /// anyway. A tool that cannot be reached and would not work if it were is not a
 /// fallback; it is a dependency in the credits and a case in every switch.
 nonisolated enum TunnelCLI: String, CaseIterable, Sendable {
-    case ssh, openconnect, ocproxy, networksetup
+    case ssh, openconnect, ocproxy
 
     var absolutePathCandidates: [String] {
         switch self {
         case .ssh:           ["/usr/bin/ssh"]
         case .openconnect:   ["/opt/homebrew/bin/openconnect", "/usr/local/bin/openconnect"]
         case .ocproxy:       ["/opt/homebrew/bin/ocproxy", "/usr/local/bin/ocproxy"]
-        case .networksetup:  ["/usr/sbin/networksetup"]
         }
     }
     var resolvedPath: String? {
@@ -635,7 +643,7 @@ nonisolated enum TunnelCLI: String, CaseIterable, Sendable {
 
     var installHint: String {
         switch self {
-        case .ssh, .networksetup: "Built into macOS."
+        case .ssh: "Built into macOS."
         case .openconnect: "Install with: brew install openconnect"
         case .ocproxy: "Install with: brew install ocproxy (enables the no-root SOCKS path)"
         }
@@ -647,7 +655,7 @@ nonisolated enum TunnelCLI: String, CaseIterable, Sendable {
     /// nothing to install.
     var installCommand: String? {
         switch self {
-        case .ssh, .networksetup: nil
+        case .ssh: nil
         case .openconnect: "brew install openconnect"
         case .ocproxy: "brew install ocproxy"
         }
@@ -660,14 +668,17 @@ final class SubprocessTunnelStore {
     private(set) var tunnels: [SubprocessTunnelConfig] = []
     private static let key = "subprocessTunnels.v1"
 
-    init() { load() }
+    init(loadSaved: Bool = true) { if loadSaved { load() } }
 
-    func save(_ raw: SubprocessTunnelConfig) {
+    @discardableResult func save(_ raw: SubprocessTunnelConfig) -> Bool {
         // normalized() on every save path (the OpenVPNOverrides rule).
         let t = raw.normalized()
+        guard !SubprocessTunnelConfig.passwordInAddress(t.proxyURL),
+              !SubprocessTunnelConfig.passwordInAddress(t.server) else { return false }
         if let i = tunnels.firstIndex(where: { $0.id == t.id }) { tunnels[i] = t }
         else { tunnels.append(t) }
         persist()
+        return true
     }
     /// Write new sidebar positions for the tunnels named in `positions`, and persist
     /// ONCE.
@@ -689,21 +700,7 @@ final class SubprocessTunnelStore {
 
     func remove(_ id: String) {
         tunnels.removeAll { $0.id == id }
-        // Delete the tunnel's keychain secrets too — password, proxy/jump passwords,
-        // the OTP token seed, the client-key passphrase and the smartcard PIN — or
-        // they'd linger in the keychain indefinitely after the tunnel itself is gone.
-        //
-        // `.token` and `.pkcs11` STAY IN THIS LIST even though neither feature exists
-        // any more, and that is the whole of the decision about them. Deleting
-        // somebody's PIN or verification-code seed as a side effect of REMOVING A
-        // FEATURE is not ours to do: an upgrade never touches it, and neither does
-        // opening or saving the profile. Deleting the PROFILE, on the other hand, is
-        // an explicit act by the person who owns the secret — and leaving the item
-        // behind then would orphan it in their keychain for ever, with nothing left on
-        // screen to say what it belonged to.
-        for suffix in ["", ".proxy", ".jump", ".token", ".privateKey", ".pkcs11", ".sshKey"] {
-            KeychainCredentialStore.deleteCredentials(profile: "tunnel.\(id)\(suffix)")
-        }
+        KeychainCredentialStore.deleteAllProfileData(profile: id)
         persist()
     }
 

@@ -20,6 +20,8 @@ nonisolated final class SSHAgentSigningBroker: @unchecked Sendable {
     private var stopped = false
     private var pending: SSHAgentSigningRequest?
     private var answer: Data?
+    typealias RequestHandler = @Sendable (SSHAgentSigningRequest?) -> Void
+    private var waiter: RequestHandler?
     private var client: Int32
     private var server: Int32
     private let timeout: TimeInterval
@@ -45,6 +47,18 @@ nonisolated final class SSHAgentSigningBroker: @unchecked Sendable {
         condition.lock(); defer { condition.unlock() }
         return stopped ? nil : pending
     }
+    /// Retain at most one app-message reply while idle. A replacement app or
+    /// a timeout retry retires the previous waiter without blocking a thread.
+    func nextRequest(_ receive: @escaping RequestHandler) {
+        condition.lock()
+        let previous = waiter
+        let request = answer == nil ? pending : nil
+        let deliverNow = stopped || request != nil
+        waiter = deliverNow ? nil : receive
+        condition.unlock()
+        previous?(nil)
+        if deliverNow { receive(request) }
+    }
     @discardableResult func reply(_ response: SSHAgentSigningResponse) -> Bool {
         condition.lock(); defer { condition.unlock() }
         guard !stopped, answer == nil, pending?.id == response.id,
@@ -52,13 +66,17 @@ nonisolated final class SSHAgentSigningBroker: @unchecked Sendable {
         answer=response.response; condition.broadcast(); return true
     }
     func stop() {
-        condition.lock(); defer { condition.unlock() }
-        guard !stopped else { return }
+        condition.lock()
+        guard !stopped else { condition.unlock(); return }
+        let waiting = waiter
+        waiter = nil
         stopped=true; pending=nil; answer=nil
         _=shutdown(client,SHUT_RDWR); _=shutdown(server,SHUT_RDWR)
         condition.broadcast()
         // The reader owns server close; client cannot be reused while borrowed.
         Darwin.close(client); client = -1
+        condition.unlock()
+        waiting?(nil)
     }
     private func serve() {
         defer { condition.lock(); Darwin.close(server); server = -1; condition.unlock() }
@@ -69,7 +87,13 @@ nonisolated final class SSHAgentSigningBroker: @unchecked Sendable {
             guard body.first == 11 || body.first == 13 else { _=write(Data([0,0,0,1,5])); return }
             condition.lock()
             guard !stopped else { condition.unlock(); return }
-            pending = .init(id:UUID(),request:header+body)
+            let request = SSHAgentSigningRequest(id: UUID(), request: header + body)
+            pending = request
+            let waiting = waiter
+            waiter = nil
+            condition.unlock()
+            waiting?(request)
+            condition.lock()
             let deadline=Date().addingTimeInterval(timeout)
             while !stopped && answer == nil {
                 if !condition.wait(until:deadline) { break }

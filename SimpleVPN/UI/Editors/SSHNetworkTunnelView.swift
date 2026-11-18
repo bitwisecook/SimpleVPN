@@ -346,7 +346,7 @@ struct SSHNetworkTunnelView: View {
         .padding(.top, 10)
         .navigationTitle(name.isEmpty ? "SSH Network Tunnel" : name)
         .task { loadOnce() }
-        .liveWindowTask(id: profileID) { await pollStatus() }
+        .liveWindowTask(id: connectedProfileID) { await pollStatus() }
         // LIVE SAVE — no confirming button in any editor now. See `SettingCommit`.
         .savesSettingsLive { Task { await save() } }
         // RED ON THE FIELD THAT IS HOLDING THE CONNECTION UP, from the connect gate
@@ -511,12 +511,15 @@ struct SSHNetworkTunnelView: View {
         (crProxyAuthUsername, crProxyAuthPassword) = loadCustomRoutingProxyAuthFields(profileID: profileID)
     }
 
+    private var connectedProfileID: String? {
+        vpn.profiles.first(where: { $0.id == profileID })?.status == .connected ? profileID : nil
+    }
+
     private func pollStatus() async {
+        guard connectedProfileID != nil else { return }
         while !Task.isCancelled {
-            if vpn.profiles.first(where: { $0.id == profileID })?.status == .connected {
-                status = await vpn.refreshSSHNetworkTunnelStatus(id: profileID)
-            }
-            try? await Task.sleep(for: .seconds(2))
+            status = await vpn.refreshSSHNetworkTunnelStatus(id: profileID)
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
         }
     }
 

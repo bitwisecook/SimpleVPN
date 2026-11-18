@@ -63,8 +63,34 @@ final class PublicIPMonitor {
             || UserDefaults.standard.bool(forKey: publicIPLookupDefaultsKey)
     }
 
+    private let lookupService: @MainActor () -> IPLookupProvider?
+    private let fetchAddress: @Sendable (URL?) async -> String?
+
+    init(lookupService: @escaping @MainActor () -> IPLookupProvider? = {
+        PublicIPMonitor.lookupEnabled ? PublicIPMonitor.provider : nil
+    }, fetchAddress: @escaping @Sendable (URL?) async -> String? = PublicIPMonitor.fetchIP) {
+        self.lookupService = lookupService
+        self.fetchAddress = fetchAddress
+    }
+
+    @ObservationIgnored private var lookupTask: Task<Void, Never>?
+    @ObservationIgnored private var lookupProvider: IPLookupProvider?
+    @ObservationIgnored private var generation = 0
+    @ObservationIgnored private var engagedAtStart = false
+
+    private func invalidateLookup() {
+        generation += 1
+        lookupTask?.cancel()
+        lookupTask = nil
+        lookupProvider = nil
+        isRefreshing = false
+    }
+
     /// Drop everything we learned (called when the user turns the lookup off).
     func clear() {
+        invalidateLookup()
+        networkRefreshTask?.cancel()
+        networkRefreshTask = nil
         publicIPv4 = nil; publicIPv6 = nil
         countryCode = nil; countryName = nil
         lat = nil; lon = nil
@@ -74,17 +100,34 @@ final class PublicIPMonitor {
 
     /// Fetch both addresses (each independently best-effort) and geolocate.
     func refresh() async {
-        guard Self.lookupEnabled else { clear(); return }
-        guard !isRefreshing else { return }
+        guard let provider = lookupService() else { clear(); return }
+        let engaged = Self.isVPNActive()
+        if lookupProvider == provider, engagedAtStart == engaged, let lookupTask {
+            await lookupTask.value
+            return
+        }
+        invalidateLookup()
+        let revision = generation
+        lookupProvider = provider
+        engagedAtStart = engaged
         isRefreshing = true
-        defer { isRefreshing = false }
+        let task = Task { await self.lookup(provider, revision: revision) }
+        lookupTask = task
+        await task.value
+        if generation == revision {
+            lookupTask = nil
+            lookupProvider = nil
+            isRefreshing = false
+        }
+    }
 
-        let provider = Self.provider
-        async let v4 = Self.fetchIP(from: provider.v4URL)
-        async let v6 = Self.fetchIP(from: provider.v6URL)
+    private func lookup(_ provider: IPLookupProvider, revision: Int) async {
+        async let v4 = fetchAddress(provider.v4URL)
+        async let v6 = fetchAddress(provider.v6URL)
         // A single-endpoint service (no family-specific host) returns whichever
         // family the connection used; classify the result by its shape.
         let a = await v4, b = await v6
+        guard generation == revision, lookupService() == provider, engagedAtStart == Self.isVPNActive() else { return }
         if provider.v6URL == nil, let a, a.contains(":") {
             publicIPv4 = nil; publicIPv6 = a
         } else {
@@ -109,6 +152,7 @@ final class PublicIPMonitor {
         let egressIsTunnelled = await Task.detached(priority: .utility) {
             NetworkIdentity.defaultRouteIsVirtual()
         }.value
+        guard generation == revision, lookupService() == provider, engagedAtStart == Self.isVPNActive() else { return }
         if Self.homeSnapshotIsTrustworthy(vpnEngaged: Self.isVPNActive(),
                                           egressIsTunnelled: egressIsTunnelled) {
             homeCountryCode = countryCode; homeCountryName = countryName
@@ -130,6 +174,7 @@ final class PublicIPMonitor {
     /// monitor (at most one interval later).
     func startMonitoring(interval: TimeInterval = 300) {
         stopMonitoring()
+        guard lookupService() != nil else { clear(); return }
         monitorTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refresh()
@@ -148,6 +193,9 @@ final class PublicIPMonitor {
     }
 
     func stopMonitoring() {
+        invalidateLookup()
+        networkRefreshTask?.cancel()
+        networkRefreshTask = nil
         monitorTask?.cancel()
         monitorTask = nil
         networkWatch?.cancel()
@@ -160,6 +208,7 @@ final class PublicIPMonitor {
     /// changes into the last one.
     @ObservationIgnored private var networkRefreshTask: Task<Void, Never>?
     private func scheduleNetworkRefresh() {
+        invalidateLookup()
         networkRefreshTask?.cancel()
         networkRefreshTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(1))
@@ -170,13 +219,21 @@ final class PublicIPMonitor {
 
     /// Plain-text body → trimmed address string; nil on any failure (or no URL).
     nonisolated private static func fetchIP(from url: URL?) async -> String? {
-        guard let url else { return nil }
+        guard let url, ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else { return nil }
         var request = URLRequest(url: url)
         request.timeoutInterval = timeout
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200,
-              let body = String(data: data, encoding: .utf8) else { return nil }
-        let ip = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        return ip.isEmpty ? nil : ip
+        do {
+            let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            defer { bytes.task.cancel() }
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+            var body = Data()
+            for try await byte in bytes {
+                guard body.count < 128 else { return nil }
+                body.append(byte)
+            }
+            let ip = String(decoding: body, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            var v4 = in_addr(), v6 = in6_addr()
+            return inet_pton(AF_INET, ip, &v4) == 1 || inet_pton(AF_INET6, ip, &v6) == 1 ? ip : nil
+        } catch { return nil }
     }
 }

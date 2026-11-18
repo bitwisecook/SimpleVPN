@@ -231,6 +231,31 @@ enum ConnectListing {
         return tag
     }
 
+    enum DisconnectTarget: Equatable {
+        case profile(String), tunnel(String), native(String)
+
+        static func resolve(selection: String?, profileIsActive: (String) -> Bool,
+                            tunnelIsActive: (String) -> Bool, activeNativeID: String?) -> Self? {
+            guard let selection else { return nil }
+            let id = ConnectListing.configID(from: selection)
+            if selection.hasPrefix(ConnectListing.nativeTag) {
+                return activeNativeID == id ? .native(id) : nil
+            }
+            if selection.hasPrefix(ConnectListing.tunnelTag) {
+                return tunnelIsActive(id) ? .tunnel(id) : nil
+            }
+            return profileIsActive(id) ? .profile(id) : nil
+        }
+    }
+
+    /// Keep a valid selection. If its row disappeared, select the nearest surviving row.
+    static func selection(afterRemovingFrom previous: [String], available: [String], selected: String?) -> String? {
+        guard !available.isEmpty else { return nil }
+        if let selected, available.contains(selected) { return selected }
+        let position = selected.flatMap { previous.firstIndex(of: $0) } ?? 0
+        return available[min(position, available.count - 1)]
+    }
+
     /// An NE profile as the listing needs it: the id it is selected by, and the kind that
     /// decides which section it appears in.
     ///

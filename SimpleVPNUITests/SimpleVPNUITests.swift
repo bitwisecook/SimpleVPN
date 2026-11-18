@@ -30,7 +30,9 @@ final class SimpleVPNUITests: XCTestCase {
     /// Teardown removes only the profile this test creates; no real VPN connects.
     @MainActor
     func testCommaListPreservesTypingAcrossFocusChanges() throws {
-        let app = try launchOrSkip()
+        // A real user's saved disclosure choice survives relaunch. Set the
+        // starting state for this screenshot in the temporary argument domain.
+        let app = try launchOrSkip(arguments: ["-maturityBannerCollapsed.v2.kind.wireguard", "YES"])
         addTeardownBlock { @MainActor in app.terminate() }
         app.menuBarItems["VPN"].click()
         app.menuBarItems["VPN"].menuItems["Manage VPNs…"].click()
@@ -305,21 +307,37 @@ final class SimpleVPNUITests: XCTestCase {
         try runAccessibilityAudit(on: app)
     }
 
+    @MainActor
+    func testOpenInstalledSimpleVPNIsCenteredUnderItsHeading() throws {
+        let app = try launchOrSkip()
+        let window = app.windows["SimpleVPN"]
+        let button = window.buttons["Open Installed SimpleVPN"]
+        try XCTSkipUnless(button.waitForExistence(timeout: 6), "This copy can activate its extension directly.")
+        let heading = window.staticTexts["Open the Installed SimpleVPN"]
+        XCTAssertTrue(heading.waitForExistence(timeout: 3))
+        let screen = XCTAttachment(screenshot: window.screenshot())
+        screen.name = "Open Installed SimpleVPN"
+        screen.lifetime = .keepAlways
+        add(screen)
+        XCTAssertEqual(button.frame.midX, heading.frame.midX, accuracy: 2,
+                       "The primary action should share the heading’s horizontal centre.")
+    }
+
     /// The empty-install provider names are navigation controls, not decorative
     /// copy. This is the user-visible regression that prompted the two-page flow:
     /// clicking a company must reveal its instructions and a real import action.
     ///
-    /// Machines with an existing VPN correctly show the connection list instead,
-    /// so they cannot exercise an empty-install surface and skip this one check.
+    /// Exercise the same empty stores on a developer Mac and a clean install.
     @MainActor
     func testFreshInstallProviderChoiceOpensItsSetupPage() throws {
-        let app = try launchOrSkip()
+        let app = try launchOrSkip(arguments: [
+            "-SimpleVPNEmptyProfileFixture", "YES", "-ui.dockIcon", "YES", "-privacy.publicIPLookup", "NO",
+        ], requireLaunchWindow: true)
         let services = app.descendants(matching: .any)["I use a VPN service"].firstMatch
-        if services.exists { services.click() }
+        XCTAssertTrue(services.waitForExistence(timeout: 8))
+        services.click()
         let provider = app.buttons["Mullvad"]
-        try XCTSkipUnless(provider.waitForExistence(timeout: 5),
-                          "This machine already has a VPN, so the fresh-install provider chooser is not visible.")
-
+        XCTAssertTrue(provider.waitForExistence(timeout: 5))
         provider.click()
 
         XCTAssertTrue(app.staticTexts["Set up with Mullvad"].waitForExistence(timeout: 5),
@@ -568,7 +586,7 @@ final class SimpleVPNUITests: XCTestCase {
 
     /// Launches the app and skips (rather than flakes) where no UI can appear.
     @MainActor
-    private func launchOrSkip() throws -> XCUIApplication {
+    private func launchOrSkip(arguments: [String] = [], requireLaunchWindow: Bool = false) throws -> XCUIApplication {
         // A locked console (screen asleep behind a password) can spawn the
         // process but never foreground it — launch() itself then fails the
         // test after a 60 s activation timeout, which is an environment
@@ -583,10 +601,16 @@ final class SimpleVPNUITests: XCTestCase {
         }
 
         let app = makeSimpleVPNTestApplication()
+        app.launchArguments += arguments
         app.launch()
 
-        guard app.wait(for: .runningForeground, timeout: 15),
-              app.windows.firstMatch.waitForExistence(timeout: 15) else {
+        let isForeground = app.wait(for: .runningForeground, timeout: 15)
+        if isForeground && requireLaunchWindow {
+            XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 15),
+                          "Launching SimpleVPN in the Dock should present the main window.")
+            return app
+        }
+        guard isForeground, app.windows.firstMatch.waitForExistence(timeout: 15) else {
             throw XCTSkip("""
                 No window appeared — this environment can't present UI \
                 (headless session, or the runner lacks Automation permission), \
@@ -635,8 +659,9 @@ final class SimpleVPNUITests: XCTestCase {
         ]
         let touchBar = touchBarChrome(of: app)
         try app.performAccessibilityAudit(for: auditTypes) { issue in
-            // Surfaced in the log so a failing gate names its culprit at once.
-            print("AUDIT ISSUE [\(issue.auditType)] \(issue.compactDescription) :: \(issue.element.map { $0.debugDescription } ?? "<no element>")")
+            // Resolving a stale AX token can take seconds. Read it once, and
+            // keep the window's contents out of diagnostic output.
+            guard let element = issue.element else { return true }
 
             // Structural false positives on ANONYMOUS CONTAINER GROUPS — AX
             // "Group" elements with no label and no identifier that the
@@ -666,23 +691,8 @@ final class SimpleVPNUITests: XCTestCase {
             // groups do not have (verified: no label, no identifier, and
             // unreachable from view code).
             if issue.auditType == .sufficientElementDescription || issue.auditType == .parentChild,
-               let element = issue.element,
                element.elementType == .group,
                element.label.isEmpty, element.identifier.isEmpty {
-                return true
-            }
-
-            // An issue whose ELEMENT CANNOT BE RESOLVED AT ALL. The audit
-            // reports these when its snapshot goes stale mid-run (the log shows
-            // the query retrying and giving up), so there is nothing to inspect,
-            // nothing to name, and nothing a developer could fix — and, worse,
-            // the shape-based excusals above can never match a nil element, so
-            // one stale snapshot fails the gate no matter how clean the app is.
-            // Observed on the Routes window, where the resolvable twin of the
-            // same issue is the AppKit zoom traffic-light chrome excused above.
-            // Excusing nil is therefore strictly the right call: a real,
-            // reproducible violation always arrives WITH its element.
-            if issue.element == nil {
                 return true
             }
 
@@ -713,7 +723,6 @@ final class SimpleVPNUITests: XCTestCase {
             // there is — and an app element can't share one with a strip that
             // lives outside every window.
             if issue.auditType == .sufficientElementDescription,
-               let element = issue.element,
                touchBar.contains(where: { $0.type == element.elementType && $0.frame == element.frame }) {
                 return true
             }
@@ -735,7 +744,6 @@ final class SimpleVPNUITests: XCTestCase {
             // would only hide this failure. Matched on AppKit's exact string so
             // an unnamed app-owned popup can never slip through with it.
             if issue.auditType == .sufficientElementDescription,
-               let element = issue.element,
                element.elementType == .popUpButton,
                element.identifier.isEmpty,
                element.label == "more toolbar items" {
@@ -761,7 +769,6 @@ final class SimpleVPNUITests: XCTestCase {
             // from app code (`.accessibilityAction` adds CUSTOM actions, not the
             // system one), and no label/menuStyle/pickerStyle changes it.
             if issue.auditType == .action,
-               let element = issue.element,
                element.elementType == .popUpButton || element.elementType == .menuButton {
                 return true
             }
@@ -769,6 +776,7 @@ final class SimpleVPNUITests: XCTestCase {
             // (The wave-2 by-name exclusions — MercatorMap, RouteGraph,
             // ThroughputGraph, Railroad — are gone: those surfaces now carry
             // their own navigable structure and are held to the full gate.)
+            print("Accessibility audit: \(issue.compactDescription), role \(element.elementType.rawValue), identifier \(element.identifier)")
             return false          // everything else is build-breaking
         }
     }

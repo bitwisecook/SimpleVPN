@@ -54,8 +54,7 @@ extension VPNController {
         mgr.localizedDescription = name
         mgr.isEnabled = true
         try await mgr.saveToPreferences()
-        try await mgr.loadFromPreferences()
-        await loadAll()
+        await registerCreatedManager(mgr, id: id)
         selectedID = id
         Self.log.log("created proxy tunnel id=\(id, privacy: .public)")
         return id
@@ -121,8 +120,6 @@ extension VPNController {
             let local = LocalNetworkCarveOut.live()
             if !local.isEmpty { options[LocalNetworkCarveOut.optionKey] = local as NSArray }
         }
-        // Establish-time default-gateway ownership, same as OpenVPN (RC3).
-        options["gatewayOwned"] = predictedGatewayOwned(id) as NSNumber
 
         mgr.isEnabled = true
         try await mgr.saveToPreferences()
@@ -130,7 +127,7 @@ extension VPNController {
         guard let session = mgr.connection as? NETunnelProviderSession else {
             throw err("The VPN configuration isn't ready — try removing and re-creating it.")
         }
-        try session.startTunnel(options: options)
+        try startWithInitialGateway(session, profile: id, options: options)
         Self.log.log("proxy tunnel startTunnel dispatched for \(id, privacy: .public)")
         resyncStatuses()
     }

@@ -163,7 +163,7 @@ nonisolated struct ConfigSnapshot: Sendable {
         var native: NativeVPNConfig? = nil
 
         var auth: VPNAuthConfig? = nil
-        var credentialSourceJSON: ConfigValue? = nil
+        var credentialSource: CredentialSource? = nil
         var customRouting: CustomRoutingProfile? = nil
         var endpoints: VPNEndpointList? = nil
         var uiPrefs: VPNUIPrefs? = nil
@@ -205,6 +205,12 @@ nonisolated struct ConfigSnapshot: Sendable {
 /// explicitly, so the set of settings the file names without a manual page behind
 /// them is visible rather than assumed.
 nonisolated enum ConfigFieldNaming {
+
+    // These options can run a local program or carry arbitrary secrets. A person
+    // must configure them on each Mac where they intend to use them.
+    static let localToolFields: Set<String> = ["extraArgs", "sshExtraOptions", "csdWrapper", "samlBrowser"]
+
+    static let addressFields: Set<String> = ["server", "proxyURL", "upstream", "controlURL", "jumpHost", "endpoint"]
 
     /// Never exported from a settings map: identity and schema plumbing. `id`,
     /// `name` and `kind` are carried once at the VPN level instead of repeated
@@ -430,8 +436,7 @@ nonisolated enum ConfigSecrets {
         // `pkcs11KeyURI` and `pkcs11RemembersPIN` were classified here. Both fields
         // are gone with smartcard sign-in, and so are their entries: a classification
         // for a field that cannot appear is a claim nothing holds to a struct.
-        // Whether the proxy password is handed over on the command line rather than
-        // on stdin — a choice ABOUT a password's handling, never the password.
+        // Whether the external tool may use the saved proxy password.
         "proxyPasswordInArgv": "a yes/no choice about how a password is passed, not the password",
         // A template ("{password}{otp}") describing how the two typed values are
         // combined. It contains placeholders, never values.
@@ -517,17 +522,16 @@ enum ConfigDocument {
             "Import it from SimpleVPN Settings \u{25B8} General \u{25B8} Export & Import.",
             "",
             "NO PASSWORDS, KEYS OR OTHER SECRETS ARE IN THIS FILE.",
-            "An exported file leaves every protection SimpleVPN has \u{2014} mail, a",
-            "shared folder, a repository, a backup \u{2014} and cannot be recalled. Everything left",
-            "out is recoverable: it is still in the keychain of the Mac that wrote this, and",
-            "whoever set up the VPN can issue it again.",
+            "Keep this file private. It includes server addresses and sign-in settings.",
+            "Saved passwords and keys stay in the keychain on the Mac that wrote the file.",
+            "Enter omitted local settings on the destination Mac.",
         ]
         if !withheld.isEmpty {
             out += [
                 "",
-                "What was left out, across every VPN in this file:",
+                "What was left out of this file:",
                 "  " + withheld.joined(separator: ", ") + ".",
-                "Each VPN below lists its own under \u{201C}omitted\u{201D}, and says how to put it back.",
+                "Each affected VPN lists its settings under \u{201C}omitted\u{201D}, and says how to put it back.",
             ]
         }
         out += [
@@ -552,7 +556,11 @@ enum ConfigDocument {
 
         var settings = ConfigMap()
         for setting in snapshot.appSettings where !ConfigSecrets.isSecret(setting.id) {
-            settings.put(setting.id, setting.value)
+            if ConfigAppSettings.privateLookupAddress(id: setting.id, value: setting.value) {
+                withheld.append("custom public address lookup URL")
+            } else {
+                settings.put(setting.id, setting.value)
+            }
         }
         root.put(ConfigDocumentKeys.appSettings, ifNotEmpty: settings)
 
@@ -599,7 +607,11 @@ enum ConfigDocument {
         m.put(ConfigDocumentKeys.id, .string(vpn.id))
         m.put(ConfigDocumentKeys.name, .string(vpn.name))
         m.put(ConfigDocumentKeys.kind, .string(vpn.kind.rawValue))
-        m.put(ConfigDocumentKeys.server, ifNotEmpty: vpn.server)
+        if !SubprocessTunnelConfig.passwordInAddress(vpn.server) {
+            m.put(ConfigDocumentKeys.server, ifNotEmpty: vpn.server)
+        } else {
+            notes.append("Enter the server address and password separately on the destination Mac.")
+        }
         m.put(ConfigDocumentKeys.labelIDs, ifNotEmpty: vpn.labelIDs)
 
         var settings = ConfigMap()
@@ -655,21 +667,35 @@ enum ConfigDocument {
             notes += built.notes
             withheld += built.withheld
         }
-        if let source = vpn.credentialSourceJSON, let map = source.mapValue {
-            let (clean, dropped, subjects) = redact(map)
-            signIn.put("signin.source", ifNotEmpty: clean)
-            notes += dropped
-            withheld += subjects
+        if var source = vpn.credentialSource, !source.isDefault {
+            // These are vault field identifiers. A role called "password" names
+            // the field to request when connecting, and never holds its contents.
+            let fields = source.fieldMap.filter { AuthKind(rawValue: $0.key) != nil }
+            source.fieldMap = [:]
+            var built = structuralMapRedacting(source)
+            if !fields.isEmpty { built.map.put("fieldMap", ConfigJSON.value(fields)) }
+            signIn.put("signin.source", ifNotEmpty: built.map)
+            notes += built.notes
+            withheld += built.withheld
         }
         m.put(ConfigDocumentKeys.signIn, ifNotEmpty: signIn)
 
-        if let routing = vpn.customRouting, !routing.isEmpty {
+        if var routing = vpn.customRouting, !routing.isEmpty {
+            if [routing.proxy.manualURL, routing.proxy.pacURL].compactMap({ $0 }).contains(where: SubprocessTunnelConfig.passwordInAddress) {
+                routing.proxy = ProxyCustomization()
+                notes.append("Set up the routing proxy on the destination Mac. Its address contains a password.")
+            }
             let built = structuralMapRedacting(routing)
             m.put(ConfigDocumentKeys.customRouting, ifNotEmpty: built.map)
             notes += built.notes
             withheld += built.withheld
         }
-        if let endpoints = vpn.endpoints, !endpoints.endpoints.isEmpty {
+        if var endpoints = vpn.endpoints, !endpoints.endpoints.isEmpty {
+            let previousCount = endpoints.endpoints.count
+            endpoints.endpoints.removeAll { SubprocessTunnelConfig.passwordInAddress($0.host) }
+            if endpoints.endpoints.count != previousCount {
+                notes.append("Add any endpoint whose address contains a password on the destination Mac.")
+            }
             let built = structuralMapRedacting(endpoints)
             m.put(ConfigDocumentKeys.endpoints, ifNotEmpty: built.map)
             notes += built.notes
@@ -719,6 +745,17 @@ enum ConfigDocument {
 
         func consider(_ field: String) {
             guard !ConfigFieldNaming.skipped.contains(field) else { return }
+            if ConfigFieldNaming.localToolFields.contains(field) {
+                if let raw = json[field], !isEmptyValue(raw) {
+                    notes.append("Configure \(ConfigFieldNaming.id(field: field, namespace: namespace)) locally on the destination Mac.")
+                }
+                return
+            }
+            if ConfigFieldNaming.addressFields.contains(field), let address = json[field] as? String,
+               SubprocessTunnelConfig.passwordInAddress(address) {
+                notes.append("Enter the address and password separately on the destination Mac.")
+                return
+            }
             if ConfigSecrets.isSecret(field) {
                 // Reported only when the value is actually set: a blank private key
                 // is nothing to explain, and a file full of notes about keys that

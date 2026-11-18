@@ -72,7 +72,8 @@ enum DiagnosticReportAssembler {
     /// Build the payload. `async` only because reading the log is.
     static func assemble(_ request: DiagnosticReportRequest,
                          context: DiagnosticReportContext,
-                         answers: DiagnosticReportAnswers) async -> DiagnosticReportPayload {
+                         answers: DiagnosticReportAnswers) async -> DiagnosticReportPayload? {
+        guard !Task.isCancelled else { return nil }
         let scrubber = SecretScrubber(policy: .report,
                                      literalSecrets: literalSecrets(context: context))
         // LOOK BEFORE REPORTING. This was the other caller reading facts nobody had
@@ -89,6 +90,7 @@ enum DiagnosticReportAssembler {
         // `DiagnosticReportContext.virtualization`), and a `try await` inside a literal
         // would be a suspension point in the middle of building the sections.
         let virtualization = await context.virtualization()
+        guard !Task.isCancelled else { return nil }
 
         var sections: [DiagnosticReportSection] = [
             whatHappened(request, answers: answers),
@@ -114,6 +116,7 @@ enum DiagnosticReportAssembler {
         ]
 
         let log = await DiagnosticReportLog.collect(scrubber: scrubber)
+        guard !Task.isCancelled else { return nil }
         sections.append(logSection(log))
 
         return DiagnosticReportPayload(request: request, sections: sections, scrubber: scrubber)
@@ -357,11 +360,21 @@ final class DiagnosticReportCoordinator: NSObject, DiagnosticReportPresenting, N
         if let window {
             // Already open: re-aim it rather than stacking a second copy.
             window.makeKeyAndOrderFront(nil)
-            model?.restart(with: request)
+            guard let model, model.request != request else { return }
+            if model.hasDraft {
+                let alert = NSAlert()
+                alert.messageText = "Start a new report?"
+                alert.informativeText = "Starting a report for another request will discard the current draft."
+                alert.addButton(withTitle: "Keep Editing")
+                alert.addButton(withTitle: "Discard and Start Report")
+                guard alert.runModal() == .alertSecondButtonReturn else { return }
+            }
+            model.restart(with: request)
             return
         }
         let model = DiagnosticReportModel(request: request, context: context)
         self.model = model
+        model.startGathering()
         let hosting = NSHostingController(rootView: DiagnosticReportView(model: model))
         let window = ReportWindow(contentViewController: hosting)
         window.title = "Report a Problem"
@@ -382,6 +395,7 @@ final class DiagnosticReportCoordinator: NSObject, DiagnosticReportPresenting, N
     /// The red button and `close()` both land here, so the references are dropped
     /// exactly once however the window went away.
     func windowWillClose(_ notification: Notification) {
+        model?.cancelGathering()
         window = nil
         model = nil
     }

@@ -62,8 +62,8 @@ struct ManualCredentialProvider: CredentialProvider {
 nonisolated enum BiometricCredentialStore {
 
     private static let log = Logger(subsystem: "com.bragi0.SimpleVPN", category: "keychain")
-    private static let service = "com.bragi0.SimpleVPN.protected"
-    private static let accessGroup = "QVUFB5676H.com.bragi0.SimpleVPN.shared"
+    private static let service = KeychainCredentialStore.protectedService
+    private static let accessGroup = KeychainCredentialStore.accessGroup
 
     struct ProtectedCredentials: Codable, Sendable, Equatable {
         var username: String
@@ -164,13 +164,7 @@ nonisolated enum BiometricCredentialStore {
     }
 
     static func delete(profile: String) {
-        SecItemDelete([
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: profile,
-            kSecAttrAccessGroup as String: accessGroup,
-            kSecUseDataProtectionKeychain as String: true,
-        ] as CFDictionary)
+        KeychainCredentialStore.deleteProtectedCredentials(profile: profile)
     }
 
     private static func err(_ m: String) -> NSError {

@@ -33,6 +33,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -197,14 +198,20 @@ func (up *upstream) dialThrough(ctx context.Context, base *net.Dialer, targetHos
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
 	}
+	raw := conn
+	stopCancel := context.AfterFunc(ctx, func() { raw.Close() })
 	switch up.kind {
 	case proxySOCKS5:
 		err = socks5Connect(conn, targetHost, targetPort, up.username, up.password)
 	default:
-		err = httpConnect(conn, up.serverName, targetHost, targetPort, up.username, up.password)
+		conn, err = httpConnect(conn, targetHost, targetPort, up.username, up.password)
+	}
+	if !stopCancel() {
+		raw.Close()
+		return nil, ctx.Err()
 	}
 	if err != nil {
-		conn.Close()
+		raw.Close()
 		return nil, err
 	}
 	// Clear the handshake deadline: the flow itself is governed by the guest's
@@ -393,10 +400,39 @@ func readSocksReply(conn net.Conn) (net.IP, int, error) {
 
 // ---- HTTP CONNECT ----------------------------------------------------------
 
-// httpConnect issues a CONNECT request and consumes the response headers. On
-// success the connection carries the tunnelled stream. proxyHost is only used
-// for the Host header cosmetics; the target is what we tunnel to.
-func httpConnect(conn net.Conn, proxyHost, targetHost string, targetPort int, username, password string) error {
+const maxConnectHeaders = 64 * 1024
+
+// Server-first protocols can send their greeting in the same read as the
+// CONNECT response. Preserve those bytes and the stream's TCP half-close.
+type prefixedConn struct {
+	net.Conn
+	readMu sync.Mutex
+	prefix []byte
+}
+
+func (c *prefixedConn) Read(p []byte) (int, error) {
+	c.readMu.Lock()
+	if len(c.prefix) != 0 {
+		n := copy(p, c.prefix)
+		c.prefix = c.prefix[n:]
+		if len(c.prefix) == 0 {
+			c.prefix = nil
+		}
+		c.readMu.Unlock()
+		return n, nil
+	}
+	c.readMu.Unlock()
+	return c.Conn.Read(p)
+}
+
+func (c *prefixedConn) CloseWrite() error {
+	if half, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return half.CloseWrite()
+	}
+	return c.Conn.Close()
+}
+
+func httpConnect(conn net.Conn, targetHost string, targetPort int, username, password string) (net.Conn, error) {
 	target := net.JoinHostPort(targetHost, strconv.Itoa(targetPort))
 	var b strings.Builder
 	fmt.Fprintf(&b, "CONNECT %s HTTP/1.1\r\n", target)
@@ -408,25 +444,27 @@ func httpConnect(conn net.Conn, proxyHost, targetHost string, targetPort int, us
 	}
 	b.WriteString("\r\n")
 	if _, err := conn.Write([]byte(b.String())); err != nil {
-		return fmt.Errorf("http connect: write: %w", err)
+		return nil, fmt.Errorf("http connect: write: %w", err)
 	}
-	// Parse just the status line + headers with the standard reader; the body
-	// (if any error body) is left on the wire but we fail before using conn.
-	br := bufio.NewReader(conn)
+	// ReadResponse on its own permits unbounded header lines. Bound only the
+	// handshake and pass any buffered bytes on to the tunnel on success.
+	limit := &io.LimitedReader{R: conn, N: maxConnectHeaders}
+	br := bufio.NewReader(limit)
 	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
 	if err != nil {
-		return fmt.Errorf("http connect: read response: %w", err)
+		if limit.N == 0 {
+			return nil, errors.New("http connect: response headers too large")
+		}
+		return nil, fmt.Errorf("http connect: read response: %w", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("http connect: proxy returned %s", resp.Status)
+	// CONNECT switches protocols after the headers. On failure the caller closes
+	// the socket; draining an advertised error body would stall that rejection.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("http connect: proxy returned %d", resp.StatusCode)
 	}
-	// bufio may have read past the header into buffered data; for a CONNECT
-	// tunnel the proxy sends nothing until we do, so an empty buffer is the
-	// normal case. Guard it anyway — a proxy that pipelined data would need a
-	// wrapped reader, which we do not support (documented limitation).
-	if br.Buffered() > 0 {
-		return errors.New("http connect: proxy sent unexpected data before the tunnel opened")
+	if br.Buffered() != 0 {
+		prefix, _ := br.Peek(br.Buffered())
+		return &prefixedConn{Conn: conn, prefix: prefix}, nil
 	}
-	return nil
+	return conn, nil
 }

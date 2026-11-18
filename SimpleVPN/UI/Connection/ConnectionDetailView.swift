@@ -243,7 +243,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     var signInStep: SignInFlowStep {   // internal: read by the body
         var inputs = SignInFlowInputs()
         inputs.collectsNothing = profile.kind == .tailscale || profile.kind == .proxyTunnel
-            || profile.kind == .wireGuard || isAutologin
+            || profile.kind == .wireGuard || profile.kind == .sshNetworkTunnel || isAutologin
         let source = vpn.credentialSource(for: profile.id)
         inputs.chosenKind = source.kind
         inputs.chosenSourceNeedsSetup = source.kind != .manual
@@ -269,7 +269,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
             return !source.reference.trimmingCharacters(in: .whitespaces).isEmpty
         }
         if BiometricCredentialStore.exists(profile: profile.id) { return true }
-        if let saved = KeychainCredentialStore.loadCredentials(profile: profile.id),
+        if let saved = vpn.savedCredentials(id: profile.id),
            !saved.password.isEmpty { return true }
         return false
     }
@@ -280,8 +280,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
         usesManager && requiresOTP && !credentialKind.suppliesOTP
     }
 
-    // One live credential state shared with the menu bar and edit sheet:
-    // typing anywhere shows everywhere. Memory-only until Remember persists it.
+    // The connect form and edit sheet share transient sign-in fields.
     private var username: Binding<String> {
         Binding(get: { vpn.transientCredentials(for: profile.id).username },
                 set: { var c = vpn.transientCredentials(for: profile.id); c.username = $0
@@ -301,7 +300,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     private var canEnableProtection: Bool {
         let c = vpn.transientCredentials(for: profile.id)
         if !c.username.isEmpty && !c.password.isEmpty { return true }
-        if let saved = KeychainCredentialStore.loadCredentials(profile: profile.id),
+        if let saved = vpn.savedCredentials(id: profile.id),
            !saved.username.isEmpty, !saved.password.isEmpty { return true }
         return vpn.authConfig(for: profile.id).protectWithBiometrics
     }
@@ -387,6 +386,10 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     /// Re-read whether an official Tailscale client is running; drop the two-phase arm
     /// if the conflict has gone away (they quit their app), so a stale red "Connect
     /// anyway" doesn't linger.
+    private var tailscaleConflictWatchID: String? {
+        profile.kind == .tailscale && !UI.isActive(profile.status) ? profile.id : nil
+    }
+
     private func refreshTailscaleClients() {
         let running = TailscaleConflict.isOfficialClientRunning
         tailscaleClientsRunning = running
@@ -591,21 +594,16 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
         // card's place — the view that would populate the facts was the view the empty
         // facts prevented from appearing. Same call, same place in the lifecycle, as
         // every other consumer (the setup card, the chooser, the entry picker, Settings).
-        .onAppear { sources.refresh() }
-        // Detect a conflicting official Tailscale client with a light 2s poll (cheap:
-        // it reads an in-process array). NSWorkspace's launch/quit notifications are
-        // unreliable for menu-bar/agent apps like Tailscale, so polling is the honest
-        // approach — and it keeps this view pure SwiftUI. A profile switch also
-        // re-checks and resets the arm (see below).
-        .liveWindowTask {
+        .liveWindowTask(id: profile.kind == .openVPN && !UI.isActive(profile.status)) {
+            if profile.kind == .openVPN && !UI.isActive(profile.status) { sources.refresh() }
+        }
+        .liveWindowTask(id: tailscaleConflictWatchID) {
+            tailscaleConflictArmed = false
+            guard tailscaleConflictWatchID != nil else { return }
             while !Task.isCancelled {
                 refreshTailscaleClients()
-                try? await Task.sleep(for: .seconds(2))
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
             }
-        }
-        .onChange(of: profile.id) { _, _ in
-            tailscaleConflictArmed = false
-            refreshTailscaleClients()
         }
         // NetworkMemory now watches the path itself, so this is only the initial read;
         // switching Wi-Fi updates it without any view having to notice.
@@ -876,6 +874,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
             guard !Task.isCancelled else { return }
             revealedSignIn = nil
         }
+        .onChange(of: vpn.authConfig(for: profile.id).protectWithBiometrics) { revealedSignIn = nil }
         .onDisappear { revealedSignIn = nil }
     }
 
@@ -1094,13 +1093,14 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                     .font(.caption).foregroundStyle(.secondary)
             }
 
-            // WHO holds the secret, in the same words the chooser's keychain row
-            // uses — one explanation of the keychain across the whole app.
-            Text(requiresOTP
-                 ? "A remembered password is kept in the Apple keychain, where macOS protects it. The verification code is used once and never stored."
-                 : "A remembered password is kept in the Apple keychain, where macOS protects it \u{2014} SimpleVPN keeps no copy of its own.")
-                .font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            if allowPasswordSave {
+                Text(remember.wrappedValue
+                     ? "SimpleVPN saves your username and password in the Mac keychain."
+                     : "Your username and password stay in memory for this session.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
 
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1167,7 +1167,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
     private var hasSavedManualSignIn: Bool {
         guard !usesManager else { return false }
         if isProtected { return true }
-        guard let saved = KeychainCredentialStore.loadCredentials(profile: profile.id) else { return false }
+        guard let saved = vpn.savedCredentials(id: profile.id) else { return false }
         return !saved.username.isEmpty && !saved.password.isEmpty
     }
 
@@ -1182,7 +1182,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                 do {
                     try await context.evaluatePolicy(
                         .deviceOwnerAuthentication,
-                        localizedReason: "Reveal the saved sign-in for (profile.name)")
+                        localizedReason: "Reveal the saved sign-in for \(profile.name)")
                     let saved = try BiometricCredentialStore.load(profile: profile.id, context: context)
                     guard !Task.isCancelled else { return }
                     revealedSignIn = .init(username: saved.username, password: saved.password)
@@ -1195,7 +1195,7 @@ struct ConnectionDetailView: View {   // was private — internal for the file s
                     vpn.report(error, profile: profile.id)
                 }
             }
-        } else if let saved = KeychainCredentialStore.loadCredentials(profile: profile.id) {
+        } else if let saved = vpn.savedCredentials(id: profile.id) {
             revealedSignIn = .init(username: saved.username, password: saved.password)
         }
     }

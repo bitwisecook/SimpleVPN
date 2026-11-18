@@ -11,7 +11,19 @@ import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
 
+@MainActor
 enum LogoStore {
+    private final class CachedLogo {
+        let image: CGImage?
+        init(_ image: CGImage?) { self.image = image }
+    }
+    private static let cache: NSCache<NSString, CachedLogo> = {
+        let cache = NSCache<NSString, CachedLogo>()
+        cache.countLimit = 256
+        cache.totalCostLimit = 4 * 1024 * 1024
+        return cache
+    }()
+
     private static let dir: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("SimpleVPN/logos", isDirectory: true)
@@ -24,11 +36,13 @@ enum LogoStore {
         return dir.appendingPathComponent(safe).appendingPathExtension("png")
     }
 
-    static func exists(_ id: String) -> Bool { FileManager.default.fileExists(atPath: url(for: id).path) }
-
     static func load(_ id: String) -> CGImage? {
-        guard let src = CGImageSourceCreateWithURL(url(for: id) as CFURL, nil) else { return nil }
-        return CGImageSourceCreateImageAtIndex(src, 0, nil)
+        let key = id as NSString
+        if let hit = cache.object(forKey: key) { return hit.image }
+        let image = CGImageSourceCreateWithURL(url(for: id) as CFURL, nil)
+            .flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) }
+        cache.setObject(CachedLogo(image), forKey: key, cost: image.map { $0.bytesPerRow * $0.height } ?? 0)
+        return image
     }
 
     /// Import a user-chosen image file: downscale to ≤256px and store as PNG. Returns success.
@@ -44,8 +58,13 @@ enum LogoStore {
               let dest = CGImageDestinationCreateWithURL(url(for: id) as CFURL, UTType.png.identifier as CFString, 1, nil)
         else { return false }
         CGImageDestinationAddImage(dest, thumb, nil)
-        return CGImageDestinationFinalize(dest)
+        let saved = CGImageDestinationFinalize(dest)
+        cache.removeObject(forKey: id as NSString)
+        return saved
     }
 
-    static func delete(_ id: String) { try? FileManager.default.removeItem(at: url(for: id)) }
+    static func delete(_ id: String) {
+        try? FileManager.default.removeItem(at: url(for: id))
+        cache.removeObject(forKey: id as NSString)
+    }
 }

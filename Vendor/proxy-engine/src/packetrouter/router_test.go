@@ -14,6 +14,10 @@ import (
 )
 
 func testDatagram(src, dst string, sourcePort uint16, protocol byte) []byte {
+	return sizedDatagram(src, dst, sourcePort, protocol, []byte("hello"))
+}
+
+func sizedDatagram(src, dst string, sourcePort uint16, protocol byte, payload []byte) []byte {
 	source, target := netip.MustParseAddr(src), netip.MustParseAddr(dst)
 	headerLength, transportLength := 20, 8
 	if source.Is6() {
@@ -22,7 +26,7 @@ func testDatagram(src, dst string, sourcePort uint16, protocol byte) []byte {
 	if protocol == 6 {
 		transportLength = 20
 	}
-	data := make([]byte, headerLength+transportLength+5)
+	data := make([]byte, headerLength+transportLength+len(payload))
 	if source.Is4() {
 		data[0], data[8], data[9] = 0x45, 64, protocol
 		binary.BigEndian.PutUint16(data[2:], uint16(len(data)))
@@ -53,7 +57,7 @@ func testDatagram(src, dst string, sourcePort uint16, protocol byte) []byte {
 		}
 		binary.BigEndian.PutUint16(l4[4:], sourcePort)
 	}
-	copy(l4[transportLength:], []byte("hello"))
+	copy(l4[transportLength:], payload)
 	var pseudo []byte
 	if protocol != 1 {
 		pseudo = append(pseudo, source.AsSlice()...)
@@ -114,7 +118,7 @@ func TestTranslationPreservesPayloadAndCompleteChecksums(t *testing.T) {
 				var outbound, inbound []byte
 				port := Port{ID: "vpn", Generation: 1, Addresses: []netip.Addr{netip.MustParseAddr(addresses[1])},
 					Allowed: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")}, MTU: 1280,
-					Send: func(p []byte) bool { outbound = bytes.Clone(p); return true }}
+					Send: func(p []byte) bool { outbound = p; return true }}
 				r, err := New([]netip.Addr{netip.MustParseAddr(addresses[0])}, []Port{port}, Policy{Revision: 1, Default: "vpn"}, func(p []byte) { inbound = p })
 				if err != nil {
 					t.Fatal(err)
@@ -123,6 +127,8 @@ func TestTranslationPreservesPayloadAndCompleteChecksums(t *testing.T) {
 				if !r.Forward(original) {
 					t.Fatalf("forward refused: %v", r.Status())
 				}
+				// The capture buffer can be recycled immediately after Forward.
+				clear(original)
 				assertChecksums(t, outbound)
 				p, err := parse(outbound, false)
 				if err != nil || p.src.String() != addresses[1] || !bytes.Equal(p.raw[len(p.raw)-5:], []byte("hello")) {
@@ -147,6 +153,7 @@ func TestTranslationPreservesPayloadAndCompleteChecksums(t *testing.T) {
 				if !r.Return("vpn", 1, reply) {
 					t.Fatalf("return refused: %v", r.Status())
 				}
+				clear(reply)
 				assertChecksums(t, inbound)
 				q, err = parse(inbound, false)
 				if err != nil || q.dst.String() != addresses[0] {
@@ -294,9 +301,48 @@ func TestTCPRetransmitNewConnectionAndClosedFlowLifetime(t *testing.T) {
 	}
 	now = now.Add(3 * time.Minute)
 	r.mu.Lock()
-	r.expire()
+	r.expire(r.now())
 	r.mu.Unlock()
 	if r.Status().Flows != 0 {
 		t.Fatal("closed flow retained")
+	}
+}
+
+// Exercise complete steady-state routing in both directions, including source
+// translation, checksum validation, flow pinning, and generation-scoped return.
+func BenchmarkRouteQUICRoundTrip(b *testing.B) {
+	for _, addresses := range [][3]string{
+		{"198.19.255.1", "10.0.0.2", "10.0.0.3"},
+		{"fd6e:7853:ffff::1", "fd42::2", "fd42::3"},
+	} {
+		b.Run(addresses[0], func(b *testing.B) {
+			payload := make([]byte, 1200)
+			for i := range payload {
+				payload[i] = byte(i)
+			}
+			port := Port{ID: "work", Generation: 7, Addresses: []netip.Addr{netip.MustParseAddr(addresses[1])},
+				Allowed: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")},
+				MTU:     1280, Send: func([]byte) bool { return true }}
+			router, err := New([]netip.Addr{netip.MustParseAddr(addresses[0])}, []Port{port},
+				Policy{Revision: 1, Default: port.ID}, func([]byte) {})
+			if err != nil {
+				b.Fatal(err)
+			}
+			out := sizedDatagram(addresses[0], addresses[2], 40000, 17, payload)
+			reply := sizedDatagram(addresses[2], addresses[1], 443, 17, payload)
+			q, err := parse(reply, false)
+			if err != nil {
+				b.Fatal(err)
+			}
+			binary.BigEndian.PutUint16(reply[q.transport+2:], 40000)
+			q.fixTransportChecksum()
+			b.SetBytes(int64(len(out) + len(reply)))
+			b.ReportAllocs()
+			for b.Loop() {
+				if !router.Forward(out) || !router.Return(port.ID, port.Generation, reply) {
+					b.Fatal(router.Status())
+				}
+			}
+		})
 	}
 }

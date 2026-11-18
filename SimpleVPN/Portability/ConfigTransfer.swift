@@ -45,16 +45,17 @@ enum ConfigTransfer {
     static func snapshot(vpn: VPNController,
                         tunnels: SubprocessTunnelStore,
                         nativeVPN: NativeVPNManager,
-                        labels: LabelStore) -> ConfigSnapshot {
+                        labels: LabelStore, profileID: String? = nil) -> ConfigSnapshot {
         var snapshot = ConfigSnapshot()
         snapshot.appVersion = UI.appVersion
-        snapshot.appSettings = ConfigAppSettings.snapshot()
-        snapshot.labels = labels.labels.map {
+        if profileID == nil { snapshot.appSettings = ConfigAppSettings.snapshot() }
+        let selectedLabels = profileID.map { labels.labels(for: $0) } ?? labels.labels
+        snapshot.labels = selectedLabels.map {
             ConfigLabel(id: $0.id, name: $0.name, red: $0.r, green: $0.g, blue: $0.b)
         }
 
         // The packet-tunnel VPNs, in the order the sidebar shows them.
-        for profile in vpn.profiles {
+        for profile in vpn.profiles where profileID == nil || profileID == profile.id {
             var entry = ConfigSnapshot.VPN(id: profile.id, name: profile.name,
                                            kind: profile.kind, server: profile.server)
             entry.labelIDs = labels.labels(for: profile.id).map(\.id)
@@ -74,8 +75,7 @@ enum ConfigTransfer {
             let auth = vpn.authConfig(for: profile.id)
             if !auth.isDefault { entry.auth = auth }
             let source = vpn.credentialSource(for: profile.id)
-            let sourceMap = ConfigDocument.structuralMap(source)
-            if !sourceMap.isEmpty { entry.credentialSourceJSON = .map(sourceMap) }
+            if !source.isDefault { entry.credentialSource = source }
             let routing = vpn.customRouting(for: profile.id)
             if !routing.isEmpty { entry.customRouting = routing }
             let endpoints = vpn.endpointList(for: profile.id)
@@ -88,7 +88,7 @@ enum ConfigTransfer {
         // The subprocess kinds (SSH and the SSL VPNs) and the OS's own kinds live in
         // their own stores rather than in NE preferences — a "whole configuration"
         // that only walked `vpn.profiles` would silently omit both.
-        for tunnel in tunnels.tunnels {
+        for tunnel in tunnels.tunnels where profileID == nil || profileID == tunnel.id {
             var entry = ConfigSnapshot.VPN(id: tunnel.id, name: tunnel.name,
                                            kind: tunnel.kind, server: tunnel.server)
             entry.labelIDs = labels.labels(for: tunnel.id).map(\.id)
@@ -96,7 +96,7 @@ enum ConfigTransfer {
             entry.customRouting = vpn.customRouting(for: tunnel.id)
             snapshot.vpns.append(entry)
         }
-        for config in nativeVPN.configs {
+        for config in nativeVPN.configs where profileID == nil || profileID == config.id {
             var entry = ConfigSnapshot.VPN(id: config.id, name: config.name,
                                            kind: config.kind, server: config.server)
             entry.labelIDs = labels.labels(for: config.id).map(\.id)
@@ -112,15 +112,13 @@ enum ConfigTransfer {
     static func exportSnapshot(vpn: VPNController, tunnels: SubprocessTunnelStore,
                                nativeVPN: NativeVPNManager, labels: LabelStore,
                                mode: ConfigSecretMode, profileID: String? = nil) async throws -> ConfigSnapshot {
-        var snapshot = snapshot(vpn: vpn, tunnels: tunnels, nativeVPN: nativeVPN, labels: labels)
-        if let profileID {
-            snapshot.vpns.removeAll { $0.id != profileID }
-            snapshot.appSettings = []
-            let labels = Set(snapshot.vpns.flatMap(\.labelIDs))
-            snapshot.labels.removeAll { !labels.contains($0.id) }
+        if let refusal = policyRefusal { throw error(refusal) }
+        var snapshot = snapshot(vpn: vpn, tunnels: tunnels, nativeVPN: nativeVPN, labels: labels, profileID: profileID)
+        if profileID != nil, snapshot.vpns.count != 1 {
+            throw error("The selected VPN could not be identified. Select it again before exporting.")
         }
         var authenticationContext: LAContext?
-        if mode == .include, snapshot.vpns.contains(where: { BiometricCredentialStore.exists(profile: $0.id) }) {
+        if mode == .include, snapshot.vpns.contains(where: { $0.kind == .openVPN && BiometricCredentialStore.exists(profile: $0.id) }) {
             let context = LAContext()
             try await context.evaluatePolicy(.deviceOwnerAuthentication,
                 localizedReason: "Export protected VPN credentials to a configuration file")
@@ -128,8 +126,11 @@ enum ConfigTransfer {
         }
         for index in snapshot.vpns.indices {
             let id = snapshot.vpns[index].id
-            snapshot.vpns[index].secrets = try await ConfigSecretTransfer.collect(id: id, mode: mode,
-                authenticationContext: authenticationContext)
+            let protected = snapshot.vpns[index].auth?.protectWithBiometrics == true
+            let kind = snapshot.vpns[index].kind
+            if let refusal = policyRefusal { throw error(refusal) }
+            snapshot.vpns[index].secrets = try await ConfigSecretTransfer.collect(id: id, kind: kind, mode: mode,
+                protectSignIn: protected, authenticationContext: authenticationContext)
             if mode == .include, let stored = snapshot.vpns[index].ovpn {
                 snapshot.vpns[index].ovpn = OVPNSecretMaterial.merge(stored,
                     secrets: try KeychainCredentialStore.ovpnInlineSecretsForExport(profile: id))
@@ -138,7 +139,7 @@ enum ConfigTransfer {
         return snapshot
     }
 
-    static func exportText(vpn: VPNController, tunnels: SubprocessTunnelStore,
+    private static func exportText(vpn: VPNController, tunnels: SubprocessTunnelStore,
                           nativeVPN: NativeVPNManager, labels: LabelStore,
                           format: ConfigFileFormat) -> String {
         ConfigDocument.text(from: snapshot(vpn: vpn, tunnels: tunnels,
@@ -175,8 +176,8 @@ enum ConfigTransfer {
         let stamp = DateFormatter()
         stamp.dateFormat = "yyyy-MM-dd HHmmss"
         let url = recoveryDirectory
-            .appendingPathComponent("Before importing \(stamp.string(from: .now)).yaml")
-        try text.write(to: url, atomically: true, encoding: .utf8)
+            .appendingPathComponent("Before importing \(stamp.string(from: .now)) \(UUID().uuidString.prefix(8)).yaml")
+        try ConfigSecretTransfer.write(text, to: url)
         // VERIFY, don't assume: read the bytes back and parse them. A file that
         // exists but cannot be read is not a way back.
         let readBack = try String(contentsOf: url, encoding: .utf8)
@@ -200,7 +201,7 @@ enum ConfigTransfer {
             if !vpnsAdded.isEmpty { parts.append("added \(vpnsAdded.count) VPN\(vpnsAdded.count == 1 ? "" : "s")") }
             if settingsChanged > 0 { parts.append("changed \(settingsChanged) setting\(settingsChanged == 1 ? "" : "s")") }
             if labelsAdded > 0 { parts.append("added \(labelsAdded) label\(labelsAdded == 1 ? "" : "s")") }
-            if parts.isEmpty { return "Nothing needed changing." }
+            if parts.isEmpty { return failures.isEmpty ? "Nothing needed changing." : "No changes were imported." }
             return "Imported \u{2014} " + parts.joined(separator: ", ") + "."
         }
     }
@@ -231,7 +232,13 @@ enum ConfigTransfer {
             // The value is re-read from the plan's own record of what to write, so
             // what was confirmed is what lands.
             guard let value = plan.settingValue(for: change.id) else { continue }
-            if ConfigAppSettings.write(value, to: entry) { result.settingsChanged += 1 }
+            if let refusal = ConfigAppSettings.refusal(applying: value, to: entry) {
+                result.failures.append(refusal)
+            } else if ConfigAppSettings.write(value, to: entry) {
+                result.settingsChanged += 1
+            } else {
+                result.failures.append("Couldn’t save “\(entry.name)”.")
+            }
         }
 
         for label in plan.newLabels {
@@ -242,7 +249,38 @@ enum ConfigTransfer {
 
         for planned in plan.vpns {
             do {
-                let id = try await add(planned.vpn, vpn: vpn, tunnels: tunnels, nativeVPN: nativeVPN)
+                let id = try await create(planned.vpn, vpn: vpn, tunnels: tunnels, nativeVPN: nativeVPN)
+                do {
+                    try await finish(planned.vpn, id: id, vpn: vpn) {
+                        if planned.vpn.native != nil { return nativeVPN.configs.contains { $0.id == id } }
+                        if planned.vpn.subprocess != nil { return tunnels.tunnels.contains { $0.id == id } }
+                        return vpn.managers[id] != nil && !vpn.locallyRemovedProfileIDs.contains(id)
+                    }
+                } catch let settingsError {
+                    do {
+                        if planned.vpn.native != nil {
+                            guard await nativeVPN.remove(id) else {
+                                throw error(nativeVPN.lastError ?? "macOS could not remove the incomplete VPN.")
+                            }
+                        } else if planned.vpn.subprocess != nil {
+                            tunnels.remove(id)
+                        } else {
+                            try await vpn.remove(id: id)
+                        }
+                        vpn.customRoutingCache[id] = nil
+                        CustomRoutingFallbackStore().clear(id)
+                    } catch {
+                        // create() assigned this profile a fresh ID. Even if macOS keeps
+                        // its preferences, discard any partially restored sign-in.
+                        ConfigSecretTransfer.deleteAll(id: id)
+                        result.failures.append("Added “\(planned.addedName)” with incomplete settings. "
+                            + settingsError.localizedDescription + " " + error.localizedDescription
+                            + " Review this VPN in Manage VPNs before connecting.")
+                        result.vpnsAdded.append(planned.addedName)
+                        continue
+                    }
+                    throw settingsError
+                }
                 for labelID in planned.vpn.labelIDs { labels.assign(labelID, to: id) }
                 result.vpnsAdded.append(planned.addedName)
             } catch {
@@ -257,76 +295,64 @@ enum ConfigTransfer {
     /// Add ONE VPN, through the same paths the editors use — so an imported VPN is
     /// indistinguishable from one made by hand, including every guard those paths
     /// already apply.
-    private static func add(_ entry: ConfigSnapshot.VPN, vpn: VPNController,
-                           tunnels: SubprocessTunnelStore,
-                           nativeVPN: NativeVPNManager) async throws -> String {
+    private static func create(_ entry: ConfigSnapshot.VPN, vpn: VPNController,
+                               tunnels: SubprocessTunnelStore,
+                               nativeVPN: NativeVPNManager) async throws -> String {
         switch entry.kind {
         case .openVPN:
-            guard let ovpn = entry.ovpn else { throw error("it has no configuration.") }
+            guard let ovpn = entry.ovpn else { throw error("It has no configuration.") }
             let server = entry.server.isEmpty
                 ? (EndpointScanner.endpoints(in: ovpn).first?.host ?? "") : entry.server
-            let id = try await vpn.importProfile(name: entry.name, ovpn: ovpn, server: server)
-            try await applyShared(entry, to: id, vpn: vpn)
-            if let overrides = entry.overrides { try await vpn.setOverrides(overrides, for: id) }
-            return id
+            return try await vpn.importProfile(name: entry.name, ovpn: ovpn, server: server)
         case .wireGuard:
             var seed = entry.wireGuard ?? WireGuardConfig()
-            seed.id = entry.id
+            seed.id = UUID().uuidString
             seed.name = entry.name
-            try ConfigSecretTransfer.save(entry.secrets, id: seed.id)
-            let id = try await vpn.createWireGuard(from: seed, name: entry.name)
-            try await applyShared(entry, to: id, vpn: vpn)
-            return id
+            return try await vpn.createWireGuard(from: seed, name: entry.name)
         case .tailscale:
-            let id = try await vpn.createTailscale(name: entry.name)
-            if let config = entry.tailscale { try await vpn.setTailscaleConfig(config, for: id) }
-            try await applyShared(entry, to: id, vpn: vpn)
-            return id
+            return try await vpn.createTailscale(name: entry.name, configuration: entry.tailscale)
         case .proxyTunnel:
-            let id = try await vpn.createProxyTunnel(name: entry.name)
-            if let config = entry.proxyTunnel { try await vpn.setProxyTunnelConfig(config, for: id) }
-            try await applyShared(entry, to: id, vpn: vpn)
-            return id
+            return try await vpn.createProxyTunnel(name: entry.name, configuration: entry.proxyTunnel)
         case .sshNetworkTunnel:
-            let id = try await vpn.createSSHNetworkTunnel(name: entry.name)
-            if let config = entry.sshNetworkTunnel {
-                try await vpn.setSSHNetworkTunnelConfig(config, for: id)
-            }
-            try await applyShared(entry, to: id, vpn: vpn)
-            return id
+            return try await vpn.createSSHNetworkTunnel(name: entry.name, configuration: entry.sshNetworkTunnel)
         case .ikev2, .ipsec, .l2tp:
-            guard var config = entry.native else { throw error("it has no settings.") }
+            guard var config = entry.native else { throw error("It has no settings.") }
             config.id = UUID().uuidString
-            try ConfigSecretTransfer.save(entry.secrets, id: config.id)
-            if let routing = routing(entry.customRouting, for: config.id) { try await vpn.setCustomRouting(routing, for: config.id) }
             nativeVPN.save(config)
             return config.id
         case .ssh, .fortinet, .f5apm, .ciscoAnyConnect, .globalProtect,
              .juniper, .pulse, .arrayNetworks:
-            guard var config = entry.subprocess else { throw error("it has no settings.") }
+            guard var config = entry.subprocess else { throw error("It has no settings.") }
             config.id = UUID().uuidString
-            try ConfigSecretTransfer.save(entry.secrets, id: config.id)
-            if let routing = routing(entry.customRouting, for: config.id) { try await vpn.setCustomRouting(routing, for: config.id) }
-            tunnels.save(config)
+            guard tunnels.save(config) else { throw error("Enter the address and password separately.") }
             return config.id
         }
     }
 
-    /// The per-VPN state every packet-tunnel kind shares. Failures here are not
-    /// fatal to the VPN itself — it exists and can be connected; a missing
-    /// Custom Routing filter is a setting to redo, not a reason to throw the
-    /// profile away.
-    private static func applyShared(_ entry: ConfigSnapshot.VPN, to id: String,
-                                     vpn: VPNController) async throws {
-        try ConfigSecretTransfer.save(entry.secrets, id: id)
-        if let auth = entry.auth { try? await vpn.setAuthConfig(auth, for: id) }
-        if let source = entry.credentialSourceJSON?.mapValue,
-           let decoded = ConfigImport.decode(CredentialSource.self, from: source) {
-            try? await vpn.setCredentialSource(decoded, for: id)
+    private static func finish(_ entry: ConfigSnapshot.VPN, id: String, vpn: VPNController,
+                               exists: () -> Bool) async throws {
+        var step = "custom routing"
+        do {
+            if let routing = routing(entry.customRouting, for: id) { try await vpn.setCustomRouting(routing, for: id) }
+            step = "connection settings"
+            if let overrides = entry.overrides { try await vpn.setOverrides(overrides, for: id) }
+            step = "the server list"
+            if let endpoints = entry.endpoints { try await vpn.persistEndpointList(endpoints, for: id) }
+            step = "display preferences"
+            if let prefs = entry.uiPrefs { try await vpn.persistUIPrefs(prefs, for: id) }
+            step = "sign-in settings"
+            let auth = ConfigSecretTransfer.importedAuth(entry.auth, secrets: entry.secrets)
+            if let auth { try await vpn.setAuthConfig(auth, for: id) }
+            if let source = entry.credentialSource { try await vpn.setCredentialSource(source, for: id) }
+            step = "credentials"
+            guard exists() else { throw error("The new VPN was removed during import.") }
+            if let refusal = policyRefusal { throw error(refusal) }
+            if !entry.secrets.isEmpty {
+                try ConfigSecretTransfer.save(entry.secrets, id: id, kind: entry.kind, protectSignIn: auth?.protectWithBiometrics == true)
+            }
+        } catch let cause {
+            throw error("Import stopped while saving \(step). \(cause.localizedDescription)")
         }
-        if let routing = routing(entry.customRouting, for: id) { try await vpn.setCustomRouting(routing, for: id) }
-        if let endpoints = entry.endpoints { await vpn.setEndpointList(endpoints, for: id) }
-        if let prefs = entry.uiPrefs { await vpn.setUIPrefs(prefs, for: id) }
     }
 
     private static func routing(_ input: CustomRoutingProfile?, for id: String) -> CustomRoutingProfile? {

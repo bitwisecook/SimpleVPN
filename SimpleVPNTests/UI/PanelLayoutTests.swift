@@ -55,7 +55,7 @@ struct PanelLayoutTests {
             contentsOf: Self.repoRoot.appendingPathComponent("SimpleVPN/App/SimpleVPNApp.swift"),
             encoding: .utf8
         )
-        guard let start = source.range(of: "WindowGroup(\"SimpleVPN\", id: \"main\")"),
+        guard let start = source.range(of: "Window(\"SimpleVPN\", id: \"main\")"),
               let end = source.range(
                 of: "Window(\"About SimpleVPN\"",
                 range: start.upperBound..<source.endIndex

@@ -64,27 +64,33 @@ extension VPNController {
 
     func sendSessionMessageData(_ message: Data, session: NETunnelProviderSession,
                                 timeout: TimeInterval = 8) async -> Data? {
-        return await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
-            // Single-resume guard + timeout: if the session is torn down between the
-            // guard and the call, or the completion never fires, the continuation
-            // would otherwise leak and hang this task forever — and this is the
-            // channel ReachabilityMonitor/ThroughputMonitor poll continuously.
-            let once = OnceResume()
-            let finish: @Sendable (Data?) -> Void = { d in if once.claim() { cont.resume(returning: d) } }
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { finish(nil) }
-            do {
-                try session.sendProviderMessage(message) { reply in finish(reply) }
-            } catch {
-                finish(nil)
+        let response = ProviderMessageResponse()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard response.install(continuation) else { return }
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak response] in
+                    response?.finish(nil)
+                }
+                do {
+                    try session.sendProviderMessage(message) { data in response.finish(data) }
+                } catch {
+                    response.finish(nil)
+                }
             }
+        } onCancel: {
+            response.finish(nil)
         }
     }
 
     /// Live telemetry poll — the only channel that crosses the root(system)
     /// extension ↔ user app boundary. nil when not connected.
-    func fetchStats(id: String) async -> TunnelStats? {
+    func fetchStats(id: String) async -> TunnelStats? { await fetchStats(id: id, timeout: 8) }
+
+    func fetchStats(id: String, timeout: TimeInterval) async -> TunnelStats? {
         let revision = networkStateSamples.revision
-        guard let data = await sendMessageData("stats", to: id) else {
+        let reply = await sendMessageData("stats", to: id, timeout: timeout)
+        guard !Task.isCancelled, networkStateSamples.accepts(revision) else { return nil }
+        guard let data = reply else {
             // A connected tunnel that stops answering its own stats IPC is the
             // extension doctor's wake-up call (dead or wedged extension). Only
             // .connected counts — disconnected profiles legitimately answer nothing.
@@ -93,7 +99,6 @@ extension VPNController {
             }
             return nil
         }
-        guard networkStateSamples.accepts(revision) else { return nil }
         let stats = try? JSONDecoder().decode(TunnelStats.self, from: data)
         if let stats, let previous = pushedNetworkState[id],
            let old = previous.settingsRevision, let new = stats.settingsRevision, new < old { return nil }
@@ -177,12 +182,31 @@ extension VPNController {
     }
 }
 
-/// Thread-safe "resume exactly once" guard for a continuation raced between a
-/// callback and a timeout. `nonisolated` so `claim()` is callable from the
-/// off-actor @Sendable completion/timeout closures (the app defaults to MainActor
-/// isolation, which would otherwise make it main-actor-bound).
-private nonisolated final class OnceResume: @unchecked Sendable {
+/// Cancellation can arrive before installation, while NE is still starting,
+/// or after the reply. The winner releases the continuation exactly once.
+private nonisolated final class ProviderMessageResponse: @unchecked Sendable {
     private let lock = NSLock()
-    private var done = false
-    func claim() -> Bool { lock.lock(); defer { lock.unlock() }; if done { return false }; done = true; return true }
+    private var finished = false
+    private var continuation: CheckedContinuation<Data?, Never>?
+
+    func install(_ next: CheckedContinuation<Data?, Never>) -> Bool {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            next.resume(returning: nil)
+            return false
+        }
+        continuation = next
+        lock.unlock()
+        return true
+    }
+
+    func finish(_ data: Data?) {
+        let next = lock.withLock {
+            finished = true
+            defer { continuation = nil }
+            return continuation
+        }
+        next?.resume(returning: data)
+    }
 }

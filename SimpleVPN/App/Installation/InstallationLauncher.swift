@@ -8,7 +8,9 @@ import AppKit
 enum InstallationLauncher {
     static func handleLaunch() -> Bool {
         let environment = ProcessInfo.processInfo.environment
-        guard environment["XCTestConfigurationFilePath"] == nil, environment["XCTestBundlePath"] == nil else { return false }
+        guard !VPNController.usesEmptyProfileFixture,
+              environment["XCTestConfigurationFilePath"] == nil,
+              environment["XCTestBundlePath"] == nil else { return false }
         let source = Bundle.main.bundleURL.resolvingSymlinksInPath()
         if Installation.isInstalled(source) {
             // An installed copy opened during replacement must never initialize the VPN session.

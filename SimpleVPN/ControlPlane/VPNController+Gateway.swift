@@ -129,7 +129,29 @@ extension VPNController {
     /// Show the default-gateway control when there's a choice to make. (Delegates.)
     var showsDefaultGatewayControl: Bool { routes.showsDefaultGatewayControl }
     /// Establish-time ownership prediction (RC3), passed via `startTunnel`. (Delegates.)
-    func predictedGatewayOwned(_ id: String) -> Bool { routes.predictedGatewayOwned(id) }
+    func startWithInitialGateway(_ session: NETunnelProviderSession, profile id: String,
+                                 options: [String: NSObject]) throws {
+        try routes.startWithGateway(for: id, wantsDefault: routes.predictedGatewayOwned(id)) { owned in
+            var start = options
+            start["gatewayOwned"] = owned as NSNumber
+            try session.startTunnel(options: start)
+        }
+    }
+    /// Removed managers cannot deliver their final status notification. Retire
+    /// reservations, resolver overrides and pending samples before arbitration.
+    func forgetRemovedNetworkProfiles(_ removed: Set<String>) {
+        guard !removed.isEmpty else { return }
+        for id in removed {
+            forgetCachedProfile(id)
+            routes.forgetSession(id)
+            dns.forgetSession(id)
+            pushedNetworkState[id] = nil
+        }
+        networkStateSamples.invalidate()
+        routes.reconcileGateway()
+        dns.reconcile()
+    }
+
     /// The user picked a new default-gateway owner. (Delegates the atomic switch.)
     func setDefaultGateway(to newOwner: String?) async {
         // Guarded here (not just in the dispatcher): the Routes window's picker
@@ -308,7 +330,8 @@ extension VPNController: RouteMediatorHost {
                 connected: p.status == .connected,
                 engaged: isEngaged(id: p.id),
                 lastConnectedAt: lastConnectedAt[p.id],
-                tailscaleHasExitNode: p.kind == .tailscale && !tailscaleExitNode(for: p.id).isEmpty)
+                tailscaleHasExitNode: p.kind == .tailscale && !tailscaleExitNode(for: p.id).isEmpty,
+                retainingRoutesDuringTransition: p.status == .reasserting || p.status == .disconnecting)
         }
     }
 
@@ -344,7 +367,7 @@ extension VPNController: RouteMediatorHost {
 
     @discardableResult
     func routeSampleEffectiveOwned(id: String) async -> Bool? {
-        await fetchStats(id: id)?.effectiveDefaultOwned
+        await fetchStats(id: id, timeout: 2)?.effectiveDefaultOwned
     }
 
     func routeWantsFullTunnel(id: String) -> Bool { profileWantsFullTunnel(id) }
