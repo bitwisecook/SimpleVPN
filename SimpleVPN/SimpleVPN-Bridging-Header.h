@@ -15,3 +15,7 @@
 // netstat text parsing.
 #include <libproc.h>
 #include <sys/proc_info.h>
+
+#include "../Vendor/routing-core/include/routing_rich.h"
+
+#include "../Vendor/routing-core/include/routing_dns.h"

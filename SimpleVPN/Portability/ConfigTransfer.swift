@@ -55,10 +55,12 @@ enum ConfigTransfer {
         }
 
         // The packet-tunnel VPNs, in the order the sidebar shows them.
-        for profile in vpn.profiles where profileID == nil || profileID == profile.id {
+        let standalone = ConnectListing.standaloneProfiles(vpn.profiles, tunnels: tunnels.tunnels)
+        for profile in standalone where profileID == nil || profileID == profile.id {
             var entry = ConfigSnapshot.VPN(id: profile.id, name: profile.name,
                                            kind: profile.kind, server: profile.server)
             entry.labelIDs = labels.labels(for: profile.id).map(\.id)
+            entry.routingEventSource = vpn.packetPolicy(for: profile.id)
             switch profile.kind {
             case .openVPN:
                 // The STORED text, not the reassembled one: the point of export is
@@ -303,20 +305,22 @@ enum ConfigTransfer {
             guard let ovpn = entry.ovpn else { throw error("It has no configuration.") }
             let server = entry.server.isEmpty
                 ? (EndpointScanner.endpoints(in: ovpn).first?.host ?? "") : entry.server
-            return try await vpn.importProfile(name: entry.name, ovpn: ovpn, server: server)
+            return try await vpn.importProfile(name: entry.name, ovpn: ovpn, server: server, routingEventSource: entry.requiredPacketPolicy)
         case .wireGuard:
             var seed = entry.wireGuard ?? WireGuardConfig()
             seed.id = UUID().uuidString
             seed.name = entry.name
-            return try await vpn.createWireGuard(from: seed, name: entry.name)
+            return try await vpn.createWireGuard(from: seed, name: entry.name, routingEventSource: entry.requiredPacketPolicy)
         case .tailscale:
-            return try await vpn.createTailscale(name: entry.name, configuration: entry.tailscale)
+            return try await vpn.createTailscale(name: entry.name, configuration: entry.tailscale, routingEventSource: entry.requiredPacketPolicy)
         case .proxyTunnel:
-            return try await vpn.createProxyTunnel(name: entry.name, configuration: entry.proxyTunnel)
+            return try await vpn.createProxyTunnel(name: entry.name, configuration: entry.proxyTunnel, routingEventSource: entry.requiredPacketPolicy)
         case .sshNetworkTunnel:
-            return try await vpn.createSSHNetworkTunnel(name: entry.name, configuration: entry.sshNetworkTunnel)
+            return try await vpn.createSSHNetworkTunnel(name: entry.name, configuration: entry.sshNetworkTunnel, routingEventSource: entry.requiredPacketPolicy)
         case .ikev2, .ipsec, .l2tp:
-            guard var config = entry.native else { throw error("It has no settings.") }
+            guard var config = entry.native, config.kind == entry.kind else { throw error("It has no matching IPsec settings.") }
+            try await ProfilePacketPolicy.validate(entry.requiredPacketPolicy, adapter: config.ownedIPsec?.adapterID)
+            config.routingEventSource = entry.requiredPacketPolicy
             config.id = UUID().uuidString
             nativeVPN.save(config)
             return config.id
@@ -324,6 +328,8 @@ enum ConfigTransfer {
              .juniper, .pulse, .arrayNetworks:
             guard var config = entry.subprocess else { throw error("It has no settings.") }
             config.id = UUID().uuidString
+            try await ProfilePacketPolicy.validate(entry.requiredPacketPolicy, adapter: ProfilePacketPolicy.adapter(for: config))
+            config.routingEventSource = entry.requiredPacketPolicy
             guard tunnels.save(config) else { throw error("Enter the address and password separately.") }
             return config.id
         }

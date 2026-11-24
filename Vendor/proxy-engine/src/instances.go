@@ -55,7 +55,7 @@ func PXCreateInstance(cfgJSON *C.char, context C.uint64_t, packet C.PXInstancePa
 	if err := json.Unmarshal([]byte(C.GoString(cfgJSON)), &cfg); err != nil {
 		return fail("badRequest", "invalid configuration")
 	}
-	up, err := parseUpstream(cfg.Upstream, cfg.Username, cfg.Password)
+	up, err := cfg.proxy()
 	if err != nil {
 		return fail("badRequest", "%v", err)
 	}
@@ -75,7 +75,7 @@ func PXCreateInstance(cfgJSON *C.char, context C.uint64_t, packet C.PXInstancePa
 		C.pxInstanceString(cb, context, s)
 	}
 	st, err := buildEngineWithOptions(engineOptions{
-		up: up, mtu: mtu, dnsSentinel: cfg.DNSSentinel, dnsUpstream: cfg.DNSUpstream,
+		up: up, mtu: mtu, tlsRoutes: cfg.TLSRoutes, dnsSentinel: cfg.DNSSentinel, dnsUpstream: cfg.DNSUpstream,
 		packetOutput: func(p []byte) {
 			if len(p) > 0 {
 				C.pxInstancePacket(packet, context, (*C.uchar)(unsafe.Pointer(&p[0])), C.int(len(p)))

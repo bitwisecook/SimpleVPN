@@ -2,12 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 //  VPNKind.swift
-//  The protocol family of a saved VPN. Each kind adds a branch at the dispatch
-//  seams: which transport runs it (NETunnelProviderManager+engine, the native
-//  NEVPNManager personal VPN, or a managed subprocess), which editor form is
-//  shown, which importer handles a payload, and which connect flow runs. Stored
-//  in providerConfiguration["vpnType"] (or the SSH/native store); absent means
-//  .openVPN (profiles saved before the field existed).
+//  The protocol family of a saved VPN identifies its editor, importer and
+//  connection settings. The selected mode determines the routing attachment.
+//  Older packet profiles without providerConfiguration["vpnType"] use OpenVPN.
 //
 
 import Foundation
@@ -15,9 +12,9 @@ import Foundation
 nonisolated enum VPNKind: String, Codable, Sendable, CaseIterable {
     case openVPN   = "openvpn"     // OpenVPN 3 engine in our packet-tunnel sysext
     case wireGuard = "wireguard"   // wireguard-go, in-process in our packet-tunnel sysext
-    case ikev2     = "ikev2"       // native NEVPNProtocolIKEv2 (personal VPN)
-    case ipsec     = "ipsec"       // native NEVPNProtocolIPSec (Cisco-style)
-    case l2tp      = "l2tp"         // native L2TP/IPsec (NEVPNProtocolIPSec + L2TP)
+    case ikev2     = "ikev2"       // Built-in IPsec provider for app-initiated connections
+    case ipsec     = "ipsec"       // IKEv1, including Cisco-style XAuth
+    case l2tp      = "l2tp"        // L2TP and PPP over IPsec
     case ssh       = "ssh"         // one SSH kind: SOCKS (-D), port forwards (-L/-R), or network tunnel (-w)
     case fortinet  = "fortinet"    // FortiGate SSL VPN (OpenConnect --protocol=fortinet)
     case f5apm     = "f5apm"       // F5 BIG-IP APM SSL VPN (OpenConnect --protocol=f5)
@@ -33,14 +30,9 @@ nonisolated enum VPNKind: String, Codable, Sendable, CaseIterable {
     // distinguishes SOCKS from CONNECT — a preset in the editor, NOT a kind
     // (the "Headscale rule").
     case proxyTunnel = "proxytunnel" // tun2socks: utun+routes, every flow dialled through a SOCKS5/HTTP(S) proxy, in-process
-    // A SECOND SSH kind, and deliberately not a mode of `.ssh`: that kind is
-    // `.subprocess`/`.proxyOnly` — a local SOCKS port or named forwards, no utun,
-    // no routes. This one is a packet tunnel with routes and a userspace TCP/IP
-    // stack, so it is a different transport, a different mediator classification
-    // and a different editor. Nor is it a Proxy Tunnel preset (the "Headscale
-    // rule" does not apply): the px engine rejects `@` in its URL, has no sign-in
-    // or host-key surface at all, and ProxyArbiter classifies px as
-    // `.egressItself`, which is the wrong answer for an SSH session.
+    // The SSH Network Tunnel terminates TCP locally and opens a direct-tcpip
+    // channel for each flow. A point-to-point tunnel in an SSH profile carries
+    // the original IP packets on a tun@openssh.com channel.
     case sshNetworkTunnel = "sshnet" // utun+routes, one SSH direct-tcpip channel per flow, in-process (TCP only)
 
     func configuredDisplayName(usesTeleport: Bool) -> String {
@@ -120,4 +112,14 @@ nonisolated enum VPNKind: String, Codable, Sendable, CaseIterable {
     /// Native personal-VPN kinds share one NEVPNManager.shared() — only one such
     /// configuration can exist at a time (an OS limit, not ours).
     var isSingletonNative: Bool { transport == .nativePersonalVPN }
+}
+
+extension VPNKind {
+    /// These SSL VPN packet protocols have verified the shared physical carrier and return path.
+    nonisolated var supportsSharedOpenConnect: Bool {
+        switch self {
+        case .ciscoAnyConnect, .globalProtect, .fortinet, .f5apm, .juniper, .pulse, .arrayNetworks: true
+        default: false
+        }
+    }
 }

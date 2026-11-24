@@ -1,0 +1,16 @@
+[package]
+name = "routing-lsp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-only"
+publish = false
+
+[dependencies]
+serde_json = "=1.0.154"
+
+[profile.release]
+strip = "debuginfo"
+
+[dependencies.simplevpn_routing_core]
+path = "../../Vendor/routing-core"

@@ -8,11 +8,11 @@ import NetworkExtension
 /// Default-route ownership is applied separately, in strip-before-promote order.
 nonisolated struct RouteApplyRequest: Codable, Sendable, Equatable {
     var prefixes: [String]? = nil
-    var isValid: Bool { prefixes?.allSatisfy { TailscaleNetworkSettings.parse($0) != nil } ?? true }
+    var isValid: Bool { prefixes?.allSatisfy { RoutePrefixMath.canonicalNetwork($0) != nil } ?? true }
 
     func apply(to settings: NEPacketTunnelNetworkSettings) {
         guard let prefixes else { return }
-        let parsed = TailscaleNetworkSettings.parseAll(prefixes).filter { !$0.isDefaultRoute }
+        let parsed = TailscaleNetworkSettings.parseAll(RoutePrefixMath.specificRoutes(in: prefixes))
         if let v4 = settings.ipv4Settings?.copy() as? NEIPv4Settings {
             let routes = v4.includedRoutes ?? []
             let halves = Set(routes.filter { $0.destinationSubnetMask == "128.0.0.0" }.map(\.destinationAddress))

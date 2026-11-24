@@ -1,0 +1,15 @@
+table offices: prefix -> int = {
+    10.0.0.0/8: 8,
+    10.42.0.0/16: 12
+};
+fn adjust(value: int) -> int {
+    var result = value;
+    for amount in [1, 2] { result = result + amount; }
+    return result;
+}
+on office: inbound.ip.packet {
+    match lookup(offices, ip.src) {
+        found(mark) { ip.dscp = adjust(mark); }
+        missing { drop(); }
+    }
+}

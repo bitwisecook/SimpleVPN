@@ -123,12 +123,12 @@ nonisolated enum TailscaleNetworkSettings {
         return s
     }
 
-    private static func ipv4Route(_ p: Prefix) -> NEIPv4Route {
+    static func ipv4Route(_ p: Prefix) -> NEIPv4Route {
         p.isDefaultRoute ? NEIPv4Route.default()
                          : NEIPv4Route(destinationAddress: p.address, subnetMask: p.ipv4Mask)
     }
 
-    private static func ipv6Route(_ p: Prefix) -> NEIPv6Route {
+    static func ipv6Route(_ p: Prefix) -> NEIPv6Route {
         p.isDefaultRoute ? NEIPv6Route.default()
                          : NEIPv6Route(destinationAddress: p.address,
                                        networkPrefixLength: NSNumber(value: p.length))

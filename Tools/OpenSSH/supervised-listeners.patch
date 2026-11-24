@@ -1,0 +1,22 @@
+--- a/channels.c
++++ b/channels.c
+@@ -2114,6 +2114,19 @@
+ 			c->notbefore = monotime_double() + 1.0;
+ 		return;
+ 	}
++	/* This client only accepts streamlocal requests made by its supervisor.
++	 * A process running under the same login UID can discover the private
++	 * socket path. Verify its kernel identity before opening any channel. */
++	{
++		pid_t peer = -1, parent = getppid();
++		socklen_t len = sizeof(peer);
++		if (c->type != SSH_CHANNEL_UNIX_LISTENER || parent <= 1 ||
++		    getsockopt(newsock, SOL_LOCAL, LOCAL_PEERPID, &peer, &len) ||
++		    len != sizeof(peer) || peer != parent) {
++			close(newsock);
++			return;
++		}
++	}
+ 	if (addr.ss_family == AF_INET || addr.ss_family == AF_INET6) {
+ 		set_nodelay(newsock);
+ 		if (ssh->chanctxt->want_tcp_keepalive)

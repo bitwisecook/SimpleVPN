@@ -120,10 +120,12 @@ const (
 // ---- Wire types -------------------------------------------------------------
 
 type startConfig struct {
-	Upstream string `json:"upstream"`
-	Username string `json:"username"`
-	Password string `json:"password"`
-	MTU      int    `json:"mtu"`
+	RequiresAuth *bool  `json:"requiresAuth,omitempty"`
+	TLSRoutes    string `json:"tlsRoutes,omitempty"`
+	Upstream     string `json:"upstream"`
+	Username     string `json:"username"`
+	Password     string `json:"password"`
+	MTU          int    `json:"mtu"`
 
 	// DNSSentinel / DNSUpstream: the far-side-resolver substitution, and the one
 	// thing SSH can express that a SOCKS proxy cannot.
@@ -170,11 +172,12 @@ type statusPayload struct {
 	// black-holed UDP flow only set lastError, which the NEXT flow overwrote:
 	// the single most likely "why is this site slow" cause was invisible after
 	// one more packet. A counter is cumulative, so it survives.
-	UDPRefused    int64 `json:"udpRefused"`
-	DNSQueries    int64 `json:"dnsQueries"`
-	BytesUp       int64 `json:"bytesUp"`
-	BytesDown     int64 `json:"bytesDown"`
-	PacketsInDrop int64 `json:"packetsInDropped"`
+	UDPRefused       int64 `json:"udpRefused"`
+	UDPRelayRejected int64 `json:"udpRelayRejected"`
+	DNSQueries       int64 `json:"dnsQueries"`
+	BytesUp          int64 `json:"bytesUp"`
+	BytesDown        int64 `json:"bytesDown"`
+	PacketsInDrop    int64 `json:"packetsInDropped"`
 }
 
 // ---- Callback registry ------------------------------------------------------
@@ -230,6 +233,8 @@ func PXSetCallbacks(packetOut C.PXPacketCallback, stateChanged C.PXStringCallbac
 // ---- Engine state -----------------------------------------------------------
 
 type engineState struct {
+	tlsRoutes    tlsRouteTable
+	helloSlots   chan struct{}
 	packetOutput func([]byte)
 	diagnostic   func(string, ...any)
 	stateOutput  func(string, string)
@@ -254,15 +259,16 @@ type engineState struct {
 	relayWG     sync.WaitGroup
 
 	// Counters (atomics: read by PXStatus off the data path).
-	activeFlows   atomic.Int64
-	totalFlows    atomic.Int64
-	failedFlows   atomic.Int64
-	udpFlows      atomic.Int64
-	udpRefused    atomic.Int64
-	dnsQueries    atomic.Int64
-	bytesUp       atomic.Int64 // guest -> proxy
-	bytesDown     atomic.Int64 // proxy -> guest
-	packetsInDrop atomic.Int64
+	activeFlows      atomic.Int64
+	totalFlows       atomic.Int64
+	failedFlows      atomic.Int64
+	udpFlows         atomic.Int64
+	udpRefused       atomic.Int64
+	udpRelayRejected atomic.Int64
+	dnsQueries       atomic.Int64
+	bytesUp          atomic.Int64 // guest -> proxy
+	bytesDown        atomic.Int64 // proxy -> guest
+	packetsInDrop    atomic.Int64
 
 	lastErrMu sync.Mutex
 	lastErr   string
@@ -317,7 +323,7 @@ func PXStart(cfgJSON *C.char) *C.char {
 	if err := json.Unmarshal([]byte(C.GoString(cfgJSON)), &cfg); err != nil {
 		return fail("badRequest", "configuration is not valid JSON: %v", err)
 	}
-	up, err := parseUpstream(cfg.Upstream, cfg.Username, cfg.Password)
+	up, err := cfg.proxy()
 	if err != nil {
 		return fail("badRequest", "%v", err)
 	}
@@ -336,7 +342,7 @@ func PXStart(cfgJSON *C.char) *C.char {
 	}
 
 	st, err := buildEngineWithOptions(engineOptions{
-		up: up, mtu: mtu,
+		up: up, mtu: mtu, tlsRoutes: cfg.TLSRoutes,
 		dnsSentinel: cfg.DNSSentinel, dnsUpstream: cfg.DNSUpstream,
 	})
 	if err != nil {
@@ -352,6 +358,8 @@ func PXStart(cfgJSON *C.char) *C.char {
 // upstream itself. A struct (rather than a growing parameter list) so a new
 // field cannot silently take an existing argument's position.
 type engineOptions struct {
+	dialer       *net.Dialer
+	tlsRoutes    string
 	packetOutput func([]byte)
 	diagnostic   func(string, ...any)
 	stateOutput  func(string, string)
@@ -377,6 +385,10 @@ func buildEngineWithOptions(opts engineOptions) (*engineState, error) {
 	}
 	if opts.stateOutput == nil {
 		opts.stateOutput = emitState
+	}
+	routes, routeErr := compileTLSRoutes(opts.tlsRoutes)
+	if routeErr != nil {
+		return nil, routeErr
 	}
 	up, mtu := opts.up, opts.mtu
 	s := stack.New(stack.Options{
@@ -433,7 +445,12 @@ func buildEngineWithOptions(opts engineOptions) (*engineState, error) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
+	dialer := opts.dialer
+	if dialer == nil {
+		dialer = &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}
+	}
 	st := &engineState{
+		tlsRoutes:    routes,
 		packetOutput: opts.packetOutput,
 		diagnostic:   opts.diagnostic,
 		stateOutput:  opts.stateOutput,
@@ -447,7 +464,10 @@ func buildEngineWithOptions(opts engineOptions) (*engineState, error) {
 		// The real OS dialer for reaching the proxy. KeepAlive keeps a busy
 		// proxy connection healthy; the timeout is per-dial (also bounded by the
 		// per-flow context).
-		dialer: &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second},
+		dialer: dialer,
+	}
+	if routes != nil {
+		st.helloSlots = make(chan struct{}, 32)
 	}
 	// Who dials a flow. For an extension-dialled upstream `st.up` stays NIL on
 	// purpose: there is no proxy in this process to reach, and leaving a
@@ -655,18 +675,19 @@ func statusEngine(st *engineState) statusPayload {
 	lastErr := st.lastErr
 	st.lastErrMu.Unlock()
 	return statusPayload{
-		State:         "running",
-		Scheme:        st.scheme,
-		LastError:     lastErr,
-		ActiveFlows:   st.activeFlows.Load(),
-		TotalFlows:    st.totalFlows.Load(),
-		FailedFlows:   st.failedFlows.Load(),
-		UDPFlows:      st.udpFlows.Load(),
-		UDPRefused:    st.udpRefused.Load(),
-		DNSQueries:    st.dnsQueries.Load(),
-		BytesUp:       st.bytesUp.Load(),
-		BytesDown:     st.bytesDown.Load(),
-		PacketsInDrop: st.packetsInDrop.Load(),
+		State:            "running",
+		Scheme:           st.scheme,
+		LastError:        lastErr,
+		ActiveFlows:      st.activeFlows.Load(),
+		TotalFlows:       st.totalFlows.Load(),
+		FailedFlows:      st.failedFlows.Load(),
+		UDPFlows:         st.udpFlows.Load(),
+		UDPRefused:       st.udpRefused.Load(),
+		UDPRelayRejected: st.udpRelayRejected.Load(),
+		DNSQueries:       st.dnsQueries.Load(),
+		BytesUp:          st.bytesUp.Load(),
+		BytesDown:        st.bytesDown.Load(),
+		PacketsInDrop:    st.packetsInDrop.Load(),
 	}
 }
 

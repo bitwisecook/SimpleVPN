@@ -19,37 +19,6 @@
 
 import Foundation
 
-// MARK: - Intent (stage 1 payload)
-
-/// One engine's structured route intent — what a connected tunnel WANTS on the host.
-/// Sourced from engine reports (advertised prefixes + whether it wants the default),
-/// never from a client-.ovpn text grep. Inspectable and per-engine; the tier-3
-/// `ROUTE_ADVERTISED` hook rewrites exactly this before arbitration.
-nonisolated struct RouteIntent: MediatorIntent {
-    let engine: String                 // profile id
-    var advertisedPrefixes: [String]   // specific CIDRs it carries (besides any default)
-    var wantsDefault: Bool             // it would carry 0.0.0.0/0 · ::/0 if allowed
-    /// Whether this engine CAN own the default right now (capability, not desire) —
-    /// `RouteMediator.participation` == .full && (kind-specific gating, e.g. a
-    /// Tailscale exit node). Only capable engines enter owner selection.
-    var canOwnDefault: Bool
-    var prefixesRewritten = false
-    var metric: Int
-    /// Recency of this engine's connection — the deterministic auto-promotion
-    /// tiebreak (newest capable wins). Later = more recent.
-    var connectedAt: Date?
-
-    init(engine: String, advertisedPrefixes: [String] = [], wantsDefault: Bool = false,
-         canOwnDefault: Bool = false, metric: Int = 0, connectedAt: Date? = nil) {
-        self.engine = engine
-        self.advertisedPrefixes = advertisedPrefixes
-        self.wantsDefault = wantsDefault
-        self.canOwnDefault = canOwnDefault
-        self.metric = metric
-        self.connectedAt = connectedAt
-    }
-}
-
 // MARK: - Policy input
 
 /// The user-facing policy the arbiter resolves the owner against (tier-2). Mirrors
@@ -86,10 +55,10 @@ nonisolated enum RouteArbiter: MediatorArbiter {
     /// Desired state from intents + policy. PURE — the whole ≤1-owner invariant is
     /// computed here, then handed to the realizer to apply.
     static func plan(intents: [RouteIntent], policy: RoutePolicy) -> RoutePlan {
-        // Capable connected engines, most-recent FIRST (the auto-promotion tiebreak),
-        // falling back to id order when recency is unknown so the order is total.
+        // A capable split-only connection can take the default when selected
+        // explicitly. Automatic selection respects each connection's route intent.
         let capable = intents
-            .filter { $0.canOwnDefault }
+            .filter { $0.canOwnDefault && ($0.wantsDefault || $0.engine == policy.storedOwner) }
             .sorted { a, b in
                 let ta = a.connectedAt ?? .distantPast
                 let tb = b.connectedAt ?? .distantPast

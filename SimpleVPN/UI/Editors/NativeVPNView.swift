@@ -45,8 +45,7 @@ struct NativeVPNView: View {
                                                kind: .ikev2)
 
     private var isActive: Bool {
-        manager.activeConfigID == draft.id &&
-        (manager.status == .connected || manager.status == .connecting || manager.status == .reasserting)
+        UI.isActive(manager.status(for: draft.id))
     }
 
     /// nil once every field the active auth mode needs is filled in;
@@ -72,7 +71,7 @@ struct NativeVPNView: View {
     private var replacesActiveVPNCaption: String? { manager.replacementWarning(for: draft.id) }
 
     private var connectHelp: String {
-        [replacesActiveVPNCaption, missingFieldCaption ?? "Push this configuration into macOS and connect."]
+        [replacesActiveVPNCaption, missingFieldCaption ?? "Connect with the built-in IPsec engine."]
             .compactMap { $0 }.joined(separator: " ")
     }
 
@@ -132,10 +131,22 @@ struct NativeVPNView: View {
                         .font(.callout).foregroundStyle(.orange)
                         .accessibilityLabel("Problem: \(p)")
                 }
-                if draft.kind == .ipsec {
+                if draft.kind == .l2tp {
+                    SettingPicker(selection: Binding(get: { draft.l2tpMSCHAPv2 == true },
+                                                     set: { draft.l2tpMSCHAPv2 = $0 ? true : nil })) {
+                        Text("Export for System Settings").tag(false)
+                        Text("Built-in IPv4 · MSCHAPv2").tag(true)
+                    } label: {
+                        Text("Connection method")
+                    }
+                    if draft.l2tpMSCHAPv2 == true {
+                        Text("The gateway must support IKEv1 Main Mode with a shared secret and PPP MSCHAPv2. Enter its IPv4 address and both IKE identities.").font(.callout)
+                    }
+                }
+                if draft.kind == .ipsec || (draft.kind == .l2tp && draft.l2tpMSCHAPv2 == true) {
                     EngineSettingRow(spec: Self.specs["native.group"], value: draft.groupOrRealm) {
                         LabeledContent {
-                            TextField("", text: $draft.groupOrRealm, prompt: Text("optional"))
+                            TextField("", text: $draft.groupOrRealm, prompt: Text(draft.kind == .l2tp ? "required local IKE identity" : "optional"))
                                 .multilineTextAlignment(.trailing)
                                 .scalarConfigurationValue()
                                 .autocorrectionDisabled()
@@ -172,6 +183,10 @@ struct NativeVPNView: View {
 
             if draft.kind == .l2tp {
                 l2tpSection
+                if draft.l2tpMSCHAPv2 == true {
+                    securitySection
+                    controlSection
+                } else { l2tpExportSection }
             } else {
                 authSection
                 trafficSection
@@ -209,7 +224,12 @@ struct NativeVPNView: View {
                 CustomRoutingTabView(vpn: vpn, profileID: draft.id, profile: $customRouting,
                                     proxyAuthUsername: $crProxyAuthUsername,
                                     proxyAuthPassword: $crProxyAuthPassword,
-                                    kind: draft.kind)
+                                    kind: draft.kind, showsProfilePacketPolicy: false)
+                ProfilePacketPolicySection(vpn: vpn, source: draft.routingEventSource, adapter: nativeProxySettings() == nil ? draft.ownedIPsec?.adapterID : nil) { source in
+                    guard !ManagedPolicy.lockConfiguration else { throw VPNController.configLocked }
+                    try await manager.setPacketPolicy(source, for: draft)
+                    draft.routingEventSource = source
+                }
                 if customRouting.proxy.authSource != nil {
                     SettingCaveat(NativeProxyCredentials.unsupported)
                 }
@@ -261,8 +281,7 @@ struct NativeVPNView: View {
     private var readinessNeed: ConnectNeed? {
         NativeVPNReadiness.need(for: draft, facts: .init(
             hasSecret: !secret.isEmpty,
-            hasGroupPSK: !sharedSecret.isEmpty,
-            hasPersonalVPNCapability: !manager.needsEntitlement))
+            hasGroupPSK: !sharedSecret.isEmpty, hasPPPPassword: OwnedIPsecConfiguration.validPPPCredential(pppPassword)))
     }
 
     private var deferredSignInNeed: ConnectNeed? {
@@ -328,7 +347,19 @@ struct NativeVPNView: View {
                                            value: draft.usesSharedSecret)
                     }
                 }
-                if !draft.usesSharedSecret {
+                if draft.kind == .ikev2 && draft.usesSharedSecret {
+                    TextField("Local IKE identity", text: $draft.username, prompt: Text("identity assigned by the gateway"))
+                        .scalarConfigurationValue()
+                } else if !draft.usesSharedSecret {
+                    if draft.kind == .ikev2 {
+                        SettingPicker(selection: Binding(get: { draft.eapMSCHAPv2 == true },
+                                                         set: { draft.eapMSCHAPv2 = $0 ? true : nil })) {
+                            Text("Automatic (macOS)").tag(false)
+                            Text("EAP-MSCHAPv2 (built in)").tag(true)
+                        } label: {
+                            Text("Password authentication")
+                        }
+                    }
                     EngineSettingRow(spec: Self.specs["native.username"], value: draft.username) {
                         LabeledContent {
                             TextField("", text: $draft.username, prompt: Text("username")).textContentType(.username)
@@ -399,14 +430,14 @@ struct NativeVPNView: View {
     /// IKEv2-only, so for IPsec the whole group is OMITTED rather than shown empty
     /// (the canonical-taxonomy rule).
     @ViewBuilder private var securitySection: some View {
-        if draft.kind == .ikev2 {
+        if draft.kind == .ikev2 || draft.kind == .ipsec || draft.l2tpMSCHAPv2 == true {
             Section("Security") {
                 // The remote identifier is the identity macOS demands the server's
                 // certificate present — a check on the SERVER, which is why it is
                 // here and not beside the address it verifies.
                 EngineSettingRow(spec: Self.specs["native.remote-id"], value: draft.remoteID) {
                     LabeledContent {
-                        TextField("", text: $draft.remoteID, prompt: Text("defaults to the server address"))
+                        TextField("", text: $draft.remoteID, prompt: Text(draft.kind == .ikev2 ? "defaults to the server address" : "authenticated IKE gateway identity"))
                             .multilineTextAlignment(.trailing)
                             .scalarConfigurationValue()
                             .autocorrectionDisabled()
@@ -415,7 +446,7 @@ struct NativeVPNView: View {
                         EngineSettingLabel(spec: Self.specs["native.remote-id"], value: draft.remoteID)
                     }
                 }
-                ikev2CryptoRows
+                if draft.kind == .ikev2 { ikev2CryptoRows }
             }
         }
     }
@@ -501,36 +532,26 @@ struct NativeVPNView: View {
 
     @ViewBuilder private var controlSection: some View {
         Section {
-            if manager.needsEntitlement {
-                Label("Native VPN needs the Personal VPN capability on this build's signing profile. Everything else works; ask to have it provisioned.",
-                      systemImage: "exclamationmark.triangle.fill")
-                    .font(.callout).foregroundStyle(.orange)
-                // Not a substitute for the capability — but the pane where an
-                // already-installed native VPN can be seen and connected by hand
-                // is where someone hitting this needs to go, and it was unnamed.
-                SystemSettingsLink(title: "Open Network \u{25B8} VPN to see and connect native VPNs on this Mac",
-                                   pane: .networkVPN, systemImage: "network",
-                                   accessibilityLabel: "Open Network, VPN, to see and connect native VPNs on this Mac")
+            if draft.ownedConnectionIssue != nil && !draft.requiresOwnedIPsec {
+                SystemSettingsLink(title: "Open VPN in System Settings", pane: .networkVPN,
+                                   systemImage: "network", accessibilityLabel: "Open VPN in System Settings")
             }
             HStack {
                 nativeStatus
                 Spacer()
                 if isActive {
-                    Button(manager.status == .connecting ? "Cancel Connecting" : "Disconnect") {
-                        if manager.activeConfigID == draft.id { manager.disconnect() }
+                    Button(manager.status(for: draft.id) == .connecting ? "Cancel Connecting" : "Disconnect") {
+                        manager.disconnect(draft.id)
                     }
                     .buttonStyle(.bordered).tint(.red)
                 } else {
                     Button("Connect") {
                         save()
                         let proxy = nativeProxySettings()
-                        Task { await manager.connect(draft, secret: secret, sharedSecret: sharedSecret, proxy: proxy) }
+                        Task { await manager.connect(draft, secret: secret, sharedSecret: sharedSecret, pppPassword: pppPassword, proxy: proxy) }
                     }
                         .buttonStyle(.glassProminent)   // primary "go" — consistent with OpenVPN Connect
-                        .disabled(readinessNeed != nil)
-                        // macOS keeps ONE app-managed personal VPN, so connecting
-                        // here tears down whichever native VPN is up. The footer
-                        // said so generically; the button names the casualty.
+                        .disabled(readinessNeed != nil || replacesActiveVPNCaption != nil)
                         .help(connectHelp)
                         .accessibilityValue([replacesActiveVPNCaption, missingFieldCaption]
                                                 .compactMap { $0 }.joined(separator: " "))
@@ -547,13 +568,13 @@ struct NativeVPNView: View {
                     .font(.callout).foregroundStyle(.red)
                     .accessibilityLabel("Error: \(err)")
             }
-            Text("macOS runs one app-managed personal VPN at a time — connecting this one replaces any other native VPN this app started.")
+            Text(draft.ownedIPsec == nil ? "Existing macOS VPN profiles are available in System Settings." : "The built-in IPsec engine negotiates routes with this gateway.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
 
     @ViewBuilder private var nativeStatus: some View {
-        switch manager.status {
+        switch manager.status(for: draft.id) {
         case .connected where isActive: Label("Connected", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
         case .reasserting where isActive:
             Label("Reconnecting…", systemImage: "arrow.clockwise.circle")
@@ -591,7 +612,7 @@ struct NativeVPNView: View {
                     EngineSettingLabel(spec: Self.specs["native.password"], value: pppPassword)
                 }
             }
-            Text("Stored in your Keychain. Choose Include secrets below to put it in the exported profile.")
+            Text(draft.l2tpMSCHAPv2 == true ? "The PPP sign-in uses 1–255 printable ASCII characters for each field." : "Stored in your Keychain. Choose Include secrets below to put it in the exported profile.")
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             EngineSettingRow(spec: Self.specs["native.shared-secret"], value: secret) {
@@ -605,6 +626,9 @@ struct NativeVPNView: View {
                 }
             }
         }
+    }
+
+    private var l2tpExportSection: some View {
         Section {
             Picker("Export credentials", selection: $exportSecretMode) {
                 Text("Placeholders").tag(ConfigSecretMode.placeholders)
@@ -744,6 +768,10 @@ struct NativeVPNView: View {
     }
 
     private func exportMobileconfig() {
+        guard !draft.requiresOwnedIPsec, manager.configs.first(where: { $0.id == draft.id })?.requiresOwnedIPsec != true else {
+            exportProblem = ProfilePacketPolicy.unsupported
+            return
+        }
         if !ManagedPolicy.lockConfiguration, !save() { return }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "\(draft.name).mobileconfig"

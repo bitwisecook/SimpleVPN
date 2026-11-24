@@ -98,10 +98,15 @@ nonisolated struct ProxyTunnelConfig: Codable, Sendable, Equatable {
     /// The upstream proxy URL. NEVER carries credentials (the editor keeps them
     /// out); e.g. "socks5://proxy.example.com:1080".
     var upstream: String = ""
-    /// Whether this proxy needs a username/password. Gates the connect button:
-    /// a no-auth proxy connects with nothing typed, an auth proxy needs stored
-    /// or entered credentials. The engine still works if this is wrong — it just
-    /// changes when the UI asks.
+    /// One destination TCP port, visible TLS server name and numeric backend per line.
+    var tlsRoutes: String = ""
+    static let tlsRoutingScheme = "tls-route-v1+"
+    static let authenticatedScheme = "auth-required-v1+"
+    var encodedUpstream: String {
+        (requiresAuth ? Self.authenticatedScheme : "") + (tlsRoutes.isEmpty ? "" : Self.tlsRoutingScheme) + upstream
+    }
+
+    /// When enabled, require a complete credential pair before starting the proxy transport.
     var requiresAuth: Bool = false
 
     /// Send ALL traffic through the tunnel (default-route). Off ⇒ only the
@@ -150,10 +155,40 @@ nonisolated struct ProxyTunnelConfig: Codable, Sendable, Equatable {
     // connecting.
     init() {}
 
+    enum CodingKeys: String, CodingKey {
+        case upstream, tlsRoutes, requiresAuth, includeDefaultRoute, includedRoutes, excludedRoutes
+        case allowLocalNetworkAccess, dnsServers, searchDomains, mtu
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        // An older app or extension rejects this unknown proxy scheme before starting.
+        try c.encode(encodedUpstream, forKey: .upstream)
+        if !tlsRoutes.isEmpty { try c.encode(tlsRoutes, forKey: .tlsRoutes) }
+        try c.encode(requiresAuth, forKey: .requiresAuth)
+        try c.encode(includeDefaultRoute, forKey: .includeDefaultRoute)
+        try c.encode(includedRoutes, forKey: .includedRoutes)
+        try c.encode(excludedRoutes, forKey: .excludedRoutes)
+        try c.encode(allowLocalNetworkAccess, forKey: .allowLocalNetworkAccess)
+        try c.encode(dnsServers, forKey: .dnsServers)
+        try c.encode(searchDomains, forKey: .searchDomains)
+        try c.encode(mtu, forKey: .mtu)
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         upstream = (try? c.decodeIfPresent(String.self, forKey: .upstream)) ?? ""
-        requiresAuth = (try? c.decodeIfPresent(Bool.self, forKey: .requiresAuth)) ?? false
+        tlsRoutes = try c.decodeIfPresent(String.self, forKey: .tlsRoutes) ?? ""
+        requiresAuth = try c.decodeIfPresent(Bool.self, forKey: .requiresAuth) ?? false
+        if upstream.hasPrefix(Self.authenticatedScheme) {
+            guard requiresAuth else {
+                throw DecodingError.dataCorruptedError(forKey: .requiresAuth, in: c, debugDescription: "Missing proxy authentication requirement")
+            }
+            upstream.removeFirst(Self.authenticatedScheme.count)
+        }
+        if !tlsRoutes.isEmpty, upstream.hasPrefix(Self.tlsRoutingScheme) {
+            upstream.removeFirst(Self.tlsRoutingScheme.count)
+        }
         includeDefaultRoute = (try? c.decodeIfPresent(Bool.self, forKey: .includeDefaultRoute)) ?? true
         includedRoutes = (try? c.decodeIfPresent([String].self, forKey: .includedRoutes)) ?? []
         excludedRoutes = (try? c.decodeIfPresent([String].self, forKey: .excludedRoutes)) ?? []
@@ -166,7 +201,7 @@ nonisolated struct ProxyTunnelConfig: Codable, Sendable, Equatable {
 }
 
 extension ProxyTunnelConfig {
-    static func decode(from blob: Data?) -> ProxyTunnelConfig {
+    nonisolated static func decode(from blob: Data?) -> ProxyTunnelConfig {
         guard let blob, let c = try? JSONDecoder().decode(ProxyTunnelConfig.self, from: blob) else {
             return ProxyTunnelConfig()
         }
@@ -231,6 +266,10 @@ extension ProxyTunnelConfig {
         }
         guard let host = comps.host, !host.isEmpty else {
             return "The proxy address is missing a host name."
+        }
+        if !(comps.percentEncodedPath.isEmpty || comps.percentEncodedPath == "/")
+            || comps.query != nil || comps.fragment != nil {
+            return "Use the proxy host and optional port. Remove the path, query and fragment."
         }
         if s.contains("@") {
             // Credentials belong in the sign-in fields, not the URL — they would
@@ -413,6 +452,7 @@ extension ProxyTunnelConfig {
     /// marking is driven from (`SettingNeeds`). See `Shared/SettingFault.swift`.
     nonisolated var connectFault: SettingFault? {
         if let p = upstreamProblem { return SettingFault("px.address", p) }
+        if let p = tlsRoutesProblem { return SettingFault("px.tls-routes", p) }
         if !includeDefaultRoute, includedRoutes.isEmpty {
             return SettingFault("px.included",
                                 "Add at least one network to route through the proxy, or turn on \u{201C}Send all traffic\u{201D}.")
@@ -437,10 +477,12 @@ extension ProxyTunnelConfig {
 /// ProxyTunnelTests over here.
 nonisolated struct ProxyTunnelStartConfig: Codable, Sendable, Equatable {
     var upstream: String
+    var tlsRoutes: String?
     /// Session-only. Reaches this struct from startTunnel options, is handed
     /// straight to the engine, and is never persisted or logged.
     var username: String
     var password: String
+    var requiresAuth: Bool
     var mtu: Int
 
     /// A safe utun default. Flows are re-dialled as fresh TCP through the proxy,
@@ -448,10 +490,27 @@ nonisolated struct ProxyTunnelStartConfig: Codable, Sendable, Equatable {
     static let defaultMTU = 1500
 
     init(config: ProxyTunnelConfig, username: String, password: String) {
-        upstream = config.upstream.trimmingCharacters(in: .whitespacesAndNewlines)
+        requiresAuth = config.requiresAuth
+        upstream = config.encodedUpstream.trimmingCharacters(in: .whitespacesAndNewlines)
+        tlsRoutes = config.tlsRoutes.isEmpty ? nil : config.tlsRoutes
         self.username = username
         self.password = password
         mtu = config.mtu > 0 ? config.mtu : ProxyTunnelStartConfig.defaultMTU
+    }
+
+    static func authenticationProblem(config: ProxyTunnelConfig, username: String, password: String) -> String? {
+        if !config.requiresAuth {
+            return username.isEmpty && password.isEmpty ? nil : "This proxy uses no authentication. Reopen the connection with its saved settings."
+        }
+        guard !username.isEmpty, !password.isEmpty else { return "Save both the proxy username and password before connecting." }
+        if config.scheme == "socks5" || config.scheme == "socks5h" {
+            guard username.utf8.count <= 255, password.utf8.count <= 255 else {
+                return "SOCKS5 usernames and passwords each have a 255-byte limit."
+            }
+        } else if username.contains(":") || [username, password].contains(where: { $0.utf8.contains { $0 < 32 || $0 == 127 } }) {
+            return "HTTP proxy usernames cannot contain a colon. Usernames and passwords must be free of control characters."
+        }
+        return nil
     }
 
     func jsonString() -> String {
@@ -467,6 +526,7 @@ nonisolated struct ProxyTunnelStartConfig: Codable, Sendable, Equatable {
         var copy = self
         copy.username = username.isEmpty ? "" : "<redacted>"
         copy.password = password.isEmpty ? "" : "<redacted>"
+        copy.tlsRoutes = nil
         return copy.jsonString()
     }
 }
@@ -488,6 +548,7 @@ nonisolated struct ProxyTunnelStatus: Codable, Sendable, Equatable {
     /// UDP flow used to set only `lastError`, which the next flow overwrote, so
     /// the single most likely "why is this slow" cause vanished after one packet.
     var udpRefused: Int64 = 0
+    var udpRelayRejected: Int64 = 0
     var dnsQueries: Int64 = 0
     var bytesUp: Int64 = 0
     var bytesDown: Int64 = 0
@@ -507,6 +568,7 @@ nonisolated struct ProxyTunnelStatus: Codable, Sendable, Equatable {
         failedFlows = (try? c.decodeIfPresent(Int64.self, forKey: .failedFlows)) ?? 0
         udpFlows = (try? c.decodeIfPresent(Int64.self, forKey: .udpFlows)) ?? 0
         udpRefused = (try? c.decodeIfPresent(Int64.self, forKey: .udpRefused)) ?? 0
+        udpRelayRejected = (try? c.decodeIfPresent(Int64.self, forKey: .udpRelayRejected)) ?? 0
         dnsQueries = (try? c.decodeIfPresent(Int64.self, forKey: .dnsQueries)) ?? 0
         bytesUp = (try? c.decodeIfPresent(Int64.self, forKey: .bytesUp)) ?? 0
         bytesDown = (try? c.decodeIfPresent(Int64.self, forKey: .bytesDown)) ?? 0
@@ -516,5 +578,57 @@ nonisolated struct ProxyTunnelStatus: Codable, Sendable, Equatable {
     static func decode(json: String) -> ProxyTunnelStatus? {
         guard let d = json.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(ProxyTunnelStatus.self, from: d)
+    }
+}
+
+extension ProxyTunnelConfig {
+    nonisolated var tlsRoutesProblem: String? {
+        if tlsRoutes.isEmpty { return nil }
+        guard tlsRoutes.utf8.count <= 32_768 else { return "Keep TLS routes under 32 KiB." }
+        var seen = Set<String>()
+        for (i, line) in tlsRoutes.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+            let parts = line.split(whereSeparator: \.isWhitespace)
+            if parts.isEmpty { continue }
+            guard parts.count == 3, let port = Self.tlsPort(parts[0]), Self.isTLSHost(parts[1]),
+                  Self.isTLSBackend(parts[2]) else {
+                return "Line \(i + 1) needs a port, server name and numeric backend such as 192.0.2.8:8443 or [2001:db8::8]:8443."
+            }
+            guard seen.insert("\(port) \(parts[1].lowercased())").inserted else {
+                return "Line \(i + 1) repeats a port and server name."
+            }
+            if seen.count > 128 { return "Enter up to 128 TLS routes." }
+        }
+        return seen.isEmpty ? "Enter a TLS route or clear the field." : nil
+    }
+
+    nonisolated private static func tlsPort(_ value: Substring) -> UInt16? {
+        guard !value.isEmpty, value.utf8.allSatisfy({ (48...57).contains($0) }),
+              let port = UInt16(value), port > 0 else { return nil }
+        return port
+    }
+
+    nonisolated private static func isTLSHost(_ name: Substring) -> Bool {
+        guard !name.isEmpty, name.utf8.count <= 253, dnsServerProblem(String(name)) != nil else { return false }
+        return name.split(separator: ".", omittingEmptySubsequences: false).allSatisfy { label in
+            !label.isEmpty && label.utf8.count <= 63 && label.first != "-" && label.last != "-"
+                && label.utf8.allSatisfy { (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 }
+        }
+    }
+
+    nonisolated private static func isTLSBackend(_ value: Substring) -> Bool {
+        guard !value.utf8.contains(0), let split = value.lastIndex(of: ":"), tlsPort(value[value.index(after: split)...]) != nil else { return false }
+        var address = value[..<split]
+        if address.hasPrefix("["), address.hasSuffix("]") {
+            address = address.dropFirst().dropLast()
+            var ip = in6_addr()
+            guard inet_pton(AF_INET6, String(address), &ip) == 1 else { return false }
+            return withUnsafeBytes(of: ip) { b in
+                b.contains(where: { $0 != 0 }) && b[0] != 255
+                    && !(b.prefix(10).allSatisfy { $0 == 0 } && b[10] == 255 && b[11] == 255)
+            }
+        }
+        var ip = in_addr()
+        guard inet_pton(AF_INET, String(address), &ip) == 1 else { return false }
+        return withUnsafeBytes(of: ip) { b in b.contains(where: { $0 != 0 }) && !(224...239).contains(b[0]) }
     }
 }

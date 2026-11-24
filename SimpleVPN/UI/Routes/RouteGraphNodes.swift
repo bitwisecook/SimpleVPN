@@ -177,7 +177,7 @@ extension RouteGraphView {
 
     // MARK: Cards
 
-    @ViewBuilder func card(_ node: GraphNode, _ outcome: SearchOutcome?) -> some View {   // was private — internal for the file split
+    @ViewBuilder func card(_ node: GraphNode, _ outcome: SearchOutcome?, routingRows: [RoutingBlockRow]) -> some View {
         switch node.kind {
         case .source:
             titledCard(title: Host.current().localizedName ?? "This Mac",
@@ -195,31 +195,64 @@ extension RouteGraphView {
         case .guestNetwork(let guest):
             guestNetworkCard(guest)
         case .railroadStation(let station):
-            let expanded = expandedCards.contains(station.id)
-            let expandable = station.details.count > collapseThreshold
-            let visible = expandable && !expanded ? Array(station.details.prefix(collapsedRows)) : station.details
-            titledCard(title: station.title, symbol: station.symbol,
-                       tint: station.warning ? .orange : .accentColor, combined: false) {
-                VStack(alignment: .leading, spacing: 5) {
-                    ForEach(Array(visible.enumerated()), id: \.offset) { _, detail in
-                        Text(detail).font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    if expandable {
-                        Button(expanded ? "Show less" : "Show all \(station.details.count)…") {
-                            if expanded { expandedCards.remove(station.id) }
-                            else { expandedCards.insert(station.id) }
+            if let routingBlocks {
+                routingBlockCard(station, rows: routingRows, diagram: routingBlocks)
+            } else {
+                let expanded = expandedCards.contains(station.id)
+                let expandable = station.details.count > collapseThreshold
+                let visible = expandable && !expanded ? Array(station.details.prefix(collapsedRows)) : station.details
+                titledCard(title: station.title, symbol: station.symbol,
+                           tint: station.warning ? .orange : .accentColor, combined: false) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        ForEach(Array(visible.enumerated()), id: \.offset) { _, detail in
+                            Text(detail).font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                        .font(.caption).buttonStyle(.plain)
-                        .accessibilityLabel("\(expanded ? "Show fewer" : "Show all") details for \(station.title)")
+                        if expandable {
+                            Button(expanded ? "Show less" : "Show all \(station.details.count)…") {
+                                if expanded { expandedCards.remove(station.id) }
+                                else { expandedCards.insert(station.id) }
+                            }
+                            .font(.caption).buttonStyle(.plain)
+                            .accessibilityLabel("\(expanded ? "Show fewer" : "Show all") details for \(station.title)")
+                        }
                     }
                 }
+                .accessibilityElement(children: expandable ? .contain : .combine)
+                .accessibilityLabel(station.title)
+                .accessibilityValue(station.details.joined(separator: ". "))
+                .accessibilityRotorEntry(id: "rotor-railroad-" + station.id, in: rotorNamespace)
             }
-            .accessibilityElement(children: expandable ? .contain : .combine)
-            .accessibilityLabel(station.title)
-            .accessibilityValue(station.details.joined(separator: ". "))
-            .accessibilityRotorEntry(id: "rotor-railroad-" + station.id, in: rotorNamespace)
+        }
+    }
+
+    @ViewBuilder
+    private func routingBlockCard(_ station: RoutingRailroadStation, rows: [RoutingBlockRow], diagram: RoutingBlockDiagram) -> some View {
+        let id = Int(station.id)
+        let selected = id != nil && id == diagram.selected
+        let spoken = rows.map { "\($0.label), \($0.value)" }.joined(separator: ". ")
+        let content = titledCard(title: station.title, symbol: station.symbol,
+                                 tint: .accentColor, selected: selected, bodyInset: 0, hasBody: !rows.isEmpty) {
+            RoutingBlockTable(rows: rows)
+        }
+        .clipShape(.rect(cornerRadius: 10))
+        if let id {
+            let block = Button { diagram.select(id) } label: { content.contentShape(Rectangle()) }
+                .buttonStyle(.plain)
+                .help(station.details.first ?? station.title)
+                .accessibilityLabel(station.title)
+                .accessibilityValue(spoken)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+                .accessibilityRotorEntry(id: "rotor-railroad-" + station.id, in: rotorNamespace)
+            if diagram.canEdit && diagram.model.moveRange(for: id) != nil {
+                block.draggable(diagram.payload(id)) { ReorderDragPreview(subject: station.title) }
+            } else {
+                block
+            }
+        } else {
+            content.accessibilityLabel(station.title)
+                .accessibilityRotorEntry(id: "rotor-railroad-" + station.id, in: rotorNamespace)
         }
     }
 
@@ -595,7 +628,7 @@ extension RouteGraphView {
     /// still, because "this is the address you asked about" is the bigger claim.
     private func titledCard(title: String, symbol: String, tint: Color,
                             highlighted: Bool = false, selected: Bool = false,
-                            combined: Bool = true,
+                            combined: Bool = true, bodyInset: CGFloat = 10, hasBody: Bool = true,
                             @ViewBuilder body: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
@@ -610,10 +643,12 @@ extension RouteGraphView {
             .padding(.horizontal, 10).frame(height: headerHeight)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(tint.opacity(0.16))
-            Divider()
-            body()
-                .padding(10)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            if hasBody {
+                Divider()
+                body()
+                    .padding(bodyInset)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
         }
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10)

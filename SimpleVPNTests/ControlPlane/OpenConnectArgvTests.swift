@@ -46,6 +46,14 @@ struct OpenConnectArgvTests {
         #expect(buffer.take().lines.count == 300)
     }
 
+    @Test func managedOpenSSHWaitsForEveryRemoteForwardToBeAcknowledged() {
+        var output = TunnelProcess.OutputBuffer(requireRemoteForwardAck: true)
+        _ = output.append(Data("debug1: Entering interactive session.\r\ndebug1: remote forward success for: listen 127.0.0.1:5555\r\n".utf8))
+        #expect(!output.take().ready)
+        _ = output.append(Data("debug1: forwarding_success: all expected forwarding replies received\r\n".utf8))
+        #expect(output.take().ready)
+    }
+
     @Test func privateTransportConfigLeavesStdinAvailableForTheVPNCookie() throws {
         let config = try #require(try SubprocessTunnelManager.openconnectPrivateConfig(
             keyPassphrase: "=with spaces", proxy: "http://alex:example@proxy.test:8080"))

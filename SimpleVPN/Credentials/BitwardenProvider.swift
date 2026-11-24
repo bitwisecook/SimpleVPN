@@ -142,8 +142,7 @@ nonisolated struct LoopbackEndpoint: Sendable, Equatable {
     /// Refusal is expressed as "no URL exists" so no caller can forget to check.
     var loopbackBaseURL: URL? {
         guard isLoopback else { return nil }
-        let literal = host.contains(":") ? "[\(host)]" : host
-        return URL(string: "http://\(literal):\(port)")
+        return URL(string: "http://" + NetworkEndpoint.authority(host: host, port: port))
     }
 
     var settingValue: String { "\(host):\(port)" }

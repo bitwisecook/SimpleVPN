@@ -64,7 +64,7 @@ func TestFragmentedDatagramsAreReassembledTranslatedAndReturned(t *testing.T) {
 		var receiver reassembler
 		var whole []byte
 		for _, part := range fragments {
-			data, _, pending, err := receiver.accept(part, fragmentScope{"peer", 1})
+			data, _, pending, err := receiver.accept(part, fragmentScope{port: "peer", generation: 1})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -138,5 +138,18 @@ func TestUnfragmentedIPv6GetsUsablePacketTooBigFeedback(t *testing.T) {
 	assertChecksums(t, feedback)
 	if len(feedback) > 1280 || feedback[40] != 2 || binary.BigEndian.Uint32(feedback[44:]) != 1280 {
 		t.Fatal("invalid PTB feedback")
+	}
+	defer r.Close()
+	if err := r.Apply(Policy{Revision: 2, Default: "vpn", EventSource: `on local:inbound.icmpv6.message {drop();}`}); err != nil {
+		t.Fatal(err)
+	}
+	feedback = nil
+	next := bigDatagram(t, "fd6e:7853:ffff::1", "fd42::3", 40001, 443)
+	if r.Forward(next.raw) || feedback != nil {
+		t.Fatal("denied local MTU feedback was delivered")
+	}
+	counts := r.PacketPolicyStatus().Inbound
+	if counts.ReceivedPackets != 0 || counts.ForwardedPackets != 1 || counts.DroppedPackets != 1 || counts.RuleHits != 1 {
+		t.Fatal(counts)
 	}
 }

@@ -1804,9 +1804,10 @@ struct EditVPNView: View {
     private var configurationTab: some View {
         Form {
             Section("Configuration (.ovpn)") {
-                TextEditor(text: $ovpn)
-                    .font(.callout.monospaced())
+                ConfigurationSourceText(text: $ovpn, format: .openVPN,
+                                        accessibilityLabel: "OpenVPN configuration")
                     .frame(minHeight: 320)
+                    .privacySensitive()
             }
         }
         .formStyle(.grouped)

@@ -27,24 +27,19 @@
 # the project's STRIP_INSTALLED_PRODUCT=NO crash-report policy.
 set -euo pipefail
 
-# Match the shipping Tailscale archive and app's macOS deployment target.
-export CGO_CFLAGS="-mmacosx-version-min=26.0 ${CGO_CFLAGS:-}"
-export CGO_LDFLAGS="-mmacosx-version-min=26.0 ${CGO_LDFLAGS:-}"
-
 # Pin exactly, never float — must match go.mod (and the Tailscale engine's pin,
 # since both fold into one archive; gVisor is the shared dependency).
 # Resolve updates with gvisor.dev/gvisor@go: @latest selects the Bazel-only
 # master branch, which cannot be compiled with standard Go tooling.
 GVISOR_MODULE="gvisor.dev/gvisor"
-GVISOR_VERSION="v0.0.0-20261118061622-13a33f77533a"
+GVISOR_VERSION="v0.0.0-20261123062844-83df8eae069e"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$REPO/Vendor/proxy-engine/src"
 OUT="$REPO/Vendor/proxy-engine"
 INCLUDE="$OUT/include"
 
-command -v go >/dev/null || { echo "error: Go toolchain not found" >&2; exit 1; }
-
+source "$REPO/Tools/routing-native-env.sh"
 cd "$SRC"
 
 # go.mod is the source of truth for the pin; fail loudly if it drifts.
@@ -73,8 +68,8 @@ go test ./...
 # in _test.go files — so the callback lives in flowdial_cgotest.go behind the
 # `pxcgotest` tag and gets its own pass. Tagged rather than always-on so no test
 # scaffolding can reach the shipped c-archive; run here so it cannot rot unnoticed.
-go vet -tags pxcgotest ./...
-go test -tags pxcgotest ./...
+go vet -tags routing_rust,pxcgotest ./...
+go test -tags routing_rust,pxcgotest -ldflags "$ROUTING_GO_LDFLAGS" ./...
 
 # c-archive: Go runtime + gVisor netstack + the proxy dialers + the shim in one
 # .a, built from the thin carchive/ main that blank-imports pxengine. No cgo
@@ -84,8 +79,7 @@ go test -tags pxcgotest ./...
 # hand-written stable include/pxengine.h regardless; the symbol cross-check
 # below is what guarantees they agree.
 mkdir -p "$INCLUDE"
-CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
-  go build -trimpath -buildmode=c-archive -o "$OUT/libpxengine.a" ./carchive
+go build -tags routing_rust -trimpath -buildmode=c-archive -o "$OUT/libpxengine.a" ./carchive
 
 # The stable header must declare exactly what the archive exports.
 # Read nm completely before matching: grep -q in a pipe can make nm fail

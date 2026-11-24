@@ -50,6 +50,16 @@ nonisolated struct DNSApplyRequest: Codable, Sendable, Equatable {
     /// Nothing to apply ⇒ clear the override (restore the captured/pushed DNS).
     var isEmpty: Bool { servers.isEmpty }
 
+    var isScoped: Bool { !servers.isEmpty && !matchDomains.isEmpty && !matchDomains.contains("") }
+
+    var isValid: Bool {
+        servers.count <= 32 && servers.allSatisfy { server in
+            server == server.trimmingCharacters(in: .whitespacesAndNewlines) &&
+                !server.contains("/") && RoutePrefixMath.canonicalNetwork(server) != nil
+        } && DNSSearchDomains.problem(list: searchDomains) == nil
+            && DNSSearchDomains.problem(list: matchDomains.filter { !$0.isEmpty }) == nil
+    }
+
     /// Build `NEDNSSettings` from the decision, or `nil` when there are no resolvers to
     /// set (clear the override). Search domains and match domains are applied only when
     /// non-empty; `matchDomains == [""]` is passed through as the catch-all.

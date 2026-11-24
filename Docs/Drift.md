@@ -146,32 +146,13 @@ names that never attached to the route diagram.
 in two halves: no hardware address is declared as a `String`, and nobody normalises one by
 hand. `Docs/NetworkTypes.md` §1 is the conventions this proved.
 
-## 5. `[::1]:443` — the IPv6 bracket, hand-rolled in **five** places ⚠️ COLLAPSE, not started
+## 5. IPv6 brackets in endpoint strings
 
-**The concept:** rendering (and re-parsing) `host:port` when the host may be an IPv6
-literal.
-
-`Docs/NetworkTypes.md` §3.6 records three sites. **There are five**, and the two it does not
-list are the interesting ones:
-
-| Site | Rule it applies |
-|---|---|
-| `SimpleVPN/Geo/WireGuardEndpointSelection.swift:110` | `contains(":") && !hasPrefix("[")` → bracket |
-| `SimpleVPN/Geo/EndpointDiscovery.swift:85`, `:94` | parse side — guards by COUNTING colons |
-| `SimpleVPN/Import/SSHConfigImport.swift:259` | parse side — `hasPrefix("[")` + find `]` |
-| **`Shared/SSHNetworkTunnelConfig.swift:182`** | same rule as the first, written out again |
-| **`SimpleVPN/Credentials/BitwardenProvider.swift:145`** | `contains(":")` → bracket, **with no already-bracketed guard** |
-
-The last one is the drift doing what drift does: four sites carry the `!hasPrefix("[")`
-check and the fifth does not, so a host that arrives already bracketed becomes `[[::1]]`.
-It is latent rather than live today only because `isLoopback` gates it and rejects the
-bracketed spellings — i.e. it is prevented by an unrelated function, which is exactly the
-kind of accident that stops being true.
-
-**Verdict: COLLAPSE — designed, not started.** The design is `Endpoint` in
-`Docs/NetworkTypes.md` §3.6, which needs `IPAddress` and `Port` first. Until then the
-guard bounds it: **`DriftRegisterTests` fails on a sixth site**, and `Docs/NetworkTypes.md`
-§3.6 has been corrected to name all five.
+`NetworkEndpoint.authority` renders IPv6 hosts with brackets for the shared VPN
+drivers, the SSH carrier and forwarding paths, WireGuard endpoint selection, and
+the Bitwarden loopback client. It preserves brackets that are already present.
+Endpoint Discovery parses optional ports and SSH import also parses usernames.
+`DriftRegisterTests` guards the renderer and those format-specific parsers.
 
 ## 6. Prefix rules — four places, four subsets ✅ KEEP SEPARATE (this is the model entry)
 
@@ -210,20 +191,15 @@ hint, one did not). The second one's own comment stated the rule it could not en
 **Verdict: COLLAPSE — done.** Guarded by `DriftRegisterTests`: `"Change\u{2026}"` may be
 spelled in exactly one place.
 
-## 8. Socketpair framing — 4-byte AF header vs raw IP ✅ KEEP SEPARATE
+## 8. Socketpair framing at the Darwin tunnel boundary
 
 **The concept:** how a packet is framed on an engine's tun file descriptor.
 
-`openvpn3` sets `tun_prefix = true` and frames every packet with `htonl(AF_INET/AF_INET6)`;
-`libopenconnect`'s `os_tun` path carries raw IP and infers the family from the version
-nibble. **This is not our choice** — each engine's own source decides it, and making them
-agree would mean patching a vendored engine.
-
-**Verdict: KEEP SEPARATE — the difference is upstream's.** It is documented at both call
-sites and in `Docs/Networking.md` §3.2, which calls it "the single most surprising thing in
-the packet path". `DriftRegisterTests` bounds it: only the two bridges may frame a tun fd,
-so a third fd-shaped engine has to declare its framing here rather than inherit whichever
-neighbour it was copied from.
+OpenVPN 3 sets `tun_prefix = true`. OpenConnect enables `TUN_HAS_AF_PREFIX` for
+Darwin's native tun FD. Both use a four-byte address family in network byte order.
+`VirtualDatagramPort` owns that socketpair for shared OpenVPN and for both OpenConnect
+attachments. Standalone OpenVPN uses its own pump, which also observes its pause and
+resume state. `DriftRegisterTests` guards both socketpair implementations.
 
 ## 9. Status words — three vocabularies ✅ KEEP SEPARATE (layered, not duplicated)
 
@@ -325,7 +301,7 @@ Update Tailscale, WireGuard, and these adapters together.
 
 gVisor updates resolve **`@go`**, not `@latest`: upstream's default branch
 requires Bazel and lacks the source layout needed by standard Go tooling. The
-2026-11-18 Go-branch revision (`13a33f77533a`) is pinned in both modules and the
+2026-11-23 Go-branch revision (`83df8eae069e`) is pinned in both modules and the
 proxy build script.
 
 OpenSSL 4.1.0 is built once from its SHA-256-verified upstream source with a macOS
@@ -376,6 +352,22 @@ The three Go modules passed their tests and the native engine build scripts
 rebuilt their archives. The unsigned Debug app and packet tunnel built against
 those archives. A disk image created with dmgbuild 2.0.0 and the repository's
 Finder layout passed `hdiutil verify`.
+
+**Dependency refresh (2026-11-23):** Both Go netstacks use gVisor's Go branch
+at `83df8eae069e` and share the refreshed `x/exp` revision. The Tailscale
+module also refreshes reachable indirect dependencies while retaining the
+stable Tailscale/WireGuard pairing. OpenVPN core 3.12 uses
+`cd2487bcde7c43130582344d9c512cb7842226f6`. OpenSSH portable 10.6p2
+uses a verified source archive and retains the local listener's supervisor
+identity check. SwiftNIO uses 2.105.1, and the SwiftNIO Extras 1.35.3
+SOCKS message sources and notices match the previous vendored release.
+Release CI uses Rust 1.100.0. RoutingLSP's offline vendor directory
+matches its updated lockfile. OpenVPN, OpenSSH, the Go engines, and the
+signed Debug app rebuilt successfully. Go and Rust tests passed, as did
+the OpenSSH reverse-forwarding test against a loopback SSH server. The
+signed macOS unit run passed 3,060 tests and skipped 23. Its one failure
+was the existing password authentication picker in `NativeVPNView.swift`,
+which `SettingAlignmentTests.everySettingRowsPickerIsRightAligned()` flags.
 
 **Verdict: KEEP SEPARATE — each engine builds independently, with coordinated
 pins.** Verify all engine archives whenever a shared dependency changes.
@@ -484,6 +476,18 @@ for these writes. Independent starts cannot compete for an active or reserved me
 
 ## 18. Routing preview and execution plus virtual interface ownership — COLLAPSED WITH EXPLICIT COMPATIBILITY
 
+The offline destination-language prototype and the live virtual router share
+`packetrouter.DestinationTable`. Source rule order is validated before lowering.
+The editor asks the compiler for both token spans and test decisions. Live capture
+and forwarding use the same ordered member claims after a port stops. See the
+[routing language and staged acceptance tests](RoutingLanguage.md).
+
+Per-app compositions have a separate OS routing method and a versioned provider
+configuration. The GUI and the packet provider validate the same source bindings.
+The shared Go router checks the process generation and selected WireGuard peer.
+Per-app sessions do not elect a whole-Mac gateway, resolver or proxy. See
+[identity and installed-system acceptance](RoutingEvidence.md#app-and-running-process-routing-in-simplevpn).
+
 The filtered `RoutePlan` now drives inspection and execution, including edited prefixes.
 One `NetworkSettingsWriter` owns all OS writes, including the OpenVPN/OpenConnect bridge
 paths. Confirmation precedes published ownership; timeout poisons the writer and ends
@@ -492,31 +496,36 @@ Telemetry begun before an acknowledged mutation is discarded; older confirmed se
 revisions cannot overwrite new ownership. CLI pause/resume/gateway replies report a
 failed acknowledgement as failure.
 
-The explicit **Connect Through One Virtual Interface** composition action currently
-supports two to sixteen single-peer WireGuard members. `VirtualRoutingEngine` owns one
-capture pump; Go instance handles and generations isolate ports and late callbacks.
-The whole virtual route plan is one OS transaction followed by one versioned Go commit.
-Stopped ports retain capture of private prefixes. Loss of default egress retains default
-capture and drops traffic; explicit Direct releases it. Physical UDP sockets are bound
-to a real underlay before bind and blackhole when no physical path exists.
+**Set Up a Routed Connection…** supports one to sixteen compatible packet members. Whole-Mac capture can combine WireGuard, paired Teleport, numeric SOCKS5 or HTTP(S) proxies, OpenVPN, Cisco AnyConnect, HTTPS GlobalProtect, TLS/PPP Fortinet and F5, HTTPS Juniper Network Connect, Pulse and Array, supported Tailscale/Headscale profiles, SSH Network Tunnel, SSH point-to-point and built-in IPsec. OpenVPN accepts built-in certificate and password sign-in, including verification codes available to the app. The shared SSL adapter uses a fresh authenticated session, including browser sign-in for protocols with built-in SSO support. App-scoped capture uses the same ports after verifying common resolver settings and the packet’s source identity. The signed provider validates both the saved member profile and its start options. Each independently authenticated child has a private slot and generation. Revoking one member stops its egress and rejects its stale replies.
 
-**KEEP SEPARATE:** other engines retain independent provider sessions. They use scoped
-Go APIs where applicable, but are not virtual routing ports yet. Distinct scoped DNS,
-custom proxies/local exclusions, chained transports, per-app/fake-IP/L7/Tcl routing and
-native VPN packet ports are refused or unavailable in virtual mode. The capability gate
-and `NetworkArchitectureBoundaryTests` must be changed together when these boundaries
-end. Do not infer provider-crash kill-switch guarantees from core packet tests: signed,
-notarized capture, sleep/wake/crash and macOS 26/27 verification remain required.
+The shared router applies the capture policy, chooses a member and translates the source address. The member policy runs on its own outgoing and returning packets. The reverse path requires the recorded member, generation and tuple before the shared inbound rules and reverse translation deliver the reply. In whole-Mac destination routing, a stopped private prefix stays captured. Explicit Direct releases default capture. Chained carriers and incompatible resolver policies require independent connections.
+
+Private peers exercise the packet and channel boundaries. Installed system-extension behavior during sleep, network roaming and a provider crash still needs a separate acceptance run.
 Restarting a stopped virtual member requires reconnecting the composition; the ordinary
 WireGuard start is guarded so it cannot create a competing independent interface.
 
+The provider keeps an unavailable member’s carrier exclusions until the session ends.
+Its route claims stay active until an acknowledged plan withdraws them. A replacement
+must still cover those claims. Gateway demotion treats a pair of IPv4 or IPv6 half-defaults
+as a default. The settings writer publishes changes after macOS acknowledges each request.
+
+Whole-Mac routed connections apply saved destination and native DNS filters to authenticated
+member claims before packet capture. Shared DNS changes install resolver settings and the
+corresponding host routes as one acknowledged plan. Private resolver scopes remain captured
+when their member drops. A single shared interface can publish one resolver configuration,
+so DNS assignments to different members require independent interfaces. macOS treats DNS
+on its default tunnel as catch-all, so scoped-only DNS requires split capture.
+Selected-app connections use source rules with member destination overrides and common DNS.
+Per-profile system proxy rewrites and legacy destination diverts require independent connections.
+OS-managed personal VPNs, external OpenConnect SOCKS sessions, and SSH listener/forwarding
+modes have no packet member port. Point-to-point SSH uses the saved tunnel routes. Live
+endpoint verification requires the actual configured VPN peers.
+
 Installed-extension acceptance has a separate launch contract:
 `Tools/test-installed-app.sh` explicitly sets Xcode's `UITargetAppPath`, and the UI
-tests use the configured target rather than Launch Services bundle lookup. They compare
-the visible app build and the exact enabled OS registration. About does not display
-the extension version, so its contents cannot prove provider IPC. Build 307 is now
-notarized, installed and registered as enabled; live capture/crash/sleep checks above
-remain open.
+tests use the configured target. They compare the visible app build and the exact
+enabled OS registration. Live provider IPC, packet capture, sleep, roaming, and
+crash handling require separate checks on that same installed build.
 
 Editor railroads also use `RouteGraphView`'s existing viewport, renderer and topology
 watcher. `RoutingRailroadProjection` adapts public engine facts to the same filters
@@ -629,6 +638,12 @@ proxy. Configuration acknowledgement is distinct from live provider verification
 `DNSQueryRoutingTests`, `DNSWireMessageTests` and loopback UDP/TCP transport tests
 cover these boundaries. No Tcl/PBR/fake-IP or packet egress router is introduced.
 
+## Protocol events in the playground and on a connected VPN
+
+The offline playground and the virtual packet router share the compiler and evaluator in `Vendor/proxy-engine/src/routelang`. Each adapter supplies its field and action permissions. The offline host stages changes to decoded event fixtures. The shared WireGuard router stages supported header edits on outbound inner packets. Other engines have different ownership boundaries. The catalog's adapter inventory records those boundaries and supplies the atlas reference. Keep the hosts separate so fixture-only actions cannot be enabled by loading the same source into a live composition. The live adapter rejection and rollback tests in `packetrouter/event_rich_test.go` guard this distinction.
+
+The atlas also models TLS termination, FTP and FTPS expectations and independent proxy legs. Proxy Tunnel's shipped ClientHello backend selector forwards the original TLS stream after choosing a target. A live terminating endpoint and authenticated application helpers require their own implementations.
+
 ## Adding to this file
 
 Two occasions, and both are cheap:
@@ -641,3 +656,32 @@ Two occasions, and both are cheap:
 
 **Never** silence a guard by loosening its needle. Widening a pattern until it stops
 matching is how the register becomes decorative.
+
+## Native packet rules and the offline routing reference
+
+**Keep separate.** The signed checker and provider execute live events with `Vendor/routing-core`. The Go portable evaluator in `Vendor/proxy-engine/src/routelang` provides browser traces and the differential oracle. The compact reference parser and matcher serve portable tooling and parity tests. Both implementations share the packet host, rule ordering, limits, counters and permission schema. Production selects the runtime during policy activation. A runtime fault drops the event.
+
+When adding an opcode, field type or standard-library function, run the native differential suites with the shipping build tag as well as the portable suites. The Swift composition editor requires a receipt from a native build. The packet tests cover compact candidate masks, staged edits, missing evidence, consumed budgets and terminal counters. The routing atlas identifies fixture-only events separately from provider capabilities.
+
+The Rust editor tree preserves source ranges for partially written programs. The Go frontend accepts completed programs and supplies authoritative adapter/type diagnostics through the bundled checker. The syntax tree can stay available while a declaration is incomplete. Any new syntax requires an editor range case and a compiler acceptance case. Signed LLVM kernels, activation-time register or threaded programs, and the portable evaluator share the same observable decisions, precise failure sites and budgets. The release’s differential tests compare these paths.
+
+## Proxy protocol ownership
+
+The local dynamic SSH listener decodes SOCKS5 with Apple NIOSOCKS from swift-nio-extras 1.35.3 and NIOCore 2.105.1. The packet-tunnel Go service uses SagerNet sing 0.9.6 for its upstream SOCKS5 messages and datagram addresses. The service uses the Go HTTP library for CONNECT and crypto/tls with system trust for HTTPS proxies. Each library executes in its existing process and language runtime. The upstream UDP association binds the expected address and port to the guest flow. Web proxy modes carry TCP and can forward DNS over TCP.
+
+
+### SSH tunnel-device ownership
+
+OpenSSH portable 10.6p2 opens a local tunnel device before requesting the remote
+`tun@openssh.com` channel. On Darwin its portable backend opens `/dev/tunN`.
+OpenSSH closes inherited descriptors above stderr at startup, and its documented
+multiplexing protocol supports stream and port forwarding. NetworkExtension
+supplies packet batches through `NEPacketTunnelFlow`. The remote OpenSSH server
+also checks `PermitTunnel`, key restrictions and availability of its own device.
+See upstream `ssh.c`, `clientloop.c`, `openbsd-compat/port-net.c`, `serverloop.c`
+and `PROTOCOL.mux`.
+
+The saved legacy SSH tunnel-device mode remains readable. The manager and
+readiness check refuse connection consistently. The separate SSH Network Tunnel
+kind carries routed TCP via authenticated `direct-tcpip` channels.
+`SSHSettingDescriptorTests` checks that the legacy mode cannot produce a command.

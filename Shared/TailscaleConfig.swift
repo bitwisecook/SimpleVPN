@@ -117,7 +117,7 @@ extension TailscaleConfig {
 
 // MARK: - Validation
 
-extension TailscaleConfig {
+nonisolated extension TailscaleConfig {
 
     // MARK: Legal ranges / limits (single source of truth for UI validation)
 
@@ -214,8 +214,8 @@ extension TailscaleConfig {
         var bytes = [UInt8](repeating: 0, count: 16)
         let ok = address.withCString { inet_pton(isV6 ? AF_INET6 : AF_INET, $0, &bytes) == 1 }
         guard ok else { return "\(address) isn't a valid address." }
-        guard !hasHostBits(bytes, prefix: prefix, byteCount: isV6 ? 16 : 4) else {
-            return "\(s) isn't the start of a network — try \(masked(address: bytes, prefix: prefix, isV6: isV6))/\(prefix)."
+        guard !RoutePrefixMath.hasHostBits(bytes, prefix: prefix, byteCount: isV6 ? 16 : 4) else {
+            return "\(s) isn't the start of a network — try \(RoutePrefixMath.masked(address: bytes, prefix: prefix, isV6: isV6))/\(prefix)."
         }
         return nil
     }
@@ -305,35 +305,7 @@ extension TailscaleConfig {
         return nil
     }
 
-    private static func hasHostBits(_ bytes: [UInt8], prefix: Int, byteCount: Int) -> Bool {
-        for i in 0..<byteCount {
-            let bitsBefore = i * 8
-            if prefix >= bitsBefore + 8 { continue }          // whole byte inside the prefix
-            let keep = max(0, min(8, prefix - bitsBefore))
-            let mask: UInt8 = keep == 0 ? 0 : UInt8(truncatingIfNeeded: 0xFF << (8 - keep))
-            if bytes[i] & ~mask != 0 { return true }
-        }
-        return false
-    }
 
-    private static func masked(address bytes: [UInt8], prefix: Int, isV6: Bool) -> String {
-        let byteCount = isV6 ? 16 : 4
-        var out = bytes
-        for i in 0..<byteCount {
-            let bitsBefore = i * 8
-            let keep = max(0, min(8, prefix - bitsBefore))
-            let mask: UInt8 = keep == 0 ? 0 : UInt8(truncatingIfNeeded: 0xFF << (8 - keep))
-            out[i] = bytes[i] & mask
-        }
-        var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
-        let s = out.withUnsafeBytes { raw -> String in
-            guard let base = raw.baseAddress,
-                  let p = inet_ntop(isV6 ? AF_INET6 : AF_INET, base, &buf, socklen_t(INET6_ADDRSTRLEN))
-            else { return "" }
-            return String(cString: p)
-        }
-        return s
-    }
 }
 
 // MARK: - Start payload (the TSStart contract)
@@ -348,6 +320,7 @@ nonisolated struct TailscaleStartConfig: Codable, Sendable, Equatable {
     /// straight to the engine, and is never persisted or logged.
     var authKey: String
     var stateDir: String
+    var underlayInterfaceIndex: UInt32?
     var userKeychainState: Bool = true
     var nodeState: String = ""
     var acceptRoutes: Bool

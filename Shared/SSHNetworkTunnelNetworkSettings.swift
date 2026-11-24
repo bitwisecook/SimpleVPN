@@ -73,7 +73,8 @@ nonisolated enum SSHNetworkTunnelNetworkSettings {
             included = [TailscaleNetworkSettings.Prefix(address: "0.0.0.0", length: 0, isIPv6: false),
                         TailscaleNetworkSettings.Prefix(address: "::", length: 0, isIPv6: true)]
         } else {
-            included = TailscaleNetworkSettings.parseAll(config.includedRoutes)
+            let routes = suppressDefaultRoute ? RoutePrefixMath.specificRoutes(in: config.includedRoutes) : config.includedRoutes
+            included = TailscaleNetworkSettings.parseAll(routes)
         }
         let excluded = TailscaleNetworkSettings.parseAll(config.excludedRoutes + extraExcludedRoutes)
 

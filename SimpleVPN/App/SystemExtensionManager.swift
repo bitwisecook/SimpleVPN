@@ -94,6 +94,17 @@ final class SystemExtensionManager: NSObject, OSSystemExtensionRequestDelegate, 
                 forExtensionWithIdentifier: extensionIdentifier, queue: .main))) ?? nil
     }
 
+    /// Protected traffic must reach the provider shipped with this app.
+    static func requireCurrentProvider() async throws {
+        let driver = OneShotRequest()
+        driver.requiresEnabledProvider = true
+        let version = try await driver.run(OSSystemExtensionRequest.propertiesRequest(
+            forExtensionWithIdentifier: extensionIdentifier, queue: .main))
+        guard let version, version == bundledExtensionVersion, !version.contains("?"), version != "unknown" else {
+            throw ProfilePacketPolicy.failure("Activate the network extension bundled with this version of SimpleVPN before using packet routing. Open Settings → Network Extension.")
+        }
+    }
+
     /// Remove the extension — the doctor's engine restart (deactivate → activate),
     /// always consent-gated upstream. macOS may ask for an admin password.
     static func deactivate() async throws {
@@ -108,6 +119,7 @@ final class SystemExtensionManager: NSObject, OSSystemExtensionRequestDelegate, 
     /// probe mid-activation must not clobber it. Same thread contract as the
     /// manager: callbacks on `.main`, hence the @unchecked Sendable.
     private final class OneShotRequest: NSObject, OSSystemExtensionRequestDelegate, @unchecked Sendable {
+        var requiresEnabledProvider = false
         private var cont: CheckedContinuation<String?, Error>?
 
         /// Resolves to the found extension's version string (properties
@@ -126,7 +138,8 @@ final class SystemExtensionManager: NSObject, OSSystemExtensionRequestDelegate, 
             // Sendable, so a string crosses the continuation, not the objects.
             // Prefer the enabled copy — a superseded one awaiting cleanup is
             // not what's answering IPC.
-            let best = properties.first { $0.isEnabled } ?? properties.first
+            let enabled = properties.filter { $0.isEnabled && !$0.isAwaitingUserApproval && !$0.isUninstalling }
+            let best = requiresEnabledProvider ? (enabled.count == 1 ? enabled.first : nil) : (enabled.first ?? properties.first)
             cont?.resume(returning: best.map { "v\($0.bundleShortVersion) (build \($0.bundleVersion))" })
             cont = nil
         }

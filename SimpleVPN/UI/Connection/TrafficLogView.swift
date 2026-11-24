@@ -198,7 +198,7 @@ struct TrafficLogView: View {
                             // Only VPNs that can actually be handed a destination are
                             // offered. Picking a Tailscale/native/SSH target used to
                             // store a rule, reconnect both VPNs and change nothing.
-                            if let reason = p.kind.routedInUnsupportedReason {
+                            if let reason = vpn.routedInUnsupportedReason(for: p) {
                                 Label("\(p.name) — \(reason)", systemImage: "exclamationmark.triangle")
                             } else {
                                 Button {
@@ -243,23 +243,17 @@ struct TrafficLogView: View {
         let dest = flow.address + (flow.family == 6 ? "/128" : "/32")
         let rule = RoutingRule(destination: dest, port: flow.port > 0 ? flow.port : nil,
                                proto: flow.proto, action: action, note: flow.address)
-        await vpn.addRoutingRule(rule, for: profileID)
+        if let reason = await vpn.addRoutingRule(rule, for: profileID) {
+            note = reason
+            return
+        }
         switch action {
         case .outside:
-            note = "\(flow.address) will now bypass \(vpnName) and use your normal connection."
+            note = "Saved. After \(vpnName) reconnects, \(flow.address) will use your normal connection."
         case .overVPN(let target):
-            let p = vpn.profiles.first { $0.id == target }
-            let name = p?.name ?? "the other VPN"
-            note = "\(flow.address) will now be routed over \(name) instead of \(vpnName)."
-            // An SSL VPN only carries a routed-in destination when it runs on the
-            // built-in engine: a config using settings that engine can't express
-            // runs through the openconnect tool, which manages its own routes and
-            // never sees this rule. Say it here rather than let it look applied.
-            if p?.kind.isSSLVPN == true {
-                note = (note ?? "") + " This applies while \(name) runs on the built-in engine — with settings only the openconnect tool can carry, it manages its own routes and this has no effect."
-            }
+            let name = vpn.profiles.first { $0.id == target }?.name ?? "the other VPN"
+            note = "Saved. When the VPNs reconnect, \(flow.address) will route through \(name) while its packet tunnel is connected."
         }
-        note = (note ?? "") + " The affected VPNs reconnect to apply the change."
     }
 
     private func ruleSymbol(_ rule: RoutingRule) -> String {

@@ -74,7 +74,8 @@ extension VPNController {
     /// first, so the caller (`ProfileImport`) needs to know it in advance.
     @discardableResult
     func importProfile(name: String, ovpn: String, server: String,
-                       id: String = UUID().uuidString) async throws -> String {
+                       id: String = UUID().uuidString, routingEventSource: String? = nil) async throws -> String {
+        try await ProfilePacketPolicy.validate(routingEventSource, adapter: RoutingAdapter.packetID(for: .openVPN))
         // An import is a deliberate new profile, even if a caller happens to
         // reuse an identifier from a profile removed earlier in this launch.
         locallyRemovedProfileIDs.remove(id)
@@ -91,6 +92,7 @@ extension VPNController {
         proto.serverAddress = server
         proto.providerConfiguration = ["ovpn": storedOVPN, "profile": id,
                                        "vpnType": VPNKind.openVPN.rawValue]
+        try await ProfilePacketPolicy.attach(routingEventSource, to: proto)
         mgr.protocolConfiguration = proto
         mgr.localizedDescription = name
         mgr.isEnabled = true
@@ -233,6 +235,7 @@ extension VPNController {
         authConfigs.removeValue(forKey: id)
         credentialSources.removeValue(forKey: id)
         overridesCache.removeValue(forKey: id)
+        filterActivity.clear(id)
         customRoutingCache.removeValue(forKey: id)
         uiPrefsCache.removeValue(forKey: id)
 
@@ -258,6 +261,7 @@ extension VPNController {
     /// Also called when macOS removes a profile outside this app. Release
     /// secrets and editor state in memory without deleting any Keychain items.
     func forgetCachedProfile(_ id: String) {
+        connectionReservations.cancel(member: id)
         credentialSaveTasks.removeValue(forKey: id)?.cancel()
         transientCreds[id] = nil
         preparedOnePasswordSignIns[id] = nil
@@ -281,6 +285,7 @@ extension VPNController {
         credentialSources[id] = nil
         authConfigs[id] = nil
         overridesCache[id] = nil
+        filterActivity.clear(id)
         customRoutingCache[id] = nil
         uiPrefsCache[id] = nil
         routingRulesCache[id] = nil

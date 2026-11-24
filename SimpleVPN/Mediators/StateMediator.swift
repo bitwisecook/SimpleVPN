@@ -34,13 +34,6 @@ import Foundation
 
 // MARK: - Stage 1: intent capture
 
-/// A structured, per-engine statement of what an engine WANTS on the host — never a
-/// direct write. `RouteIntent` / (later) `DNSIntent` / `ProxyIntent` conform.
-protocol MediatorIntent: Sendable, Equatable {
-    /// The engine (our profile id) this intent belongs to. One SCOPE = one subject.
-    var engine: String { get }
-}
-
 /// The single hookable capture point per mediator. An engine submits or withdraws
 /// intent here; a tier-3 handler (attached via `MediatorIntentHook`) may rewrite it
 /// before it reaches the arbiter. Left deliberately minimal — no Tcl engine now.

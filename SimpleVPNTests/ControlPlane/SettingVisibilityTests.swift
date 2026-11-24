@@ -88,7 +88,7 @@ struct SettingVisibilityTests {
         let ipsec = SettingVisibility.native(Self.native(.ipsec))
         #expect(ipsec.reason("native.xauth") == nil)
         #expect(ipsec.reason("native.group") == nil)
-        #expect(ipsec.reason("native.remote-id") != nil)      // IKEv2-only in macOS
+        #expect(ipsec.reason("native.remote-id") == nil)      // Authenticated IKEv1 gateway identity
         #expect(ipsec.reason("native.mobike") != nil)
 
         // L2TP's exported profile carries four fields; everything else is absent.

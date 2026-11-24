@@ -302,7 +302,7 @@ enum ConfigImport {
                 }
                 let fileName = map[ConfigDocumentKeys.name]?.stringValue ?? ""
                 let subject = fileName.isEmpty ? "A VPN with no name" : fileName
-                switch planVPN(map) {
+                switch planVPN(map, version: plan.formatVersion) {
                 case .failure(let reason):
                     plan.refusals.append(.init(subject: subject, reason: reason))
                 case .success(var planned):
@@ -333,7 +333,7 @@ enum ConfigImport {
         case failure(String)
     }
 
-    private static func planVPN(_ map: ConfigMap) -> VPNResult {
+    private static func planVPN(_ map: ConfigMap, version: Int) -> VPNResult {
         for key in [ConfigDocumentKeys.name, ConfigDocumentKeys.kind, ConfigDocumentKeys.server, ConfigDocumentKeys.openVPNConfiguration] {
             if let value = map[key], !isText(value) { return .failure("\(key) must be text.") }
         }
@@ -363,6 +363,13 @@ enum ConfigImport {
 
         var vpn = ConfigSnapshot.VPN(id: UUID().uuidString, name: name, kind: kind,
                                       server: map[ConfigDocumentKeys.server]?.stringValue ?? "")
+        if let value = map[ConfigDocumentKeys.packetPolicy] {
+            guard version >= ConfigFormat.packetPolicyVersion, isText(value), let source = value.stringValue,
+                  !source.isEmpty, source.utf8.count <= 32768, !source.utf8.contains(0) else {
+                return .failure("Its packet event handlers require format 2 and between 1 and 32,768 UTF-8 bytes of source.")
+            }
+            vpn.routingEventSource = source
+        }
         if let secrets = map[ConfigDocumentKeys.secrets] {
             guard let fields = secrets.mapValue else { return .failure("its secret section isn't readable.") }
             do { vpn.secrets = try ConfigSecretTransfer.validated(fields, kind: kind) }
@@ -391,13 +398,21 @@ enum ConfigImport {
             case .tailscale:
                 vpn.tailscale = try apply(settings, onto: TailscaleConfig(), namespace: "ts.")
             case .proxyTunnel:
-                vpn.proxyTunnel = try apply(settings, onto: ProxyTunnelConfig(), namespace: "px.")
+                let config = try apply(settings, onto: ProxyTunnelConfig(), namespace: "px.")
+                if let problem = config.tlsRoutesProblem { return .failure(problem) }
+                vpn.proxyTunnel = config
             case .sshNetworkTunnel:
                 vpn.sshNetworkTunnel = try apply(settings, onto: SSHNetworkTunnelConfig(), namespace: "sshnet.")
             case .ikev2, .ipsec, .l2tp:
                 var config = try apply(settings, onto: NativeVPNConfig(), namespace: "native.")
                 config.name = name
                 config.kind = kind
+                if config.l2tpMSCHAPv2 == true && version < ConfigFormat.ownedL2TPVersion {
+                    return .failure("The built-in L2TP authentication mode requires configuration format 4.")
+                }
+                if config.eapMSCHAPv2 == true && version < ConfigFormat.exactIKEAuthenticationVersion {
+                    return .failure("An explicit EAP-MSCHAPv2 authentication method requires configuration format 3.")
+                }
                 vpn.native = config
             case .ssh, .fortinet, .f5apm, .ciscoAnyConnect, .globalProtect,
                  .juniper, .pulse, .arrayNetworks:
@@ -414,12 +429,22 @@ enum ConfigImport {
                       !SubprocessTunnelConfig.passwordInAddress(config.server) else {
                     return .failure("Enter addresses and passwords separately.")
                 }
+                if config.sshTun != nil && (version < ConfigFormat.pointToPointSSH || kind != .ssh) {
+                    return .failure("SSH point-to-point settings require an SSH profile in format 5 or newer.")
+                }
                 vpn.subprocess = config.normalized()
             }
         } catch {
             return .failure("SimpleVPN couldn\u{2019}t read its settings, so it was left out.")
         }
 
+        if vpn.requiredPacketPolicy != nil {
+            let adapter: String?
+            if let native = vpn.native { adapter = native.ownedIPsec?.adapterID }
+            else if let subprocess = vpn.subprocess { adapter = ProfilePacketPolicy.adapter(for: subprocess) }
+            else { adapter = RoutingAdapter.packetID(for: kind, teleport: vpn.wireGuard?.usesTeleport == true, proxyScheme: vpn.proxyTunnel?.scheme) }
+            if adapter == nil { return .failure(ProfilePacketPolicy.unsupported) }
+        }
         if let signIn = map[ConfigDocumentKeys.signIn]?.mapValue {
             do { vpn.auth = try apply(signIn, onto: VPNAuthConfig(), namespace: "signin.") }
             catch { return .failure("its sign-in settings contain an invalid value.") }
@@ -519,6 +544,7 @@ enum ConfigImport {
                 out.append("Connects to: \(endpoint.host)\(endpoint.port.map { ":\($0)" } ?? "")")
             }
         }
+        if vpn.requiredPacketPolicy != nil { out.append("Requires packet event handlers before connecting.") }
         if let routing = vpn.customRouting, !routing.isEmpty {
             out.append("Custom Routing: this VPN carries its own rules for where traffic goes")
         }

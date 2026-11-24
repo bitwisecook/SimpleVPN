@@ -74,3 +74,12 @@ Vendor/proxy-engine/src/carchive/carchive
 
 # Agent worktrees (transient, self-contained git repos)
 .claude/worktrees/
+
+# Rust routing evaluator and C ABI; Cargo products stay out of source control.
+!Vendor/routing-core/
+Vendor/routing-core/target/
+Tools/RoutingLSP/target/
+
+!Vendor/ssh-socks/
+Vendor/ssh-socks/.build/
+Vendor/ssh-socks/.swiftpm/

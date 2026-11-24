@@ -22,6 +22,24 @@ import Darwin
 /// contains-matching in the filter itself).
 nonisolated enum RoutePrefixMath {
 
+    static func defaultRoutePrefixes(in routes: [String]) -> Set<String> {
+        defaults(in: Set(routes.compactMap(canonicalNetwork)))
+    }
+
+    private static func defaults(in networks: Set<String>) -> Set<String> {
+        var defaults = networks.intersection(["0.0.0.0/0", "::/0"])
+        for halves: Set<String> in [["0.0.0.0/1", "128.0.0.0/1"], ["::/1", "8000::/1"]] where networks.isSuperset(of: halves) {
+            defaults.formUnion(halves)
+        }
+        return defaults
+    }
+
+    static func specificRoutes(in routes: [String]) -> [String] {
+        let networks = routes.map { canonicalNetwork($0) ?? $0 }
+        let defaults = defaults(in: Set(networks))
+        return networks.filter { !defaults.contains($0) }
+    }
+
     static func overlaps(_ a: String, _ b: String) -> Bool {
         guard let pa = parse(a), let pb = parse(b), pa.v6 == pb.v6 else { return false }
         return prefixEqual(pa.bytes, pb.bytes, bits: min(pa.prefix, pb.prefix))
@@ -55,5 +73,46 @@ nonisolated enum RoutePrefixMath {
             if (a[fullBytes] & mask) != (b[fullBytes] & mask) { return false }
         }
         return true
+    }
+
+    /// The routing wire format uses a network address and prefix length, even
+    /// for a single host. netip on the other side rejects IPv4-mapped IPv6.
+    static func canonicalNetwork(_ value: String) -> String? {
+        guard value.utf8.count <= 80, !value.utf8.contains(0), let parsed = parse(value),
+              !hasHostBits(parsed.bytes, prefix: parsed.prefix, byteCount: parsed.bytes.count) else { return nil }
+        if parsed.v6 && parsed.bytes.prefix(10).allSatisfy({ $0 == 0 })
+            && parsed.bytes[10] == 255 && parsed.bytes[11] == 255 { return nil }
+        let address = masked(address: parsed.bytes, prefix: parsed.prefix, isV6: parsed.v6)
+        return address.isEmpty ? nil : address + "/" + String(parsed.prefix)
+    }
+
+    static func hasHostBits(_ bytes: [UInt8], prefix: Int, byteCount: Int) -> Bool {
+        for i in 0..<byteCount {
+            let bitsBefore = i * 8
+            if prefix >= bitsBefore + 8 { continue }          // whole byte inside the prefix
+            let keep = max(0, min(8, prefix - bitsBefore))
+            let mask: UInt8 = keep == 0 ? 0 : UInt8(truncatingIfNeeded: 0xFF << (8 - keep))
+            if bytes[i] & ~mask != 0 { return true }
+        }
+        return false
+    }
+
+    static func masked(address bytes: [UInt8], prefix: Int, isV6: Bool) -> String {
+        let byteCount = isV6 ? 16 : 4
+        var out = bytes
+        for i in 0..<byteCount {
+            let bitsBefore = i * 8
+            let keep = max(0, min(8, prefix - bitsBefore))
+            let mask: UInt8 = keep == 0 ? 0 : UInt8(truncatingIfNeeded: 0xFF << (8 - keep))
+            out[i] = bytes[i] & mask
+        }
+        var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+        let s = out.withUnsafeBytes { raw -> String in
+            guard let base = raw.baseAddress,
+                  let p = inet_ntop(isV6 ? AF_INET6 : AF_INET, base, &buf, socklen_t(INET6_ADDRSTRLEN))
+            else { return "" }
+            return String(cString: p)
+        }
+        return s
     }
 }

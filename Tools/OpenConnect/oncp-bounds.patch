@@ -1,0 +1,105 @@
+--- a/oncp.c
++++ b/oncp.c
+@@ -395,8 +395,10 @@
+ 	struct oc_vpn_option *new_opts = NULL;
+ 	struct oc_ip_info new_ip_info = {};
+ 
++	if (pktlen < 20)
++		return -EINVAL;
+ 	kmplen = load_be16(bytes + ofs + 18);
+-	kmpend = ofs + kmplen;
++	kmpend = 20 + kmplen;
+ 	if (kmpend > pktlen) {
+ 	eparse:
+ 		vpn_progress(vpninfo, PRG_ERR,
+@@ -419,9 +421,9 @@
+ 		group = load_be16(bytes + ofs);
+ 		grouplen = load_be32(bytes + ofs + 2);
+ 		ofs += 6;
++		if (grouplen < 0 || grouplen > kmpend - ofs)
++			goto eparse;
+ 		groupend = ofs + grouplen;
+-		if (groupend > pktlen)
+-			goto eparse;
+ 
+ 		if (kmp == 302 && group != 7 && group != 8) {
+ 			vpn_progress(vpninfo, PRG_ERR,
+@@ -436,7 +438,7 @@
+ 			attr = load_be16(bytes + ofs);
+ 			attrlen = load_be32(bytes + ofs + 2);
+ 			ofs += 6;
+-			if (attrlen + ofs > groupend)
++			if (attrlen < 0 || attrlen > groupend - ofs)
+ 				goto eparse;
+ 			if (process_attr(vpninfo, &new_opts, &new_ip_info,
+ 					 group, attr, bytes + ofs, attrlen))
+@@ -548,9 +550,11 @@
+ 	/* Now we expect a three-byte response with what's presumably an
+ 	   error code */
+ 	ret = vpninfo->ssl_read(vpninfo, (void *)bytes, 3);
++	if (ret < 3) {
++		ret = ret < 0 ? ret : -EIO;
++		goto out;
++	}
+ 	check_len = load_le16(bytes);
+-	if (ret < 0)
+-		goto out;
+ 	vpn_progress(vpninfo, PRG_TRACE,
+ 		     _("Read %d bytes of SSL record\n"), ret);
+ 	dump_buf_hex(vpninfo, PRG_TRACE, '<', (void *)bytes, ret);
+@@ -583,8 +587,8 @@
+ 	 */
+ 	if (check_len == 1) {
+ 		len = vpninfo->ssl_read(vpninfo, (void *)bytes, sizeof(bytes));
+-		if (len < 0) {
+-			ret = len;
++		if (len < 2) {
++			ret = len < 0 ? len : -EIO;
+ 			goto out;
+ 		}
+ 		check_len = load_le16(bytes);
+@@ -605,8 +609,8 @@
+ 	/* The NC frame might be split across multiple TLS records. Read the whole frame */
+ 	while (len < check_len + 2) {
+ 		int thislen = vpninfo->ssl_read(vpninfo, (void *)(bytes + len), sizeof(bytes) - len);
+-		if (len < 0) {
+-			ret = len;
++		if (thislen <= 0) {
++			ret = thislen < 0 ? thislen : -EIO;
+ 			goto out;
+ 		}
+ 		len += thislen;
+@@ -639,7 +643,7 @@
+ 	}
+ 
+ 	kmplen = load_be16(bytes + 20);
+-	if (kmplen + 2 >= sizeof(bytes)) {
++	if (kmplen + 22 > sizeof(bytes)) {
+ 		vpn_progress(vpninfo, PRG_ERR,
+ 			     _("KMP message 301 from server too large (%d bytes)\n"),
+ 			     kmplen);
+@@ -659,7 +663,7 @@
+ 			ret = -EINVAL;
+ 			goto out;
+ 		}
+-		if (load_le16(l) + len > kmplen + 22) {
++		if (!load_le16(l) || load_le16(l) + len > kmplen + 22) {
+ 			vpn_progress(vpninfo, PRG_ERR,
+ 				     _("Record of additional %d bytes too large; would make %d\n"),
+ 				     load_le16(l), len + load_le16(l));
+@@ -670,12 +674,12 @@
+ 		/* The NC frame might be split across multiple TLS records. Read the whole frame */
+ 		reclen = 0;
+ 		while (reclen < load_le16(l)) {
+-			int thislen = vpninfo->ssl_read(vpninfo, (void *)(bytes + len), load_le16(l) - reclen);
+-			if (thislen < 0) {
++			int thislen = vpninfo->ssl_read(vpninfo, (void *)(bytes + len + reclen), load_le16(l) - reclen);
++			if (thislen <= 0) {
+ 				vpn_progress(vpninfo, PRG_ERR,
+ 					     _("Failed to read continuation record of length %d\n"),
+ 					     load_le16(l));
+-				ret = thislen;
++				ret = thislen < 0 ? thislen : -EIO;
+ 				goto out;
+ 			}
+ 			reclen += thislen;

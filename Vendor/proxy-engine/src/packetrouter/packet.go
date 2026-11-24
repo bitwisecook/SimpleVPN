@@ -23,15 +23,21 @@ type packet struct {
 	ipHeader, transport, srcOffset, dstOffset, checksumOffset int
 	protocol                                                  uint8
 	srcPort, dstPort                                          uint16
-	echo, icmpError, udpZero, truncated                       bool
+	echo, icmpError, udpZero, truncated, headerOnly           bool
 }
 
 // Parsing never trusts a length, offset, extension count or transport checksum.
 // Quotes in ICMP errors may truncate the original datagram, but must contain its
 // complete IP header and the first eight bytes identifying the original flow.
 func parse(raw []byte, quote bool) (packet, error) {
+	return parseIP(raw, quote, false, false)
+}
+
+// Standalone pumps can carry opaque upper protocols without address translation.
+// Fragmented transport content is available only to the shared reassembler.
+func parseIP(raw []byte, quote, standalone, allowFragments bool) (packet, error) {
 	p := packet{raw: raw, checksumOffset: -1, truncated: quote}
-	if len(raw) < 20 || len(raw) > 65535 {
+	if len(raw) < 20 || len(raw) > 65535 && (!standalone || raw[0]>>4 != 6 || len(raw) > 65575) {
 		return p, ErrPacket
 	}
 	var total int
@@ -45,8 +51,16 @@ func parse(raw []byte, quote bool) (packet, error) {
 		if sum(raw[:p.ipHeader]) != 0xffff {
 			return p, ErrChecksum
 		}
-		if binary.BigEndian.Uint16(raw[6:8])&0xbfff != 0 {
-			return p, ErrFragment
+		flags := binary.BigEndian.Uint16(raw[6:8])
+		if flags&0xbfff != 0 {
+			if !allowFragments {
+				return p, ErrFragment
+			}
+			size := len(raw) - p.ipHeader
+			if flags&0xc000 != 0 || size == 0 || flags&0x2000 != 0 && size%8 != 0 || int(flags&0x1fff)*8+size > 65535-p.ipHeader {
+				return p, ErrPacket
+			}
+			p.headerOnly = true
 		}
 		// Source routes would make the destination in the header misleading.
 		for at := 20; at < p.ipHeader; {
@@ -75,7 +89,7 @@ func parse(raw []byte, quote bool) (packet, error) {
 			return p, ErrPacket
 		}
 		total = 40 + int(binary.BigEndian.Uint16(raw[4:6]))
-		if total == 40 {
+		if total == 40 && !(standalone && raw[6] == 59) {
 			return p, ErrProtocol
 		} // no jumbograms
 		p.ipHeader, p.transport, p.protocol = 40, 40, raw[6]
@@ -120,9 +134,28 @@ func parse(raw []byte, quote bool) (packet, error) {
 				p.transport += length
 				continue
 			case 44:
-				return p, ErrFragment
-			case 43, 50, 51:
-				return p, ErrProtocol // routing / encrypted / authenticated headers
+				if !allowFragments {
+					return p, ErrFragment
+				}
+				at := p.transport
+				if at+8 > len(raw) {
+					return p, ErrPacket
+				}
+				frag := binary.BigEndian.Uint16(raw[at+2:])
+				size := len(raw) - at - 8
+				if raw[at+1] != 0 || frag&6 != 0 || size == 0 || (frag&1 != 0 && size%8 != 0) || int(frag&0xfff8)+size > 65535-(at-40) {
+					return p, ErrPacket
+				}
+				p.protocol, p.transport, p.headerOnly = raw[at], at+8, true
+			case 50:
+				if !standalone || len(raw) < p.transport+8 {
+					return p, ErrProtocol
+				}
+				p.headerOnly = true
+			case 43, 51, 135, 139, 140:
+				// Routing, AH, Mobility, HIP and Shim6 can describe another
+				// next header. Treating them as terminal would skip its policy.
+				return p, ErrProtocol
 			}
 			break
 		}
@@ -135,6 +168,10 @@ func parse(raw []byte, quote bool) (packet, error) {
 	}
 	if total > len(raw) && !quote || total < len(raw) {
 		return p, ErrPacket
+	}
+	if standalone && (p.headerOnly || p.protocol != 6 && p.protocol != 17 && p.protocol != 1 && p.protocol != 58) {
+		p.headerOnly = true
+		return p, nil
 	}
 	if p.transport+8 > len(raw) {
 		return p, ErrPacket
@@ -168,7 +205,7 @@ func parse(raw []byte, quote bool) (packet, error) {
 		p.checksumOffset = p.transport + 2
 		p.echo = p.protocol == 1 && (l4[0] == 0 || l4[0] == 8) || p.protocol == 58 && (l4[0] == 128 || l4[0] == 129)
 		p.icmpError = p.protocol == 1 && (l4[0] == 3 || l4[0] == 11 || l4[0] == 12) || p.protocol == 58 && l4[0] >= 1 && l4[0] <= 4
-		if !p.echo && !p.icmpError {
+		if !standalone && !p.echo && !p.icmpError {
 			return p, ErrProtocol
 		}
 		if p.echo {

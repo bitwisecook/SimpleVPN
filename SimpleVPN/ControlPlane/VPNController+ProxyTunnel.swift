@@ -37,10 +37,12 @@ extension VPNController {
     /// Create a new Proxy Tunnel. Starts as a SOCKS5 preset with a full-tunnel
     /// default route — the common case — which the editor then refines.
     @discardableResult
-    func createProxyTunnel(name: String = "Proxy Tunnel", configuration: ProxyTunnelConfig? = nil) async throws -> String {
+    func createProxyTunnel(name: String = "Proxy Tunnel", configuration: ProxyTunnelConfig? = nil, routingEventSource: String? = nil) async throws -> String {
+        try await ProfilePacketPolicy.validate(routingEventSource, adapter: RoutingAdapter.packetID(for: .proxyTunnel, proxyScheme: configuration?.scheme))
         guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
         let id = UUID().uuidString
         let config = configuration?.normalized() ?? ProxyTunnelConfig()
+        if let problem = config.tlsRoutesProblem { throw err(problem) }
         let mgr = NETunnelProviderManager()
         let proto = NETunnelProviderProtocol()
         proto.providerBundleIdentifier = Self.providerBundleID
@@ -50,6 +52,7 @@ extension VPNController {
         var conf: [String: Any] = ["profile": id, "vpnType": VPNKind.proxyTunnel.rawValue]
         if let blob = config.encodedBlob() { conf["proxytunnel"] = blob }
         proto.providerConfiguration = conf
+        try await ProfilePacketPolicy.attach(routingEventSource, to: proto)
         mgr.protocolConfiguration = proto
         mgr.localizedDescription = name
         mgr.isEnabled = true
@@ -65,7 +68,12 @@ extension VPNController {
         guard let mgr = managers[id],
               let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { return }
         // normalized() on every save path (the OpenVPNOverrides rule).
+        guard virtualManager(for: id) == nil, let editing = connectionReservations.reserve(owner: "proxy.edit." + id, members: [id]) else {
+            throw err("Disconnect the virtual connection before editing this Proxy Tunnel.")
+        }
+        defer { connectionReservations.finish(editing) }
         let config = raw.normalized()
+        if let problem = config.tlsRoutesProblem { throw err(problem) }
         var conf = proto.providerConfiguration ?? [:]
         conf["profile"] = id
         conf["vpnType"] = VPNKind.proxyTunnel.rawValue
@@ -98,19 +106,28 @@ extension VPNController {
     /// Connect a Proxy Tunnel. Credentials (when the proxy needs them) ride
     /// startTunnel options in memory; a no-auth proxy connects with nothing.
     func connectProxyTunnel(id: String) async throws {
+        if let why = controlDenied(.connect(profile: id)) { throw err(why) }
+        guard virtualManager(for: id) == nil, let attempt = connectionReservations.reserve(owner: "profile." + id, members: [id]) else {
+            throw err("This VPN belongs to an active or connecting composition.")
+        }
+        defer { connectionReservations.finish(attempt); resyncStatuses() }
+
         guard let mgr = managers[id],
               mgr.protocolConfiguration is NETunnelProviderProtocol else { throw err("no such profile") }
         if let ensureExtensionReady, !(await ensureExtensionReady()) {
             throw err("SimpleVPN needs its network extension approved before it can connect. Open System Settings ▸ General ▸ Login Items & Extensions ▸ Network Extensions and allow SimpleVPN.")
         }
+        if hasPacketPolicy(for: id) { try await SystemExtensionManager.requireCurrentProvider() }
+        guard connectionReservations.isCurrent(attempt), managers[id] === mgr, !UI.isActive(mgr.connection.status), !Task.isCancelled else { throw CancellationError() }
         let config = proxyTunnelConfig(for: id)
         if let problem = config.connectProblem { throw err(problem) }
 
         var options: [String: NSObject] = [:]
         if config.requiresAuth {
             let creds = proxyTunnelCredentials(for: id)
-            if !creds.username.isEmpty { options["username"] = creds.username as NSString }
-            if !creds.password.isEmpty { options["password"] = creds.password as NSString }
+            if let problem = ProxyTunnelStartConfig.authenticationProblem(config: config, username: creds.username, password: creds.password) { throw err(problem) }
+            options["username"] = creds.username as NSString
+            options["password"] = creds.password as NSString
         }
         if ManagedPolicy.forceKeepInsideVPN { options["policyKeepInside"] = true as NSNumber }
         if ManagedPolicy.disableDivertRules { options["policyNoDiverts"] = true as NSNumber }

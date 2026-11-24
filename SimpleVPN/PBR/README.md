@@ -1,17 +1,16 @@
-# PBR — Policy-Based Routing engine home (design done, engine not built)
+# Policy-based routing
 
 Tier-3 of the routing architecture: the Tcl-9 iRules-style policy engine — full-capture
 single utun, gVisor netstack, routing-as-a-switch, egress DAG, NAT/SNAT/DNAT, fake-IP
 overlap handling, named DNS listeners, per-egress proxies + PAC via JavaScriptCore.
 
-**Read the 2026-10-05 [network architecture review](../../Docs/NetworkArchitectureReview.md)
-first.** The requested core model is one stable virtual interface selecting between VPN
-egresses. It needs engine ports, instance handles, translation, transport routing and a
-confirmed policy/status contract before Tcl. The review also identifies platform assumptions
-and current mediator gaps that must be resolved before treating the older proposal as an
-implementation contract. No shared router is built yet.
+Start with the [executable routing language design](../../Docs/RoutingLanguage.md),
+[macOS editor](../../Docs/RoutingEditor.md) and [routing evidence model](../../Docs/RoutingEvidence.md).
+One virtual interface can already select among two to sixteen single-peer WireGuard
+members. The editor and checker exercise destination rules offline. Live application
+of custom programs, scoped synthetic DNS and protocol handlers are future stages.
 
-The **design is the contract** — read it before writing code here:
+Earlier architecture and vocabulary:
 
 - `Docs/PolicyRouting.md` — the engine design, GUI sketches, example Tcl scripts
 - `Docs/PolicyEvents.md`  — the `VPN_*` / `VPN_HS_*` event & command taxonomy

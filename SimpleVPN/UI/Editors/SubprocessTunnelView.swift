@@ -166,7 +166,14 @@ struct SubprocessTunnelView: View {
             Form {
                 CustomRoutingTabView(vpn: vpn, profileID: draft.id, profile: $customRouting,
                                     proxyAuthUsername: $crProxyAuthUsername,
-                                    proxyAuthPassword: $crProxyAuthPassword)
+                                    proxyAuthPassword: $crProxyAuthPassword, showsProfilePacketPolicy: false)
+                ProfilePacketPolicySection(vpn: vpn, source: draft.routingEventSource, adapter: ProfilePacketPolicy.adapter(for: draft)) { source in
+                    try await updatePacketPolicy(source)
+                }
+                if manager.hasPacketSession(draft.id) || manager.hasProxyPacketSession(draft.id) {
+                    PacketCoreActivityButton(vpn: vpn, profileID: draft.id, name: draft.name,
+                                             proxyManager: manager.hasProxyPacketSession(draft.id) ? manager : nil)
+                }
             }
             .formStyle(.grouped)
             .revealsSettings()
@@ -301,12 +308,14 @@ struct SubprocessTunnelView: View {
         }
     }
 
-    /// SSH carries traffic three ways; the mode picks which fields matter.
+    /// Preserve a saved legacy choice until the user selects a supported mode.
     @ViewBuilder private var sshTrafficSection: some View {
         Section("Traffic") {
             EngineSettingRow(spec: spec("ssh.mode"), value: draft.sshMode) {
                 SettingPicker(selection: $draft.sshMode) {
-                    ForEach(SSHMode.allCases, id: \.self) { Text($0.label).tag($0) }
+                    ForEach(SSHMode.allCases, id: \.self) {
+                        Text($0.label).tag($0)
+                    }
                 } label: { EngineSettingLabel(spec: spec("ssh.mode"), value: draft.sshMode) }
                 .pickerStyle(.segmented)
                 // Segmented pickers draw no label — give VoiceOver the name back.
@@ -316,8 +325,13 @@ struct SubprocessTunnelView: View {
             case .socks: socksSectionBody
             case .portForward: forwardsSectionBody
             case .netTunnel:
-                Label("Point-to-point tunnel over SSH (-w). Creating the utun device requires root, so this mode is not supported in this build (it also needs “PermitTunnel” on the server).",
-                      systemImage: "exclamationmark.triangle")
+                linesRow("ssh.tun-addresses", tunField(\.addresses), format: .automatic, prompt: "10.80.0.2/32")
+                linesRow("ssh.tun-routes", tunField(\.routes), format: .automatic, prompt: "10.80.0.0/24")
+                intRow("ssh.tun-unit", value: tunField(\.remoteUnit), prompt: "Automatic", range: 0...2147483646,
+                       invalidMessage: "Enter the remote device number, or leave it empty.")
+                intRow("ssh.tun-mtu", value: Binding(get: { draft.sshTun?.mtu }, set: { tunField(\.mtu).wrappedValue = $0 ?? 1400 }),
+                       prompt: "1400", range: 1280...9000, invalidMessage: "Enter an MTU from 1280 to 9000 bytes.")
+                Text("The server must allow point-to-point tunnels and configure its end of the link. Ask its administrator for your local address and peer routes.")
                     .font(.callout).foregroundStyle(.secondary)
             }
             TrafficCrossLinks()
@@ -821,11 +835,13 @@ struct SubprocessTunnelView: View {
         ForEach(Array(draft.forwards.enumerated()), id: \.offset) { i, _ in
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    TextField("L 8080:internal.host:80", text: Binding(
-                        get: { draft.forwards[i] }, set: { draft.forwards[i] = $0 }))
-                        .font(.callout.monospaced())
-                        .onSubmit { applyForwardsNow() }
-                        .accessibilityLabel("Port forward \(i + 1)")
+                    ConfigurationOptionField(text: Binding(get: {
+                        draft.forwards.indices.contains(i) ? draft.forwards[i] : ""
+                    }, set: { value in
+                        guard draft.forwards.indices.contains(i) else { return }
+                        draft.forwards[i] = value
+                    }), format: .ssh, prompt: "L 8080:internal.host:80",
+                       accessibilityLabel: "Port forward \(i + 1)", onSubmit: { applyForwardsNow() })
                         // Validation rides the field's value (Docs/Accessibility.md).
                         .accessibilityValue(forwardError(draft.forwards[i]).map { "Problem: \($0)" } ?? "")
                     // .onDelete draws NO affordance in a macOS Form — without
@@ -1210,7 +1226,7 @@ struct SubprocessTunnelView: View {
                    invalidMessage: "Enter an interval between 0 and 86400 seconds — 0 turns keepalives off. Leave empty for the default 30.",
                    changed: draft.serverAliveInterval != 30)
             toggleRow("ssh.compression", isOn: $draft.compression)
-            linesRow("ssh.extra-options", $draft.sshExtraOptions, prompt: "Ciphers aes256-gcm@openssh.com")
+            linesRow("ssh.extra-options", $draft.sshExtraOptions, format: .ssh, prompt: "Ciphers aes256-gcm@openssh.com")
         }
     }
 
@@ -1404,7 +1420,7 @@ struct SubprocessTunnelView: View {
                 intRow("oc.force-dpd", value: $draft.forceDPD, prompt: "off",
                        range: SubprocessTunnelConfig.forceDPDRange,
                        invalidMessage: "Enter an interval between 0 and 3600 seconds — 0 leaves the protocol's own rate.")
-                linesRow("oc.extra-args", $draft.extraArgs, prompt: "--no-http-keepalive")
+                linesRow("oc.extra-args", $draft.extraArgs, format: .shell, prompt: "--no-http-keepalive")
             }
         }
     }
@@ -1625,16 +1641,26 @@ struct SubprocessTunnelView: View {
                 prompt: prompt, value: value, range: range, invalidMessage: invalidMessage)
         }
     }
-    private func linesRow(_ id: String, _ binding: Binding<[String]>, prompt: String) -> some View {
+    private func tunField<T>(_ key: WritableKeyPath<SSHTunNetworkSettings, T>) -> Binding<T> {
+        Binding(get: { (draft.sshTun ?? .init())[keyPath: key] }, set: { value in
+            var settings = draft.sshTun ?? .init()
+            settings[keyPath: key] = value
+            draft.sshTun = settings
+        })
+    }
+
+    private func linesRow(_ id: String, _ binding: Binding<[String]>, format: ConfigSyntax.Format, prompt: String) -> some View {
         EngineSettingRow(spec: spec(id), value: binding.wrappedValue) {
             VStack(alignment: .leading, spacing: 4) {
                 EngineSettingLabel(spec: spec(id), value: binding.wrappedValue)
                 ForEach(Array(binding.wrappedValue.enumerated()), id: \.offset) { i, _ in
                     HStack(spacing: 6) {
-                        TextField(prompt, text: Binding(get: { binding.wrappedValue[i] }, set: { binding.wrappedValue[i] = $0 }))
-                            .font(.callout.monospaced())
-                            .lineLimit(1)
-                            .accessibilityLabel("\(spec(id).name) line \(i + 1)")
+                        ConfigurationOptionField(text: Binding(get: {
+                            binding.wrappedValue.indices.contains(i) ? binding.wrappedValue[i] : ""
+                        }, set: { value in
+                            guard binding.wrappedValue.indices.contains(i) else { return }
+                            binding.wrappedValue[i] = value
+                        }), format: format, prompt: prompt, accessibilityLabel: "\(spec(id).name) line \(i + 1)")
                         // .onDelete draws NO affordance in a macOS Form — without
                         // this button a line can't be removed by mouse or keyboard.
                         Button {
@@ -1713,6 +1739,24 @@ struct SubprocessTunnelView: View {
         // Advanced opens itself when it already holds changes — the shared
         // CollapsibleSettingsSection derives that from its own changed count, so
         // there is nothing to seed here (and no chain to keep in sync).
+    }
+
+    private func updatePacketPolicy(_ source: String?) async throws {
+        guard !ManagedPolicy.lockConfiguration else { throw VPNController.configLocked }
+        let adapter = ProfilePacketPolicy.adapter(for: draft)
+        try await ProfilePacketPolicy.validate(source, adapter: adapter)
+        guard adapter == ProfilePacketPolicy.adapter(for: draft),
+              store.tunnels.contains(where: { $0.id == draft.id }), manager.beginPacketPolicyEdit(draft.id) else {
+            throw ProfilePacketPolicy.failure("Disconnect the VPN and reopen its routing settings.")
+        }
+        defer { manager.finishPacketPolicyEdit(draft.id) }
+        // A previously connected OpenConnect profile can also be started from
+        // System Settings. Update that saved provider before publishing the change.
+        if draft.kind.isSSLVPN || draft.kind == .ssh { try await OpenConnectProfileStore.updatePacketPolicy(source, id: draft.id) }
+        guard store.setPacketPolicy(source, for: draft.id) else {
+            throw ProfilePacketPolicy.failure("The VPN was removed before the rules were saved.")
+        }
+        draft.routingEventSource = source
     }
 
     /// Store what the editor holds. Called on field blur, on submit, and on close

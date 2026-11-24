@@ -117,11 +117,11 @@ private final class SystemDNSQueryRoutingBackend: DNSQueryRoutingBackend {
             UserDefaults.standard.removeObject(forKey: ownedKey)
             return
         }
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        let data = try encoder.encode(policy)
+        let data = try DNSQueryActivity.configurationData(policy)
         guard data.count <= 1_048_576 else { throw DNSQueryRoutingController.error("DNS query policy is too large.") }
         if manager.isEnabled, manager.providerProtocol?.providerBundleIdentifier == providerID,
-           manager.providerProtocol?.providerConfiguration?["queryPolicy"] as? Data == data { return }
+           manager.providerProtocol?.providerConfiguration?["queryPolicy"] as? Data == data,
+           manager.providerProtocol?.providerConfiguration?[DNSQueryActivityWire.ownerUIDKey] as? NSNumber != nil { return }
         if manager.isEnabled {
             // Query policy is a startProxy option. Restart the DNS proxy, never VPN sessions.
             manager.isEnabled = false
@@ -129,7 +129,7 @@ private final class SystemDNSQueryRoutingBackend: DNSQueryRoutingBackend {
         }
         let proto = NEDNSProxyProviderProtocol()
         proto.providerBundleIdentifier = providerID
-        proto.providerConfiguration = ["queryPolicy": data]
+        proto.providerConfiguration = ["queryPolicy": data, DNSQueryActivityWire.ownerUIDKey: NSNumber(value: geteuid())]
         proto.serverAddress = "DNS Query Routing"
         manager.providerProtocol = proto
         manager.localizedDescription = "SimpleVPN DNS Query Routing"

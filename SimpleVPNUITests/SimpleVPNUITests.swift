@@ -323,10 +323,202 @@ final class SimpleVPNUITests: XCTestCase {
                        "The primary action should share the heading’s horizontal centre.")
     }
 
-    /// The empty-install provider names are navigation controls, not decorative
-    /// copy. This is the user-visible regression that prompted the two-page flow:
-    /// clicking a company must reveal its instructions and a real import action.
-    ///
+    /// Check a disposable process through the signed helper and add a host
+    /// override. The fixture keeps the draft and VPN profiles in memory.
+    @MainActor
+    func testOneWireGuardVPNCanDraftAppRoutesWithoutChangingNetworkSettings() throws {
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        child.arguments = ["90"]
+        try child.run()
+        defer { if child.isRunning { child.terminate() }; child.waitUntilExit() }
+        let app = try launchOrSkip(arguments: [
+            "-SimpleVPNEmptyProfileFixture", "YES", "-SimpleVPNAppRoutingFixture", "YES",
+            "-ui.dockIcon", "YES", "-privacy.publicIPLookup", "NO",
+        ], requireLaunchWindow: true)
+        app.menuBarItems["VPN"].click()
+        app.menuBarItems["VPN"].menuItems["Manage VPNs…"].click()
+        let manage = app.windows["manage"]
+        let more = manage.descendants(matching: .any)["More VPN Actions"].firstMatch
+        XCTAssertTrue(more.waitForExistence(timeout: 8))
+        more.click()
+        let create = app.menuItems["Create a Composition…"].firstMatch
+        XCTAssertTrue(create.waitForExistence(timeout: 5))
+        XCTAssertTrue(create.isEnabled)
+        create.click()
+        let save = manage.buttons["Save"].firstMatch
+        XCTAssertTrue(save.waitForExistence(timeout: 5))
+        XCTAssertTrue(save.isEnabled, "One VPN can be saved for whole-Mac virtual routing.")
+        let traffic = manage.descendants(matching: .any)["composition-route-traffic"].firstMatch
+        XCTAssertTrue(traffic.waitForExistence(timeout: 5))
+        traffic.click()
+        app.menuItems["From selected apps"].firstMatch.click()
+        let add = manage.descendants(matching: .any)["Add Source"].firstMatch
+        XCTAssertTrue(add.waitForExistence(timeout: 5))
+        XCTAssertFalse(manage.buttons["Save"].firstMatch.isEnabled)
+        add.click()
+        app.menuItems["Running Process…"].firstMatch.click()
+        let field = app.textFields["app-route-process-id"].firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Add Rule"].firstMatch.isEnabled)
+        field.click()
+        field.typeText(String(child.processIdentifier))
+        app.buttons["Check Process"].firstMatch.click()
+        let addRule = app.buttons["Add Rule"].firstMatch
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: addRule)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 10), .completed)
+        addRule.click()
+        XCTAssertTrue(field.waitForNonExistence(timeout: 5))
+        let overrides = manage.descendants(matching: .any)["Destination overrides"].firstMatch
+        XCTAssertTrue(overrides.waitForExistence(timeout: 5))
+        overrides.click()
+        let sheet = manage.sheets.firstMatch
+        let form = sheet.scrollViews.firstMatch
+        let addDestination = sheet.buttons["Add Destination"]
+        // A macOS Form can report the frames of controls clipped below its
+        // scroll viewport. Bring the actual button inside the sheet before clicking.
+        if addDestination.frame.midY >= form.frame.maxY {
+            form.scroll(byDeltaX: 0, deltaY: -230)
+        }
+        XCTAssertTrue(addDestination.isHittable)
+        addDestination.click()
+        let target = sheet.textFields.matching(NSPredicate(format: "identifier BEGINSWITH %@", "app-route-destination-")).firstMatch
+        XCTAssertTrue(target.waitForExistence(timeout: 5))
+        XCTAssertTrue(target.label.hasPrefix("Destination 1 for ") || target.title.hasPrefix("Destination 1 for "))
+        XCTAssertFalse(manage.buttons["Save"].firstMatch.isEnabled)
+        target.click()
+        target.typeText("10.42.8.19")
+        XCTAssertTrue(manage.buttons["Save"].firstMatch.isEnabled)
+        let snapshot = XCTAttachment(screenshot: manage.screenshot())
+        snapshot.name = "App routing with a temporary process and destination override"
+        snapshot.lifetime = .keepAlways
+        self.add(snapshot)
+        manage.buttons["Cancel"].firstMatch.click()
+        XCTAssertTrue(add.waitForNonExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testRoutingBlockDragUpdatesTheSource() throws {
+        let app = try launchOrSkip(arguments: [
+            "-SimpleVPNEmptyProfileFixture", "YES", "-SimpleVPNAppRoutingFixture", "YES",
+            "-ui.dockIcon", "YES", "-privacy.publicIPLookup", "NO",
+        ], requireLaunchWindow: true)
+        app.menuBarItems["VPN"].click()
+        app.menuBarItems["VPN"].menuItems["Manage VPNs…"].click()
+        let manage = app.windows["manage"]
+        let more = manage.descendants(matching: .any)["More VPN Actions"].firstMatch
+        XCTAssertTrue(more.waitForExistence(timeout: 8))
+        more.click()
+        app.menuItems["Create a Composition…"].firstMatch.click()
+
+        let disclosure = manage.descendants(matching: .any)["Session Event Handlers"].firstMatch
+        XCTAssertTrue(disclosure.waitForExistence(timeout: 5))
+        disclosure.click()
+        let source = manage.textViews["Session event handler code"].firstMatch
+        XCTAssertTrue(source.waitForExistence(timeout: 5))
+        let original = "on observe: ip.packet { count(); if true {} }"
+        source.click()
+        source.typeText(original)
+
+        let graph = manage.descendants(matching: .any)["routing-block-railroad"].firstMatch
+        XCTAssertTrue(graph.waitForExistence(timeout: 5))
+        let fit = manage.buttons["Fit"].firstMatch
+        let form = manage.scrollViews.firstMatch
+        for _ in 0..<4 where !fit.isHittable {
+            form.scroll(byDeltaX: 0, deltaY: form.frame.midY - fit.frame.midY)
+        }
+        fit.click()
+        let incoming = graph.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Connector, Before action")).firstMatch
+        let branch = graph.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Connector, End of Then branch")).firstMatch
+        XCTAssertTrue(incoming.isHittable)
+        XCTAssertTrue(branch.isHittable)
+        incoming.click(forDuration: 0.15, thenDragTo: branch)
+        let moved = NSPredicate(format: "value MATCHES %@", "(?s)on observe: ip\\.packet \\{\\s*if true \\{\\s*count\\(\\);\\s*}\\s*}")
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: moved, object: source)], timeout: 5), .completed)
+        manage.buttons["Undo"].firstMatch.click()
+        XCTAssertEqual(source.value as? String, original)
+    }
+
+    @MainActor
+    func testPersistentProcessConditionsSurviveSavingInMemory() throws {
+        let app = try launchOrSkip(arguments: [
+            "-SimpleVPNEmptyProfileFixture", "YES", "-SimpleVPNAppRoutingFixture", "YES",
+            "-SimpleVPNProcessConditionsFixture", "YES", "-ui.dockIcon", "YES", "-privacy.publicIPLookup", "NO",
+        ], requireLaunchWindow: true)
+        app.menuBarItems["VPN"].click()
+        app.menuBarItems["VPN"].menuItems["Manage VPNs…"].click()
+        let manage = app.windows["manage"]
+        let actions = manage.descendants(matching: .any)["Actions for Process Conditions Fixture"].firstMatch
+        let sheet = manage.sheets.firstMatch
+        let form = sheet.scrollViews.firstMatch
+
+        func openEditor() throws {
+            XCTAssertTrue(actions.waitForExistence(timeout: 8))
+            actions.click()
+            app.menuItems["Edit…"].firstMatch.click()
+            XCTAssertTrue(sheet.waitForExistence(timeout: 5))
+        }
+        func reveal(_ control: XCUIElement) throws {
+            guard control.waitForExistence(timeout: 5) else {
+                throw NSError(domain: "ProcessConditionsUITest", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "Missing control: " + control.description])
+            }
+            // macOS exposes Form children beyond its clipped viewport.
+            for _ in 0..<4 {
+                let viewport = form.frame.insetBy(dx: 0, dy: 18)
+                let center = control.frame.midY
+                if viewport.minY...viewport.maxY ~= center { break }
+                form.scroll(byDeltaX: 0, deltaY: viewport.midY - center)
+            }
+            XCTAssertTrue(control.isHittable)
+        }
+        func condition(_ title: String) -> XCUIElement {
+            sheet.textFields["app-route-condition-" + title].firstMatch
+        }
+        func set(_ title: String, _ value: String) throws {
+            let field = condition(title)
+            try reveal(field)
+            field.click()
+            field.typeKey("a", modifierFlags: .command)
+            field.typeText(value)
+            XCTAssertEqual(field.value as? String, value)
+        }
+        try openEditor()
+        let disclosure = sheet.descendants(matching: .any)["Process conditions"].firstMatch
+        try reveal(disclosure)
+        disclosure.click()
+        let enable = sheet.descendants(matching: .any)["Require process conditions for Fixture Tool"].firstMatch
+        try reveal(enable)
+        enable.click()
+        let save = sheet.buttons["Save"].firstMatch
+        XCTAssertFalse(save.isEnabled, "A blank enabled constraint must not become an app-wide rule.")
+        try set("Executable name", "curl")
+        try set("Executable path", "/usr/bin/curl")
+        try set("Ancestor executable path", "/bin/zsh")
+        try set("HTTP proxy endpoint", "http://user:secret@proxy.example:8080")
+        XCTAssertFalse(save.isEnabled)
+        try set("HTTP proxy endpoint", "proxy.example:8080")
+        let variable = sheet.popUpButtons["app-route-proxy-variable"].firstMatch
+        try reveal(variable)
+        variable.click()
+        app.menuItems["http_proxy"].firstMatch.click()
+        XCTAssertTrue(save.isEnabled)
+        save.click()
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5))
+
+        try openEditor()
+        let required = sheet.descendants(matching: .disclosureTriangle).matching(
+            NSPredicate(format: "label CONTAINS[c] %@", "Process conditions required")).firstMatch
+        try reveal(required)
+        required.click()
+        XCTAssertEqual(condition("Executable name").value as? String, "curl")
+        XCTAssertEqual(condition("Executable path").value as? String, "/usr/bin/curl")
+        XCTAssertEqual(condition("Ancestor executable path").value as? String, "/bin/zsh")
+        XCTAssertEqual(condition("HTTP proxy endpoint").value as? String, "proxy.example:8080")
+        XCTAssertEqual(variable.value as? String, "http_proxy")
+        sheet.buttons["Cancel"].click()
+    }
+
     /// Exercise the same empty stores on a developer Mac and a clean install.
     @MainActor
     func testFreshInstallProviderChoiceOpensItsSetupPage() throws {

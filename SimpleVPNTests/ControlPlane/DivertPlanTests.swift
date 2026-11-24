@@ -26,6 +26,50 @@ struct DivertPlanTests {
         RoutingRule(destination: dest, action: action, enabled: enabled)
     }
 
+    @Test @MainActor func openConnectRouteTargetsUseEffectiveTransport() {
+        var config = SubprocessTunnelConfig()
+        config.kind = .ciscoAnyConnect
+        let builtin = SubprocessTunnelManager.openConnectRouteTargetProblem
+        #expect(builtin(config, nil) == nil)
+        #expect(builtin(nil, nil) == nil) // NE-only profile
+        for status in [SubprocessTunnelManager.Status.connecting, .connected] {
+            #expect(builtin(config, .init(status: status, socksPort: 1080)) != nil)
+            #expect(builtin(config, .init(status: status)) == nil)
+        }
+        #expect(builtin(config, .init(status: .disconnected, socksPort: 1080)) == nil)
+        config.preferInProcess = false
+        #expect(builtin(config, nil) != nil)
+        config.preferInProcess = true
+        config.extraArgs = ["--no-http-keepalive"]
+        #expect(builtin(config, nil) != nil)
+        config.extraArgs = []
+        config.kind = .fortinet
+        config.authMode = "sso"
+        #expect(builtin(config, nil) != nil)
+    }
+
+    @Test @MainActor func openConnectReconnectPreservesOnlySameProfileRoutingState() throws {
+        var config = SubprocessTunnelConfig()
+        config.kind = .ciscoAnyConnect
+        let rules = try #require(RoutingRuleStore.encode([Self.rule("192.0.2.4/32")]))
+        let includes = try #require(RouteDestStore.encode([.init(address: "192.0.2.5", prefix: 32, ipv6: false)]))
+        var custom = CustomRoutingProfile()
+        custom.routes.defaultDisposition = .ignore
+        let filter = try #require(custom.encodedBlob())
+        var previous: [String: Any] = [
+            "profile": config.id, "routingRules": rules, "routingIncludes": includes, "customrouting": filter, "obsolete": "value"
+        ]
+        let next = SubprocessTunnelManager.inProcessConfiguration(config, previous: previous)
+        #expect(next["obsolete"] == nil)
+        #expect(next["customrouting"] as? Data == filter)
+        let plan = DivertPlan.make(providerConfiguration: next, keepInside: false, noDiverts: false)
+        #expect(plan.outsideCIDRs == ["192.0.2.4/32"])
+        #expect(plan.inboundCIDRs == ["192.0.2.5/32"])
+        previous["profile"] = "different-profile"
+        let other = SubprocessTunnelManager.inProcessConfiguration(config, previous: previous)
+        #expect(other["routingRules"] == nil && other["routingIncludes"] == nil && other["customrouting"] == nil)
+    }
+
     @Test func outsideDivertsBecomeCarveOutCIDRs() {
         let plan = DivertPlan.make(rules: [Self.rule("142.250.0.0/16"),
                                            Self.rule("2001:db8::1/128")],

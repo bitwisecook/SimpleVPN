@@ -48,6 +48,11 @@ struct DNSProfileInfo: Sendable, Identifiable {
     let matchDomains: [String]
     /// It claims the catch-all (all lookups) — e.g. a full-tunnel with pushed resolvers.
     let wantsCatchAll: Bool
+    var ownsPacketSettings = false
+
+    var participatesInSplitDNS: Bool {
+        ownsPacketSettings || DNSParticipation.classify(kind).participatesInSplitDNS
+    }
 }
 
 @MainActor
@@ -57,6 +62,8 @@ protocol DNSMediatorHost: AnyObject {
     /// The profile that owns the default route right now (== the Route mediator's
     /// `effectiveGatewayOwner`) — its DNS is the catch-all.
     var dnsDefaultOwner: String? { get }
+    var dnsVirtualProfileIDs: Set<String> { get }
+    func dnsApplyVirtual(_ requests: [String: DNSApplyRequest]) async -> Bool
     /// SOLE-WRITER apply: push ONE participant's arbitrated `NEDNSSettings` onto its
     /// live tunnel via the `dns:apply:` IPC (Docs/StateMediators.md › DNS applier).
     /// `request == nil`/empty clears the override (restore the captured/pushed DNS).
@@ -67,6 +74,11 @@ protocol DNSMediatorHost: AnyObject {
     /// Reconnect a profile (the fallback re-assert lever — re-establishes its pushed
     /// DNS for engines with no live applier).
     func dnsReconnect(id: String) async
+}
+
+extension DNSMediatorHost {
+    var dnsVirtualProfileIDs: Set<String> { [] }
+    func dnsApplyVirtual(_ requests: [String: DNSApplyRequest]) async -> Bool { false }
 }
 
 // MARK: - Realizer (stage 3 — the sole-writer seam)
@@ -135,8 +147,11 @@ final class DNSRealizer: MediatorRealizer {
         guard let host else { return false }
         let requests = plan.applyRequests()
         guard force || !uncertain.isEmpty || requests != appliedRequests else { return true }
+        let virtual = host.dnsVirtualProfileIDs
+        let shared = requests.filter { virtual.contains($0.key) }
+        let oldShared = appliedRequests.filter { virtual.contains($0.key) }
         do {
-            for engine in Set(appliedRequests.keys).union(uncertain).subtracting(requests.keys).sorted() {
+            for engine in Set(appliedRequests.keys).union(uncertain).subtracting(requests.keys).subtracting(virtual).sorted() {
                 guard isCurrent() else { return false }
                 // A disconnected session no longer owns any resolver settings.
                 if host.dnsProfiles.contains(where: { $0.id == engine && $0.engaged }) {
@@ -144,16 +159,28 @@ final class DNSRealizer: MediatorRealizer {
                 } else { forget(id: engine) }
             }
         }
-        let order = requests.keys.sorted {
-            let a = requests[$0]?.matchDomains.contains("") == true
-            let b = requests[$1]?.matchDomains.contains("") == true
-            return a != b ? !a : $0 < $1
+        func applyIndependent(catchAll: Bool) async -> Bool {
+            for engine in requests.keys.sorted() where !virtual.contains(engine) {
+                guard let request = requests[engine], (request.matchDomains.contains("") == catchAll) else { continue }
+                guard isCurrent() else { return false }
+                if !force, appliedRequests[engine] == request { continue }
+                guard await write(request, to: engine, host: host) else { return false }
+            }
+            return true
         }
-        for engine in order {
+        guard await applyIndependent(catchAll: false) else { return false }
+        if !virtual.isEmpty, force || shared != oldShared || !uncertain.isDisjoint(with: virtual) {
             guard isCurrent() else { return false }
-            if !force, appliedRequests[engine] == requests[engine] { continue }
-            guard await write(requests[engine], to: engine, host: host) else { return false }
+            let token = UUID()
+            for id in virtual { writes[id] = token; uncertain.insert(id); appliedRequests[id] = nil }
+            let ok = await host.dnsApplyVirtual(shared)
+            for id in virtual where writes[id] == token {
+                writes[id] = nil
+                if ok { appliedRequests[id] = shared[id]; uncertain.remove(id) }
+            }
+            guard ok, isCurrent() else { return false }
         }
+        guard await applyIndependent(catchAll: true) else { return false }
         return isCurrent()
     }
 
@@ -222,7 +249,7 @@ final class DNSMediator {
     /// Connected profiles that participate in DNS, most-recent-first.
     var participatingProfiles: [DNSProfileInfo] {
         (host?.dnsProfiles ?? [])
-            .filter { $0.connected && DNSParticipation.classify($0.kind).participatesInSplitDNS }
+            .filter { $0.connected && $0.participatesInSplitDNS }
             .sorted { a, b in
                 let ta = a.lastConnectedAt ?? .distantPast
                 let tb = b.lastConnectedAt ?? .distantPast
@@ -261,7 +288,7 @@ final class DNSMediator {
     /// Rebuild intents from the live profiles through the capture seam.
     private func refreshIntents() {
         let live = (host?.dnsProfiles ?? [])
-            .filter { $0.connected && DNSParticipation.classify($0.kind).participatesInSplitDNS }
+            .filter { $0.connected && $0.participatesInSplitDNS }
         let liveIDs = Set(live.map(\.id))
         for gone in intents.keys where !liveIDs.contains(gone) { withdraw(engine: gone) }
         for info in live {

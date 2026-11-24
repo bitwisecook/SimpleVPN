@@ -21,6 +21,8 @@ attributes:
 # the release workflow generates and signs). Pinned exactly, same policy as the
 # SHA-pinned workflow actions — bump deliberately, never float.
 packages:
+  SSHProxyCodec:
+    path: Vendor/ssh-socks
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     # Keep the release workflow's appcast tools at this same version.
@@ -37,12 +39,12 @@ settings:
     SWIFT_VERSION: "6.0"                       # Swift 6 language mode = complete/strict concurrency
     SWIFT_APPROACHABLE_CONCURRENCY: YES
     SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
-    MARKETING_VERSION: "0.8"
+    MARKETING_VERSION: "0.9"
     # Kept in lockstep with the committed BUILDNUMBER by the BuildNumber
     # dependency below. Xcode resolves this default before that dependency
     # runs, so the two product targets stamp the newly allocated value into
     # their generated plists before signing.
-    CURRENT_PROJECT_VERSION: "522"
+    CURRENT_PROJECT_VERSION: "630"
     # Xcode "recommended settings" we accept (signing stays Developer ID, ARCHS stays arm64 by design).
     DEAD_CODE_STRIPPING: YES
     ENABLE_USER_SCRIPT_SANDBOXING: YES
@@ -56,6 +58,22 @@ settings:
     COPY_PHASE_STRIP: NO
 
 targets:
+  RoutingEventChecker:
+    type: ""
+    platform: macOS
+    legacy:
+      toolPath: /bin/bash
+      arguments: '"$(SRCROOT)/Tools/build-event-checker.sh"'
+      passSettings: true
+      workingDirectory: "$(SRCROOT)"
+  RoutingLanguageServer:
+    type: ""
+    platform: macOS
+    legacy:
+      toolPath: /bin/bash
+      arguments: '"$(SRCROOT)/Tools/build-routing-lsp.sh"'
+      passSettings: true
+      workingDirectory: "$(SRCROOT)"
   TeleportPairHelper:
     type: ""
     platform: macOS
@@ -125,6 +143,14 @@ targets:
         # The app links the OpenVPN3 engine solely for static profile evaluation
         # (OVPNProfileEvaluator → OpenVPNClientHelper::eval_config). Same C++
         # settings as the PacketTunnel target.
+        # PacketTunnel builds the Rust archive before its dependent app links.
+        # The app runs its own SSH channel policies with the same static evaluator.
+        LIBRARY_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(BUILT_PRODUCTS_DIR)/RoutingNative"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-lsimplevpn_routing_core"
         SWIFT_OBJC_BRIDGING_HEADER: "SimpleVPN/SimpleVPN-Bridging-Header.h"
         CLANG_CXX_LANGUAGE_STANDARD: "c++20"
         CLANG_CXX_LIBRARY: "libc++"
@@ -140,6 +166,39 @@ targets:
           - "USE_TUN_BUILDER=1"
           - "FMT_HEADER_ONLY=1"
     postBuildScripts:
+      - name: Embed supervised OpenSSH client
+        script: |
+          /usr/bin/install -d "${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers"
+          /usr/bin/install -m 755 "${SRCROOT}/Vendor/openssh/bin/ssh" "${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers/ssh"
+          if [ "${CODE_SIGNING_ALLOWED:-YES}" != NO ]; then
+            /usr/bin/codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY:-$CODE_SIGN_IDENTITY}" --options runtime --timestamp --identifier com.bragi0.SimpleVPN.ssh "${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers/ssh"
+          fi
+        inputFiles:
+          - "$(SRCROOT)/Vendor/openssh/bin/ssh"
+        outputFiles:
+          - "$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/ssh"
+      - name: Embed routing event checker
+        script: |
+          mkdir -p "${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers"
+          cp -f "${BUILT_PRODUCTS_DIR}/routecheck" "${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers/routecheck"
+          if [ "${CODE_SIGNING_ALLOWED:-YES}" != NO ]; then
+            /usr/bin/codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY:-$CODE_SIGN_IDENTITY}" --options runtime --timestamp --identifier com.bragi0.SimpleVPN.routecheck "${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers/routecheck"
+          fi
+        inputFiles:
+          - "$(BUILT_PRODUCTS_DIR)/routecheck"
+        outputFiles:
+          - "$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/routecheck"
+      - name: Embed routing language server
+        script: |
+          /usr/bin/install -d "${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers"
+          /usr/bin/install -m 755 "${BUILT_PRODUCTS_DIR}/routing-lsp" "${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers/routing-lsp"
+          if [ "${CODE_SIGNING_ALLOWED:-YES}" != NO ]; then
+            /usr/bin/codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY:-$CODE_SIGN_IDENTITY}" --options runtime --timestamp --identifier com.bragi0.SimpleVPN.routing-lsp "${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers/routing-lsp"
+          fi
+        inputFiles:
+          - "$(BUILT_PRODUCTS_DIR)/routing-lsp"
+        outputFiles:
+          - "$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/routing-lsp"
       - name: Embed Teleport pairing helper
         script: |
           mkdir -p "${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers"
@@ -209,12 +268,17 @@ targets:
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER}" "${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
           echo "==> stamped ${FULL_PRODUCT_NAME} build ${BUILD_NUMBER}"
     dependencies:
+      - sdk: libbsm.tbd
+      - target: SourceIdentityHelper
+        embed: true
       - target: PacketTunnel
         embed: true
       - target: OPNativeHelper
         # Embedded explicitly in Contents/MacOS above. XcodeGen's default
         # embedding adds a second copy to Resources without a secure timestamp.
         embed: false
+      - target: RoutingEventChecker
+      - target: RoutingLanguageServer
       - target: TeleportPairHelper
         embed: false
       - target: OCAuthHelper
@@ -226,6 +290,7 @@ targets:
       - target: SimpleVPNInstaller
         embed: false
       - package: Sparkle
+      - package: SSHProxyCodec
       - sdk: Security.framework
       - sdk: SystemConfiguration.framework
       - sdk: libresolv.tbd
@@ -286,6 +351,7 @@ targets:
           - "Info.plist"
           - "PacketTunnel.entitlements"
       - Shared
+      - path: SimpleVPN/Credentials/OpenConnectAuthWire.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.bragi0.SimpleVPN.PacketTunnel
@@ -323,6 +389,7 @@ targets:
           # libtsengine.a (two Go c-archives cannot co-link), so there is no
           # extra library to search for — only this header to find.
           - "$(SRCROOT)/Vendor/proxy-engine/include"
+          - "$(SRCROOT)/Vendor/strongswan-include"
           # libssh, for the SSH Network Tunnel kind's in-process session
           # (SSHNetworkTunnelEngine + Shared/SSHBridge.m). Shared/ is on the
           # search path too because the bridging header below imports
@@ -339,10 +406,13 @@ targets:
         # netstack → SOCKS5/CONNECT) is folded into THIS archive via a blank
         # import in the Tailscale shim, so -ltsengine carries both.
         LIBRARY_SEARCH_PATHS:
-          - "$(SRCROOT)/Vendor/tailscale-engine"
+          - "$(BUILT_PRODUCTS_DIR)/RoutingNative"
+          - "$(SRCROOT)/Vendor"
         OTHER_LDFLAGS:
           - "$(inherited)"
           - "-ltsengine"
+          - "-lSimpleIPsec"
+          - "-lsimplevpn_routing_core"
           - "-framework"
           - "CoreFoundation"
           - "-framework"
@@ -355,7 +425,25 @@ targets:
           - "USE_OPENSSL=1"
           - "USE_TUN_BUILDER=1"
           - "FMT_HEADER_ONLY=1"
+    preBuildScripts:
+      # Cargo and Go manage incremental dependencies across the two languages and
+      # build tags. Declare the link inputs so Xcode schedules them before Ld.
+      - name: Build native routing engines
+        basedOnDependencyAnalysis: false
+        script: |
+          /bin/bash "$SRCROOT/Tools/build-tailscale-engine.sh" --archive-only "$BUILT_PRODUCTS_DIR/RoutingNative"
+        outputFiles:
+          - "$(BUILT_PRODUCTS_DIR)/RoutingNative/libtsengine.a"
+          - "$(BUILT_PRODUCTS_DIR)/RoutingNative/libsimplevpn_routing_core.a"
     postBuildScripts:
+      - name: Embed signed IPsec member worker
+        script: |
+          /usr/bin/install -d "${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers"
+          /bin/cp -f "${BUILT_PRODUCTS_DIR}/IPsecMemberWorker" "${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers/IPsecMemberWorker"
+        inputFiles:
+          - "$(BUILT_PRODUCTS_DIR)/IPsecMemberWorker"
+        outputFiles:
+          - "$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/IPsecMemberWorker"
       # Keep the embedded engine on the exact same allocated build as its
       # containing app. SystemExtensionManager uses this equality to decide
       # whether an installed engine needs an upgrade.
@@ -371,6 +459,12 @@ targets:
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER}" "${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
           echo "==> stamped ${FULL_PRODUCT_NAME} build ${BUILD_NUMBER}"
     dependencies:
+      - sdk: libbsm.tbd
+      - target: IPsecMemberWorker
+        embed: false
+        link: false
+      - target: SourceIdentityHelper
+        embed: true
       - target: BuildNumber
       - sdk: NetworkExtension.framework
       - sdk: Security.framework
@@ -404,6 +498,53 @@ targets:
       # CoreFoundation to LINK, regardless of whether a security key is ever used.
       - sdk: IOKit.framework
       - sdk: CoreFoundation.framework
+
+  IPsecMemberWorker:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Tools/StrongSwan/Worker/main.c
+    settings:
+      base:
+        PRODUCT_NAME: IPsecMemberWorker
+        PRODUCT_BUNDLE_IDENTIFIER: com.bragi0.SimpleVPN.IPsecMemberWorker
+        CREATE_INFOPLIST_SECTION_IN_BINARY: YES
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+        CODE_SIGN_ENTITLEMENTS: Tools/StrongSwan/Worker/Worker.entitlements
+        HEADER_SEARCH_PATHS: ["$(SRCROOT)/Vendor/strongswan-include"]
+        LIBRARY_SEARCH_PATHS: ["$(SRCROOT)/Vendor"]
+        OTHER_LDFLAGS: ["$(inherited)", "-lSimpleIPsec"]
+        SKIP_INSTALL: YES
+    dependencies:
+      # This archive contains the same pinned static libcrypto and is also
+      # available on a clean CI engine-cache hit.
+      - framework: Vendor/OpenVPNEngine.xcframework
+        link: true
+        embed: false
+      - sdk: CoreFoundation.framework
+      - sdk: Security.framework
+
+  SourceIdentityHelper:
+    type: xpc-service
+    platform: macOS
+    sources:
+      - path: SourceIdentityHelper
+        excludes: ["Info.plist", "SourceIdentityHelper.entitlements"]
+      - Shared/SourceIdentityTypes.swift
+      - Shared/SourceProcessCriteria.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bragi0.SimpleVPN.SourceIdentity
+        PRODUCT_NAME: SourceIdentityHelper
+        INFOPLIST_FILE: SourceIdentityHelper/Info.plist
+        CODE_SIGN_ENTITLEMENTS: SourceIdentityHelper/SourceIdentityHelper.entitlements
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+        SKIP_INSTALL: YES
+        SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
+    dependencies:
+      - sdk: Security.framework
+      - sdk: libbsm.tbd
 
   # ---- 1Password SDK helper (the ONLY binary with the library-validation
   # relaxation — AMFI forbids it on the sysext-embedding app; see

@@ -338,6 +338,11 @@ extension VPNController {
             throw err("no such profile")
         }
 
+        guard virtualManager(for: id) == nil, let reservation = connectionReservations.reserve(owner: "profile." + id, members: [id]) else {
+            throw err("This VPN is starting or belongs to an active virtual connection.")
+        }
+        defer { connectionReservations.finish(reservation) }
+
         // First connect of an OpenVPN profile is the moment to ask macOS to approve the
         // system extension — not app launch. A brand-new user should meet the app, not a
         // security dialog for a capability they haven't asked for yet. Every connect path
@@ -346,6 +351,7 @@ extension VPNController {
         if let ensureExtensionReady, !(await ensureExtensionReady()) {
             throw err("SimpleVPN needs its network extension approved before it can connect. Open System Settings ▸ General ▸ Login Items & Extensions ▸ Network Extensions and allow SimpleVPN.")
         }
+        if hasPacketPolicy(for: id) { try await SystemExtensionManager.requireCurrentProvider() }
         let raw: RawCredentials
         switch plan {
         case .value(let values):
@@ -364,23 +370,8 @@ extension VPNController {
         case .typedByDevice:
             throw err("Waiting for your security key. Touch it, then connect.")
         }
-        let staticChallenge = hasStaticChallenge(id)
-        let engine: EngineCredentials
-        if staticChallenge {
-            // static-challenge profiles: the OTP travels as the engine's
-            // challenge response (see the options below), never concatenated
-            // into the password — the template concat stays for profiles
-            // without one (GR Lab depends on {password}{otp}).
-            engine = EngineCredentials(username: raw.username ?? "", password: raw.password ?? "")
-        } else {
-            engine = request.assemble(from: raw)
-        }
-        // Autologin profiles authenticate with their certificate — empty
-        // credentials are the correct payload, not a user mistake.
-        let autologin = isAutologin(id)
-        guard autologin || (!engine.username.isEmpty && !engine.password.isEmpty) else {
-            throw err("missing username or password")
-        }
+        let signIn = try openVPNSignIn(id: id, raw: raw, request: request)
+        let engine = signIn.credentials
 
         if remember, !engine.username.isEmpty {
             if authConfig(for: id).protectWithBiometrics {
@@ -407,8 +398,8 @@ extension VPNController {
         if let p = secrets?.privateKeyPassword { options["privateKeyPassword"] = p as NSString }
         // The static-challenge response rides its own option so the bridge can
         // hand it to the engine as ProvideCreds.response.
-        if staticChallenge, let otp = raw.otp?.trimmingCharacters(in: .whitespaces), !otp.isEmpty {
-            options["challengeResponse"] = otp as NSString
+        if let response = signIn.response {
+            options["challengeResponse"] = response as NSString
         }
         // A password manager can also supply the private-key passphrase; it wins
         // over the keychain copy so the mapped 1Password field takes effect.
@@ -475,6 +466,7 @@ extension VPNController {
             Self.log.error("connect: no NETunnelProviderSession for \(id, privacy: .public)")
             throw err("The VPN configuration isn't ready — try removing and re-importing it.")
         }
+        guard connectionReservations.isCurrent(reservation), virtualManager(for: id) == nil, !Task.isCancelled else { throw CancellationError() }
         do {
             try startWithInitialGateway(session, profile: id, options: options)
             Self.log.log("startTunnel dispatched for \(id, privacy: .public) (status now \(Self.statusText(mgr.connection.status), privacy: .public))")
@@ -508,6 +500,24 @@ extension VPNController {
         }
         appliedOverrides[id] = overrides(for: id)   // what this session runs with
         appliedOVPN[id] = ovpnText(id: id) ?? ""
+    }
+
+    func openVPNSignIn(id: String, raw: RawCredentials, request: CredentialRequest) throws -> (credentials: EngineCredentials, response: String?) {
+        let engine: EngineCredentials
+        let response: String?
+        if hasStaticChallenge(id) {
+            // A static challenge travels separately. Other profiles may use a password template.
+            engine = EngineCredentials(username: raw.username ?? "", password: raw.password ?? "")
+            let otp = raw.otp?.trimmingCharacters(in: .whitespaces) ?? ""
+            response = otp.isEmpty ? nil : otp
+        } else {
+            engine = request.assemble(from: raw)
+            response = nil
+        }
+        guard isAutologin(id) || (!engine.username.isEmpty && !engine.password.isEmpty) else {
+            throw err("Missing OpenVPN username or password.")
+        }
+        return (engine, response)
     }
 
     /// Unified connect from the shared credential state (the store every surface
@@ -593,9 +603,10 @@ extension VPNController {
             let config = proxyTunnelConfig(for: id)
             inputs.proxyHasProblem = config.connectProblem != nil
             inputs.proxyRequiresAuth = config.requiresAuth
-            let creds = proxyTunnelCredentials(for: id)
-            inputs.proxyCredentialsComplete =
-                !creds.username.trimmingCharacters(in: .whitespaces).isEmpty && !creds.password.isEmpty
+            if config.requiresAuth {
+                let creds = proxyTunnelCredentials(for: id)
+                inputs.proxyCredentialsComplete = ProxyTunnelStartConfig.authenticationProblem(config: config, username: creds.username, password: creds.password) == nil
+            }
             return inputs
         }
         if inputs.kind == .wireGuard {
@@ -718,8 +729,19 @@ extension VPNController {
     /// Connect every member of a composition, in dependency order: a member that
     /// runs "over" another waits for that one to reach `.connected` first (bounded).
     /// Members needing a fresh OTP are collected in `compositionNeedsAttention`.
+    private func needsSharedInterface(_ composition: VPNComposition) -> Bool {
+        if composition.usesSharedRouter { return true }
+        let ids = Set(composition.members.map(\.profileID))
+        return nativeConfigStore?.configs.contains { ids.contains($0.id) } == true ||
+            subprocessSessionStore?.configurationStore?.tunnels.contains { ids.contains($0.id) && ($0.kind.isSSLVPN || ($0.kind == .ssh && $0.sshMode == .netTunnel)) } == true
+    }
+
     func connectComposition(_ composition: VPNComposition) async {
         compositionNeedsAttention = []
+        if needsSharedInterface(composition) {
+            await connectThroughVirtualInterface(composition)
+            return
+        }
         guard composition.validationProblem == nil else {
             lastError = composition.validationProblem
             return
@@ -765,11 +787,12 @@ extension VPNController {
 
     func disconnectComposition(_ composition: VPNComposition) {
         connectionReservations.cancel(owner: "virtual." + composition.id)
-        if let manager = virtualManagers[composition.id], UI.isActive(manager.connection.status) {
+        if let manager = virtualManagers[composition.id], UI.isActive(manager.connection.status) || virtualStarts[composition.id] != nil {
             manager.connection.stopVPNTunnel()
             resyncStatuses()
             return
         }
+        guard !needsSharedInterface(composition) else { resyncStatuses(); return }
         let order = composition.validationProblem == nil ? composition.startOrder : composition.members
         for member in order.reversed() {
             disconnect(id: member.profileID)
@@ -779,7 +802,12 @@ extension VPNController {
 
     /// True while any member of the composition is active.
     func isCompositionActive(_ composition: VPNComposition) -> Bool {
-        composition.members.contains { m in
+        if needsSharedInterface(composition) {
+            return connectionReservations.isStarting(owner: "virtual." + composition.id)
+                || virtualStarts[composition.id] != nil
+                || virtualManagers[composition.id].map { UI.isActive($0.connection.status) } == true
+        }
+        return composition.members.contains { m in
             profiles.first { $0.id == m.profileID }.map { UI.isActive($0.status) } ?? false
         }
     }

@@ -1067,9 +1067,17 @@ struct NetworkToolsView: View {
         if let fix = assessment.suggestedMSSFix {
             // Applying fixes belongs to the Connection Manager (which records an undo);
             // this card only names the number it measured.
-            Label("Suggested clamp: mssfix \(fix) — the Connection Manager can apply it.",
-                  systemImage: "wrench.and.screwdriver")
-                .font(.caption).foregroundStyle(.orange)
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    ConfigSourceLabel(text: "mssfix \(fix)", format: .openVPN)
+                    Text("The Connection Manager can apply this suggested clamp.")
+                        .foregroundStyle(.secondary)
+                }
+            } icon: {
+                Image(systemName: "wrench.and.screwdriver").foregroundStyle(.orange)
+            }
+            .font(.caption)
+            .accessibilityElement(children: .combine)
         }
         if mtuProto == .icmp, let steps = pathMTU?.steps, !steps.isEmpty {
             DisclosureGroup("Sizes probed (\(steps.count))") {

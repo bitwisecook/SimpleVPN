@@ -1,0 +1,25 @@
+--- a/src/netif/ppp/pppol2tp.c
++++ b/src/netif/ppp/pppol2tp.c
+@@ -310,7 +310,10 @@
+     udp_bind(l2tp->udp, IP6_ADDR_ANY, 0);
+   } else
+ #endif /* LWIP_IPV6 */
+-  udp_bind(l2tp->udp, IP_ADDR_ANY, 0);
++  if (udp_bind(l2tp->udp, IP_ADDR_ANY, 1701) != ERR_OK) {
++    ppp_link_failed(ppp);
++    return;
++  }
+ 
+ #if PPPOL2TP_AUTH_SUPPORT
+   /* Generate random vector */
+--- a/src/core/timeouts.c
++++ b/src/core/timeouts.c
+@@ -98,7 +98,7 @@
+   {IGMP_TMR_INTERVAL, HANDLER(igmp_tmr)},
+ #endif /* LWIP_IGMP */
+ #endif /* LWIP_IPV4 */
+-#if LWIP_DNS
++#if LWIP_DNS && !defined(SIMPLEVPN_IPCP_DNS_ONLY)
+   {DNS_TMR_INTERVAL, HANDLER(dns_tmr)},
+ #endif /* LWIP_DNS */
+ #if LWIP_IPV6

@@ -98,8 +98,21 @@ enum SSHSettings {
         // MARK: Traffic
 
         .init(id: "ssh.mode", name: "Mode",
-              summary: "How this tunnel carries traffic: one proxy any app can use (SOCKS), specific port forwards, or a full network tunnel.",
+              summary: "Use a SOCKS proxy, forward individual services, or route IP prefixes through a server that allows point-to-point tunnels.",
               group: .traffic, default: SSHMode.socks),
+
+        .init(id: "ssh.tun-addresses", name: "Local Tunnel Addresses",
+              summary: "The IPv4 or IPv6 addresses assigned to this end of the point-to-point link, with their prefix lengths.",
+              group: .traffic, default: [String]()),
+        .init(id: "ssh.tun-routes", name: "Peer Routes",
+              summary: "Destination prefixes the SSH server can reach through its tunnel device.",
+              group: .traffic, default: [String]()),
+        .init(id: "ssh.tun-unit", name: "Remote Tunnel Unit",
+              summary: "Leave empty to let the server allocate a tunnel device, or enter the number of the device configured by its administrator.",
+              group: .traffic, default: ""),
+        .init(id: "ssh.tun-mtu", name: "Tunnel MTU",
+              summary: "Maximum inner IP packet size in bytes. Use the MTU configured on the peer.",
+              group: .traffic, default: 1400),
 
         .init(id: "ssh.socks-port", name: "Local SOCKS Port",
               summary: "Where on this Mac the tunnel offers its proxy — point apps at 127.0.0.1 and this port. Give each tunnel its own port.",

@@ -1,0 +1,65 @@
+--- a/net/netmon/netmon.go
++++ b/net/netmon/netmon.go
+@@ -15,6 +15,7 @@
+ 	"slices"
+ 	"strings"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"tailscale.com/feature/buildfeatures"
+@@ -67,10 +68,17 @@
+ var IsInterestingInterface func(Interface, []netip.Prefix) bool
+ 
+ // Monitor represents a monitoring instance.
++// SetRequiredInterface pins all netns carrier sockets created for this monitor.
++func (m *Monitor) SetRequiredInterface(index uint32) { m.requiredInterface.Store(index) }
++
++// RequiredInterface returns zero for ordinary upstream route selection.
++func (m *Monitor) RequiredInterface() uint32 { return m.requiredInterface.Load() }
++
+ type Monitor struct {
+-	logf    logger.Logf
+-	b       *eventbus.Client
+-	changed *eventbus.Publisher[ChangeDelta]
++	requiredInterface atomic.Uint32
++	logf              logger.Logf
++	b                 *eventbus.Client
++	changed           *eventbus.Publisher[ChangeDelta]
+ 
+ 	om     osMon         // nil means not supported on this platform
+ 	change chan bool     // send false to wake poller, true to also force ChangeDeltas be sent
+--- a/net/netns/netns.go
++++ b/net/netns/netns.go
+@@ -91,7 +91,7 @@
+ 	if netMon == nil {
+ 		panic("netns.Listener called with nil netMon")
+ 	}
+-	if disabled.Load() {
++	if disabled.Load() && netMon.RequiredInterface() == 0 {
+ 		return new(net.ListenConfig)
+ 	}
+ 	return &net.ListenConfig{Control: control(logf, netMon)}
+@@ -117,6 +117,10 @@
+ func FromDialer(logf logger.Logf, netMon *netmon.Monitor, d *net.Dialer) Dialer {
+ 	if netMon == nil {
+ 		panic("netns.FromDialer called with nil netMon")
++	}
++	if netMon.RequiredInterface() != 0 {
++		d.Control = control(logf, netMon)
++		return d
+ 	}
+ 	if disabled.Load() {
+ 		return d
+--- a/net/netns/netns_darwin.go
++++ b/net/netns/netns_darwin.go
+@@ -37,6 +37,9 @@
+ // controlLogf binds c to a particular interface as necessary to dial the
+ // provided (network, address).
+ func controlLogf(logf logger.Logf, netMon *netmon.Monitor, network, address string, c syscall.RawConn) error {
++	if index := netMon.RequiredInterface(); index != 0 {
++		return bindConnToInterface(c, network, address, int(index), logf)
++	}
+ 	if disableBindConnToInterface.Load() || (version.IsMacGUIVariant() && disableBindConnToInterfaceAppleExt.Load()) {
+ 		return nil
+ 	}

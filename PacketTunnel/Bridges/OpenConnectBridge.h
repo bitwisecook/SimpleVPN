@@ -14,6 +14,7 @@
 #import <Foundation/Foundation.h>
 #import <NetworkExtension/NetworkExtension.h>
 #import "TunnelSettingsApplying.h"
+#import "SVPPacketPolicy.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -35,6 +36,9 @@ typedef NS_ENUM(NSInteger, OCStatus) {
 /// A fresh code for a distinct `OC_FORM_OPT_TOKEN` field.  It rides the session
 /// payload only; unlike password it is never persisted or reused.
 @property (nullable, copy) NSString *oneTimeCode;
+/// Uses the same field classification as the app's sign-in helper. A nil
+/// answer means that this interactive field requires the user's decision.
+@property (nullable, copy) NSString * _Nullable (^authFieldAnswer)(NSString *authID, NSString *name, NSString *label, NSString *kind);
 /// A session cookie obtained OUT of process (the app's ocauth-helper SSO
 /// sign-in). When set, the bridge skips openconnect_obtain_cookie entirely —
 /// no forms, no credentials — and connects with this cookie. In-memory only
@@ -42,6 +46,8 @@ typedef NS_ENUM(NSInteger, OCStatus) {
 @property (nullable, copy) NSString *cookie;
 @property (nullable, copy) NSString *realm;             // authgroup
 @property (nullable, copy) NSString *serverCertSHA256;  // pin (accept only this)
+@property (nullable, copy) NSString *resolveHost;       // TLS identity returned by the sign-in helper
+@property (nullable, copy) NSString *resolveIP;         // numeric carrier selected for that host
 @property (nullable, copy) NSString *caFile;            // extra CA bundle path
 @property (nullable, copy) NSString *externalBrowser;   // SAML/SSO browser path ("" = default)
 @property (nullable, copy) NSString *userAgent;
@@ -118,8 +124,15 @@ typedef NS_ENUM(NSInteger, OCStatus) {
 NS_SWIFT_SENDABLE
 @interface OpenConnectBridge : NSObject
 
+- (instancetype)initWithInterfaceIndex:(uint32_t)index delegate:(id<OpenConnectBridgeDelegate>)delegate
+                               received:(void (^)(NSData *))received;
+- (BOOL)sendMemberPacket:(NSData *)packet;
+- (NEPacketTunnelNetworkSettings *)memberNetworkSettings;
+- (void)stopMemberWithCompletion:(void (^)(void))completion;
+
 - (instancetype)initWithProvider:(NEPacketTunnelProvider<SVPTunnelSettingsApplying> *)provider
-                        delegate:(id<OpenConnectBridgeDelegate>)delegate;
+                        delegate:(id<OpenConnectBridgeDelegate>)delegate
+                    packetPolicy:(SVPPacketPolicy *)packetPolicy;
 
 /// Authenticate and bring the tunnel up. Returns NO + `error` if setup fails to
 /// start; connection progress arrives via the delegate.

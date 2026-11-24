@@ -27,6 +27,7 @@
     --warn-border: #e8a33d;
     --warn-text: #7a4a00;     /* 6.6:1 on --warn-bg */
     --code-bg: #f0f0f2;
+    --directive: #693b88;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -40,6 +41,7 @@
       --warn-border: #c8892a;
       --warn-text: #f0c680;
       --code-bg: #2c2c31;
+      --directive: #d4adee;
     }
   }
   * { box-sizing: border-box; }
@@ -100,6 +102,7 @@
     background: var(--code-bg);
     padding: 1px 5px; border-radius: 4px;
   }
+  code .directive { color: var(--directive); font-weight: 600; }
   a { color: var(--accent); }
   table { border-collapse: collapse; margin: 10px 0; }
   td, th { border: 1px solid var(--border); padding: 6px 10px; font-size: 14px; text-align: left; }
@@ -152,6 +155,8 @@
   <h2>SimpleVPN</h2>
   <a href="#importing">Importing VPNs</a>
   <a href="#virtual-routing-compositions">One Virtual Interface</a>
+  <a href="#rule-activity">Inspect Live Rule Activity</a>
+  <a href="#app-routing">Route Traffic from Selected Apps</a>
   <a href="#vpn-order">Your Own VPN Order</a>
   <a href="#endpoints-map">Servers &amp; the Map</a>
   <a href="#endpoints-order">Your Own Server Order</a>
@@ -247,6 +252,10 @@
   <a href="#ssh-agent-socket">SSH Agent Socket</a>
   <a href="#ssh-password">Password</a>
   <a href="#ssh-mode">Mode</a>
+  <a href="#ssh-tun-addresses">Local Tunnel Addresses</a>
+  <a href="#ssh-tun-routes">Peer Routes</a>
+  <a href="#ssh-tun-unit">Remote Tunnel Unit</a>
+  <a href="#ssh-tun-mtu">Tunnel MTU</a>
   <a href="#ssh-socks-port">Local SOCKS Port</a>
   <a href="#ssh-system-proxy">System SOCKS Proxy</a>
   <a href="#ssh-forwards">Port Forwards</a>
@@ -339,6 +348,7 @@
   <a href="#px-dns">DNS Servers</a>
   <a href="#px-search-domains">Search Domains</a>
   <a href="#px-mtu">MTU</a>
+  <a href="#px-tls-routes">TLS Backend Routes</a>
 
   <h2>SSH Network Tunnel</h2>
   <a href="#sshnet-what-is-it">What This Is</a>
@@ -368,6 +378,7 @@
   <a href="#cr-what-is-it">What This Is</a>
   <a href="#cr-routes-default">Unmatched Routes</a>
   <a href="#cr-route-rule">Route Rules</a>
+  <a href="#cr-packet-events">Traffic Event Handlers</a>
   <a href="#cr-rule-order">Rule Order</a>
   <a href="#cr-query-routing">Query-name Routing</a>
   <a href="#cr-query-rule">Query Rules</a>
@@ -527,7 +538,7 @@
 <h2 id="problem-dns-leak">Website lookups may be leaking (DNS)</h2>
 <p><strong>Symptom:</strong> your traffic is protected, but a “DNS leak test” site shows your internet provider's or local network's DNS servers rather than the VPN's.</p>
 <p><strong>Cause:</strong> everything is routed through the VPN, but the VPN didn't hand your Mac a private DNS server — so the <em>names</em> of the sites you visit are still being looked up by whoever runs the local network, revealing where you're browsing even though the traffic itself is encrypted.</p>
-<p><strong>Fix:</strong> there's no safe automatic fix, so the Doctor explains it. The proper fix is server-side: the VPN's administrator should push a DNS server (OpenVPN <code>dhcp-option DNS …</code>). As a stopgap you can set a trusted DNS server manually in <strong>System Settings ▸ Network</strong>.</p>
+<p><strong>Fix:</strong> there's no safe automatic fix, so the Doctor explains it. The proper fix is server-side: the VPN's administrator should push a DNS server (OpenVPN <code><span class="directive">dhcp-option</span> DNS …</code>). As a stopgap you can set a trusted DNS server manually in <strong>System Settings ▸ Network</strong>.</p>
 
 <h2 id="problem-lan">Local devices unreachable while connected</h2>
 <p><strong>Symptom:</strong> once connected you can no longer reach your printer, network drive, router page or other devices on your home or office network.</p>
@@ -542,7 +553,7 @@
 <h2 id="problem-otp-reneg">Keeps asking for a new code after connecting</h2>
 <p><strong>Symptom:</strong> you connect fine, then minutes or an hour later the VPN drops with a sign-in failure, even though nothing changed.</p>
 <p><strong>Cause:</strong> OpenVPN renegotiates its keys on a timer, and by default that re-runs the whole sign-in. With a verification code that code is already spent, so the re-authentication fails.</p>
-<p><strong>Fix:</strong> the Doctor sets <code>reneg-sec 0</code> to stop the client forcing a re-sign-in. The cleaner fix is server-side: the administrator enables session tokens (<code>auth-gen-token</code>) so the first code is exchanged for a token and never demanded again — see <a href="#openvpn-autologin-sessions">Session Tokens</a>.</p>
+<p><strong>Fix:</strong> the Doctor sets <code><span class="directive">reneg-sec</span> 0</code> to stop the client forcing a re-sign-in. The cleaner fix is server-side: the administrator enables session tokens (<code><span class="directive">auth-gen-token</span></code>) so the first code is exchanged for a token and never demanded again — see <a href="#openvpn-autologin-sessions">Session Tokens</a>.</p>
 
 <h2 id="problem-cipher">Couldn't agree on an encryption cipher</h2>
 <p><strong>Symptom:</strong> the connection fails during setup with a message mentioning the cipher or "data channel".</p>
@@ -943,7 +954,7 @@ exports that explicitly include secrets; an ordinary export requires pairing aga
 <h2 id="ssh-password">Password</h2>
 <p class="default">Optional.</p>
 <p>Used when the server asks for a password, and to unlock a protected (passphrase-encrypted) key file. With <strong>Remember</strong> on it's kept in your login keychain — never in the tunnel's settings file — so you don't retype it.</p>
-<div class="warn">With the Password sign-in method, any follow-up question the server asks — a verification code, an MFA prompt — is answered with the stored password. Servers that require a fresh code per sign-in aren't suited to a remembered password.</div>
+<div class="warn">OpenSSH can request the saved password once for each configured login. SimpleVPN checks the requesting process and the account named in the prompt. A verification code, key passphrase or other follow-up challenge requires a sign-in method that supports that prompt.</div>
 
 <h2 id="ssh-mode">Mode</h2>
 <p class="default">Default: SOCKS proxy.</p>
@@ -951,7 +962,7 @@ exports that explicitly include secrets; an ordinary export requires pairing aga
 <ul>
   <li><strong>SOCKS proxy</strong> — one local proxy any app can point at (see <a href="#ssh-socks-port">Local SOCKS Port</a>). The most flexible mode, and it runs entirely inside SimpleVPN.</li>
   <li><strong>Port forwards</strong> — specific connections only (see <a href="#ssh-forwards">Port Forwards</a>). Local (<code>L</code>) and dynamic (<code>D</code>) forwards run entirely inside SimpleVPN too.</li>
-  <li><strong>Network tunnel</strong> — a full point-to-point tunnel (ssh <code>-w</code>). It needs root for the network device and “PermitTunnel” on the server, so this build doesn't offer it yet.</li>
+  <li><strong>Point-to-point tunnel</strong> carries IPv4 and IPv6 over the OpenSSH <code>-w</code> channel. Enter the local addresses and remote routes supplied by the server administrator. The server must allow <code>PermitTunnel</code>. The separate SSH Network Tunnel profile uses TCP forwarding.</li>
 </ul>
 
 <h2 id="ssh-socks-port">Local SOCKS Port</h2>
@@ -962,16 +973,28 @@ exports that explicitly include secrets; an ordinary export requires pairing aga
 <p class="default">Default: off.</p>
 <p>Lets apps that use the macOS SOCKS proxy connect through this tunnel. macOS may ask for administrator approval. SimpleVPN follows the primary network service when you switch networks. If several tunnels request this setting, the most recently enabled one takes over. Disconnecting it returns control to the previous tunnel. After the last tunnel disconnects, SimpleVPN restores the original SOCKS settings unless you or another app have changed them. If SimpleVPN quits unexpectedly, reopen it to restore the previous settings.</p>
 
+<h2 id="ssh-tun-addresses">Local Tunnel Addresses</h2>
+<p class="default"><strong>Default</strong> None. Enter the address and prefix assigned by the peer administrator.</p>
+<p>Enter the address assigned to this Mac on the SSH point-to-point link, including its prefix length. You can supply one address per IP family.</p>
+<h2 id="ssh-tun-routes">Peer Routes</h2>
+<p class="default"><strong>Default</strong> None. Add the destinations reachable through the tunnel.</p>
+<p>List the destination prefixes reachable through the remote tunnel device. The server administrator configures addresses and routes on the peer. The server must allow point-to-point <code>PermitTunnel</code>.</p>
+<h2 id="ssh-tun-unit">Remote Tunnel Unit</h2>
+<p class="default"><strong>Default</strong> Automatic. The SSH server selects an available tunnel unit.</p>
+<p>Leave this empty for automatic allocation, or enter the number of the tunnel device configured on the server.</p>
+<h2 id="ssh-tun-mtu">Tunnel MTU</h2>
+<p class="default"><strong>Default</strong> 1400 bytes.</p>
+<p>Set the largest inner IP packet to match the peer. The default is 1400 bytes, with a supported range of 1280 to 9000.</p>
 <h2 id="ssh-forwards">Port Forwards</h2>
 <p class="default">Optional.</p>
 <p>Specific connections to carry, one per row:</p>
 <ul>
-  <li><code>L localPort:host:port</code> — brings a remote service to this Mac: connecting to <code>127.0.0.1:localPort</code> here reaches <code>host:port</code> on the server's side.</li>
-  <li><code>D port</code> — a SOCKS proxy on that local port, the same thing <a href="#ssh-mode">SOCKS proxy</a> mode offers, alongside your other forwards.</li>
-  <li><code>R remotePort:host:port</code> — the reverse: publishes something reachable from this Mac onto the server's side.</li>
+  <li><code><span class="directive">L</span> localPort:host:port</code> — brings a remote service to this Mac: connecting to <code>127.0.0.1:localPort</code> here reaches <code>host:port</code> on the server's side.</li>
+  <li><code><span class="directive">D</span> port</code> — a SOCKS proxy on that local port, the same thing <a href="#ssh-mode">SOCKS proxy</a> mode offers, alongside your other forwards.</li>
+  <li><code><span class="directive">R</span> remotePort:host:port</code> — the reverse: publishes something reachable from this Mac onto the server's side.</li>
 </ul>
 <p>While connected, edits apply live — each row shows whether its forward is active — and no reconnect is needed.</p>
-<div class="warn"><strong>Reverse forwards (<code>R</code>) aren't supported by SimpleVPN's built-in SSH engine yet.</strong> A tunnel with one runs through the system's <code>ssh</code> tool instead, so it can't be combined with a <a href="#ssh-pinned-host-key">pinned host key</a>. Local (<code>L</code>) and dynamic (<code>D</code>) forwards have no such limit. Adding a reverse forward to an already-connected tunnel is refused with that reason rather than silently ignored — reconnect and it will be established by the <code>ssh</code> tool.</div>
+<div class="warn"><strong>Reverse forwards (<code>R</code>) aren't supported by SimpleVPN's built-in SSH engine yet.</strong> SimpleVPN handles a reverse forward with its bundled OpenSSH client. That mode uses known-hosts verification and cannot be combined with a <a href="#ssh-pinned-host-key">pinned host key</a>. Local (<code>L</code>) and dynamic (<code>D</code>) forwards have no such limit. Adding a reverse forward to an already-connected tunnel is refused with that reason rather than silently ignored — reconnect and it will be established by the <code>ssh</code> tool.</div>
 
 <h2 id="ssh-strict-host-key">Host Key Checking</h2>
 <p class="default">Default: Trust on first use.</p>
@@ -998,7 +1021,7 @@ exports that explicitly include secrets; an ordinary export requires pairing aga
 
 <h2 id="ssh-extra-options">Extra Options</h2>
 <p class="default">Optional.</p>
-<p>Raw <code>ssh_config</code> directives, one per line as “Key Value” (e.g. <code>Ciphers aes256-gcm@openssh.com</code>, <code>MACs hmac-sha2-512</code>). An escape hatch for anything this screen doesn't expose. A tunnel using extra options runs through the system <code>ssh</code> tool rather than the built-in engine.</p>
+<p>Raw <code>ssh_config</code> directives, one per line as “Key Value” (e.g. <code><span class="directive">Ciphers</span> aes256-gcm@openssh.com</code>, <code><span class="directive">MACs</span> hmac-sha2-512</code>). An escape hatch for anything this screen doesn't expose. A tunnel using extra options runs through the system <code>ssh</code> tool rather than the built-in engine.</p>
 
 <!-- ══════════════════ SSL VPN (OpenConnect) ══════════════════ -->
 
@@ -1180,14 +1203,16 @@ who wants them.</p>
 
 <h2 id="oc-extra-args">Extra Arguments</h2>
 <p class="default">Optional.</p>
-<p>Raw OpenConnect command-line flags, one per line, for site-specific needs not covered above (e.g. <code>--no-http-keepalive</code>). See <code>man openconnect</code>.</p>
+<p>Raw OpenConnect command-line flags, one per line, for site-specific needs not covered above (e.g. <code><span class="directive">--no-http-keepalive</span></code>). See <code>man openconnect</code>.</p>
 
 <!-- ══════════════════ Native (IKEv2 / IPsec) ══════════════════ -->
 
 <h2 id="native-protocol">Protocol</h2>
 <p class="default">Default: IKEv2.</p>
-<p>Which VPN protocol macOS runs for this connection. <strong>IKEv2</strong> is the modern one and what almost every current server offers — pick it unless told otherwise. <strong>IPsec (IKEv1)</strong> suits older Cisco-style concentrators that expect a group secret. <strong>L2TP / IPsec</strong> has no programmatic interface for apps at all, so SimpleVPN writes a configuration profile you install instead of connecting it directly.</p>
+<p>Choose the protocol your VPN gateway supports. SimpleVPN uses its built-in IPsec engine for compatible IKEv2, Cisco-style IKEv1 and L2TP/IPsec profiles. For built-in L2TP choose IPv4 with MSCHAPv2. Export a configuration profile when you need System Settings to own the connection.</p>
 <p>Switching to L2TP hides the options an L2TP profile cannot carry. Anything you set for IKEv2 or IPsec is kept, just not used there — the export says so explicitly.</p>
+
+<p>For L2TP/IPsec, <strong>Export for System Settings</strong> preserves the existing configuration-profile workflow. Choose <strong>Built-in IPv4 · MSCHAPv2</strong> for an IPv4 gateway using IKEv1 Main Mode with a shared secret and PPP MSCHAPv2. Enter the numeric gateway address, the exact local and remote IKE identities, the shared secret, and the PPP username and password. PPP credentials must each contain 1–255 printable ASCII characters. The gateway supplies the IPv4 address, resolver and MTU. Saved handlers run on the inner IP traffic.</p>
 
 <h2 id="native-server">Server Address</h2>
 <p class="default">Required.</p>
@@ -1203,7 +1228,7 @@ who wants them.</p>
 
 <h2 id="native-auth-method">Use a Shared Secret (PSK)</h2>
 <p class="default">Default: off — sign in with a username and password.</p>
-<p>How you prove who you are to an IKEv2 server: a <strong>shared secret</strong> that everyone using the VPN has, or your own <strong>username and password</strong>. Turning this on replaces the username and password fields with a single shared-secret field.</p>
+<p>How you prove who you are to an IKEv2 server: a <strong>shared secret</strong> that everyone using the VPN has, or your own <strong>username and password</strong>. With a shared secret, enter the local IKE identity assigned by the gateway. With a password, choose Automatic to let macOS negotiate or explicitly choose EAP-MSCHAPv2 for the built-in IPsec engine. The latter validates the gateway certificate against the Mac’s trust settings and checks its IKE identity.</p>
 <p>Certificate sign-in isn't offered in this build — there is no identity picker or import for it, so it isn't listed as a choice that then wouldn't work.</p>
 
 <h2 id="native-xauth">Also Sign In With a Username and Password (XAuth)</h2>
@@ -1229,7 +1254,7 @@ who wants them.</p>
 
 <h2 id="native-remote-id">Remote Identifier</h2>
 <p class="default">Default: empty — the server address itself must match.</p>
-<p>The identity the server has to prove it has, checked against the name in its certificate. Leave it empty and macOS requires the server address you typed; set it when the server's certificate legitimately names something else (a load-balanced cluster name, for instance) and your administrator tells you what to expect.</p>
+<p>The exact IKE identity the gateway must authenticate. For IKEv1, enter this along with the group identity to use the built-in packet engine. IKEv2 EAP also checks the gateway certificate. Leave it empty and macOS requires the server address you typed; set it when the server's certificate legitimately names something else (a load-balanced cluster name, for instance) and your administrator tells you what to expect.</p>
 <p>This is a check on the <em>server</em>, which is why it sits under Security rather than beside the address it verifies.</p>
 
 <h2 id="native-encryption">Encryption</h2>
@@ -1314,6 +1339,7 @@ who wants them.</p>
 <p class="default">Default: off.</p>
 <p>Normally only traffic to your own machines goes through this VPN; everything else takes its usual route. Turn this on to send <em>all</em> internet traffic through another machine on the network — the way a traditional VPN works. Useful for appearing to be somewhere else, or for using a trusted connection from an untrusted network.</p>
 <p>The machine has to be offering to do this and be approved on the admin page; SimpleVPN lists the ones that are, and it can only list them while the VPN is connected. <strong>Allow local network access</strong> leaves printers and file shares on the network you are physically on reachable; turn it off for the strictest isolation.</p>
+<p>For a connected Tailscale or Headscale profile, open SimpleVPN in the menu bar and use <strong>Exit Nodes</strong> to see the active choice and switch to an online node. Choose <strong>No Exit Node</strong> to return that profile to its tailnet and shared subnet routes. Choosing a node for an individual connection makes that VPN the internet gateway. The selection is saved for the next connection. A composition uses the exit-node choices of its members.</p>
 
 <h2 id="ts-exit-node-machine">Which Machine</h2>
 <p class="default">Required once &ldquo;Send internet traffic elsewhere&rdquo; is on.</p>
@@ -1344,7 +1370,7 @@ who wants them.</p>
 
 <h2 id="px-requires-auth">Requires Sign-In</h2>
 <p class="default">Default: off.</p>
-<p>Turn on if your proxy asks for a username and password; leave off for an open proxy. Turning it off again clears the stored credentials, so a proxy you stopped signing in to isn&rsquo;t left holding your password.</p>
+<p>Turn on to require a username and password. SimpleVPN checks both before creating the tunnel. Leave off for a proxy that accepts anonymous connections. Turning it off again clears the stored credentials, so a proxy you stopped signing in to isn&rsquo;t left holding your password.</p>
 
 <h2 id="px-username">Username</h2>
 <p class="default">Required when the proxy asks for a sign-in.</p>
@@ -1382,6 +1408,12 @@ who wants them.</p>
 <p class="default">Default: empty — only full names resolve.</p>
 <p>The domains to try when you type a short name. With <code>corp.example</code> listed, <code>wiki</code> is looked up as <code>wiki.corp.example</code>; without it, <code>wiki</code> finds nothing while <code>wiki.corp.example</code> works. That asymmetry is the commonest “DNS is broken” report on this kind of tunnel, and there is nothing to learn the list from — a proxy hands out no configuration — so it is yours to state. Separate several with commas, in the order you want them tried.</p>
 <p>Only used when <a href="#px-dns">DNS Servers</a> is filled in: the search list belongs to the resolvers this tunnel advertises.</p>
+
+<h2 id="px-tls-routes">TLS Backend Routes</h2>
+<p class="default"><strong>Default</strong> Empty. TCP and UDP use the proxy’s ordinary forwarding behavior.</p>
+<p>In a Proxy Tunnel’s Advanced settings, enter one destination port, TLS server name and numeric backend per line. For example, <code>443 portal.example 192.0.2.8:8443</code> forwards matching connections to that backend through the profile’s upstream proxy. Use brackets around IPv6 addresses.</p>
+<p>On each listed port, the tunnel waits for the client’s visible TLS server name before opening a backend connection. Unknown names, encrypted or missing names, incomplete handshakes and UDP traffic on the same port are refused. Other ports use ordinary proxy forwarding. These settings apply to traffic captured by this VPN’s configured routes. Reconnect to apply a change.</p>
+<p>The client supplies the routing name. The backend handles authentication and presents a certificate that satisfies the client for the requested name. The tunnel keeps client traffic encrypted throughout.</p>
 
 <h2 id="px-mtu">MTU</h2>
 <p class="default">Default: 1500.</p>
@@ -1429,9 +1461,22 @@ who wants them.</p>
 <div class="warn">Kerberos is unavailable in the system service because it cannot access your login session's ticket cache. SSH Agent uses SimpleVPN's authenticated signing relay.</div>
 
 <h2 id="virtual-routing-compositions">One Virtual Interface</h2>
-<p>In Manage VPNs, choose a composition&rsquo;s <strong>Connect Through One Virtual Interface</strong> action to connect two to sixteen single-peer WireGuard VPNs behind one stable interface. Your saved individual VPNs keep their settings and Keychain credentials.</p>
+<p>In Manage VPNs, choose a composition&rsquo;s <strong>Connect Through One Virtual Interface</strong> action to connect one to sixteen eligible VPNs behind one stable interface. Whole-Mac capture supports single-peer WireGuard, paired UniFi Teleport, Proxy Tunnel, built-in OpenVPN, compatible configurations of all seven OpenConnect protocols, Tailscale and Headscale nodes, SSH Network Tunnel, point-to-point SSH and built-in IPsec profiles. App-based capture uses these members when they agree on DNS servers, search domains and resolver scopes. Your saved individual VPNs keep their settings and Keychain credentials. To route one VPN, select it in Manage VPNs and choose <strong>Set Up a Routed Connection…</strong>. Save the composition and use its Connect button. The virtual interface translates outbound flows and tracks their replies. Connecting the individual profile keeps its own tunnel addresses, incoming connections and negotiated DNS scopes.</p>
 <p>Custom destination routes choose the VPN carrying each new connection. Existing connections stay on their original VPN when you change the default. Stopping a member keeps its private routes captured; if no VPN can carry default traffic, the path display says <strong>Internet blocked</strong>. Choose <strong>Direct</strong> explicitly to release default capture.</p>
-<p>This action currently supports WireGuard members using one resolver configuration. Different scoped DNS servers, custom proxies, local network exclusions and chained VPNs require independent connections. The action explains an unavailable configuration before connecting.</p>
+<p>Proxy members need a numeric upstream address and compatible routes, MTU and DNS settings. SOCKS5 can carry UDP when its proxy grants an association. HTTP and HTTPS CONNECT can carry DNS over TCP. A change of physical network requires reconnecting the composition. One virtual interface can assign DNS to one member. Resolver scopes owned by different VPNs, custom system proxies, saved destination diverts, local network exclusions and chained VPNs require independent connections. Use a split tunnel for a scoped-only resolver. A disconnected member’s private DNS scopes remain captured until the virtual connection ends. OpenVPN supports built-in certificate and password sign-in, including verification codes available to SimpleVPN. Shared SSL VPNs use a fresh, certificate-bound session from the sign-in helper. Protocols with built-in browser sign-in can use it for this session. Select HTTPS with UDP transport disabled for GlobalProtect, Fortinet, F5, Juniper Network Connect, Pulse and Array. Juniper, Pulse and Array require password sign-in for a shared connection. Array also requires its authentication realm. SSH Point-to-Point Tunnel carries IPv4 and IPv6 datagrams to a server with tunnel-device forwarding enabled. Enter the local tunnel address, destination prefixes and verified host-key fingerprint supplied by the server administrator. An individual point-to-point connection accepts incoming packets addressed to its configured tunnel IP. SSH Network Tunnel requires a trusted host key and numeric server. It carries TCP and its configured DNS traffic. A tailnet can supply mesh routes and DNS scopes. Advertising local subnets requires an independent connection. Built-in IKEv1, IKEv2 and IPv4 L2TP members authenticate independently and negotiate their addresses and routes. A member retains its own packet handlers in a composition. The shared interface starts when its members have authenticated and supplied compatible routes and DNS settings.</p>
+<h3 id="rule-activity">Inspect live rule activity</h3>
+<p>In the composition editor, <strong>Session Event Handlers</strong> accepts rules for packets in both directions. Use the <code>inbound.</code> event prefix to inspect a reply before the Mac receives it. For example, <code>on web: tcp.syn { if port.server == 443 { ip.dscp = 18; } }</code> sets a traffic class on a web connection’s SYN. The editor checks field names, types and write permissions before saving. Actions in the offline playground that require a terminating proxy are available only on its simulated endpoints.</p>
+<p>While a composition is connected through one virtual interface, choose <strong>Rule Activity…</strong> from its Actions menu in Manage VPNs, or open <strong>Rule Activity</strong> in a connected member’s details. Choose a VPN to narrow the list. Select a rule to see its packet, byte and drop totals. The rate chart samples while the inspector is visible. Event handlers count matching packets and can be inspected even before their first match.</p>
+<p>Select a connection and choose <strong>Details…</strong> for a snapshot of its original endpoints, translated source, VPN, attributed source or process ID, and observed DNS or TLS names. The <strong>Columns</strong> menu also shows these fields across a page. Enter a filter to search the current page and use <strong>Find on later pages</strong> to continue. DNS names and TLS server names are shown only when observed. Older system extensions may lack rule activity.</p>
+
+<h3 id="app-routing">Route traffic from selected apps</h3>
+<p>In <strong>Manage VPNs</strong>, select a VPN that supports a shared virtual interface and choose <strong>More VPN Actions → Route Apps Through This VPN…</strong>. To use several members, choose <strong>Create a Composition…</strong>, set <strong>Route traffic</strong> to <strong>From selected apps</strong>, and add the VPNs. App routing supports one to sixteen compatible VPNs. Each signed app or running process can use a different member. A shared Proxy Tunnel needs a numeric upstream IP address and an MTU of at least 1280. Save its authentication in the profile. SOCKS5 can carry UDP through UDP ASSOCIATE when the upstream supports it. HTTP and HTTPS CONNECT carry TCP and tunnel DNS over TCP. Reconnect the composition after changing physical networks. Ordinary individual VPN connections use their regular destination routes.</p>
+<p>Under <strong>App Routing</strong>, choose <strong>Add Source</strong>, select a signed app or executable, and choose its VPN. The rule uses the executable’s verified signing identity. macOS can attribute a helper’s traffic to its app. When the source is identified as a different executable, that helper needs its own rule. Captured traffic without an eligible source or outside the chosen VPN’s allowed networks is blocked.</p>
+<p>For a rule that follows repeated invocations of a command, select the signed executable and enable <strong>Require all entered conditions</strong> under its process conditions. For curl launched in Apple Terminal, enter the executable path <code>/usr/bin/curl</code> and ancestor path <code>/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal</code>. The shell may sit between them. SimpleVPN verifies the attributed process generation, executable signature and requested same-user ancestry.</p>
+<p>To require a proxy launch setting, enter a credential-free endpoint such as <code>1.2.3.4:8888</code> and select the exact variable spelling. curl itself uses lowercase <code>http_proxy</code> for HTTP. The helper can compare a launch value only when macOS provides it. An unavailable condition blocks admission. If you need to match where the connection went, use the proxy address as a destination override. The inspector shows the remote port.</p>
+<p>For an exception, expand <strong>Destination overrides</strong> on an app or process rule. Choose <strong>Add Destination</strong>, enter an IPv4 or IPv6 address or network in CIDR notation, and select the VPN for that destination. For example, an app can use Work by default and Finance for <code>10.42.8.19</code>. The most specific matching address or network wins. The selected member must permit that destination through its WireGuard Allowed IPs or Proxy Tunnel routes.</p>
+<p>Choose <strong>Running Process…</strong> for a temporary override. Choose a running app or enter the process ID from Activity Monitor, check its identity, then add the rule. In this temporary mode, the parent list describes the selected instance. A process rule takes priority over its app rule, expires when the process exits, and must be selected again after reopening SimpleVPN. Other instances of the same app can be captured and blocked unless an app-wide rule covers them.</p>
+<p><strong>Save</strong> the composition, then use its <strong>Connect</strong> action. Changes to these rules take effect on the next connection. Saving an empty set of persistent app rules never switches the composition back to whole-Mac routing.</p>
 <p>Tailscale node identity is saved in your user Keychain. Keep SimpleVPN running while connected so identity updates can be saved; an update that cannot be saved stops the connection and reports the problem. Legacy identity files are removed only after verified Keychain storage.</p>
 
 <h2 id="sshnet-agent-socket-path">SSH Agent Socket</h2>
@@ -1551,6 +1596,10 @@ arrow keys. DNS has its own paths; Custom Routing shows route and proxy paths.</
 <p class="default">Default: Accept.</p>
 <p>What happens to the networks this VPN offers that no rule below mentions. <strong>Accept</strong> keeps them all, and your rules are exceptions. <strong>Ignore</strong> drops them all, and only what a rule explicitly accepts or replaces is used — an allow-list.</p>
 
+<h2 id="cr-packet-events">Traffic Event Handlers</h2>
+<p class="default">Default: no event handlers.</p>
+<p>Open the VPN’s Custom Routing tab and choose Add Handlers. Save checks the source against the selected tunnel. Disconnect before changing a saved program. On the next connection the built-in provider must install the program before carrying packets. The SSH forwarding adapters expose channel events. Managed local and dynamic forwards can check the destination at <code>ssh.forward_open</code>. Managed reverse forwards can check the destination before opening the local connection at <code>ssh.reverse_delivery</code>. SSH point-to-point and the OpenConnect proxy adapter inspect inner IP packets in both directions. The editor lists the events available for the selected transport. Existing VPNs started separately in System Settings use macOS routing.</p>
+<p>Export Settings preserves the program with the profile. Use the Routing Atlas to explore the available events, actions and examples.</p>
 <h2 id="cr-route-rule">Route Rules</h2>
 <p class="default">Default: no rules — routes pass through unchanged.</p>
 <p>An ordered list that edits the networks this VPN offers. Each rule has an action and one or two networks (in address/length form, or the word <code>default</code> for the &ldquo;send everything&rdquo; route):</p>
@@ -1576,6 +1625,7 @@ arrow keys. DNS has its own paths; Custom Routing shows route and proxy paths.</
 <h2 id="cr-query-routing">Query-name Routing</h2>
 <p class="default">Default: off.</p>
 <p>Advanced query-name routing uses a DNS proxy while this VPN is connected. Enabling it replaces another app&rsquo;s DNS proxy: macOS allows one active DNS proxy. It requires the installed SimpleVPN system extension with DNS proxy support and macOS approval. Normal DNS configuration does not activate this proxy.</p>
+<p>Choose <strong>DNS Query Activity…</strong> to inspect counters from the active proxy. Select a rule or <strong>Unmatched · Original resolver</strong> to see admitted queries, valid upstream answers, forwarding failures, and query and answer bytes. Retries count as one query. Valid replies can include a DNS error. The chart samples while visible. The inspector never records queried names or payloads. Saving or previewing a rule in the editor does not increment any count.</p>
 <p>Policy changes restart only the DNS proxy. Active DNS transactions may retry. Configuration acknowledgement does not prove provider liveness; verify actual queries after installation. Standard single-question UDP/TCP DNS is supported; zone transfers and DSO are excluded. Application-managed DoH or DoT bypasses these rules.</p>
 <h2 id="cr-query-rule">Query Rules</h2>
 <p class="default">Default: no rules.</p>
@@ -1619,7 +1669,7 @@ arrow keys. DNS has its own paths; Custom Routing shows route and proxy paths.</
 <h2 id="cr-proxy-mode">Proxy</h2>
 <p class="default">Default: use the proxy this VPN pushes.</p>
 <p>Whether to use the proxy this VPN offers, go <strong>direct</strong> and ignore it, or use a proxy of your <strong>own</strong>. Choosing Custom reveals the address fields below.</p>
-<p>For the OS-native VPN kinds (IKEv2, IPsec) macOS applies the proxy itself and SimpleVPN only observes it — so a pushed proxy&rsquo;s sign-in can&rsquo;t be attached there. The tab says so where it matters instead of offering a field that does nothing.</p>
+<p>When an IKEv2 or IPsec profile uses the macOS personal VPN, macOS applies the proxy itself and SimpleVPN only observes it — so a pushed proxy&rsquo;s sign-in can&rsquo;t be attached there. The tab says so where it matters instead of offering a field that does nothing.</p>
 
 <h2 id="cr-proxy-manual-url">Manual Proxy Address</h2>
 <p class="default">Optional. Custom mode only.</p>
@@ -1874,7 +1924,7 @@ arrow keys. DNS has its own paths; Custom Routing shows route and proxy paths.</
 <p><strong>This one is best-effort, and it is worth knowing why before you rely on it.</strong> LastPass&rsquo;s tool is the least capable of the ones SimpleVPN reads, and three of its limits are not things this app can work around:</p>
 <ul>
 <li><strong>It can never give a verification code.</strong> There is no field for one anywhere in what the tool hands back, and no command to ask for one. If your VPN needs a code, you type it every time.</li>
-<li><strong>Its memory expires.</strong> The helper quits after an hour by default, and after that SimpleVPN cannot read anything until you sign in again in Terminal. To be asked far less often, put <code>LPASS_AGENT_TIMEOUT=0</code> in the file <code>~/.lpass/env</code> &mdash; nought means never forget.</li>
+<li><strong>Its memory expires.</strong> The helper quits after an hour by default, and after that SimpleVPN cannot read anything until you sign in again in Terminal. To be asked far less often, put <code><span class="directive">LPASS_AGENT_TIMEOUT</span>=0</code> in the file <code>~/.lpass/env</code> &mdash; nought means never forget.</li>
 <li><strong>An entry set to ask for your master password every time cannot be read at all.</strong> LastPass calls that &ldquo;Require Password Reprompt&rdquo;. SimpleVPN will not ask you for your LastPass master password, so an entry using it is one SimpleVPN says no to rather than one it prompts for. Turn the setting off on that entry, or point the VPN at a different one.</li>
 </ul>
 <p>The tool itself also moves slowly, so what works today is what will keep working; nothing new is likely to arrive.</p>

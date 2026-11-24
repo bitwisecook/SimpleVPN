@@ -119,13 +119,25 @@ struct OCAuthFormAutofillTests {
         #expect(r.unanswered.isEmpty)
     }
 
-    @Test func ssoUserAndTokenFieldsMapToStoredValues() {
+    @Test func onlyIdentificationAndPrimaryPasswordFieldsReceiveStoredValues() {
         let form = OCAuthFormSpec(fields: [
             field("user", OCAuthFormField.Kind.ssoUser),
             field("otp", OCAuthFormField.Kind.token, secret: true),
+            field("secondary_password", OCAuthFormField.Kind.password, secret: true),
+            field("challenge", OCAuthFormField.Kind.text),
+            field("method", OCAuthFormField.Kind.text),
         ])
-        let r = OCAuthFormAutofill.fill(form, username: "jd", password: "123456")
-        #expect(r.answers == ["user": "jd", "otp": "123456"])
+        let r = OCAuthFormAutofill.fill(form, username: "jd", password: "primary", realm: "staff", vpnProtocol: "array")
+        #expect(r.answers == ["user": "jd", "method": "staff"])
+        #expect(r.unanswered.map(\.id) == ["otp", "secondary_password", "challenge"])
+    }
+
+    @Test(arguments: ["_challenge", "secondary", "password-change", "OTP", "rotate-password"])
+    func secondaryPageCannotReuseThePrimaryPasswordField(formID: String) {
+        let form = OCAuthFormSpec(authID: formID, fields: [field("password", OCAuthFormField.Kind.password, secret: true)])
+        let result = OCAuthFormAutofill.fill(form, username: "jd", password: "primary")
+        #expect(result.answers.isEmpty)
+        #expect(result.unanswered.map(\.id) == ["password"])
     }
 
     @Test func missingValuesAreReportedNotGuessed() {

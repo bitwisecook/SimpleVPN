@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/tailscale/wireguard-go/conn"
 	"golang.org/x/sys/unix"
@@ -170,4 +171,25 @@ func (b *physicalBind) SetInterface(index uint32) error {
 	}
 	b.index = index
 	return nil
+}
+
+func physicalProxyDialer(index uint32) (*net.Dialer, error) {
+	if index == 0 {
+		return nil, errors.New("physical network unavailable")
+	}
+	return &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second, Control: func(network, address string, raw syscall.RawConn) error {
+		family := unix.AF_INET
+		switch network {
+		case "udp6", "tcp6":
+			family = unix.AF_INET6
+		case "udp4", "tcp4":
+		default:
+			return errors.New("unknown proxy socket family")
+		}
+		var bindErr error
+		if err := raw.Control(func(fd uintptr) { bindErr = scopeSocket(int(fd), family, index) }); err != nil {
+			return err
+		}
+		return bindErr
+	}}, nil
 }

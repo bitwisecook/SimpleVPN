@@ -39,6 +39,7 @@ struct TunnelStats: Codable, Sendable, Equatable {
     /// A shared capture session. Default ownership denotes the selected egress
     /// here; it does not mean this member owns a separate OS interface.
     var virtualRoutingSession: String? = nil
+    var virtualPortStopped: Bool? = nil
     var defaultCaptureBlocked: Bool? = nil
     var mtu: Int? = nil                // tunnel MTU
 

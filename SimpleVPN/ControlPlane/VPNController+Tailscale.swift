@@ -44,7 +44,8 @@ extension VPNController {
     /// shows in Network settings; the real control server rides the settings
     /// blob, because for the Tailscale preset there is nothing to show.
     @discardableResult
-    func createTailscale(name: String = "Tailscale", configuration: TailscaleConfig? = nil) async throws -> String {
+    func createTailscale(name: String = "Tailscale", configuration: TailscaleConfig? = nil, routingEventSource: String? = nil) async throws -> String {
+        try await ProfilePacketPolicy.validate(routingEventSource, adapter: RoutingAdapter.packetID(for: .tailscale))
         guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
         let id = UUID().uuidString
         var config = configuration?.normalized() ?? TailscaleConfig()
@@ -60,6 +61,7 @@ extension VPNController {
         var conf: [String: Any] = ["profile": id, "vpnType": VPNKind.tailscale.rawValue]
         if let blob = config.encodedBlob() { conf["tailscale"] = blob }
         proto.providerConfiguration = conf
+        try await ProfilePacketPolicy.attach(routingEventSource, to: proto)
         mgr.protocolConfiguration = proto
         mgr.localizedDescription = name
         mgr.isEnabled = true
@@ -128,6 +130,11 @@ extension VPNController {
     /// collect: either a stored auth key registers this Mac silently, or the
     /// engine asks for a browser sign-in and `watchTailscaleSignIn` surfaces it.
     func connectTailscale(id: String) async throws {
+        guard virtualManager(for: id) == nil,
+              let reservation = connectionReservations.reserve(owner: "profile." + id, members: [id]) else {
+            throw err("This VPN is in use by another connection.")
+        }
+        defer { connectionReservations.finish(reservation); resyncStatuses() }
         guard let existing = managers[id], existing.connection.status == .disconnected || existing.connection.status == .invalid else {
             throw err("Disconnect this VPN before starting a new connection.")
         }
@@ -143,6 +150,7 @@ extension VPNController {
         if let ensureExtensionReady, !(await ensureExtensionReady()) {
             throw err("SimpleVPN needs its network extension approved before it can connect. Open System Settings ▸ General ▸ Login Items & Extensions ▸ Network Extensions and allow SimpleVPN.")
         }
+        if hasPacketPolicy(for: id) { try await SystemExtensionManager.requireCurrentProvider() }
         await migrateLegacyTailscaleIdentity(id)
         let config = tailscaleConfig(for: id)
         if let problem = config.controlURLProblem { throw err(problem) }
@@ -173,7 +181,8 @@ extension VPNController {
         guard let session = mgr.connection as? NETunnelProviderSession else {
             throw err("The VPN configuration isn't ready — try removing and re-creating it.")
         }
-        guard !locallyRemovedProfileIDs.contains(id), !tailscaleCancelledStarts.contains(id),
+        guard connectionReservations.isCurrent(reservation), !Task.isCancelled, virtualManager(for: id) == nil,
+              !locallyRemovedProfileIDs.contains(id), !tailscaleCancelledStarts.contains(id),
               session.status == .disconnected || session.status == .invalid else {
             throw err("The connection changed before this VPN could start.")
         }
@@ -193,9 +202,9 @@ extension VPNController {
         tailscaleSignInResults[id] = nil
     }
 
-    private func watchTailscaleSignIn(id: String, lease: Installation.Lease, reauthenticating: Bool = false) {
+    func watchTailscaleSignIn(id: String, lease: Installation.Lease, reauthenticating: Bool = false) {
         clearTailscaleSignIn(id: id)
-        tailscaleSignInResults[id] = .preparing
+        tailscaleSignInResults[id] = reauthenticating ? .renewing : .preparing
         tailscaleSignInWatch[id] = Task { [weak self] in
             defer { withExtendedLifetime(lease) {} }
             // Five minutes is longer than any legitimate registration (the user
@@ -232,7 +241,6 @@ extension VPNController {
                 guard let url, SSOAuthModel.accepts(url), url != self.tailscaleSignInURL[id] else { continue }
                 openedSignInPage = true
                 self.tailscaleSignInURL[id] = url
-                self.tailscaleSignInResults[id] = nil
                 self.openTailscaleURL(url, id: id)
             }
             guard let self, !Task.isCancelled else { return }
@@ -240,8 +248,8 @@ extension VPNController {
                 self.disconnect(id: id)
             }
             self.tailscaleSignInURL[id] = nil
-            self.tailscaleSignInResults[id] = .failed
-            AccessibilityAnnouncer.sayNow("Sign-in timed out")
+            self.tailscaleSignInResults[id] = reauthenticating ? .renewalFailed : .failed
+            AccessibilityAnnouncer.sayNow(reauthenticating ? "Sign-in renewal timed out" : "Sign-in timed out")
         }
     }
 
@@ -250,20 +258,20 @@ extension VPNController {
     }
 
     func reauthenticateTailscale(id: String) async {
-        guard tailscaleSignInResults[id] != .preparing, tailscaleSignInURL[id] == nil,
+        guard tailscaleSignInResults[id]?.inProgress != true, tailscaleSignInURL[id] == nil,
               let connection = managers[id]?.connection, connection.status == .connected else { return }
         let lease: Installation.Lease
         do { lease = try tailscaleIdentityLease(id) }
         catch { report(error, profile: id); return }
         defer { withExtendedLifetime(lease) {} }
-        tailscaleSignInResults[id] = .preparing
+        tailscaleSignInResults[id] = .renewing
         let data = await sendMessageData("tsreauth", to: id)
-        guard tailscaleSignInResults[id] == .preparing,
+        guard tailscaleSignInResults[id] == .renewing,
               managers[id]?.connection === connection, connection.status == .connected else { return }
         guard let data,
               let reply = String(data: data, encoding: .utf8), reply == "ok" else {
-            tailscaleSignInResults[id] = .failed
-            AccessibilityAnnouncer.sayNow("Could not start sign-in")
+            tailscaleSignInResults[id] = .renewalFailed
+            AccessibilityAnnouncer.sayNow("Could not start sign-in renewal")
             return
         }
         watchTailscaleSignIn(id: id, lease: lease, reauthenticating: true)
@@ -288,28 +296,34 @@ extension VPNController {
     /// Refresh (and publish) the engine status for a connected Tailscale VPN.
     @discardableResult
     func refreshTailscaleStatus(id: String) async -> TailscaleStatus? {
-        guard let connection = managers[id]?.connection,
+        guard let connection = (virtualManager(for: id) ?? managers[id])?.connection,
               UI.isActive(connection.status),
               let data = await sendMessageData("tsstatus", to: id),
               !Task.isCancelled,
-              managers[id]?.connection === connection,
+              (virtualManager(for: id) ?? managers[id])?.connection === connection,
               UI.isActive(connection.status),
               let status = try? JSONDecoder().decode(TailscaleStatus.self, from: data) else { return nil }
-        let wasWaitingForSignIn = tailscaleSignInURL[id] != nil
-            || tailscaleStatuses[id]?.backendState.needsUserAction == true
+        if publishTailscaleStatus(status, id: id) {
+            AccessibilityAnnouncer.sayNow("Sign-in successful")
+        }
+        return status
+    }
+
+    /// Returns whether a sign-in that asked the user to act just completed.
+    func publishTailscaleStatus(_ status: TailscaleStatus, id: String) -> Bool {
+        let wasWaitingForSignIn = tailscaleSignInURL[id] != nil ||
+            tailscaleStatuses[id]?.backendState.needsUserAction == true
         if tailscaleStatuses[id] != status { tailscaleStatuses[id] = status }
         // Once the node is registered there is nothing left to sign in to. The
         // control plane completed the sign-in on its own — the browser never
         // redirects anywhere this app can see — so the stale sign-in state has
         // to be cleared from this side.
-        if status.backendState == .running && status.authURL.isEmpty {
-            if tailscaleSignInURL[id] != nil { tailscaleSignInURL[id] = nil }
-            if wasWaitingForSignIn {
-                tailscaleSignInResults[id] = nil
-                AccessibilityAnnouncer.sayNow("Sign-in successful")
-            }
+        guard status.backendState == .running, status.authURL.isEmpty else { return false }
+        if tailscaleSignInURL[id] != nil { tailscaleSignInURL[id] = nil }
+        if wasWaitingForSignIn || tailscaleSignInResults[id] == .preparing || tailscaleSignInResults[id] == .failed {
+            tailscaleSignInResults[id] = nil
         }
-        return status
+        return wasWaitingForSignIn
     }
 
     /// Apply a settings change to a *running* session so the user doesn't have
@@ -322,5 +336,71 @@ extension VPNController {
         guard let data = await sendMessageData("tsprefs:\(patch.jsonString())", to: id),
               let text = String(data: data, encoding: .utf8) else { return "The VPN didn't answer." }
         return text == "ok" ? nil : String(text.dropFirst("error: ".count))
+    }
+
+    /// Change the standalone node and store the choice for the next connection.
+    /// The route mediator stays the sole writer of default-route ownership.
+    func selectTailscaleExitNode(_ node: TailscalePeer?, id: String) async throws {
+        guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
+        guard !changingTailscaleExitNode else { throw err("An exit-node change is already in progress.") }
+        guard isTailscale(id), virtualManager(for: id) == nil,
+              managers[id]?.connection.status == .connected else {
+            throw err("Connect this VPN on its own to change its exit node.")
+        }
+        guard node != nil || !ManagedPolicy.forceKeepInsideVPN else {
+            throw err("Your organization requires internet traffic to use a VPN.")
+        }
+        if let reason = controlDenied(.setDefaultGateway(profile: node == nil ? nil : id)) {
+            throw err(reason)
+        }
+        changingTailscaleExitNode = true
+        defer { changingTailscaleExitNode = false }
+        guard let status = await refreshTailscaleStatus(id: id), status.backendState == .running else {
+            throw err("The VPN didn’t report its available exit nodes. Try again in a moment.")
+        }
+        if let node, !status.exitNodes.contains(where: { $0.id == node.id && $0.online }) {
+            throw err("That exit node is no longer online.")
+        }
+
+        let previous = tailscaleConfig(for: id)
+        let previousGateway = routes.gatewayPreference
+        var selected = previous
+        selected.useExitNode = node != nil
+        if let node { selected.exitNode = node.id }
+        let requestedGateway = if node != nil {
+            RoutePolicy(storedOwner: id, userChoseDirect: false)
+        } else if previousGateway.storedOwner == id {
+            RoutePolicy(storedOwner: nil, userChoseDirect: false)
+        } else {
+            previousGateway
+        }
+        do {
+            try await setTailscaleConfig(selected, for: id)
+            guard managers[id]?.connection.status == .connected, virtualManager(for: id) == nil else {
+                throw err("The VPN disconnected during the exit-node change.")
+            }
+            await routes.applyGatewayPreference(requestedGateway, refreshGateway: true)
+            if let problem = routes.lastApplyError { throw err(problem) }
+            guard let plan = routes.appliedPlan, (plan.owner == id) == (node != nil) else {
+                throw err("The requested exit node did not get the expected gateway role.")
+            }
+            guard let confirmed = await refreshTailscaleStatus(id: id),
+                  confirmed.exitNodeID == (node?.id ?? "") else {
+                throw err("The VPN did not confirm the requested exit node.")
+            }
+        } catch {
+            let failure = error
+            do {
+                try await setTailscaleConfig(previous, for: id)
+                if routes.gatewayPreference == requestedGateway {
+                    await routes.applyGatewayPreference(previousGateway, refreshGateway: true)
+                    if let problem = routes.lastApplyError { throw err(problem) }
+                }
+                await refreshTailscaleStatus(id: id)
+            } catch {
+                throw err("\(failure.localizedDescription) The previous exit-node selection could not be restored. \(error.localizedDescription)")
+            }
+            throw failure
+        }
     }
 }

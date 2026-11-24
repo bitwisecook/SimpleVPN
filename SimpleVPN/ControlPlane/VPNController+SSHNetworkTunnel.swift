@@ -52,7 +52,8 @@ extension VPNController {
     /// Create a new SSH Network Tunnel. Starts full-tunnel with trust-on-first-use,
     /// which the editor then refines.
     @discardableResult
-    func createSSHNetworkTunnel(name: String = "SSH Network Tunnel", configuration: SSHNetworkTunnelConfig? = nil) async throws -> String {
+    func createSSHNetworkTunnel(name: String = "SSH Network Tunnel", configuration: SSHNetworkTunnelConfig? = nil, routingEventSource: String? = nil) async throws -> String {
+        try await ProfilePacketPolicy.validate(routingEventSource, adapter: RoutingAdapter.packetID(for: .sshNetworkTunnel))
         guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
         let id = UUID().uuidString
         var config = configuration?.normalized() ?? SSHNetworkTunnelConfig()
@@ -68,6 +69,7 @@ extension VPNController {
         var conf: [String: Any] = ["profile": id, "vpnType": VPNKind.sshNetworkTunnel.rawValue]
         if let blob = config.encodedBlob() { conf["sshnet"] = blob }
         proto.providerConfiguration = conf
+        try await ProfilePacketPolicy.attach(routingEventSource, to: proto)
         mgr.protocolConfiguration = proto
         mgr.localizedDescription = name
         mgr.isEnabled = true
@@ -246,11 +248,16 @@ extension VPNController {
     /// over in memory; the host key is resolved here too, because the extension
     /// accepts exactly one fingerprint and can neither prompt nor look one up.
     func connectSSHNetworkTunnel(id: String) async throws {
+        guard virtualManager(for: id) == nil, let attempt = connectionReservations.reserve(owner: "sshnet." + id, members: [id]) else {
+            throw err("This SSH VPN is starting or belongs to an active virtual connection.")
+        }
+        defer { connectionReservations.finish(attempt) }
         guard let mgr = managers[id],
               mgr.protocolConfiguration is NETunnelProviderProtocol else { throw err("no such profile") }
         if let ensureExtensionReady, !(await ensureExtensionReady()) {
             throw err("SimpleVPN needs its network extension approved before it can connect. Open System Settings ▸ General ▸ Login Items & Extensions ▸ Network Extensions and allow SimpleVPN.")
         }
+        if hasPacketPolicy(for: id) { try await SystemExtensionManager.requireCurrentProvider() }
         let config = sshNetworkTunnelConfig(for: id)
         if let problem = config.connectProblem { throw err(problem) }
 
@@ -303,6 +310,7 @@ extension VPNController {
             guard state.canSignIn, let socket=state.socketPath else { throw err(state.summary) }
             agentSocket=socket; options["sshAgentBroker"] = true as NSNumber
         }
+        guard connectionReservations.isCurrent(attempt), virtualManager(for: id) == nil, !Task.isCancelled else { throw CancellationError() }
         try startWithInitialGateway(session, profile: id, options: options)
         if let agentSocket { watchSSHAgentSigning(id, session:session, socket:agentSocket) }
         Self.log.log("ssh network tunnel startTunnel dispatched for \(id, privacy: .public)")

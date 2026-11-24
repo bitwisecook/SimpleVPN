@@ -304,15 +304,34 @@ nonisolated enum OCAuthFormAutofill {
         var unanswered: [OCAuthFormField] = []
     }
 
-    static func fill(_ form: OCAuthFormSpec, username: String?, password: String?) -> Result {
+    static func fill(_ form: OCAuthFormSpec, username: String?, password: String?, realm: String? = nil,
+                     vpnProtocol: String? = nil) -> Result {
         var result = Result()
+        // Gateways may reuse the primary field ID and label on a second page.
+        let formID = (form.authID ?? "").lowercased()
+        let secondaryForm = ["challenge", "secondary", "secondfactor", "second_factor", "otp", "mfa", "2fa",
+                             "token", "passcode", "rotate", "rotation", "change", "reset", "expired", "newpin"]
+            .contains { formID.contains($0) }
         for field in form.fields {
             switch field.type {
             case OCAuthFormField.Kind.text, OCAuthFormField.Kind.ssoUser:
-                if let username, !username.isEmpty { result.answers[field.id] = username }
+                let name = field.id.lowercased()
+                let value: String?
+                if field.type == OCAuthFormField.Kind.ssoUser || ["username", "user", "uname", "login", "j_username"].contains(name) {
+                    value = username
+                } else if name == "realm" || (vpnProtocol == "array" && name == "method") {
+                    value = realm
+                } else { value = nil }
+                if let value, !value.isEmpty { result.answers[field.id] = value }
                 else { result.unanswered.append(field) }
-            case OCAuthFormField.Kind.password, OCAuthFormField.Kind.token:
-                if let password, !password.isEmpty { result.answers[field.id] = password }
+            case OCAuthFormField.Kind.password:
+                let name = field.id.lowercased()
+                let label = field.label.lowercased()
+                let challenge = ["otp", "token", "passcode", "one-time", "verification", "secondary", "response",
+                                 "challenge", "new password", "pin:"].contains { label.contains($0) }
+                let primary = !secondaryForm && !challenge && (["password", "passwd", "pwd", "pass", "j_password"].contains(name)
+                    || (name == "credential" && vpnProtocol == "fortinet" && form.authID == "_login"))
+                if primary, let password, !password.isEmpty { result.answers[field.id] = password }
                 else { result.unanswered.append(field) }
             case OCAuthFormField.Kind.select:
                 // A one-choice select answers itself; a real choice (the helper

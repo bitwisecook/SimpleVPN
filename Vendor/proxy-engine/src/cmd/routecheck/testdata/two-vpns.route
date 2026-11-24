@@ -1,0 +1,6 @@
+policy 1
+# The payroll host is an exception inside the larger office network.
+rule payroll ip 10.42.8.19 via finance
+rule office ip 10.42.0.0/16 via work
+rule office6 ip 2001:db8:42::/48 via work
+default drop

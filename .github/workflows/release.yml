@@ -133,7 +133,10 @@ jobs:
             Vendor/openvpn3-include
             Vendor/openconnect-include
             Vendor/libssh-include
-          key: engines-${{ runner.os }}-${{ runner.arch }}-xcode${{ steps.xc.outputs.version }}-${{ hashFiles('Tools/build-openvpn3-xcframework.sh', 'Tools/build-openconnect-xcframework.sh', 'Tools/build-libssh-xcframework.sh', 'Tools/build-openssl.sh') }}
+            Vendor/libSimpleIPsec.a
+            Vendor/openssh/bin/ssh
+            Vendor/strongswan-include
+          key: engines-${{ runner.os }}-${{ runner.arch }}-xcode${{ steps.xc.outputs.version }}-${{ hashFiles('Tools/build-openvpn3-xcframework.sh', 'Tools/build-openconnect-xcframework.sh', 'Tools/OpenConnect/*.patch', 'Tools/build-libssh-xcframework.sh', 'Tools/build-openssl.sh', 'Tools/build-strongswan.sh', 'Tools/StrongSwan/**', 'Tools/build-openssh-client.sh', 'Tools/OpenSSH/**') }}
 
       - name: Install pinned OpenSSL (cache miss only)
         if: steps.cache.outputs.cache-hit != 'true'
@@ -150,13 +153,18 @@ jobs:
       - name: Build SSHEngine.xcframework (cache miss only)
         if: steps.cache.outputs.cache-hit != 'true'
         run: Tools/build-libssh-xcframework.sh
+      - name: Build and peer-test the strongSwan userspace IPsec engine
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          Tools/build-strongswan.sh
+          Tools/build-openssh-client.sh
 
       - name: Assert all engine artifacts exist
         run: |
           set -euo pipefail
           for p in Vendor/OpenVPNEngine.xcframework Vendor/OpenConnectEngine.xcframework \
                    Vendor/SSHEngine.xcframework Vendor/openvpn3-include \
-                   Vendor/openconnect-include Vendor/libssh-include; do
+                   Vendor/openconnect-include Vendor/libssh-include Vendor/strongswan-include Vendor/libSimpleIPsec.a Vendor/openssh/bin/ssh; do
             if [ ! -e "$p" ]; then echo "FATAL: missing $p"; exit 1; fi
           done
 
@@ -170,6 +178,9 @@ jobs:
             Vendor/openvpn3-include
             Vendor/openconnect-include
             Vendor/libssh-include
+            Vendor/libSimpleIPsec.a
+            Vendor/openssh/bin/ssh
+            Vendor/strongswan-include
           retention-days: 1
 
   # Job 2: signs, notarizes, and releases. Holds all the secrets, and never
@@ -227,10 +238,18 @@ jobs:
           set -euo pipefail
           go version
           Tools/build-onepassword-sdk.sh
-      # Runs gofmt/vet/go test on the shim before producing the archive, so a
-      # drift in the Swift↔Go JSON contract fails the release here rather than
-      # shipping a tunnel that connects and carries nothing.
-      - name: Build Tailscale engine archive
+      - name: Install the release Rust toolchain
+        run: |
+          if ! command -v rustup >/dev/null; then
+            brew install rustup
+            rustup_bin="$(brew --prefix rustup)/bin"
+            export PATH="$rustup_bin:$PATH"
+            echo "$rustup_bin" >> "$GITHUB_PATH"
+          fi
+          rustup toolchain install 1.100.0 --profile minimal --component clippy --target aarch64-apple-darwin
+          echo 'RUSTUP_TOOLCHAIN=1.100.0' >> "$GITHUB_ENV"
+      # Validate Rust and its tagged Go consumers before loading signing credentials.
+      - name: Build and test native routing engines
         run: |
           set -euo pipefail
           Tools/build-tailscale-engine.sh

@@ -92,6 +92,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
@@ -131,6 +132,7 @@ import (
 // ---- Wire types -------------------------------------------------------------
 
 type startConfig struct {
+	UnderlayInterfaceIndex uint32   `json:"underlayInterfaceIndex,omitempty"`
 	ControlURL             string   `json:"controlURL"`
 	Hostname               string   `json:"hostname"`
 	AuthKey                string   `json:"authKey"`
@@ -639,6 +641,14 @@ func buildEngineWithCallbacks(cfg startConfig, controlURL string, advRoutes []ne
 	if err != nil {
 		return nil, startError{"engine", fmt.Errorf("network monitor: %w", err)}
 	}
+	if cfg.UnderlayInterfaceIndex != 0 {
+		scoped, ok := any(netMon).(interface{ SetRequiredInterface(uint32) })
+		if _, err := net.InterfaceByIndex(int(cfg.UnderlayInterfaceIndex)); err != nil || !ok {
+			netMon.Close()
+			return nil, startError{"engine", errors.New("the selected physical interface is unavailable for this Tailscale node")}
+		}
+		scoped.SetRequiredInterface(cfg.UnderlayInterfaceIndex)
+	}
 	st.netMon = netMon
 	sys.Set(netMon)
 
@@ -760,7 +770,6 @@ func buildEngineWithCallbacks(cfg startConfig, controlURL string, advRoutes []ne
 
 	ctx, cancel := context.WithCancel(context.Background())
 	st.cancel = cancel
-	st.startWatch(ctx, cfg.AuthKey == "")
 
 	if err := lb.Start(ipn.Options{UpdatePrefs: prefs, AuthKey: cfg.AuthKey}); err != nil {
 		cancel()
@@ -768,6 +777,7 @@ func buildEngineWithCallbacks(cfg startConfig, controlURL string, advRoutes []ne
 		unwind()
 		return nil, startError{"backend", fmt.Errorf("start: %w", err)}
 	}
+	st.startWatch(ctx)
 	return st, nil
 }
 
@@ -790,7 +800,7 @@ func applyExitNode(prefs *ipn.Prefs, use bool, id string) {
 
 // ---- Notification watch -----------------------------------------------------
 
-func (st *engineState) startWatch(ctx context.Context, interactive bool) {
+func (st *engineState) startWatch(ctx context.Context) {
 	st.watchWG.Add(1)
 	go func() {
 		defer st.watchWG.Done()
@@ -806,10 +816,10 @@ func (st *engineState) startWatch(ctx context.Context, interactive bool) {
 			if n.State != nil {
 				s := *n.State
 				st.callbacks.state(statePayload{State: s.String(), AuthURL: st.authURL()})
-				// No auth key ⇒ the node has to be authorized in a browser.
-				// LocalBackend does not start that itself: it waits for a
-				// client to ask, which is what a `tailscale up` would do.
-				if interactive && s == ipn.NeedsLogin && !loginStarted {
+				// Like tailscale up, explicitly begin registration for a new
+				// node. Control uses the supplied auth key when present and
+				// can request a browser otherwise.
+				if s == ipn.NeedsLogin && !loginStarted {
 					loginStarted = true
 					go func() {
 						if err := st.lb.StartLoginInteractive(ctx); err != nil {

@@ -1,0 +1,144 @@
+--- a/array.c
++++ b/array.c
+@@ -133,7 +133,7 @@
+  out:
+ 	if (form) free_auth_form(form);
+ 	if (req_buf) buf_free(req_buf);
+-	printf("obtain return %d\n", ret);
++	/* The embedding process owns stdout (including its structured auth channel). */
+ 	return ret;
+ }
+ 
+@@ -217,7 +217,7 @@
+ 	/* We have no idea how they expose IPv6 yet. Hopefully not
+ 	   as wrong-endian integers like Legacy IP! */
+ 	if (ipv6)
+-		return 0;
++		return vpninfo->member_socket ? -ENOTSUP : 0;
+ 
+ 	uint32_t route_ip = 0, route_mask = 0;
+ 	int route_ip_found = 0, route_mask_found = 0;
+@@ -237,6 +237,8 @@
+ 			route_mask_found = 1;
+ 		}
+ 	}
++	if (vpninfo->member_socket && !(route_ip_found && route_mask_found))
++		return -EINVAL;
+ 	if (route_ip_found && route_mask_found) {
+ 		char buf[64];
+ 		if (!inet_ntop(AF_INET, &route_ip, buf, sizeof(buf)/2))
+@@ -258,7 +260,11 @@
+ 		else
+ 			list = &ip_info->split_excludes;
+ 
+-		inc->route = add_option_dup(opts, "split-include", buf, -1);
++		inc->route = add_option_dup(opts, incl ? "split-include" : "split-exclude", buf, -1);
++		if (!inc->route) {
++			free(inc);
++			return -ENOMEM;
++		}
+ 		inc->next = *list;
+ 		*list = inc;
+ 	}
+@@ -281,15 +287,19 @@
+ 		json_value *child_val = val->u.object.values[i].value;
+ 		int is_ipv6;
+ 
+-		if (child_val->type != json_array)
++		if (child_val->type != json_array) {
++			if (vpninfo->member_socket) return -EINVAL;
+ 			continue;
++		}
+ 
+ 		if (!strcmp(child_name, "ipv6"))
+ 			is_ipv6 = 1;
+ 		else if (!strcmp(child_name, "ipv4"))
+ 			is_ipv6 = 0;
+-		else
++		else {
++			if (vpninfo->member_socket) return -ENOTSUP;
+ 			continue;
++		}
+ 
+ 		for (int j = 0; j < child_val->u.array.length; j++) {
+ 			ret = parse_one_inc_exc(vpninfo, opts, ip_info, incl, is_ipv6,
+@@ -305,6 +315,7 @@
+ static int parse_proxy_script(struct openconnect_info *vpninfo, struct oc_vpn_option **opts,
+ 			      struct oc_ip_info *ip_info, json_value *val)
+ {
++	if (vpninfo->member_socket && val->u.object.length) return -ENOTSUP;
+ 	return 0;
+ }
+ 
+@@ -420,6 +431,13 @@
+ 		json_char *child_name = val->u.object.values[i].name;
+ 		json_value *child_val = val->u.object.values[i].value;
+ 
++		if (vpninfo->member_socket &&
++		    ((!strcmp(child_name, "include_network_resource") ||
++		      !strcmp(child_name, "exclude_network_resource") || !strcmp(child_name, "proxy_script")) &&
++		     child_val->type != json_object)) {
++			ret = -EINVAL;
++			goto out;
++		}
+ 		if (child_val->type == json_integer) {
+ 			json_int_t ival = child_val->u.integer;
+ 
+@@ -441,14 +459,14 @@
+ 				new_ip_info.addr = add_option_ipaddr(&new_opts,
+ 								     "client_ipv4",
+ 								     AF_INET, &ip);
+-				printf("Found Legacy IP address %s\n", new_ip_info.addr);
++				vpn_progress(vpninfo, PRG_DEBUG, "Found Legacy IP address %s\n", new_ip_info.addr);
+ 			} else if (!strcmp(child_name, "client_ipv4_mask")) {
+ 				uint32_t mask;
+ 				store_le32(&mask, ival);
+ 				new_ip_info.netmask = add_option_ipaddr(&new_opts,
+ 									"client_ipv4_mask",
+ 									AF_INET, &mask);
+-				printf("Found Legacy IP netmask %s\n", new_ip_info.netmask);
++				vpn_progress(vpninfo, PRG_DEBUG, "Found Legacy IP netmask %s\n", new_ip_info.netmask);
+ 			}
+ 			else goto unknown;
+ 		} else if (child_val->type == json_object) {
+--- a/pulse.c
++++ b/pulse.c
+@@ -502,11 +502,13 @@
+ 		break;
+ 
+ 	case 0x4009:
++		if (vpninfo->member_socket && attrlen) return -ENOTSUP;
+ 		vpn_progress(vpninfo, PRG_INFO,
+ 			     _("Received proxy auto-config (PAC) payload of size %d\n"), attrlen);
+ 		break;
+ 
+ 	case 0x4023:
++		if (vpninfo->member_socket && attrlen) return -ENOTSUP;
+ 		vpn_progress(vpninfo, PRG_INFO,
+ 			     _("Received proxy auto-config (PAC) URL: %.*s\n"), attrlen, data);
+ 		break;
+@@ -2438,7 +2440,7 @@
+ 					     attr_flag, "openconnect-devel@lists.infradead.org");
+ 			}
+ 
+-			if (len < offset + attr_len ||
++			if (attr_len < 4 || len < offset + attr_len ||
+ 			    /* Process the attributes, even though all the attrs that
+ 			     * we have ever seen in this section are unknown, and will
+ 			     * be logged and otherwise ignored. */
+@@ -2481,6 +2483,15 @@
+ 
+ 		if (ffff != 0xffff)
+ 			goto bad_config;
++
++		/* A single CIDR can represent a range only when its endpoints
++		 * are the network and last address of one aligned prefix. */
++		if (vpninfo->member_socket) {
++			uint32_t start = load_be32(p + 8), end = load_be32(p + 12);
++			uint32_t hostmask = start ^ end;
++			if (start > end || (hostmask & (hostmask + 1)) || (start & hostmask))
++				goto bad_config;
++		}
+ 
+ 		/* Convert the range end into a netmask by xor. Mask out the
+ 		 * bits in the network address, leaving only the low bits set,

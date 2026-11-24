@@ -28,9 +28,8 @@
 //    • direct-tcpip  — SOCKS (-D) and port-forwards (-L)
 //    • tun@openssh.com — the net-tunnel (-w) mode. Built and available (libssh has no
 //      public API for that channel type, so the build script compiles a tiny wrapper
-//      into the vendored library — see Tools/build-libssh-xcframework.sh) but with NO
-//      CALLER yet: `-w` still runs through /usr/bin/ssh, and the SSH Network Tunnel
-//      kind uses per-flow direct-tcpip instead (no server-side root / PermitTunnel)
+//      into the vendored library — see Tools/build-libssh-xcframework.sh). The
+//      packet provider exchanges point-to-point IP datagrams with this channel.
 //  libssh sessions are not thread-safe: the caller MUST serialise every call on
 //  one queue. Blocking mode is used; SSH_OPTIONS_TIMEOUT bounds the blocking
 //  calls.
@@ -44,6 +43,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// Read up to len bytes; returns count, 0 on would-block (EAGAIN), negative on a
 /// hard error, and 0 with isEOF set at clean end. Non-blocking once in data mode.
 - (NSInteger)read:(void *)buffer maxLength:(NSInteger)len;
+/// Send one raw point-to-point IP packet. 1 sent, 0 dropped at a full window, -1 hard error.
+- (NSInteger)writeTunPacket:(NSData *)packet;
 /// Write; returns bytes accepted (may be < len, or 0 on EAGAIN), negative on error.
 - (NSInteger)write:(const void *)buffer length:(NSInteger)len;
 - (BOOL)isEOF;
@@ -120,6 +121,9 @@ typedef NS_ENUM(NSInteger, SSHHostKeyStatus) {
         kexAlgorithms:(nullable NSString *)kexAlgorithms
           compression:(BOOL)compression
                 error:(NSError * _Nullable * _Nullable)error;
+
+/// Bind the TCP carrier to one Darwin interface before key exchange. Zero uses the ordinary OS dialer.
+@property (nonatomic) uint32_t physicalInterfaceIndex;
 
 /// The server host key fingerprint (SHA-256, hex) for known-hosts verification.
 @property (nullable, readonly) NSString *hostKeyFingerprintSHA256;
@@ -288,6 +292,13 @@ typedef NS_ENUM(NSInteger, SSHHostKeyStatus) {
 /// 1 (point-to-point) or 2 (ethernet); `remoteUnit` is the server tun unit or -1.
 - (nullable SSHChannel *)openTunChannelMode:(int)mode remoteUnit:(int)remoteUnit
                                       error:(NSError * _Nullable * _Nullable)error;
+
+/// Open one point-to-point tun@openssh.com channel. Installs the packet callback
+/// before negotiating, so early data and consecutive messages retain boundaries.
+/// Both the callback and channel operations run on the caller's single session queue.
+- (nullable SSHChannel *)openPointToPointUnit:(int)remoteUnit mtu:(int)mtu
+                                     received:(void (^)(NSData *packet))received
+                                        error:(NSError * _Nullable * _Nullable)error NS_SWIFT_NAME(openTun(remoteUnit:mtu:received:));
 
 - (void)disconnect;
 

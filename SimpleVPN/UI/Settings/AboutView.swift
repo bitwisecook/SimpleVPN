@@ -38,6 +38,10 @@ enum Acknowledgements {
               url: "https://github.com/tailscale/wireguard-go"),
         .init(name: "teleport-client", license: "MIT", role: "UniFi Teleport invite exchange and endpoint negotiation",
               url: "https://github.com/sinnet3000/teleport-client"),
+        .init(name: "SwiftNIO and NIOSOCKS", license: "Apache-2.0", role: "SOCKS5 messages for local dynamic SSH forwarding",
+              url: "https://github.com/apple/swift-nio-extras"),
+        .init(name: "SagerNet sing", license: "GPL-3.0-or-later", role: "SOCKS5 authentication, requests and datagram addressing",
+              url: "https://github.com/SagerNet/sing"),
         .init(name: "Pion STUN", license: "MIT", role: "Authenticated STUN for Teleport",
               url: "https://github.com/pion/stun"),
         // gVisor's netstack is the userspace TCP/IP stack in BOTH Go engines: the

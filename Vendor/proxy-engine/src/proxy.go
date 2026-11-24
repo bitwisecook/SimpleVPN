@@ -13,20 +13,21 @@
 //               verifier — SecTrustEvaluate — so this honours the login
 //               keychain and MDM-pushed anchors). See dialTLS.
 //
-// No third-party proxy library: the two handshakes are small, and hand-rolling
-// them keeps the dependency surface to gVisor + the standard library (which is
-// what lets this fold into the tailscale archive without dragging x/net/proxy
-// and its transitive graph in).
+// SOCKS wire encoding uses SagerNet sing. HTTP and TLS use the Go standard library.
 
 package pxengine
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/sagernet/sing/common/metadata"
+	"github.com/sagernet/sing/common/varbin"
+	"github.com/sagernet/sing/protocol/socks/socks5"
 	"io"
 	"net"
 	"net/http"
@@ -88,7 +89,8 @@ func parseUpstream(raw, username, password string) (*upstream, error) {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("upstream URL is not valid: %w", err)
+		// url.Error includes the entire input, which can contain credentials.
+		return nil, errors.New("upstream proxy URL is invalid")
 	}
 	var kind proxyKind
 	switch strings.ToLower(u.Scheme) {
@@ -110,11 +112,20 @@ func parseUpstream(raw, username, password string) (*upstream, error) {
 	default:
 		return nil, fmt.Errorf("unsupported proxy scheme %q (use socks5://, http://, https:// or ssh://)", u.Scheme)
 	}
+	if (u.EscapedPath() != "" && u.EscapedPath() != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return nil, errors.New("use a proxy endpoint without a path, query or fragment")
+	}
 	host := u.Hostname()
 	if host == "" {
 		return nil, errors.New("upstream URL has no host")
 	}
 	port := u.Port()
+	if port != "" {
+		n, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || n == 0 {
+			return nil, errors.New("proxy port must be between 1 and 65535")
+		}
+	}
 	if port == "" {
 		// Sensible per-scheme defaults; SOCKS has no IANA default so 1080 is the
 		// universal convention.
@@ -145,6 +156,21 @@ func parseUpstream(raw, username, password string) (*upstream, error) {
 			// could reach the engine from the SAVED upstream string.
 			if p, ok := ui.Password(); ok && up.password == "" && kind != proxySSHExtension {
 				up.password = p
+			}
+		}
+	}
+	if kind != proxySSHExtension {
+		if (up.username == "") != (up.password == "") {
+			return nil, errors.New("proxy authentication requires both username and password")
+		}
+		if kind == proxySOCKS5 {
+			if len(up.username) > 255 || len(up.password) > 255 {
+				return nil, errors.New("SOCKS5 credentials exceed 255 bytes")
+			}
+		} else {
+			control := func(c rune) bool { return c < 32 || c == 127 }
+			if strings.Contains(up.username, ":") || strings.IndexFunc(up.username, control) >= 0 || strings.IndexFunc(up.password, control) >= 0 {
+				return nil, errors.New("invalid HTTP Basic credential format")
 			}
 		}
 	}
@@ -202,7 +228,7 @@ func (up *upstream) dialThrough(ctx context.Context, base *net.Dialer, targetHos
 	stopCancel := context.AfterFunc(ctx, func() { raw.Close() })
 	switch up.kind {
 	case proxySOCKS5:
-		err = socks5Connect(conn, targetHost, targetPort, up.username, up.password)
+		_, err = up.socksHandshake(conn, socks5.CommandConnect, targetHost, targetPort)
 	default:
 		conn, err = httpConnect(conn, targetHost, targetPort, up.username, up.password)
 	}
@@ -222,180 +248,68 @@ func (up *upstream) dialThrough(ctx context.Context, base *net.Dialer, targetHos
 
 // ---- SOCKS5 (RFC 1928 / RFC 1929) ------------------------------------------
 
-const (
-	socksVersion5 = 0x05
-	socksNoAuth   = 0x00
-	socksUserPass = 0x02
-	socksNoAccept = 0xFF
-
-	socksCmdConnect  = 0x01
-	socksCmdUDPAssoc = 0x03
-
-	socksAtypIPv4   = 0x01
-	socksAtypDomain = 0x03
-	socksAtypIPv6   = 0x04
-)
-
-// socks5Negotiate performs the method-selection and (if offered/required) the
-// username/password sub-negotiation, leaving conn positioned for a request.
-func socks5Negotiate(conn net.Conn, username, password string) error {
-	methods := []byte{socksNoAuth}
-	if username != "" {
-		methods = []byte{socksUserPass, socksNoAuth}
+// Use the upstream codecs for both CONNECT and UDP ASSOCIATE. Bind the server's
+// selection to the profile's authentication method before sending any secret.
+func (up *upstream) socksHandshake(conn net.Conn, command byte, host string, port int) (metadata.Socksaddr, error) {
+	var empty metadata.Socksaddr
+	if host == "" || len(host) > 255 || port < 0 || port > 65535 {
+		return empty, errors.New("invalid SOCKS target")
 	}
-	greeting := append([]byte{socksVersion5, byte(len(methods))}, methods...)
-	if _, err := conn.Write(greeting); err != nil {
-		return fmt.Errorf("socks: write greeting: %w", err)
+	method := socks5.AuthTypeNotRequired
+	if up.username != "" {
+		if len(up.username) > 255 || len(up.password) > 255 {
+			return empty, errors.New("SOCKS credentials exceed 255 bytes")
+		}
+		method = socks5.AuthTypeUsernamePassword
 	}
-	reply := make([]byte, 2)
-	if _, err := io.ReadFull(conn, reply); err != nil {
-		return fmt.Errorf("socks: read method: %w", err)
+	if err := socks5.WriteAuthRequest(conn, socks5.AuthRequest{Methods: []byte{method}}); err != nil {
+		return empty, err
 	}
-	if reply[0] != socksVersion5 {
-		return fmt.Errorf("socks: bad version 0x%02x", reply[0])
-	}
-	switch reply[1] {
-	case socksNoAuth:
-		return nil
-	case socksUserPass:
-		return socks5UserPassAuth(conn, username, password)
-	case socksNoAccept:
-		return errors.New("socks: proxy rejected all offered auth methods")
-	default:
-		return fmt.Errorf("socks: proxy chose unsupported method 0x%02x", reply[1])
-	}
-}
-
-func socks5UserPassAuth(conn net.Conn, username, password string) error {
-	if len(username) > 255 || len(password) > 255 {
-		return errors.New("socks: username or password exceeds 255 bytes")
-	}
-	// RFC 1929: VER=1, ULEN, UNAME, PLEN, PASSWD.
-	buf := make([]byte, 0, 3+len(username)+len(password))
-	buf = append(buf, 0x01, byte(len(username)))
-	buf = append(buf, username...)
-	buf = append(buf, byte(len(password)))
-	buf = append(buf, password...)
-	if _, err := conn.Write(buf); err != nil {
-		return fmt.Errorf("socks: write auth: %w", err)
-	}
-	resp := make([]byte, 2)
-	if _, err := io.ReadFull(conn, resp); err != nil {
-		return fmt.Errorf("socks: read auth reply: %w", err)
-	}
-	if resp[1] != 0x00 {
-		return errors.New("socks: username/password rejected")
-	}
-	return nil
-}
-
-// socks5Connect issues a CONNECT for targetHost:targetPort after negotiating.
-func socks5Connect(conn net.Conn, targetHost string, targetPort int, username, password string) error {
-	if err := socks5Negotiate(conn, username, password); err != nil {
-		return err
-	}
-	req, err := socksRequest(socksCmdConnect, targetHost, targetPort)
+	reader := varbin.StubReader(conn)
+	auth, err := socks5.ReadAuthResponse(reader)
 	if err != nil {
-		return err
+		return empty, err
 	}
-	if _, err := conn.Write(req); err != nil {
-		return fmt.Errorf("socks: write connect: %w", err)
+	if auth.Method != method {
+		return empty, errors.New("SOCKS proxy did not accept the configured authentication method")
 	}
-	_, _, err = readSocksReply(conn)
-	return err
-}
-
-// socksRequest builds a SOCKS5 request (CONNECT or UDP ASSOCIATE). A literal IP
-// target uses the IPv4/IPv6 address types; otherwise the domain type lets the
-// proxy resolve (socks5h semantics, which is what a real tunnel wants — DNS
-// must not leak from the guest).
-func socksRequest(cmd byte, host string, port int) ([]byte, error) {
-	if port < 0 || port > 65535 {
-		return nil, fmt.Errorf("socks: port %d out of range", port)
-	}
-	buf := []byte{socksVersion5, cmd, 0x00}
-	if ip := net.ParseIP(host); ip != nil {
-		if v4 := ip.To4(); v4 != nil {
-			buf = append(buf, socksAtypIPv4)
-			buf = append(buf, v4...)
-		} else {
-			buf = append(buf, socksAtypIPv6)
-			buf = append(buf, ip.To16()...)
+	if method == socks5.AuthTypeUsernamePassword {
+		err = socks5.WriteUsernamePasswordAuthRequest(conn, socks5.UsernamePasswordAuthRequest{Username: up.username, Password: up.password})
+		if err != nil {
+			return empty, err
 		}
-	} else {
-		if len(host) > 255 {
-			return nil, errors.New("socks: hostname exceeds 255 bytes")
+		reply, err := socks5.ReadUsernamePasswordAuthResponse(reader)
+		if err != nil {
+			return empty, err
 		}
-		buf = append(buf, socksAtypDomain, byte(len(host)))
-		buf = append(buf, host...)
-	}
-	buf = append(buf, byte(port>>8), byte(port&0xFF))
-	return buf, nil
-}
-
-// socksReplyMessage maps the RFC 1928 reply codes to prose.
-var socksReplyMessage = map[byte]string{
-	0x00: "succeeded",
-	0x01: "general SOCKS server failure",
-	0x02: "connection not allowed by ruleset",
-	0x03: "network unreachable",
-	0x04: "host unreachable",
-	0x05: "connection refused",
-	0x06: "TTL expired",
-	0x07: "command not supported",
-	0x08: "address type not supported",
-}
-
-// readSocksReply reads a reply and returns the bound address it carries (needed
-// for UDP ASSOCIATE — the relay endpoint). A non-zero status is an error.
-func readSocksReply(conn net.Conn) (net.IP, int, error) {
-	head := make([]byte, 4)
-	if _, err := io.ReadFull(conn, head); err != nil {
-		return nil, 0, fmt.Errorf("socks: read reply: %w", err)
-	}
-	if head[0] != socksVersion5 {
-		return nil, 0, fmt.Errorf("socks: bad reply version 0x%02x", head[0])
-	}
-	if head[1] != 0x00 {
-		msg := socksReplyMessage[head[1]]
-		if msg == "" {
-			msg = fmt.Sprintf("code 0x%02x", head[1])
+		if reply.Status != socks5.UsernamePasswordStatusSuccess {
+			return empty, errors.New("SOCKS username/password rejected")
 		}
-		return nil, 0, fmt.Errorf("socks: %s", msg)
 	}
-	var addr net.IP
-	switch head[3] {
-	case socksAtypIPv4:
-		b := make([]byte, 4)
-		if _, err := io.ReadFull(conn, b); err != nil {
-			return nil, 0, err
-		}
-		addr = net.IP(b)
-	case socksAtypIPv6:
-		b := make([]byte, 16)
-		if _, err := io.ReadFull(conn, b); err != nil {
-			return nil, 0, err
-		}
-		addr = net.IP(b)
-	case socksAtypDomain:
-		l := make([]byte, 1)
-		if _, err := io.ReadFull(conn, l); err != nil {
-			return nil, 0, err
-		}
-		b := make([]byte, int(l[0]))
-		if _, err := io.ReadFull(conn, b); err != nil {
-			return nil, 0, err
-		}
-		// A domain bound-address is unusual; leave addr nil, the caller only
-		// needs the port for the relay in that case.
-	default:
-		return nil, 0, fmt.Errorf("socks: reply has unknown address type 0x%02x", head[3])
+	destination := metadata.ParseSocksaddrHostPort(host, uint16(port))
+	if err := socks5.WriteRequest(conn, socks5.Request{Command: command, Destination: destination}); err != nil {
+		return empty, err
 	}
-	pb := make([]byte, 2)
-	if _, err := io.ReadFull(conn, pb); err != nil {
-		return nil, 0, err
+	// sing deliberately ignores RSV. Reject extensions to the advertised
+	// protocol before consuming the returned relay address.
+	var header [3]byte
+	if _, err := io.ReadFull(conn, header[:]); err != nil {
+		return empty, err
 	}
-	return addr, int(pb[0])<<8 | int(pb[1]), nil
+	if header[2] != 0 {
+		return empty, errors.New("invalid SOCKS reserved byte")
+	}
+	reply, err := socks5.ReadResponse(varbin.StubReader(io.MultiReader(bytes.NewReader(header[:]), conn)))
+	if err != nil {
+		return empty, err
+	}
+	if reply.ReplyCode == socks5.ReplyCodeUnsupported {
+		return empty, errors.New("SOCKS command not supported")
+	}
+	if reply.ReplyCode != socks5.ReplyCodeSuccess {
+		return empty, fmt.Errorf("SOCKS request rejected (code %d)", reply.ReplyCode)
+	}
+	return reply.Bind, nil
 }
 
 // ---- HTTP CONNECT ----------------------------------------------------------
@@ -434,33 +348,38 @@ func (c *prefixedConn) CloseWrite() error {
 
 func httpConnect(conn net.Conn, targetHost string, targetPort int, username, password string) (net.Conn, error) {
 	target := net.JoinHostPort(targetHost, strconv.Itoa(targetPort))
-	var b strings.Builder
-	fmt.Fprintf(&b, "CONNECT %s HTTP/1.1\r\n", target)
-	fmt.Fprintf(&b, "Host: %s\r\n", target)
-	b.WriteString("Proxy-Connection: Keep-Alive\r\n")
+	if targetPort < 1 || targetPort > 65535 || (!metadata.ParseAddr(targetHost).IsValid() && !metadata.IsDomainName(targetHost)) {
+		return nil, errors.New("invalid HTTP CONNECT destination")
+	}
+	req := &http.Request{Method: http.MethodConnect, URL: &url.URL{Host: target}, Host: target, Header: make(http.Header)}
 	if username != "" {
 		cred := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
-		fmt.Fprintf(&b, "Proxy-Authorization: Basic %s\r\n", cred)
+		req.Header.Set("Proxy-Authorization", "Basic "+cred)
 	}
-	b.WriteString("\r\n")
-	if _, err := conn.Write([]byte(b.String())); err != nil {
+	if err := req.Write(conn); err != nil {
 		return nil, fmt.Errorf("http connect: write: %w", err)
 	}
 	// ReadResponse on its own permits unbounded header lines. Bound only the
 	// handshake and pass any buffered bytes on to the tunnel on success.
 	limit := &io.LimitedReader{R: conn, N: maxConnectHeaders}
 	br := bufio.NewReader(limit)
-	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
-	if err != nil {
-		if limit.N == 0 {
-			return nil, errors.New("http connect: response headers too large")
+	for {
+		resp, err := http.ReadResponse(br, req)
+		if err != nil {
+			if limit.N == 0 {
+				return nil, errors.New("http connect: response headers too large")
+			}
+			// A protocol error can include a proxy-generated header or status line.
+			return nil, errors.New("http connect: incomplete or invalid proxy response")
 		}
-		return nil, fmt.Errorf("http connect: read response: %w", err)
-	}
-	// CONNECT switches protocols after the headers. On failure the caller closes
-	// the socket; draining an advertised error body would stall that rejection.
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("http connect: proxy returned %d", resp.StatusCode)
+		if resp.StatusCode >= 100 && resp.StatusCode < 200 && resp.StatusCode != http.StatusSwitchingProtocols {
+			continue
+		}
+		// Draining an error body would wait on a tunnel we have already refused.
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("http connect: proxy returned %d", resp.StatusCode)
+		}
+		break
 	}
 	if br.Buffered() != 0 {
 		prefix, _ := br.Peek(br.Buffered())

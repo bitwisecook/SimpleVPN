@@ -20,3 +20,7 @@ func (b *physicalBind) SetInterface(uint32) error {
 func (b *physicalBind) teleportSockets() (*net.UDPConn, *net.UDPConn, error) {
 	return nil, nil, errors.New("physical scoping requires macOS")
 }
+
+func physicalProxyDialer(uint32) (*net.Dialer, error) {
+	return nil, errors.New("physical interface binding requires macOS")
+}

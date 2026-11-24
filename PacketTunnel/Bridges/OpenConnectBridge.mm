@@ -10,11 +10,13 @@
 //  Runtime note: SSO is signed in OUT of process now (ocauth-helper) and arrives here
 //  as a cookie, so `openconnect_obtain_cookie` below is only the non-SSO fallback. The
 //  structure is otherwise the standard libopenconnect embedding (obtain_cookie →
-//  make_cstp_connection → setup_tun → mainloop). Still wanting validation against a
-//  live gateway: the exact tun framing over a provided fd.
+//  make_cstp_connection → setup_tun → mainloop). Tools/OpenConnect exercises native
+//  Darwin framing and mandatory peer pinning against a private CSTP endpoint.
 //
 
 #import "OpenConnectBridge.h"
+#import "VirtualDatagramPort.h"
+#include <fcntl.h>
 #import <os/log.h>
 #include <string>
 #include <mutex>
@@ -23,6 +25,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Weverything"
@@ -32,32 +35,56 @@
 static NSErrorDomain const kOCErrorDomain = @"OpenConnectBridge";
 static os_log_t gOCLog = os_log_create("com.bragi0.SimpleVPN.PacketTunnel", "openconnect");
 #define OCLOG(fmt, ...) os_log(gOCLog, fmt, ##__VA_ARGS__)
-static const int kOCSockBuf = 1 << 20;
 
 @implementation OCClientSettings
 @end
 
 // C trampolines → the bridge instance carried as privdata.
+static BOOL parseOCPrefix(const char *s, int max, int *result) {
+    if (!s || !*s) return NO;
+    int prefix = 0;
+    for (; *s; s++) {
+        if (*s < '0' || *s > '9') return NO;
+        prefix = prefix * 10 + (*s - '0');
+        if (prefix > max) return NO;
+    }
+    *result = prefix;
+    return YES;
+}
+static BOOL validOCNetmask(const char *s) {
+    struct in_addr address;
+    if (!s || inet_pton(AF_INET, s, &address) != 1) return NO;
+    uint32_t inverse = ~ntohl(address.s_addr);
+    return (inverse & (inverse + 1)) == 0;
+}
 static int oc_validate_cert(void *priv, const char *reason);
 static int oc_process_form(void *priv, struct oc_auth_form *form);
 static void oc_progress(void *priv, int level, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
 static void oc_setup_tun(void *priv);
 static void oc_stats(void *priv, const struct oc_stats *stats);
+static int oc_member_socket(void *priv, int fd, int family);
+static int oc_required_pin(void *priv);
+static void oc_member_reconnected(void *priv);
+static int oc_member_resolve(void *priv, const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **result);
 
 @interface OpenConnectBridge () {
     __weak NEPacketTunnelProvider<SVPTunnelSettingsApplying> *_provider;
     __weak id<OpenConnectBridgeDelegate> _delegate;
+    SVPPacketPolicy *_packetPolicy;
+    VirtualDatagramPort *_member;
+    uint32_t _interfaceIndex;
+    BOOL _haveMemberTun;
+    std::mutex _cancelMutex;
     struct openconnect_info *_vpninfo;
     OCClientSettings *_cfg;
     dispatch_queue_t _runQueue;      // owns the openconnect mainloop
-    dispatch_queue_t _pumpQueue;     // services the inbound read source (never blocked by the mainloop)
-    dispatch_source_t _readSource;
-    int _ourFD, _ocFD;
-    int _cancelPipe[2];              // write end nudges openconnect_mainloop to return on disconnect
+    VirtualDatagramPort *_hostPort;
+    int _commandFD;                  // borrowed until vpninfo_free; protected by _cancelMutex
     std::atomic<uint32_t> _pumpGeneration;
     std::atomic<bool> _running;
     std::mutex _statsMutex;
     int64_t _bytesIn, _bytesOut;
+    bool _statsPending;
     NSMutableDictionary<NSString *, id> *_info;
 
     // Default-gateway ownership + a snapshot of the negotiated IP config, so the
@@ -97,20 +124,33 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
 @implementation OpenConnectBridge
 
 - (instancetype)initWithProvider:(NEPacketTunnelProvider<SVPTunnelSettingsApplying> *)provider
-                        delegate:(id<OpenConnectBridgeDelegate>)delegate {
-    if ((self = [super init])) {
+                        delegate:(id<OpenConnectBridgeDelegate>)delegate
+                    packetPolicy:(SVPPacketPolicy *)packetPolicy {
+    if ((self = [self initWithEngineDelegate:delegate])) {
         _provider = provider;
+        _packetPolicy = packetPolicy;
+    }
+    return self;
+}
+
+- (instancetype)initWithInterfaceIndex:(uint32_t)index delegate:(id<OpenConnectBridgeDelegate>)delegate
+                               received:(void (^)(NSData *))received {
+    if ((self = [self initWithEngineDelegate:delegate])) {
+        _interfaceIndex = index;
+        _member = [[VirtualDatagramPort alloc] initWithFamilyHeader:YES received:received];
+    }
+    return self;
+}
+
+- (instancetype)initWithEngineDelegate:(id<OpenConnectBridgeDelegate>)delegate {
+    if ((self = [super init])) {
         _delegate = delegate;
-        _ourFD = _ocFD = -1;
         _pumpGeneration = 0;
         _running = false;
         _info = [NSMutableDictionary dictionary];
-        _cancelPipe[0] = _cancelPipe[1] = -1;
+        _commandFD = -1;
         _runQueue = dispatch_queue_create("com.bragi0.SimpleVPN.openconnect.run", DISPATCH_QUEUE_SERIAL);
-        // Inbound packets are pumped on their own queue — the run queue is
-        // monopolised by the mainloop for the whole session, so a read source
-        // targeted there would never fire.
-        _pumpQueue = dispatch_queue_create("com.bragi0.SimpleVPN.openconnect.pump", DISPATCH_QUEUE_SERIAL);
+
     }
     return self;
 }
@@ -123,6 +163,18 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
 }
 
 - (void)runSession {
+    [self connectAndPump];
+    [self teardownTun];
+    {
+        std::lock_guard<std::mutex> lock(_cancelMutex);
+        _commandFD = -1;
+    }
+    if (_vpninfo) { openconnect_vpninfo_free(_vpninfo); _vpninfo = NULL; }
+    _running = false;
+    [self emitStatus:OCStatusDisconnected event:@"DISCONNECTED" info:@""];
+}
+
+- (void)connectAndPump {
     [self emitStatus:OCStatusConnecting event:@"CONNECTING" info:_cfg.server];
 
     const char *ua = _cfg.userAgent.length ? _cfg.userAgent.UTF8String : "SimpleVPN";
@@ -133,6 +185,10 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
     openconnect_set_loglevel(_vpninfo, PRG_INFO);
     openconnect_set_setup_tun_handler(_vpninfo, oc_setup_tun);
     openconnect_set_stats_handler(_vpninfo, oc_stats);
+    if (_member) openconnect_set_reconnected_handler(_vpninfo, oc_member_reconnected);
+    openconnect_set_member_guards(_vpninfo, _member ? oc_member_socket : NULL,
+                                  _cfg.serverCertSHA256.length ? oc_required_pin : NULL);
+    if (_member || _cfg.resolveIP.length || _cfg.resolveHost.length) openconnect_override_getaddrinfo(_vpninfo, oc_member_resolve);
 
     // Certificate trust: validate against the OS trust store (and any extra CA
     // bundle) by default. oc_validate_cert is only invoked when that verification
@@ -143,9 +199,18 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
 
     // Cancel fd: disconnect() writes here so openconnect_mainloop returns promptly
     // instead of us calling mainloop concurrently from another thread.
-    if (pipe(_cancelPipe) == 0) openconnect_set_cancel_fd(_vpninfo, _cancelPipe[0]);
+    bool cancelReady;
+    {
+        std::lock_guard<std::mutex> lock(_cancelMutex);
+        if (!_running.load()) return;
+        _commandFD = openconnect_setup_cmd_pipe(_vpninfo);
+        cancelReady = _commandFD >= 0;
+    }
+    if (!cancelReady) { [self fail:@"The connection could not create a cancellation channel."]; return; }
 
-    if (_cfg.protocol.length) openconnect_set_protocol(_vpninfo, _cfg.protocol.UTF8String);
+    if (_cfg.protocol.length && openconnect_set_protocol(_vpninfo, _cfg.protocol.UTF8String) != 0) {
+        [self fail:@"This OpenConnect protocol is unavailable."]; return;
+    }
 
     // WEB PROXY TO THE GATEWAY, before parse_url — the proxy is part of how the
     // server is reached, and openconnect resolves nothing until it connects. The
@@ -183,7 +248,7 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
     // `--usergroup`. Set AFTER parse_url, which writes urlpath itself from the
     // address: setting it first would be silently overwritten, which is the whole
     // class of bug this batch is about.
-    if (_cfg.urlPath.length) openconnect_set_urlpath(_vpninfo, _cfg.urlPath.UTF8String);
+    if (!_cfg.cookie.length && _cfg.urlPath.length) openconnect_set_urlpath(_vpninfo, _cfg.urlPath.UTF8String);
 
     // WHAT THIS CLIENT CLAIMS TO BE. Each is a plain setter and each was a refusal
     // until now. `set_reported_os` also selects the matching CSD trojan binary, so
@@ -235,11 +300,21 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
     } else if (openconnect_obtain_cookie(_vpninfo) != 0) {
         [self fail:@"Sign-in failed (check your username, password or one-time code)."]; return;
     }
-    if (openconnect_make_cstp_connection(_vpninfo) != 0) {
-        [self fail:@"Couldn't establish the secure connection to the gateway."]; return;
+    int result = openconnect_make_cstp_connection(_vpninfo);
+    if (result != 0) {
+        if (result == -ENOTSUP && [_cfg.protocol isEqualToString:@"fortinet"]) {
+            [self fail:@"The Fortinet gateway requires split DNS rules this VPN cannot apply."];
+        } else if (result == -ENOTSUP && [_cfg.protocol isEqualToString:@"f5"]) {
+            [self fail:@"The F5 gateway requires split DNS rules this VPN cannot apply."];
+        } else {
+            [self fail:@"Couldn't establish the secure connection to the gateway."];
+        }
+        return;
     }
 
-    [self emitStatus:OCStatusConnected event:@"CONNECTED" info:_cfg.server];
+    if (!_cfg.disableDTLS && openconnect_setup_dtls(_vpninfo, 60) != 0) {
+        openconnect_disable_dtls(_vpninfo);   // The gateway can offer TLS alone.
+    }
 
     // Pump the tunnel until asked to stop. mainloop returns 0 to be called again,
     // < 0 on a fatal error.
@@ -254,19 +329,39 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
         int r = openconnect_mainloop(_vpninfo, reconnectTimeout, 10);
         if (r < 0) { if (_running.load()) [self fail:@"The VPN connection dropped."]; break; }
     }
-    [self teardownTun];
-    if (_vpninfo) { openconnect_vpninfo_free(_vpninfo); _vpninfo = NULL; }
-    if (_cancelPipe[0] >= 0) { close(_cancelPipe[0]); _cancelPipe[0] = -1; }
-    if (_cancelPipe[1] >= 0) { close(_cancelPipe[1]); _cancelPipe[1] = -1; }
-    [self emitStatus:OCStatusDisconnected event:@"DISCONNECTED" info:@""];
 }
 
 - (void)disconnect {
-    _running = false;
+    std::lock_guard<std::mutex> lock(_cancelMutex);
+    if (!_running.exchange(false)) return;
     // Wake the mainloop via its cancel fd — do NOT call openconnect_mainloop here;
     // it is already running on _runQueue and is not safe to invoke concurrently on
     // the same _vpninfo (and _vpninfo may be freed by runSession as we return).
-    if (_cancelPipe[1] >= 0) { char b = 'x'; (void)write(_cancelPipe[1], &b, 1); }
+    if (_commandFD >= 0) { const char cancel = OC_CMD_CANCEL; (void)write(_commandFD, &cancel, 1); }
+}
+
+- (BOOL)sendMemberPacket:(NSData *)packet { return _running.load() && [_member sendPacket:packet]; }
+- (NEPacketTunnelNetworkSettings *)memberNetworkSettings { return [self buildCapturedSettings]; }
+- (void)stopMemberWithCompletion:(void (^)(void))completion {
+    [self disconnect];
+    // Leave the native descriptor alive for the authenticated PPP termination
+    // and gateway logout. runSession closes the lane before this callback.
+    dispatch_async(_runQueue, completion);
+}
+- (int)bindSocket:(int)fd family:(int)family {
+    if (!_interfaceIndex || (family != AF_INET && family != AF_INET6)) return -1;
+    return setsockopt(fd, family == AF_INET ? IPPROTO_IP : IPPROTO_IPV6,
+        family == AF_INET ? IP_BOUND_IF : IPV6_BOUND_IF, &_interfaceIndex, sizeof(_interfaceIndex));
+}
+- (int)resolveHost:(const char *)node service:(const char *)service hints:(const struct addrinfo *)hints result:(struct addrinfo **)result {
+    if (!node || !hints) return EAI_NONAME;
+    if (_cfg.resolveHost.length) {
+        if (strcasecmp(node, _cfg.resolveHost.UTF8String) != 0) return EAI_NONAME;
+        node = _cfg.resolveIP.UTF8String;
+    }
+    struct addrinfo numeric = *hints;
+    numeric.ai_flags |= AI_NUMERICHOST;
+    return node ? getaddrinfo(node, service, &numeric, result) : EAI_NONAME;
 }
 
 // MARK: - Auth / cert callbacks
@@ -281,40 +376,33 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
         OCLOG("cert REJECTED — untrusted and no pin configured (%{public}s)", reason ?: "");
         return -1;
     }
-    const char *h = openconnect_get_peer_cert_hash(_vpninfo);
-    NSString *hash = h ? [NSString stringWithUTF8String:h] : @"";
-    // openconnect hashes may carry a prefix ("pin-sha256:" / "sha256:"); the pin
-    // may too. Compare only the hex tail after the last ':' , case-insensitively,
-    // as an exact equality (not hasSuffix:, which a truncated pin could satisfy).
-    NSString *(^tail)(NSString *) = ^NSString *(NSString *s) {
-        NSRange c = [s rangeOfString:@":" options:NSBackwardsSearch];
-        return (c.location == NSNotFound ? s : [s substringFromIndex:c.location + 1]).lowercaseString;
-    };
-    BOOL match = [tail(hash) isEqualToString:tail(_cfg.serverCertSHA256)];
-    OCLOG("pinned cert %{public}s (%{public}s)", match ? "matched" : "MISMATCH", reason ?: "");
-    return match ? 0 : -1;
+    return openconnect_check_full_sha256_pin(_vpninfo, _cfg.serverCertSHA256.UTF8String);
 }
 
 - (int)processForm:(struct oc_auth_form *)form {
-    // Pick the auth group (realm) if the form offers one.
-    if (form->authgroup_opt && _cfg.realm.length) {
-        openconnect_set_option_value(&form->authgroup_opt->form, _cfg.realm.UTF8String);
-    }
+    const char *authID = form->auth_id ?: "";
     for (struct oc_form_opt *opt = form->opts; opt; opt = opt->next) {
-        if (opt->flags & OC_FORM_OPT_IGNORE) continue;
-        switch (opt->type) {
-            case OC_FORM_OPT_TEXT:
-            case OC_FORM_OPT_SSO_USER:
-                if (_cfg.username.length) openconnect_set_option_value(opt, _cfg.username.UTF8String);
-                break;
-            case OC_FORM_OPT_PASSWORD:
-                if (_cfg.password.length) openconnect_set_option_value(opt, _cfg.password.UTF8String);
-                break;
-            case OC_FORM_OPT_TOKEN:
-                if (_cfg.oneTimeCode.length) openconnect_set_option_value(opt, _cfg.oneTimeCode.UTF8String);
-                break;
-            default: break;
+        if (opt->flags & OC_FORM_OPT_IGNORE || opt->type == OC_FORM_OPT_HIDDEN || opt->type == OC_FORM_OPT_SSO_TOKEN)
+            continue;
+        NSString *answer = nil;
+        if (form->authgroup_opt && opt == &form->authgroup_opt->form && _cfg.realm.length) {
+            answer = _cfg.realm;
+        } else if (opt->type == OC_FORM_OPT_SELECT) {
+            struct oc_form_opt_select *select = (struct oc_form_opt_select *)opt;
+            if (select->nr_choices == 1 && select->choices && select->choices[0] && select->choices[0]->name)
+                answer = @(select->choices[0]->name);
+        } else if (opt->type == OC_FORM_OPT_TOKEN) {
+            answer = _cfg.oneTimeCode;
+            _cfg.oneTimeCode = nil;
+        } else {
+            NSString *kind = opt->type == OC_FORM_OPT_TEXT ? @"text"
+                : opt->type == OC_FORM_OPT_PASSWORD ? @"password"
+                : opt->type == OC_FORM_OPT_SSO_USER ? @"sso-user" : nil;
+            if (kind && opt->name && _cfg.authFieldAnswer)
+                answer = _cfg.authFieldAnswer(@(authID), @(opt->name), @(opt->label ?: opt->name), kind);
         }
+        if (!answer.length || openconnect_set_option_value(opt, answer.UTF8String) != 0)
+            return OC_FORM_RESULT_CANCELLED;
     }
     return OC_FORM_RESULT_OK;
 }
@@ -325,12 +413,22 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
 
 - (void)stats:(const struct oc_stats *)s {
     std::lock_guard<std::mutex> lk(_statsMutex);
+    _statsPending = false;
     _bytesIn = (int64_t)s->rx_bytes;
     _bytesOut = (int64_t)s->tx_bytes;
 }
 
 - (void)transportBytesIn:(int64_t *)bytesIn bytesOut:(int64_t *)bytesOut {
+    // libopenconnect publishes stats only on OC_CMD_STATS. Ask on demand;
+    // its mainloop answers asynchronously without pausing the packet path.
     std::lock_guard<std::mutex> lk(_statsMutex);
+    if (!_statsPending) {
+        std::lock_guard<std::mutex> hold(_cancelMutex);
+        if (_running.load() && _commandFD >= 0) {
+            const char request = OC_CMD_STATS;
+            _statsPending = write(_commandFD, &request, 1) == 1;
+        }
+    }
     if (bytesIn) *bytesIn = _bytesIn;
     if (bytesOut) *bytesOut = _bytesOut;
 }
@@ -343,6 +441,9 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
     // applied-role cache and traffic-path UI from this, never a config grep.
     std::lock_guard<std::mutex> hold(_cfgMutex);
     BOOL effectiveOwned = (_capHaveV4Default || _capHaveV6Default) && !_suppressDefault;
+    out[@"defaultV4"] = @(_capHaveV4Default);
+    out[@"defaultV6"] = @(_capHaveV6Default);
+    out[@"searchDomains"] = _capSearchDomains ?: @[];
     out[@"suppressDefault"] = @(_suppressDefault);
     out[@"effectiveDefaultOwned"] = @(effectiveOwned);
     return out;
@@ -356,7 +457,7 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
         [self fail:@"The gateway didn't provide an IP configuration."]; return;
     }
     NEPacketTunnelProvider<SVPTunnelSettingsApplying> *provider = _provider;
-    if (!provider) return;
+    if (!provider && !_member) return;
 
     // Snapshot the negotiated config into ivars so the tun settings can be rebuilt
     // and re-applied live when the gateway role flips, without re-entering
@@ -367,34 +468,66 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
     NSMutableArray<NEIPv4Route *> *v4Split = [NSMutableArray array];
     NSMutableArray<NEIPv6Route *> *v6Split = [NSMutableArray array];
     for (struct oc_split_include *si = ip->split_includes; si; si = si->next) {
-        if (!si->route) continue;
-        [self appendSplitRoute:@(si->route) v4:v4Split v6:v6Split];
+        if (!si->route || ![self appendSplitRoute:@(si->route) v4:v4Split v6:v6Split]) {
+            [self fail:@"The gateway supplied an invalid split route."]; return;
+        }
+    }
+    // F5 explicitly represents UseDefaultGateway with a /0 mask. For
+    // split-tunnel policies, an empty per-family list grants no routes in
+    // that family. Some protocols omit split lists altogether for full VPNs.
+    BOOL implicitDefault = ip->split_includes == NULL && ![_cfg.protocol isEqualToString:@"f5"];
+    BOOL v4Default = implicitDefault || (ip->netmask && strcmp(ip->netmask, "0.0.0.0") == 0);
+    BOOL v6Default = implicitDefault;
+    for (NEIPv4Route *route in [v4Split copy]) {
+        if ([route.destinationSubnetMask isEqualToString:@"0.0.0.0"]) { v4Default = YES; [v4Split removeObject:route]; }
+    }
+    for (NEIPv6Route *route in [v6Split copy]) {
+        if (route.destinationNetworkPrefixLength.intValue == 0) { v6Default = YES; [v6Split removeObject:route]; }
     }
 
-    NSInteger v6prefix = 128;
-    if (ip->addr6 && ip->netmask6) {
-        NSString *nm = @(ip->netmask6);   // "addr/prefix"
-        NSRange slash = [nm rangeOfString:@"/"];
-        if (slash.location != NSNotFound) v6prefix = [[nm substringFromIndex:slash.location + 1] integerValue];
+    int v6prefix = 128;
+    NSString *assigned6 = ip->addr6 ? @(ip->addr6) : nil;
+    struct in6_addr v6;
+    if (ip->netmask6) {
+        // The public oc_ip_info ABI allows the address to appear exclusively
+        // inside netmask6. Pulse and AnyConnect commonly send address/prefix.
+        NSArray<NSString *> *parts = [@(ip->netmask6) componentsSeparatedByString:@"/"];
+        if (parts.count != 2 || inet_pton(AF_INET6, parts.firstObject.UTF8String, &v6) != 1 ||
+            !parseOCPrefix(parts.lastObject.UTF8String, 128, &v6prefix)) {
+            [self fail:@"The gateway supplied an invalid IPv6 prefix."]; return;
+        }
+        if (!assigned6) assigned6 = parts.firstObject;
+        if (v6prefix == 0) { v6Default = YES; v6prefix = 128; }
+    }
+    struct in_addr v4;
+    if ((ip->addr && (inet_pton(AF_INET, ip->addr, &v4) != 1 || v4.s_addr == INADDR_ANY ||
+                     IN_MULTICAST(ntohl(v4.s_addr)))) ||
+        (ip->netmask && !validOCNetmask(ip->netmask)) ||
+        (assigned6 && (inet_pton(AF_INET6, assigned6.UTF8String, &v6) != 1 ||
+                       IN6_IS_ADDR_UNSPECIFIED(&v6) || IN6_IS_ADDR_MULTICAST(&v6))) || (!ip->addr && !assigned6)) {
+        [self fail:@"The gateway supplied an invalid tunnel address or subnet mask."]; return;
     }
 
     {
         std::lock_guard<std::mutex> hold(_cfgMutex);
         _capRemote = ip->gateway_addr ? @(ip->gateway_addr) : @"127.0.0.1";
-        if (ip->addr && ip->netmask) {
-            _capV4Addrs = @[@(ip->addr)]; _capV4Masks = @[@(ip->netmask)];
-            _capHaveV4Default = YES;   // OpenConnect brings up a full tunnel by default
+        if (ip->addr) {
+            _capV4Addrs = @[@(ip->addr)];
+            _capV4Masks = @[ip->netmask && strcmp(ip->netmask, "0.0.0.0") ? @(ip->netmask) : @"255.255.255.255"];
+            _capHaveV4Default = v4Default;
         } else {
             _capV4Addrs = nil; _capV4Masks = nil; _capHaveV4Default = NO;
         }
-        _capV6Addr = ip->addr6 ? @(ip->addr6) : nil;
+        _capV6Addr = assigned6;
         _capV6Prefix = v6prefix;
-        _capHaveV6 = (ip->addr6 != NULL);
-        _capHaveV6Default = (ip->addr6 != NULL);
+        _capHaveV6 = assigned6 != nil;
+        _capHaveV6Default = assigned6 != nil && v6Default;
         _capV4Split = [v4Split copy];
         _capV6Split = [v6Split copy];
         _capDNS = [dns copy];
-        _capSearchDomains = ip->domain ? @[@(ip->domain)] : @[];
+        NSArray<NSString *> *domains = ip->domain ? [@(ip->domain) componentsSeparatedByCharactersInSet:
+            NSCharacterSet.whitespaceAndNewlineCharacterSet] : @[];
+        _capSearchDomains = [domains filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
         _capMTU = ip->mtu;
         _haveConfig = YES;
     }
@@ -413,7 +546,7 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
 
     @synchronized (self) {
         if (ip->addr) _info[@"tunnelIP"] = @(ip->addr);
-        if (ip->addr6) _info[@"tunnelIPv6"] = @(ip->addr6);
+        if (assigned6) _info[@"tunnelIPv6"] = assigned6;
         if (ip->gateway_addr) _info[@"gateway4"] = @(ip->gateway_addr);
         if (serverIP.length) {
             _info[@"server"] = serverIP;
@@ -421,72 +554,81 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
         }
         if (serverPort > 0) _info[@"serverPort"] = [NSString stringWithFormat:@"%d", serverPort];
         if (ip->mtu > 0) _info[@"mtu"] = @(ip->mtu);
-        if (dns.count) _info[@"dns"] = [dns copy];
+        _info[@"dns"] = [dns copy];
     }
 
+    if (_member) {
+        if (ip->split_excludes || ip->split_dns || _haveMemberTun) {
+            [self fail:@"This OpenConnect member changed its network or requested unsupported split DNS or excluded routes."];
+            return;
+        }
+        int descriptor = [_member openEngineDescriptor];
+        if (descriptor < 0 || openconnect_setup_tun_fd(_vpninfo, descriptor) != 0) {
+            [self fail:@"The OpenConnect member packet channel could not start."]; return;
+        }
+        _haveMemberTun = YES;
+        [self emitStatus:OCStatusConnected event:@"CONNECTED" info:_cfg.server];
+        return;
+    }
     if (![self applySettings:[self buildCapturedSettings]]) {
         [self fail:@"macOS refused the tunnel network settings."]; return;
     }
 
-    // openconnect calls this handler again on every CSTP reconnect. Cancel the
-    // previous read source and close our previous socketpair end first, or each
-    // reconnect leaks a source + two fds until the extension exhausts descriptors.
     [self teardownTun];
-
-    // Hand openconnect a socketpair end; pump the other into the packet flow.
-    int fds[2];
-    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, fds) != 0) { [self fail:@"socketpair failed"]; return; }
-    setsockopt(fds[0], SOL_SOCKET, SO_SNDBUF, &kOCSockBuf, sizeof(kOCSockBuf));
-    setsockopt(fds[1], SOL_SOCKET, SO_RCVBUF, &kOCSockBuf, sizeof(kOCSockBuf));
-    _ocFD = fds[0];
-    _ourFD = fds[1];
-    _pumpGeneration.fetch_add(1);
-    openconnect_setup_tun_fd(_vpninfo, _ocFD);
-    [self startPumpInto:provider.packetFlow];
+    uint32_t generation = _pumpGeneration.load();
+    __weak OpenConnectBridge *weakSelf = self;
+    NEPacketTunnelFlow *flow = provider.packetFlow;
+    // libopenconnect's Darwin TUN uses a four-byte address family in both
+    // directions, including when the descriptor belongs to our socketpair.
+    _hostPort = [[VirtualDatagramPort alloc] initWithFamilyHeader:YES received:^(NSData *packet) {
+        OpenConnectBridge *bridge = weakSelf;
+        if (!bridge || bridge->_pumpGeneration.load() != generation) return;
+        NSData *accepted = packet;
+        if (bridge->_packetPolicy.inspectInbound) {
+            NSMutableData *edit = [packet mutableCopy];
+            if (![bridge->_packetPolicy apply:edit.mutableBytes length:edit.length inbound:YES]) return;
+            accepted = edit;
+        } else if (![bridge->_packetPolicy observePacket:packet.bytes length:packet.length inbound:YES]) return;
+        uint32_t af = (((const uint8_t *)accepted.bytes)[0] >> 4) == 6 ? AF_INET6 : AF_INET;
+        [flow writePackets:@[accepted] withProtocols:@[@(af)]];
+    }];
+    int descriptor = [_hostPort openEngineDescriptor];
+    if (descriptor < 0 || openconnect_setup_tun_fd(_vpninfo, descriptor) != 0) {
+        [self fail:@"The OpenConnect packet channel could not start."];
+        return;
+    }
+    [self readFromFlow:flow port:_hostPort generation:generation];
+    [self emitStatus:OCStatusConnected event:@"CONNECTED" info:_cfg.server];
 }
 
-// openconnect ↔ packetFlow. Framing note: unlike openvpn3 (which frames a utun
-// with a 4-byte AF header), libopenconnect's os_tun fd path carries RAW IP with no
-// address-family prefix in either direction. So outbound we write pkt.bytes verbatim
-// and inbound we infer the family from the IP version nibble (buf[0] >> 4). If a
-// future openconnect build switches to a 4-byte AF header on the fd, both the write
-// (skip 4) and the read (family from the header, payload at +4) must change together.
-- (void)startPumpInto:(NEPacketTunnelFlow *)flow {
-    int fd = _ourFD;
-    uint32_t gen = _pumpGeneration.load();
-
-    // packetFlow → openconnect
+- (void)readFromFlow:(NEPacketTunnelFlow *)flow port:(VirtualDatagramPort *)port generation:(uint32_t)generation {
+    __weak VirtualDatagramPort *weakPort = port;
+    __weak OpenConnectBridge *weakBridge = self;
+    __weak NEPacketTunnelFlow *weakFlow = flow;
     [flow readPacketsWithCompletionHandler:^(NSArray<NSData *> *packets, NSArray<NSNumber *> *protocols) {
-        if (self->_pumpGeneration.load() != gen) return;
-        for (NSData *pkt in packets) (void)write(fd, pkt.bytes, pkt.length);
-        [self startPumpInto:flow];
+        OpenConnectBridge *bridge = weakBridge;
+        NEPacketTunnelFlow *flow = weakFlow;
+        VirtualDatagramPort *port = weakPort;
+        if (!bridge || !flow || !port || bridge->_pumpGeneration.load() != generation) return;
+        if (bridge->_packetPolicy.inspectOutbound) {
+            for (NSData *packet in packets) {
+                NSMutableData *copy = [packet mutableCopy];
+                if ([bridge->_packetPolicy apply:copy.mutableBytes length:copy.length inbound:NO])
+                    [port sendPacket:copy];
+            }
+        } else {
+            if (![bridge->_packetPolicy observeOutboundBatch:packets]) return;
+            for (NSData *packet in packets) [port sendPacket:packet];
+        }
+        if (bridge->_pumpGeneration.load() == generation) [bridge readFromFlow:flow port:port generation:generation];
     }];
-
-    // openconnect → packetFlow. Target the pump queue, NOT _runQueue: the run
-    // queue is serial and monopolised by the mainloop for the whole session, so a
-    // source targeted there would never deliver a single inbound packet.
-    _readSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)fd, 0, _pumpQueue);
-    dispatch_source_set_event_handler(_readSource, ^{
-        uint8_t buf[65536];
-        ssize_t n = read(fd, buf, sizeof(buf));
-        if (n <= 0) return;
-        uint32_t af = ((buf[0] >> 4) == 6) ? AF_INET6 : AF_INET;
-        [flow writePackets:@[[NSData dataWithBytes:buf length:(NSUInteger)n]] withProtocols:@[@(af)]];
-    });
-    dispatch_resume(_readSource);
 }
 
 - (void)teardownTun {
     _pumpGeneration.fetch_add(1);
-    int fd = _ourFD; _ourFD = -1;
-    if (_readSource) {
-        dispatch_source_t src = _readSource; _readSource = nil;
-        dispatch_source_set_cancel_handler(src, ^{ if (fd >= 0) close(fd); });
-        dispatch_source_cancel(src);
-    } else if (fd >= 0) {
-        close(fd);
-    }
-    _ocFD = -1;   // openconnect owns/closes its end
+    [_member close];
+    [_hostPort close];
+    _hostPort = nil;
 }
 
 // MARK: - Route / DNS building (gated on default-route ownership)
@@ -494,34 +636,35 @@ static void oc_stats(void *priv, const struct oc_stats *stats);
 // Parse one libopenconnect split-include "route" string into an NE route and
 // append it to the matching family bucket. The field is "addr/mask" where the
 // mask is either a prefix length or (for v4) a dotted-quad netmask.
-- (void)appendSplitRoute:(NSString *)route
-                      v4:(NSMutableArray<NEIPv4Route *> *)v4
-                      v6:(NSMutableArray<NEIPv6Route *> *)v6 {
-    NSRange slash = [route rangeOfString:@"/" options:NSBackwardsSearch];
-    NSString *addr = slash.location == NSNotFound ? route : [route substringToIndex:slash.location];
-    NSString *maskPart = slash.location == NSNotFound ? @"" : [route substringFromIndex:slash.location + 1];
-    addr = [addr stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-    if (!addr.length) return;
-
-    if ([addr containsString:@":"]) {                    // IPv6
-        NSInteger prefix = maskPart.length ? [maskPart integerValue] : 128;
-        if (prefix < 0 || prefix > 128) prefix = 128;
-        [v6 addObject:[[NEIPv6Route alloc] initWithDestinationAddress:addr networkPrefixLength:@(prefix)]];
-        return;
+- (BOOL)appendSplitRoute:(NSString *)route
+                       v4:(NSMutableArray<NEIPv4Route *> *)v4
+                       v6:(NSMutableArray<NEIPv6Route *> *)v6 {
+    NSArray<NSString *> *parts = [route componentsSeparatedByString:@"/"];
+    if (parts.count > 2) return NO;
+    NSString *address = parts.firstObject;
+    NSString *suffix = parts.count == 2 ? parts.lastObject : nil;
+    struct in6_addr addr6;
+    if (inet_pton(AF_INET6, address.UTF8String, &addr6) == 1) {
+        int prefix = 128;
+        if (suffix && !parseOCPrefix(suffix.UTF8String, 128, &prefix)) return NO;
+        [v6 addObject:[[NEIPv6Route alloc] initWithDestinationAddress:address networkPrefixLength:@(prefix)]];
+        return YES;
     }
-    // IPv4: mask may be a prefix length or a dotted-quad netmask.
-    NSString *mask;
-    if ([maskPart containsString:@"."]) {
-        mask = maskPart;
+    struct in_addr addr4;
+    if (inet_pton(AF_INET, address.UTF8String, &addr4) != 1) return NO;
+    NSString *mask = suffix;
+    if ([suffix containsString:@"."]) {
+        if (!validOCNetmask(suffix.UTF8String)) return NO;
     } else {
-        NSInteger prefix = maskPart.length ? [maskPart integerValue] : 32;
-        if (prefix < 0 || prefix > 32) prefix = 32;
-        uint32_t m = prefix == 0 ? 0 : htonl(0xFFFFFFFFu << (32 - prefix));
-        struct in_addr a; a.s_addr = m; char buf[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &a, buf, sizeof(buf));
-        mask = @(buf);
+        int prefix = 32;
+        if (suffix && !parseOCPrefix(suffix.UTF8String, 32, &prefix)) return NO;
+        struct in_addr subnet = { .s_addr = prefix == 0 ? 0 : htonl(UINT32_MAX << (32 - prefix)) };
+        char text[INET_ADDRSTRLEN];
+        if (!inet_ntop(AF_INET, &subnet, text, sizeof(text))) return NO;
+        mask = @(text);
     }
-    [v4 addObject:[[NEIPv4Route alloc] initWithDestinationAddress:addr subnetMask:mask]];
+    [v4 addObject:[[NEIPv4Route alloc] initWithDestinationAddress:address subnetMask:mask]];
+    return YES;
 }
 
 // Turn the app's destination dictionaries (@{ "address": NSString, "prefix":
@@ -534,7 +677,7 @@ static void oc_splitDests(NSArray<NSDictionary<NSString *, id> *> *dests,
         NSString *address = d[@"address"];
         int prefix = [d[@"prefix"] intValue];
         BOOL ipv6 = [d[@"ipv6"] boolValue];
-        if (address.length == 0) continue;
+        if (address.length == 0 || prefix < 0 || prefix > (ipv6 ? 128 : 32)) continue;
         if (ipv6) {
             [v6 addObject:[[NEIPv6Route alloc] initWithDestinationAddress:address networkPrefixLength:@(prefix)]];
         } else {
@@ -728,4 +871,19 @@ static void oc_setup_tun(void *priv) {
 }
 static void oc_stats(void *priv, const struct oc_stats *stats) {
     [(__bridge OpenConnectBridge *)priv stats:stats];
+}
+
+static int oc_member_socket(void *priv, int fd, int family) {
+    return [(__bridge OpenConnectBridge *)priv bindSocket:fd family:family];
+}
+static void oc_member_reconnected(void *priv) {
+    OpenConnectBridge *bridge = (__bridge OpenConnectBridge *)priv;
+    [bridge disconnect];
+    [bridge fail:@"The OpenConnect member must negotiate new settings after reconnect."];
+}
+static int oc_required_pin(void *priv) {
+    return [(__bridge OpenConnectBridge *)priv validateCert:"required peer identity"];
+}
+static int oc_member_resolve(void *priv, const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **result) {
+    return [(__bridge OpenConnectBridge *)priv resolveHost:node service:service hints:hints result:result];
 }

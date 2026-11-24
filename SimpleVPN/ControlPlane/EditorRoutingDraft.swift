@@ -92,6 +92,11 @@ struct EditorRoutingDraft: Equatable {
     }
 
     static func native(_ config: NativeVPNConfig, customRouting: CustomRoutingProfile) -> Self {
+        if config.ownedIPsec != nil && customRouting.proxy.isIdentity {
+            var result = Self(wantsDefault: true, canOwnDefault: true, connection: [address(config.server)], customRouting: customRouting)
+            result.notes.append("The built-in IPsec engine installs the addresses and routes negotiated with the gateway")
+            return result
+        }
         var result = Self(wantsDefault: config.includeAllNetworks, canOwnDefault: false,
                           connection: [address(config.server)], customRouting: customRouting)
         result.proxyKnown = true
@@ -103,6 +108,13 @@ struct EditorRoutingDraft: Equatable {
 
     static func subprocess(_ config: SubprocessTunnelConfig, customRouting: CustomRoutingProfile) -> Self {
         var result = Self(connection: [address(config.server)], customRouting: customRouting)
+        if config.kind == .ssh && config.sshMode == .netTunnel {
+            result.networks = config.sshTun?.routes ?? []
+            result.wantsDefault = result.networks?.contains { TailscaleNetworkSettings.parse($0)?.isDefaultRoute == true } == true
+            result.canOwnDefault = result.wantsDefault == true
+            if let reason = config.sshTunProblem { result.notes.append(reason) }
+            return result
+        }
         if config.kind == .ssh {
             result.proxyKnown = true
             result.networks = []
@@ -117,7 +129,7 @@ struct EditorRoutingDraft: Equatable {
                     result.localProxy = ProxyEndpoint(scheme: .socks, host: "127.0.0.1", port: config.socksPort)
                 }
             case .portForward: result.notes += config.forwards
-            case .netTunnel: result.notes.append("Network tunnel requires server support and separate route configuration")
+            case .netTunnel: break
             }
             if config.useJumpHost { result.connection.insert("Jump host: " + address(config.jumpHost), at: 0) }
         } else {

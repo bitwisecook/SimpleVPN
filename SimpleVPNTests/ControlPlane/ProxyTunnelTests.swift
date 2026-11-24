@@ -20,22 +20,70 @@ struct ProxyTunnelConfigTests {
 
     // MARK: Start-payload contract (must match Vendor/proxy-engine/src/engine.go)
 
+    @Test func incompleteCredentialsCannotStartProtectedProxy() throws {
+        for scheme in ["socks5","socks5h","http","https"] {
+            var config = ProxyTunnelConfig()
+            config.upstream = scheme + "://192.0.2.8"
+            config.requiresAuth = true
+            for pair in [("", ""), ("user", ""), ("", "pass")] {
+                #expect(ProxyTunnelStartConfig.authenticationProblem(config: config, username: pair.0, password: pair.1) != nil)
+            }
+            #expect(ProxyTunnelStartConfig.authenticationProblem(config: config, username: "user", password: "p:ass") == nil)
+            let data = try JSONEncoder().encode(config)
+            #expect(try JSONDecoder().decode(ProxyTunnelConfig.self, from: data) == config)
+            #expect(String(decoding: data, as: UTF8.self).contains("auth-required-v1+"))
+            config.requiresAuth = false
+            #expect(ProxyTunnelStartConfig.authenticationProblem(config: config, username: "", password: "") == nil)
+            #expect(ProxyTunnelStartConfig.authenticationProblem(config: config, username: "user", password: "pass") != nil)
+        }
+        #expect(throws: (any Error).self) {
+            try JSONDecoder().decode(ProxyTunnelConfig.self, from: Data(#"{"upstream":"auth-required-v1+http://192.0.2.8","requiresAuth":false}"#.utf8))
+        }
+    }
+
     @Test func startConfigEncodesExactlyTheKeysTheEngineParses() throws {
         var c = ProxyTunnelConfig()
         c.upstream = "socks5://proxy.example.com:1080"
         c.mtu = 1400
+        c.requiresAuth = true
 
         let start = ProxyTunnelStartConfig(config: c, username: "u", password: "p")
         let json = start.jsonString()
         let obj = try #require(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
 
         // startConfig in engine.go: these names are the contract.
-        let expected: Set<String> = ["upstream", "username", "password", "mtu"]
+        let expected: Set<String> = ["upstream", "username", "password", "mtu", "requiresAuth"]
         #expect(Set(obj.keys) == expected)
-        #expect(obj["upstream"] as? String == "socks5://proxy.example.com:1080")
+        #expect(obj["upstream"] as? String == "auth-required-v1+socks5://proxy.example.com:1080")
+        #expect(obj["requiresAuth"] as? Bool == true)
         #expect(obj["username"] as? String == "u")
         #expect(obj["password"] as? String == "p")
         #expect(obj["mtu"] as? Int == 1400)
+    }
+
+    @Test func tlsRoutesRoundTripWithFailClosedVersioning() throws {
+        var config = ProxyTunnelConfig()
+        config.upstream = "socks5://proxy.example:1080"
+        config.tlsRoutes = "443 Portal.Example 192.0.2.4:8443\n9443 v6.example [2001:db8::4]:443"
+        #expect(config.connectProblem == nil)
+        let encoded = try JSONEncoder().encode(config)
+        #expect(try JSONDecoder().decode(ProxyTunnelConfig.self, from: encoded) == config)
+        var json = try #require(try JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        let legacyUpstream = try #require(json["upstream"] as? String)
+        #expect(ProxyTunnelConfig.upstreamProblem(legacyUpstream) != nil)
+        json.removeValue(forKey: "tlsRoutes")
+        let incomplete = try JSONDecoder().decode(ProxyTunnelConfig.self, from: JSONSerialization.data(withJSONObject: json))
+        #expect(incomplete.connectProblem != nil)
+        let wire = ProxyTunnelStartConfig(config: config, username: "", password: "")
+        #expect(wire.upstream == legacyUpstream)
+        #expect(wire.tlsRoutes == config.tlsRoutes)
+        #expect(!wire.redactedJSONString().contains("Portal.Example"))
+        for bad in ["0 test.example 127.0.0.1:443", "443 test.example dynamic.example:443",
+                    "443 test.example 224.0.0.1:443", "443 *.example 127.0.0.1:443",
+                    "443 test.example 127.0.0.1:443\n443 TEST.EXAMPLE 127.0.0.1:443"] {
+            config.tlsRoutes = bad
+            #expect(config.tlsRoutesProblem != nil)
+        }
     }
 
     @Test func startPayloadRedactsCredentials() {

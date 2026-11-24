@@ -19,10 +19,12 @@
 package pxengine
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
+	"github.com/sagernet/sing/common/metadata"
+	"github.com/sagernet/sing/protocol/socks/socks5"
 	"net"
 	"sync"
 	"time"
@@ -46,6 +48,10 @@ func (st *engineState) handleUDP(r *udp.ForwarderRequest) bool {
 	id := r.ID()
 	dstHost := addrFromTCPIP(id.LocalAddress)
 	dstPort := int(id.LocalPort)
+	if st.tlsRoutes[dstPort] != nil {
+		st.udpRefused.Add(1)
+		return true
+	}
 
 	var wq waiter.Queue
 	ep, tcpErr := r.CreateEndpoint(&wq)
@@ -153,38 +159,31 @@ func (st *engineState) serveUDPviaSOCKS(guest net.Conn, dstHost string, dstPort 
 	defer stopHandshake()
 
 	_ = ctrl.SetDeadline(time.Now().Add(dialTimeout))
-	if err := socks5Negotiate(ctrl, st.up.username, st.up.password); err != nil {
-		closeCtrl()
-		return err
-	}
-	// DST in a UDP ASSOCIATE is the address the CLIENT will send from; 0.0.0.0:0
-	// means "I don't know yet", which every compliant proxy accepts.
-	req, err := socksRequest(socksCmdUDPAssoc, "0.0.0.0", 0)
+	relay, err := st.up.socksHandshake(ctrl, socks5.CommandUDPAssociate, "0.0.0.0", 0)
 	if err != nil {
 		closeCtrl()
 		return err
-	}
-	if _, err := ctrl.Write(req); err != nil {
-		closeCtrl()
-		return err
-	}
-	relayIP, relayPort, err := readSocksReply(ctrl)
-	if err != nil {
-		closeCtrl()
-		return err // e.g. "command not supported" ⇒ caller falls back for DNS
 	}
 	_ = ctrl.SetDeadline(time.Time{})
-
-	// A 0.0.0.0 (or absent) relay address means "use the proxy's own address".
-	relayHost := ""
-	if relayIP != nil && !relayIP.IsUnspecified() {
-		relayHost = relayIP.String()
+	if !relay.IsValid() || relay.Port == 0 {
+		closeCtrl()
+		return errors.New("SOCKS proxy returned an invalid relay endpoint")
 	}
-	if relayHost == "" {
-		h, _, _ := net.SplitHostPort(st.up.address)
-		relayHost = h
+	if relay.Addr.IsUnspecified() {
+		// Use the connected peer: a second resolution can pick another server.
+		peer, ok := ctrl.RemoteAddr().(*net.TCPAddr)
+		if !ok {
+			closeCtrl()
+			return errors.New("SOCKS proxy peer is unavailable")
+		}
+		relay.Addr = peer.AddrPort().Addr().Unmap()
 	}
-	relayAddr := net.JoinHostPort(relayHost, fmt.Sprintf("%d", relayPort))
+	relayAddr := relay.String()
+	header, err := socksUDPHeader(dstHost, dstPort)
+	if err != nil {
+		closeCtrl()
+		return err
+	}
 
 	// The relay socket is a real OS UDP socket to the proxy's relay endpoint.
 	relayConn, err := st.dialer.DialContext(st.ctx, "udp", relayAddr)
@@ -230,8 +229,9 @@ func (st *engineState) serveUDPviaSOCKS(guest net.Conn, dstHost string, dstPort 
 				closeAll()
 				return
 			}
-			payload, derr := socksUDPDecap(buf[:n])
-			if derr != nil {
+			payload, matches := bytes.CutPrefix(buf[:n], header)
+			if !matches {
+				st.udpRelayRejected.Add(1)
 				continue
 			}
 			if _, werr := guest.Write(payload); werr != nil {
@@ -244,18 +244,15 @@ func (st *engineState) serveUDPviaSOCKS(guest net.Conn, dstHost string, dstPort 
 
 	// guest -> relay: wrap each datagram in the SOCKS UDP request header aimed
 	// at the original destination.
-	buf := make([]byte, maxPacketSize)
+	buf := make([]byte, len(header)+maxPacketSize)
+	copy(buf, header)
 	for {
 		_ = guest.SetReadDeadline(time.Now().Add(udpIdleTimeout))
-		n, rerr := guest.Read(buf)
+		n, rerr := guest.Read(buf[len(header):])
 		if rerr != nil {
 			return nil
 		}
-		encap, eerr := socksUDPEncap(dstHost, dstPort, buf[:n])
-		if eerr != nil {
-			continue
-		}
-		if _, werr := relayConn.Write(encap); werr != nil {
+		if _, werr := relayConn.Write(buf[:len(header)+n]); werr != nil {
 			return nil
 		}
 		st.bytesUp.Add(int64(n))
@@ -267,63 +264,16 @@ func (st *engineState) serveUDPviaSOCKS(guest net.Conn, dstHost string, dstPort 
 	}
 }
 
-// socksUDPEncap builds a SOCKS5 UDP request datagram: RSV(2) FRAG(1)=0 ATYP
-// DST.ADDR DST.PORT DATA.
-func socksUDPEncap(host string, port int, data []byte) ([]byte, error) {
-	if port < 0 || port > 65535 {
-		return nil, fmt.Errorf("socks udp: port %d out of range", port)
+// One association belongs to one connected guest flow. Reuse its wire header
+// in both directions to enforce the peer IP and port and reject fragments.
+func socksUDPHeader(host string, port int) ([]byte, error) {
+	if len(host) == 0 || len(host) > 255 || port < 1 || port > 65535 {
+		return nil, errors.New("invalid SOCKS UDP destination")
 	}
-	out := []byte{0x00, 0x00, 0x00} // RSV RSV FRAG
-	if ip := net.ParseIP(host); ip != nil {
-		if v4 := ip.To4(); v4 != nil {
-			out = append(out, socksAtypIPv4)
-			out = append(out, v4...)
-		} else {
-			out = append(out, socksAtypIPv6)
-			out = append(out, ip.To16()...)
-		}
-	} else {
-		if len(host) > 255 {
-			return nil, errors.New("socks udp: hostname exceeds 255 bytes")
-		}
-		out = append(out, socksAtypDomain, byte(len(host)))
-		out = append(out, host...)
-	}
-	out = append(out, byte(port>>8), byte(port&0xFF))
-	out = append(out, data...)
-	return out, nil
+	destination := metadata.ParseSocksaddrHostPort(host, uint16(port))
+	var header bytes.Buffer
+	header.Grow(3 + metadata.SocksaddrSerializer.AddrPortLen(destination))
+	header.Write([]byte{0, 0, 0})
+	err := metadata.SocksaddrSerializer.WriteAddrPort(&header, destination)
+	return header.Bytes(), err
 }
-
-// socksUDPDecap strips the SOCKS5 UDP header and returns the payload. FRAG != 0
-// (fragmented datagrams) is rejected — we do not reassemble, per RFC 1928's
-// permission to drop fragments.
-func socksUDPDecap(pkt []byte) ([]byte, error) {
-	if len(pkt) < 4 {
-		return nil, errors.New("socks udp: short datagram")
-	}
-	if pkt[2] != 0x00 {
-		return nil, errors.New("socks udp: fragmented datagram dropped")
-	}
-	off := 4
-	switch pkt[3] {
-	case socksAtypIPv4:
-		off += 4
-	case socksAtypIPv6:
-		off += 16
-	case socksAtypDomain:
-		if len(pkt) < 5 {
-			return nil, errors.New("socks udp: short domain")
-		}
-		off += 1 + int(pkt[4])
-	default:
-		return nil, fmt.Errorf("socks udp: unknown address type 0x%02x", pkt[3])
-	}
-	off += 2 // port
-	if off > len(pkt) {
-		return nil, errors.New("socks udp: header longer than datagram")
-	}
-	return pkt[off:], nil
-}
-
-// io is imported for its error sentinels used across the UDP path.
-var _ = io.EOF

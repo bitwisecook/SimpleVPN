@@ -38,6 +38,14 @@ static void tsCallString(TSStringCallback f, const char *s) { if (f != NULL) f(s
 
 #line 1 "cgo-generated-wrapper"
 
+#line 5 "packet_policy.go"
+
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+#line 1 "cgo-generated-wrapper"
+
 #line 5 "tailscale_instances.go"
 
 #include <stdint.h>
@@ -53,6 +61,7 @@ static void tsInstanceString(TSInstanceStringCallback f, uint64_t c, const char 
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 typedef void (*VRPacketCallback)(uint64_t context, const unsigned char *bytes, int length);
 static void vrPacket(VRPacketCallback f, uint64_t c, const unsigned char *p, int n) { if (f) f(c,p,n); }
 
@@ -147,6 +156,15 @@ extern char* TSStart(char* cfgJSON);
 extern char* TSStatus(void);
 extern char* TSUpdatePrefs(char* patchJSON);
 extern char* TSStop(void);
+extern uint64_t PPCreate(char* adapter, char* source, char** diagnostic);
+extern uint64_t PPCreateWithContext(char* adapter, char* profile, char* kind, char* source, char** diagnostic);
+extern int PPDirectionNeedsPackets(uint64_t handle, int d);
+extern void PPObserve(uint64_t handle, int d, uint64_t n, uint64_t bytes);
+extern int PPApply(uint64_t handle, int d, void* bytes, int length);
+extern char* PPStatus(uint64_t handle);
+extern void PPDestroy(uint64_t handle);
+extern void PPFree(char* text);
+extern char* VRPacketStats(uint64_t handle);
 extern char* TSCreateInstance(char* cfgJSON, uint64_t context, TSInstancePacketCallback packet, TSInstanceStringCallback state, TSInstanceStringCallback browse, TSInstanceStringCallback netmap, TSInstanceStringCallback diagnostic);
 extern int TSPacketInInstance(uint64_t handle, void* bytes, int length);
 extern char* TSStatusInstance(uint64_t handle);
@@ -158,8 +176,11 @@ extern char* TSNodeStateSince(uint64_t handle, uint64_t revision);
 extern char* TSAckNodeState(uint64_t handle, uint64_t revision);
 extern char* VRCreateInstance(char* configuration, uint64_t context, VRPacketCallback packetOut);
 extern int VRPacketIn(uint64_t handle, void* bytes, int length);
+extern int VRPacketInWithSource(uint64_t handle, void* bytes, int length, char* source, uint64_t owner);
 extern char* VRApplyPolicy(uint64_t handle, char* policy);
 extern char* VRCheckPolicy(uint64_t handle, char* policy);
+extern char* VRValidateEvents(char* source);
+extern char* VRInspect(uint64_t handle, char* request);
 extern char* VRStatus(uint64_t handle);
 extern char* VRStopPort(uint64_t handle, char* id);
 extern char* VRStopInstance(uint64_t handle);

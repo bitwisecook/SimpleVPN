@@ -50,8 +50,11 @@ final class ProxyTunnelEngine: @unchecked Sendable {
     private var starting = false
     private let packetOutput: (@Sendable (Data) -> Void)?
 
-    init(provider: NEPacketTunnelProvider? = nil, delegate: any ProxyTunnelEngineDelegate,
+    private let packetPolicy: SVPPacketPolicy?
+
+    init(provider: NEPacketTunnelProvider? = nil, delegate: any ProxyTunnelEngineDelegate, packetPolicy: SVPPacketPolicy? = nil,
          packetOutput: (@Sendable (Data) -> Void)? = nil) {
+        self.packetPolicy = packetPolicy
         self.provider = provider
         self.delegate = delegate
         self.packetOutput = packetOutput
@@ -161,7 +164,7 @@ final class ProxyTunnelEngine: @unchecked Sendable {
         guard let flow = provider?.packetFlow else { return }
         flow.readPackets { [weak self] packets, _ in
             guard let self else { return }
-            for packet in packets {
+            self.packetPolicy?.routeOutbound(packets) { packet in
                 // Raw IP packet straight in — no PF header on this boundary. A
                 // full queue drops (PXPacketIn returns 0), which is correct: a
                 // VPN must shed load, never stall the flow reader.
@@ -178,7 +181,8 @@ final class ProxyTunnelEngine: @unchecked Sendable {
     fileprivate func deliver(_ packet: Data) {
         guard !lock.withLock({ stopped }) else { return }
         if let packetOutput { packetOutput(packet); return }
-        guard let flow = provider?.packetFlow, let first = packet.first else { return }
+        guard let flow = provider?.packetFlow, let packet = packetPolicy?.routeInbound(packet),
+              let first = packet.first else { return }
         let proto: Int32 = (first >> 4) == 6 ? AF_INET6 : AF_INET
         flow.writePackets([packet], withProtocols: [NSNumber(value: proto)])
     }

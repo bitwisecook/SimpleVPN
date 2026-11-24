@@ -787,8 +787,6 @@ struct ConnectListingTests {
             named.username = "alex"
             add(NativeVPNReadiness.need(for: named, facts: .init()))
             add(NativeVPNReadiness.need(for: named, facts: .init(hasSecret: true)))
-            add(NativeVPNReadiness.need(
-                for: named, facts: .init(hasPersonalVPNCapability: false)))
             var psk = configured
             psk.usesSharedSecret = true
             add(NativeVPNReadiness.need(for: psk, facts: .init()))
@@ -825,6 +823,7 @@ struct ConnectListingTests {
         var ike = freshNative(.ikev2)
         ike.server = "vpn.example.com"
         ike.username = "alex"
+        ike.eapMSCHAPv2 = true
         #expect(NativeVPNReadiness.need(for: ike, facts: .init(hasSecret: true)) == nil)
         // IKEv2 with a shared secret instead.
         var psk = ike
@@ -833,6 +832,8 @@ struct ConnectListingTests {
         // IPsec: the group PSK is the sign-in, and XAuth can be off.
         var ipsec = freshNative(.ipsec)
         ipsec.server = "vpn.example.com"
+        ipsec.groupOrRealm = "group"
+        ipsec.remoteID = "vpn.example.com"
         ipsec.xauth = false
         #expect(NativeVPNReadiness.need(for: ipsec, facts: .init(hasGroupPSK: true)) == nil)
     }
@@ -904,10 +905,11 @@ struct ConnectListingTests {
             for: c, facts: .init(installedTools: [.openconnect, .ocproxy], hasPassword: true)) == nil)
     }
 
-    /// L2TP cannot be connected by any app on macOS. It is still LISTED, and it says
-    /// so — the honest version of "there is no Connect for this".
+    /// An existing L2TP export profile keeps its original System Settings workflow.
     @Test func l2tpIsListedAndExplainsItself() {
-        let need = NativeVPNReadiness.need(for: freshNative(.l2tp), facts: .init())
+        var config = freshNative(.l2tp)
+        config.server = "vpn.example.test"
+        let need = NativeVPNReadiness.need(for: config, facts: .init())
         #expect(need?.readiness == .blocked)
         #expect(need?.locus == .transport)
         #expect(need?.sentence.contains("System Settings") == true)

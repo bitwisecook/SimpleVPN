@@ -179,6 +179,22 @@ struct ProxyTunnelView: View {
                 TrafficCrossLinks(gatewayNote: gatewayNote)
             }
 
+            CollapsibleSettingsSection(group: .advanced, changedCount: draft.tlsRoutes.isEmpty ? 0 : 1) {
+                EngineSettingRow(spec: Self.specs["px.tls-routes"], value: draft.tlsRoutes) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        EngineSettingLabel(spec: Self.specs["px.tls-routes"], value: draft.tlsRoutes)
+                        Text("Enter one destination port, TLS server name and backend IP address with port per line. Other names and UDP traffic on those ports are refused. Leave empty for ordinary proxying.")
+                            .font(.callout).foregroundStyle(.secondary)
+                        ConfigSourceLabel(text: "443 portal.example 192.0.2.8:8443", format: .automatic)
+                        ConfigurationSourceText(text: $draft.tlsRoutes, format: .automatic, accessibilityLabel: "TLS backend routes")
+                            .frame(minHeight: 76, idealHeight: 96)
+                        if let problem = draft.tlsRoutesProblem {
+                            Label(problem, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                        }
+                    }
+                }
+            }
+
             // Live status, AFTER the canonical config groups — it is not one of
             // them, so it must not interrupt their run.
             if let status, status.isRunning {
@@ -297,6 +313,9 @@ struct ProxyTunnelView: View {
             if status.failedFlows > 0 {
                 LabeledContent("Couldn't connect", value: "\(status.failedFlows)")
             }
+            if status.udpRelayRejected > 0 {
+                LabeledContent("Rejected UDP relay datagrams", value: "\(status.udpRelayRejected)")
+            }
             if status.dnsQueries > 0 {
                 LabeledContent("DNS lookups", value: "\(status.dnsQueries)")
             }
@@ -389,6 +408,7 @@ struct ProxyTunnelView: View {
         if let problem = ConfigurationNameField.problem(name) { return problem }
         if address.trimmingCharacters(in: .whitespaces).isEmpty { return "Enter the proxy address." }
         if let p = upstreamProblem { return p }
+        if let p = draft.tlsRoutesProblem { return p }
         if !draft.includeDefaultRoute, ProxyTunnelConfig.splitRoutes(includedText).isEmpty {
             return "Add a network to route through the proxy, or turn on \u{201C}Send all traffic\u{201D}."
         }

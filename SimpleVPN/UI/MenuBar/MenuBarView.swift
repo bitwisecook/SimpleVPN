@@ -351,6 +351,10 @@ struct MenuBarView: View {
         vpn.profiles.first { $0.status == .connected }
     }
 
+    private var exitNodeProfiles: [VPNController.Profile] {
+        vpn.profiles.filter { $0.kind == .tailscale && $0.status == .connected }
+    }
+
     var body: some View {
         VisibleMenuBarContent { popupBody }
             .frame(width: 340)
@@ -409,8 +413,8 @@ struct MenuBarView: View {
     }
 
     private var activeCount: Int {
-        vpn.profiles.filter { UI.isActive($0.status) }.count
-            + (tunnelManager?.activeIDs.count ?? 0) + (nativeBackendActive ? 1 : 0)
+        let packetIDs = Set(vpn.profiles.lazy.filter { UI.isActive($0.status) }.map(\.id))
+        return packetIDs.union(tunnelManager?.activeIDs ?? []).count + (nativeBackendActive ? 1 : 0)
     }
 
     private var inventory: some View {
@@ -420,7 +424,7 @@ struct MenuBarView: View {
                     .foregroundStyle(.secondary).font(.callout)
                     .padding(.horizontal, 14).padding(.vertical, 4)
             }
-            ForEach(vpn.profiles) { row($0) }
+            ForEach(ConnectListing.standaloneProfiles(vpn.profiles, tunnels: tunnels?.tunnels ?? [])) { row($0) }
             if let tunnels, let tunnelManager {
                 ForEach(tunnels.tunnels) { tunnelRow($0, manager: tunnelManager) }
             }
@@ -432,6 +436,16 @@ struct MenuBarView: View {
                 Text("Compositions").font(.caption).foregroundStyle(.secondary)
                     .padding(.horizontal, 14)
                 ForEach(compositions.compositions) { compositionRow($0) }
+            }
+            if !exitNodeProfiles.isEmpty {
+                Divider().padding(.vertical, 4)
+                Text("Exit Nodes").font(.caption).foregroundStyle(.secondary)
+                    .accessibilityAddTraits(.isHeader)
+                    .padding(.horizontal, 14)
+                ForEach(exitNodeProfiles) { profile in
+                    MenuBarExitNodePicker(vpn: vpn, profile: profile)
+                        .padding(.horizontal, 14)
+                }
             }
         }
     }
@@ -489,6 +503,10 @@ struct MenuBarView: View {
         case .disconnect, .cancel: vpn.disconnect(id: p.id)
         case .waiting: break
         case .connect:
+            if p.kind == .tailscale && TailscaleConflict.isOfficialClientRunning {
+                showConnection(p.id)
+                return
+            }
             guard starting.insert(p.id).inserted else { return }
             Task {
                 defer { starting.remove(p.id) }
@@ -542,15 +560,15 @@ struct MenuBarView: View {
     }
 
     private func nativeRow(_ config: NativeVPNConfig, manager: NativeVPNManager) -> some View {
-        let status: NEVPNStatus = manager.activeConfigID == config.id ? manager.status : .disconnected
+        let status = manager.status(for: config.id)
         let command = MenuVPNAction(status: status, paused: false)
         let tag = ConnectListing.nativeTag + config.id
         return otherRow(name: config.name, dot: .from(status: status), command: command, starting: starting.contains(tag)) {
             if command == .disconnect || command == .cancel {
-                if manager.activeConfigID == config.id { manager.disconnect() }
+                manager.disconnect(config.id)
             } else if command == .connect {
                 guard manager.replacementWarning(for: config.id) == nil,
-                      NativeVPNReadiness.need(for: config, hasPersonalVPNCapability: !manager.needsEntitlement) == nil else {
+                      NativeVPNReadiness.need(for: config) == nil else {
                     showConnection(tag)
                     return
                 }
@@ -615,11 +633,147 @@ struct MenuBarView: View {
         .accessibilityLabel("\(comp.name), \((active ? DotState.connected : .off).accessibilityDescription), \(comp.members.count) VPNs")
         .accessibilityHint(active ? "Disconnects the whole group." : "Connects the whole group.")
         .contextMenu {
-            Button("Connect Through One Virtual Interface") { Task { await vpn.connectThroughVirtualInterface(comp) } }
-                .disabled(vpn.virtualCompositionProblem(comp) != nil)
-                .help(vpn.virtualCompositionProblem(comp) ?? "Route this composition through one virtual interface.")
-                .accessibilityValue(vpn.virtualCompositionProblem(comp) ?? "Available")
+            if comp.applicationRoutes == nil {
+                Button("Connect Through One Virtual Interface") { Task { await vpn.connectThroughVirtualInterface(comp) } }
+                    .disabled(vpn.virtualCompositionProblem(comp) != nil)
+                    .help(vpn.virtualCompositionProblem(comp) ?? "Route this composition through one virtual interface.")
+                    .accessibilityValue(vpn.virtualCompositionProblem(comp) ?? "Available")
+            }
         }
+    }
+}
+
+private struct MenuBarExitNodePicker: View {
+    let vpn: VPNController
+    let profile: VPNController.Profile
+    @State private var switching = false
+    @State private var hasRefreshed = false
+    @State private var refreshFailed = false
+    @State private var errorText: String?
+    @State private var copiedNodeID: String?
+
+    private var status: TailscaleStatus? { hasRefreshed ? vpn.tailscaleStatuses[profile.id] : nil }
+    private var currentID: String { status?.exitNodeID ?? "" }
+    private var isCompositionMember: Bool { vpn.virtualMembers[profile.id] != nil }
+    private var choices: [TailscalePeer] {
+        (status?.exitNodes ?? []).filter { !$0.id.isEmpty }.sorted { first, second in
+            if first.online != second.online { return first.online }
+            let order = title(for: first).localizedStandardCompare(title(for: second))
+            return order == .orderedSame ? first.id < second.id : order == .orderedAscending
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(profile.name).lineLimit(1)
+                Spacer(minLength: 8)
+                if let status, status.backendState == .running {
+                    picker
+                    if !currentID.isEmpty && !refreshFailed { copyNodeID }
+                } else {
+                    Text(statusLabel).foregroundStyle(.secondary)
+                }
+            }
+            if switching {
+                ProgressView("Changing exit node…").controlSize(.small)
+            } else if let errorText {
+                Text(errorText).foregroundStyle(.secondary)
+            } else if isCompositionMember {
+                Text("Edit this VPN and reconnect the composition to change its exit node.")
+                    .foregroundStyle(.secondary)
+            } else if ManagedPolicy.lockConfiguration {
+                Text("Managed by your organization").foregroundStyle(.secondary)
+            }
+            if refreshFailed && !switching {
+                Button("Refresh Exit Nodes") { Task { await refresh() } }
+            }
+        }
+        .font(.callout)
+        .task(id: profile.id) {
+            while !Task.isCancelled {
+                if !switching { await refresh() }
+                do { try await Task.sleep(for: .seconds(10)) } catch { return }
+            }
+        }
+        .task(id: copiedNodeID) {
+            guard copiedNodeID != nil else { return }
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            copiedNodeID = nil
+        }
+    }
+
+    private var statusLabel: String {
+        if refreshFailed { return "Exit nodes unavailable" }
+        if status?.backendState.needsUserAction == true { return "Waiting for sign-in" }
+        return "Checking exit nodes…"
+    }
+
+    private var picker: some View {
+        let choices = choices
+        return Picker("Exit node for \(profile.name)", selection: Binding(get: { currentID }, set: select)) {
+            Text("No Exit Node").tag("")
+                .disabled(ManagedPolicy.forceKeepInsideVPN)
+            if !currentID.isEmpty, !choices.contains(where: { $0.id == currentID }) {
+                let name = status?.exitNodeName ?? ""
+                Text(name.isEmpty ? currentID : name)
+                    .tag(currentID).disabled(true)
+            }
+            ForEach(choices) { node in
+                Text(title(for: node) + (node.online ? "" : " (offline)"))
+                    .tag(node.id).disabled(!node.online)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .accessibilityLabel("Exit node for \(profile.name)")
+        .disabled(switching || refreshFailed || isCompositionMember || ManagedPolicy.lockConfiguration)
+    }
+
+    private var copyNodeID: some View {
+        let copied = copiedNodeID == currentID
+        return Button(copied ? "Copied Exit Node ID" : "Copy Exit Node ID",
+                      systemImage: copied ? "checkmark" : "doc.on.doc") {
+            NSPasteboard.general.clearContents()
+            if NSPasteboard.general.setString(currentID, forType: .string) {
+                copiedNodeID = currentID
+                AccessibilityAnnouncer.sayNow("Copied exit node ID for \(profile.name)")
+            }
+        }
+        .labelStyle(.iconOnly)
+        .buttonStyle(.borderless)
+        .help("Copy the exit node ID for routing rules")
+    }
+
+    private func title(for node: TailscalePeer) -> String {
+        node.pickerLabel.isEmpty ? node.id : node.pickerLabel
+    }
+
+    private func select(_ id: String) {
+        guard id != currentID, !switching else { return }
+        let node = choices.first { $0.id == id && $0.online }
+        guard id.isEmpty || node != nil else { return }
+        switching = true
+        errorText = nil
+        Task {
+            defer { switching = false }
+            do {
+                try await vpn.selectTailscaleExitNode(node, id: profile.id)
+                AccessibilityAnnouncer.sayNow(node.map { "\(profile.name) uses \(title(for: $0))" }
+                    ?? "Exit node off for \(profile.name)")
+            } catch {
+                errorText = UserFacingError.redact(error.localizedDescription)
+                AccessibilityAnnouncer.sayNow("Could not change the exit node for \(profile.name)")
+            }
+            await refresh()
+        }
+    }
+
+    private func refresh() async {
+        let updated = await vpn.refreshTailscaleStatus(id: profile.id)
+        guard !Task.isCancelled else { return }
+        refreshFailed = updated == nil
+        if updated != nil { hasRefreshed = true }
     }
 }
 

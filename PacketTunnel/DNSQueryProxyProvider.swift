@@ -17,7 +17,12 @@ final class DNSQueryProxyProvider: NEDNSProxyProvider, NEAppProxyUDPFlowHandling
                 userInfo: [NSLocalizedDescriptionKey: "Invalid DNS query policy."]))
             return
         }
-        Task { await runtime.start(policy); completionHandler(nil) }
+        let ownerUID = (options?[DNSQueryActivityWire.ownerUIDKey] as? NSNumber)?.uint32Value
+        let generation = DNSQueryActivity.digest(data)
+        Task {
+            do { try await runtime.start(policy, generation: generation, ownerUID: ownerUID); completionHandler(nil) }
+            catch { completionHandler(error) }
+        }
     }
     override func stopProxy(with reason: NEProviderStopReason, completionHandler: @escaping @Sendable () -> Void) {
         Task { await runtime.stop(); completionHandler() }
@@ -41,7 +46,7 @@ private final class DNSProxyFlowBox: @unchecked Sendable {
 }
 
 private actor DNSQueryProxyRuntime {
-    private var forwarder = DNSQueryForwarder(policy: DNSQueryPolicy())
+    private var forwarder: DNSQueryForwarder?
     private var stopped = true
     private struct Job {
         let flow: DNSProxyFlowBox
@@ -49,16 +54,30 @@ private actor DNSQueryProxyRuntime {
         let deadline: Task<Void, Never>
     }
     private var jobs: [UUID: Job] = [:]
-    func start(_ policy: DNSQueryPolicy) { forwarder = DNSQueryForwarder(policy: policy); stopped = false }
+    private var activitySession: UUID?
+    func start(_ policy: DNSQueryPolicy, generation: Data, ownerUID: UInt32?) throws {
+        stop()
+        let forwarder = try DNSQueryForwarder(policy: policy)
+        self.forwarder = forwarder
+        stopped = false
+        if let ownerUID {
+            activitySession = DNSQueryActivityService.shared.start(forwarder, generation: generation, ownerUID: ownerUID)
+        }
+    }
     func stop() {
         stopped = true
+        forwarder = nil
+        if let activitySession {
+            DNSQueryActivityService.shared.stop(activitySession)
+            self.activitySession = nil
+        }
         let active = jobs; jobs.removeAll()
         for job in active.values { job.task.cancel(); job.deadline.cancel(); job.flow.close() }
     }
     func accept(_ box: DNSProxyFlowBox) {
-        guard !stopped, jobs.count < 64 else { box.close(); return }
+        guard !stopped, let forwarder, jobs.count < 64 else { box.close(); return }
         let id = UUID()
-        let task = Task { await self.serve(box, id: id) }
+        let task = Task { await self.serve(box, id: id, forwarder: forwarder) }
         // Bound retained idle TCP/UDP flows; clients can open a new DNS flow.
         let deadline = Task {
             do { try await Task.sleep(for: .seconds(60)) } catch { return }
@@ -70,7 +89,7 @@ private actor DNSQueryProxyRuntime {
         guard let job = jobs.removeValue(forKey: id) else { return }
         job.task.cancel(); job.deadline.cancel(); job.flow.close()
     }
-    private func serve(_ box: DNSProxyFlowBox, id: UUID) async {
+    private func serve(_ box: DNSProxyFlowBox, id: UUID, forwarder: DNSQueryForwarder) async {
         defer { finish(id) }
         do {
             try await box.flow.open(withLocalFlowEndpoint: nil)

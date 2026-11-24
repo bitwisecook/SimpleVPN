@@ -193,7 +193,8 @@ struct NewVPNSetupView: View {
                 readFile(url)
                 return true
             } isTargeted: { isTargeted = $0 }
-            TextEditor(text: $draft.input)
+            ConfigurationSourceText(text: $draft.input, format: .automatic,
+                                    accessibilityLabel: "Configuration or setup instructions")
                 .frame(minHeight: 110, idealHeight: 140)
                 .overlay(alignment: .topLeading) {
                     if draft.input.isEmpty {
@@ -205,7 +206,6 @@ struct NewVPNSetupView: View {
                     }
                 }
                 .onPasteCommand(of: [.image, .text, .fileURL]) { _ in useClipboard() }
-                .accessibilityLabel("Configuration or setup instructions")
                 .accessibilityHint("Paste the configuration or instructions you received. They stay on this Mac.")
                 .privacySensitive()
             HStack {

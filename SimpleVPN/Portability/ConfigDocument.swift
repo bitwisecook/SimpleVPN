@@ -57,15 +57,15 @@ import Foundation
 
 nonisolated enum ConfigFormat {
 
-    /// The version this build WRITES. Bumped only when the meaning of an existing
-    /// key changes; adding keys does not need it, because a reader ignores what it
-    /// does not know.
+    /// Ordinary profiles stay compatible with existing importers. Required
+    /// handlers use version 2 so a reader cannot silently ignore them.
     static let current = 1
 
-    /// The newest version this build can READ. Equal to `current` today, and
-    /// separate from it so a future build that gains a key without changing any
-    /// meaning can raise one and not the other.
-    static let maximumReadable = 1
+    static let packetPolicyVersion = 2
+    static let exactIKEAuthenticationVersion = 3
+    static let ownedL2TPVersion = 4
+    static let pointToPointSSH = 5
+    static let maximumReadable = pointToPointSSH
 
     /// A file from the future is REFUSED, not read best-effort. Its keys may mean
     /// something else, and applying a misread server address or pinned certificate
@@ -111,6 +111,7 @@ nonisolated enum ConfigDocumentKeys {
     static let interfacePrefs = "interface"
     static let labelIDs = "labels"
     static let omitted = "omitted"
+    static let packetPolicy = "packet-event-handlers"
 }
 
 // MARK: - The snapshot the document is built from
@@ -162,6 +163,8 @@ nonisolated struct ConfigSnapshot: Sendable {
         var subprocess: SubprocessTunnelConfig? = nil
         var native: NativeVPNConfig? = nil
 
+        var routingEventSource: String?
+        var requiredPacketPolicy: String? { routingEventSource ?? subprocess?.routingEventSource ?? native?.routingEventSource }
         var auth: VPNAuthConfig? = nil
         var credentialSource: CredentialSource? = nil
         var customRouting: CustomRoutingProfile? = nil
@@ -216,7 +219,7 @@ nonisolated enum ConfigFieldNaming {
     /// `name` and `kind` are carried once at the VPN level instead of repeated
     /// inside its settings, and `schema` is the blob's own serialisation version,
     /// which the document's `format` supersedes.
-    static let skipped: Set<String> = ["id", "name", "kind", "schema"]
+    static let skipped: Set<String> = ["id", "name", "kind", "schema", "routingEventSource"]
 
     static let exceptions: [String: [String: String]] = [
         "openvpn.": [
@@ -253,6 +256,7 @@ nonisolated enum ConfigFieldNaming {
         ],
         "px.": [
             "upstream": "px.address",
+            "tlsRoutes": "px.tls-routes",
             "includeDefaultRoute": "px.default-route",
             "includedRoutes": "px.included",
             "excludedRoutes": "px.excluded",
@@ -319,6 +323,8 @@ nonisolated enum ConfigFieldNaming {
         ],
         "native.": [
             "remoteID": "native.remote-id",
+            "eapMSCHAPv2": "native.eap-mschapv2",
+            "l2tpMSCHAPv2": "native.l2tp-mschapv2",
             "groupOrRealm": "native.group",
             "ikeEncryption": "native.encryption",
             "ikeIntegrity": "native.integrity",
@@ -550,7 +556,11 @@ enum ConfigDocument {
     static func build(from snapshot: ConfigSnapshot, secretMode: ConfigSecretMode = .omit) -> (root: ConfigMap, withheld: [String]) {
         var withheld: [String] = []
         var root = ConfigMap()
-        root.put(ConfigDocumentKeys.format, .int(ConfigFormat.current))
+        let hasRequiredPolicy = snapshot.vpns.contains { $0.requiredPacketPolicy != nil }
+        let exactIKE = snapshot.vpns.contains { $0.native?.eapMSCHAPv2 == true }
+        let ownedL2TP = snapshot.vpns.contains { $0.native?.l2tpMSCHAPv2 == true }
+        let sshPacket = snapshot.vpns.contains { $0.subprocess?.sshTun != nil }
+        root.put(ConfigDocumentKeys.format, .int(sshPacket ? ConfigFormat.pointToPointSSH : ownedL2TP ? ConfigFormat.ownedL2TPVersion : exactIKE ? ConfigFormat.exactIKEAuthenticationVersion : hasRequiredPolicy ? ConfigFormat.packetPolicyVersion : ConfigFormat.current))
         root.put(ConfigDocumentKeys.exported, .string(ISO8601DateFormatter().string(from: snapshot.exportedAt)))
         root.put(ConfigDocumentKeys.app, .string(snapshot.appVersion))
 
@@ -607,6 +617,7 @@ enum ConfigDocument {
         m.put(ConfigDocumentKeys.id, .string(vpn.id))
         m.put(ConfigDocumentKeys.name, .string(vpn.name))
         m.put(ConfigDocumentKeys.kind, .string(vpn.kind.rawValue))
+        if let source = vpn.requiredPacketPolicy { m.put(ConfigDocumentKeys.packetPolicy, .verbatim(source)) }
         if !SubprocessTunnelConfig.passwordInAddress(vpn.server) {
             m.put(ConfigDocumentKeys.server, ifNotEmpty: vpn.server)
         } else {

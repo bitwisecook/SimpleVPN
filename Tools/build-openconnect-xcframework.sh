@@ -72,6 +72,12 @@ echo "==> openconnect @ $PIN"
 if [ ! -d "$WORK/.git" ]; then rm -rf "$WORK"; git clone https://gitlab.com/openconnect/openconnect.git "$WORK"; fi
 git -C "$WORK" fetch --tags origin >/dev/null 2>&1 || true
 git -C "$WORK" checkout -q "$PIN"
+for patch_file in "$REPO/Tools/OpenConnect/member-guards.patch" "$REPO/Tools/OpenConnect/oncp-bounds.patch" "$REPO/Tools/OpenConnect/managed-routes.patch"; do
+  if ! git -C "$WORK" apply --reverse --check "$patch_file" 2>/dev/null; then
+    git -C "$WORK" apply --check "$patch_file"
+    git -C "$WORK" apply "$patch_file"
+  fi
+done
 
 export PKG_CONFIG_PATH="$O3/lib/pkgconfig:$LZ4/lib/pkgconfig"
 export CC="clang"

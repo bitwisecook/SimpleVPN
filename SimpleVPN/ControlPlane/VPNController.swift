@@ -155,11 +155,19 @@ final class VPNController {
     /// Version of the running extension (via IPC); "unavailable" when nothing is connected.
     private(set) var extensionVersion: String = "unavailable"
 
+    weak var nativeConfigStore: NativeVPNManager?
+    weak var subprocessSessionStore: SubprocessTunnelManager?
+    var nativePacketManagers: [String: NETunnelProviderManager] = [:]
+    var nativePacketProfiles: [String: Profile] = [:]
     var managers: [String: NETunnelProviderManager] = [:]   // was private — internal for the +File split
     @ObservationIgnored var sshNetworkAgentBrokers: [String: Task<Void, Never>] = [:]
     @ObservationIgnored var sshNetworkAgentEpochs: [String: UUID] = [:]
+    var pendingVirtualNodeLeases: [String: Installation.Lease] = [:]
     var virtualManagers: [String: NETunnelProviderManager] = [:]
     var virtualMembers: [String: String] = [:]
+    var virtualSourceNames: [String: [String: String]] = [:]
+    var temporaryProcessRoutes: [String: [VPNProcessRoute]] = [:]
+    var preparingAppRouteMembers: Set<String> = []
     var virtualStoppedMembers: Set<String> = []
     var virtualStarts: [String: Date] = [:]
     var virtualObservedActive: Set<String> = []
@@ -292,19 +300,26 @@ final class VPNController {
         routes.captureHook = { [weak self] intent in self?.recordPushedRoutes(intent) }
         routes.intentHook = { [weak self] intent in
             guard let self else { return }
-            intent = self.customRouting(for: intent.engine).routes.apply(to: intent)
+            let profileID = intent.engine
+            intent = self.customRouting(for: profileID).routes.apply(to: intent) { id in
+                self.filterActivity.hit(profileID, .route(id))
+            }
             if self.compositionRouteRoles[intent.engine] == .split,
                self.virtualManager(for: intent.engine) == nil { intent.canOwnDefault = false }
         }
         dns.intentHook = { [weak self] intent in
             guard let self else { return }
             self.recordPushedDNS(intent)
-            intent = self.customRouting(for: intent.engine).dns.apply(to: intent)
+            let profileID = intent.engine
+            intent = self.customRouting(for: profileID).dns.apply(to: intent) { id in
+                self.filterActivity.hit(profileID, .resolver(id))
+            }
         }
         proxies.intentHook = { [weak self] intent in
             guard let self else { return }
             self.recordPushedProxy(intent)
             let cust = self.customRouting(for: intent.engine).proxy
+            if !cust.isIdentity { self.filterActivity.hit(intent.engine, .proxy) }
             if let result = cust.apply(to: intent, engine: intent.engine) {
                 intent = result
             } else {
@@ -457,9 +472,17 @@ final class VPNController {
             managers.removeAll()
             virtualManagers.removeAll()
             virtualMembers.removeAll()
+            virtualSourceNames.removeAll()
             var list: [Profile] = []
+            // The isolated picker fixture has no manager or saved network settings.
+            if Self.usesEmptyProfileFixture && ProcessInfo.processInfo.arguments.contains("-SimpleVPNAppRoutingFixture") {
+                list.append(Profile(id: "fixture-app-routing", name: "App Routing Fixture", server: "vpn.example.test",
+                                    status: .disconnected, kind: .wireGuard))
+            }
             for mgr in mgrs {
                 let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol
+                // NativeVPNManager owns the saved identity, credentials and status of its packet mirror.
+                if proto?.providerConfiguration?["vpnType"] as? String == OwnedIPsecConfiguration.providerKind { continue }
                 if let data = proto?.providerConfiguration?["routingSession"] as? Data,
                    let config = try? JSONDecoder().decode(VirtualRoutingConfig.self, from: data) {
                     rememberVirtualManager(mgr, config: config)
@@ -659,8 +682,14 @@ final class VPNController {
     var tailscaleConfigs: [String: TailscaleConfig] = [:]   // was private(set) — internal for the +File split
     /// Latest engine status per profile, refreshed while connected.
     var tailscaleStatuses: [String: TailscaleStatus] = [:]   // was private(set) — internal for the +File split
-    enum TailscaleSignInResult { case preparing, failed }
+    enum TailscaleSignInResult {
+        case preparing, failed, renewing, renewalFailed
+
+        var inProgress: Bool { self == .preparing || self == .renewing }
+        var hasFailed: Bool { self == .failed || self == .renewalFailed }
+    }
     var tailscaleSignInResults: [String: TailscaleSignInResult] = [:]
+    @ObservationIgnored var changingTailscaleExitNode = false
     @ObservationIgnored var tailscaleSignInWatch: [String: Task<Void, Never>] = [:]   // was private — internal for the +File split
     /// The sign-in page we sent this VPN's user to — observable, so the connect
     /// panel can offer to re-open it; cleared once the node registers.
@@ -694,6 +723,7 @@ final class VPNController {
     /// Observable mirror of the persisted "customrouting" blobs (see overridesCache). The
     /// filter is the tier-2 static form of the tier-3 intent-rewrite hooks; it is applied
     /// at the mediator capture seam by `installCustomRoutingHooks`.
+    let filterActivity = RoutingFilterActivity()
     var customRoutingCache: [String: CustomRoutingProfile] = [:]   // was private(set) — internal for the +File split
 
     /// Observable mirror of the persisted "endpoints" blobs (see overridesCache).
@@ -767,6 +797,8 @@ final class VPNController {
 
     /// The profile's auth-nocache verdict (engine eval); true when unknown.
     var allowsPasswordSaveEvaluator: ((String) -> Bool)?
+
+    @ObservationIgnored var openConnectRouteTargetProblem: ((String) -> String?)?
 
     /// Engine-eval facts the connect flow branches on (autologin, static
     /// challenge, userlocked username). Wired at launch like the evaluator
@@ -937,18 +969,9 @@ final class VPNController {
     /// unmatched falls back to a full resync.
     private func observeStatusChanges() {
         let obs = NotificationCenter.default.addObserver(
-            forName: .NEVPNStatusDidChange, object: nil, queue: .main) { [weak self] note in
-                // Only the object's identity crosses into the isolated region —
-                // Notification (and NEVPNConnection) aren't Sendable.
-                let objID = note.object.map { ObjectIdentifier($0 as AnyObject) }
+            forName: .NEVPNStatusDidChange, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    guard let self else { return }
-                    if let objID,
-                       let (id, mgr) = self.managers.first(where: { ObjectIdentifier($0.value.connection) == objID }) {
-                        self.handleStatusChange(id: id, status: mgr.connection.status)
-                    } else {
-                        self.resyncStatuses()
-                    }
+                    self?.resyncStatuses()
                 }
             }
         observers.append(obs)
@@ -971,7 +994,7 @@ final class VPNController {
                 virtualStoppedMembers.contains(id) ? NEVPNStatus.disconnected
                     : ($0.connection.status == .disconnected && virtualStarts[virtualMembers[id] ?? ""] != nil ? .connecting : $0.connection.status)
             }
-                ?? (connectionReservations.isStarting(id) ? .connecting : mgr.connection.status)
+                ?? connectionReservations.status(for: id, reported: mgr.connection.status)
             guard profiles.first(where: { $0.id == id })?.status != s else { continue }
             handleStatusChange(id: id, status: s)
         }
@@ -985,9 +1008,11 @@ final class VPNController {
         // gateway) is retried by the engine for ever, so the app has to
         // impose its own deadline — otherwise "Connecting…" is permanent.
         if s == .disconnecting || s == .disconnected || s == .invalid {
-            let signInInterrupted = tailscaleSignInURL[id] != nil || tailscaleSignInResults[id] != nil
+            let result = tailscaleSignInResults[id]
+            let signInInterrupted = tailscaleSignInURL[id] != nil ||
+                (result == .preparing && tailscaleStatuses[id]?.backendState.needsUserAction == true)
             clearTailscaleSignIn(id: id)
-            if signInInterrupted { tailscaleSignInResults[id] = .failed }
+            if signInInterrupted || result == .failed { tailscaleSignInResults[id] = .failed }
         }
         if UI.isActive(s), isTailscale(id) { attachTailscaleNodeState(id) }
         if s == .connecting {

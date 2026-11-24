@@ -13,6 +13,9 @@
 #import <os/lock.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -27,6 +30,7 @@ extern int libsshx_channel_open_tun(ssh_channel channel,
 // own ssh_send_keepalive() is in src/server.c, which this build does not compile
 // (WITH_SERVER=OFF), and ssh_global_request() is not public API. The wrapper is
 // compiled into the vendored library by Tools/build-libssh-xcframework.sh.
+extern int libsshx_channel_write_tun(ssh_channel channel, const void *data, uint32_t len);
 extern int libsshx_send_keepalive(ssh_session session);
 
 static NSErrorDomain const kSSHErrorDomain = @"SSHBridge";
@@ -93,9 +97,55 @@ static NSString *hexTail(NSString *s) {
 
 @interface SSHChannel ()
 @property (assign) ssh_channel chan;
+@property (nonatomic, copy) void (^tunReceiver)(NSData *);
+@property (nonatomic) int tunMTU;
+- (BOOL)installTunReceiver:(void (^)(NSData *))receiver mtu:(int)mtu;
 @end
 
-@implementation SSHChannel
+// OpenSSH port-net.c uses the OpenBSD wire family numbers on every platform.
+static uint32_t tunFamily(const uint8_t *p, size_t n) {
+    if (n >= 20 && p[0] >> 4 == 4) {
+        size_t h = 4 * (p[0] & 15);
+        return h >= 20 && h <= n && (((size_t)p[2] << 8) | p[3]) == n ? 2 : 0;
+    }
+    if (n >= 40 && p[0] >> 4 == 6 && (((size_t)p[4] << 8) | p[5]) == n - 40) return 24;
+    return 0;
+}
+static int tunIncoming(ssh_session session, ssh_channel channel, void *bytes, uint32_t len, int extended, void *context) {
+    SSHChannel *owner = (__bridge SSHChannel *)context;
+    const uint8_t *raw = bytes;
+    // Consume every complete SSH message, including malformed frames. Leaving a
+    // suffix in libssh's channel buffer would coalesce it with the next datagram.
+    if (!extended && len > 4 && len - 4 <= owner.tunMTU) {
+        uint32_t wire;
+        memcpy(&wire, raw, 4);
+        uint32_t family = tunFamily(raw + 4, len - 4);
+        if (family && family == ntohl(wire)) owner.tunReceiver([NSData dataWithBytes:raw + 4 length:len - 4]);
+    }
+    return (int)len;
+}
+@implementation SSHChannel {
+    struct ssh_channel_callbacks_struct _tunCallbacks;
+}
+- (BOOL)installTunReceiver:(void (^)(NSData *))receiver mtu:(int)mtu {
+    _tunReceiver = [receiver copy];
+    _tunMTU = mtu;
+    _tunCallbacks.userdata = (__bridge void *)self;
+    _tunCallbacks.channel_data_function = tunIncoming;
+    ssh_callbacks_init(&_tunCallbacks);
+    return ssh_set_channel_callbacks(_chan, &_tunCallbacks) == SSH_OK;
+}
+- (NSInteger)writeTunPacket:(NSData *)packet {
+    if (!_chan || !_tunReceiver || packet.length > (NSUInteger)_tunMTU || packet.length > 9000) return -1;
+    uint32_t family = tunFamily(packet.bytes, packet.length);
+    if (!family) return -1;
+    uint8_t frame[9004];
+    family = htonl(family);
+    memcpy(frame, &family, 4);
+    memcpy(frame + 4, packet.bytes, packet.length);
+    int rc = libsshx_channel_write_tun(_chan, frame, (uint32_t)packet.length + 4);
+    return rc > 0 ? 1 : rc;
+}
 - (instancetype)initWithChannel:(ssh_channel)c { if ((self = [super init])) _chan = c; return self; }
 - (NSInteger)read:(void *)buffer maxLength:(NSInteger)len {
     if (!_chan) return -1;
@@ -134,8 +184,36 @@ static NSString *hexTail(NSString *s) {
 }
 @end
 
+// A shared packet interface can own the default route. Pin the carrier before
+// connect, and allow only an already-resolved numeric endpoint. A new physical
+// interface requires a new session and host-key verification.
+static int scopedCarrier(NSString *host, int port, unsigned int index, int timeout) {
+    struct addrinfo hints = { .ai_flags = AI_NUMERICHOST | AI_NUMERICSERV, .ai_socktype = SOCK_STREAM };
+    struct addrinfo *addresses = NULL;
+    if (getaddrinfo(host.UTF8String, [@(port).stringValue UTF8String], &hints, &addresses) != 0) return -1;
+    int fd = socket(addresses->ai_family, SOCK_STREAM, 0);
+    if (fd >= 0) {
+        BOOL v6 = addresses->ai_family == AF_INET6;
+        int flags = fcntl(fd, F_GETFL);
+        BOOL ready = flags >= 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 &&
+            setsockopt(fd, v6 ? IPPROTO_IPV6 : IPPROTO_IP, v6 ? IPV6_BOUND_IF : IP_BOUND_IF, &index, sizeof(index)) == 0 &&
+            fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+        if (ready && connect(fd, addresses->ai_addr, addresses->ai_addrlen) < 0) {
+            struct pollfd wait = { .fd = fd, .events = POLLOUT };
+            int error = 0;
+            socklen_t size = sizeof(error);
+            ready = errno == EINPROGRESS && poll(&wait, 1, MAX(1, MIN(timeout, 120)) * 1000) > 0 &&
+                getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &size) == 0 && error == 0;
+        }
+        if (!ready || fcntl(fd, F_SETFL, flags) != 0) { close(fd); fd = -1; }
+    }
+    freeaddrinfo(addresses);
+    return fd;
+}
+
 @implementation SSHSession {
     ssh_session _session;
+    int _scopedCarrier;  // libssh caller owns sockets supplied via SSH_OPTIONS_FD
     ssh_key _hostKey;       // the server's public key, held for type/length/TOFU
     ssh_event _event;       // lazily created, session-lifetime poll set (see waitForActivity)
     int _wakePipe[2];       // self-pipe in that poll set, so the wait is interruptible
@@ -152,6 +230,7 @@ static NSString *hexTail(NSString *s) {
     // Weak wrappers: callers own their flows, while the session must invalidate
     // every surviving wrapper before ssh_free reclaims its channel pointers.
     NSHashTable<SSHChannel *> *_channels;
+    SSHChannel *_tun; // libssh retains the callback pointer until channel teardown
 }
 
 + (void)initialize {
@@ -169,6 +248,7 @@ static NSString *hexTail(NSString *s) {
     if ((self = [super init])) {
         // MUST be explicit: ivars zero-initialise, and fd 0 is stdin — a
         // `_wakePipe[1] >= 0` guard would then happily write to it.
+        _scopedCarrier = -1;
         _wakePipe[0] = -1;
         _wakePipe[1] = -1;
         _wakeLock = OS_UNFAIR_LOCK_INIT;
@@ -232,6 +312,13 @@ static NSString *hexTail(NSString *s) {
     }
 
     ssh_set_blocking(_session, 1);
+    if (self.physicalInterfaceIndex != 0) {
+        _scopedCarrier = scopedCarrier(host, port, self.physicalInterfaceIndex, seconds);
+        if (_scopedCarrier < 0 || ssh_options_set(_session, SSH_OPTIONS_FD, &_scopedCarrier) != SSH_OK) {
+            if (error) *error = sshErr(@"The SSH server could not be reached on the selected physical interface.");
+            return NO;
+        }
+    }
     if (ssh_connect(_session) != SSH_OK) {
         if (error) *error = sshErrDetail(@"The SSH handshake failed.", _session);
         return NO;
@@ -643,6 +730,29 @@ static NSString *hexTail(NSString *s) {
     } failure:@"The server refused a network tunnel (PermitTunnel?)." error:error];
 }
 
+- (SSHChannel *)openPointToPointUnit:(int)unit mtu:(int)mtu received:(void (^)(NSData *))received error:(NSError **)error {
+    if (!_session || _tun || unit < -1 || unit > 2147483646 || mtu < 1280 || mtu > 9000) {
+        if (error) *error = sshErr(@"Invalid SSH point-to-point channel settings.");
+        return nil;
+    }
+    ssh_channel c = ssh_channel_new(_session);
+    if (!c) { if (error) *error = sshErr(@"Could not allocate the SSH tunnel channel."); return nil; }
+    _tun = [[SSHChannel alloc] initWithChannel:c];
+    int blocking = ssh_is_blocking(_session);
+    ssh_set_blocking(_session, 1);
+    BOOL opened = [_tun installTunReceiver:received mtu:mtu] &&
+        libsshx_channel_open_tun(c, 1, unit < 0 ? 0x7fffffff : (uint32_t)unit) == SSH_OK;
+    ssh_set_blocking(_session, blocking);
+    if (!opened) {
+        if (error) *error = sshErrDetail(@"The SSH server refused the requested point-to-point tunnel. Check PermitTunnel and the remote unit.", _session);
+        [_tun close];
+        _tun = nil;
+        return nil;
+    }
+    [_channels addObject:_tun];
+    return _tun;
+}
+
 /// Lazily build the poll set and the wake pipe. NO on a failure that makes waiting
 /// impossible.
 ///
@@ -790,6 +900,7 @@ static NSString *hexTail(NSString *s) {
     // so a queued read/write/close after teardown safely sees a closed channel.
     for (SSHChannel *channel in _channels.allObjects) [channel close];
     [_channels removeAllObjects];
+    _tun = nil;
     if (_hostKey) { ssh_key_free(_hostKey); _hostKey = NULL; }
     // Remove the session from the poll set BEFORE freeing either: ssh_event holds
     // the session's socket, and freeing the session first leaves the event with a
@@ -811,6 +922,7 @@ static NSString *hexTail(NSString *s) {
         ssh_free(_session);
         _session = NULL;
     }
+    if (_scopedCarrier >= 0) { close(_scopedCarrier); _scopedCarrier = -1; }
     _fp = nil;
 }
 

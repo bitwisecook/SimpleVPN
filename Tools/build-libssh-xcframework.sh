@@ -180,6 +180,24 @@ int libsshx_channel_open_tun(ssh_channel channel,
     return rc;
 }
 
+/* Packet boundaries must survive remote flow control. Called only on the
+ * session queue. A nonblocking libssh write accepts the entire message when
+ * both the channel window and negotiated remote packet size accommodate it.
+ * OpenSSH counts four more bytes of local window for its datagram queue. */
+__attribute__((visibility("default")))
+int libsshx_channel_write_tun(ssh_channel c, const void *buf, uint32_t len);
+int libsshx_channel_write_tun(ssh_channel c, const void *buf, uint32_t len)
+{
+    int rc;
+    if (!c || len < 24 || len > 65539 || len + 4 > c->remote_maxpacket) {
+        return SSH_ERROR;
+    }
+    if (len + 4 > c->remote_window) return 0;
+    rc = ssh_channel_write(c, buf, len);
+    if (rc == SSH_AGAIN) return 0;
+    return rc > 0 && rc != (int)len ? SSH_ERROR : rc;
+}
+
 /* --- SimpleVPN addition ---
  * Session keepalive (OpenSSH ServerAliveInterval's message): a
  * "keepalive@openssh.com" global request with want_reply, so an idle tunnel
@@ -289,7 +307,7 @@ nm "$BUILD/libSSHEngine.a" 2>/dev/null > "$NM"
 # SimpleVPNTests/ControlPlane/SecurityKeySSHTests.swift re-checks the same symbols
 # against the SHIPPED archive, so this can't be the only place that knows.
 for sym in _ssh_new _ssh_connect _ssh_session_is_known_server _ssh_userauth_gssapi \
-           _ssh_gssapi_set_creds _libsshx_channel_open_tun _libsshx_send_keepalive \
+           _ssh_gssapi_set_creds _libsshx_channel_open_tun _libsshx_channel_write_tun _libsshx_send_keepalive \
            _pki_sk_enroll_key _ssh_sk_usbhid_load_resident_keys _fido_dev_open \
            _cbor_load; do
   if ! grep -cE "^[0-9a-f]+ [Tt] ${sym}\$" "$NM" >/dev/null; then

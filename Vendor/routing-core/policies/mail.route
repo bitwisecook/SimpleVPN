@@ -1,0 +1,3 @@
+on block_smtp: ssh.forward_open {
+    if ssh.port == 25 { drop(); }
+}

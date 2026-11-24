@@ -6,14 +6,14 @@ The analysis below describes the pre-fix architecture and the longer-term target
 The current change implements its first packet-routing slice and repairs the existing
 control plane: one acknowledged OS settings writer; complete filtered route plans;
 serialized route/DNS/proxy apply and forced drift; scoped Go engine handles and callback
-contexts; and an explicit WireGuard composition running through one virtual interface.
+contexts; and a shared packet interface for independently authenticated VPNs.
 
 ```mermaid
 flowchart LR
   Apps[Mac applications] --> Capture[Stable virtual interface]
   Capture --> Router[Versioned flow router and source translation]
-  Router --> A[WireGuard port A]
-  Router --> B[WireGuard port B]
+  Router --> A[WireGuard or proxy port]
+  Router --> B[Authenticated packet driver]
   A --> Physical[Bound physical underlay]
   B --> Physical
   Physical --> Return[Encrypted peer replies]
@@ -33,14 +33,9 @@ policy switches and isolated member stop. Race and malformed-packet fuzz tests c
 core. Swift delayed/failing hosts cover acknowledged ownership and supersession. This is
 not a provider-crash kill-switch proof or complete platform acceptance.
 
-**Visible compatibility boundary:** virtual compositions support two to sixteen
-single-peer WireGuard members. Other engines retain independent sessions. Distinct DNS
-resolvers, custom proxy/local exclusion combinations, chains, native packet ports,
-per-app/fake-IP/L7/Tcl routing are gated. `Docs/Drift.md` §18 and
-`NetworkArchitectureBoundaryTests` guard this boundary. Notarized live capture,
-sleep/wake/provider crash, Tailscale enrollment and macOS 26/27 remain platform checks;
-keep these checks open until actual evidence exists.
+**Current compatibility.** Routed connections admit one to sixteen compatible members. A saved profile retains its own traffic rules behind the shared source or destination policy. Members with negotiated addresses publish their transport facts before the capture interface starts. Each return packet identifies the port and generation that supplied it. A stopped member keeps its private destinations captured. The optional DNS query provider compiles its ordered exact, suffix and glob rules before enabling its listener. The routing atlas lists the adapter boundaries and the restrictions for each transport. [Adapter guide](RoutingAtlas.html#rich-adapter-reference)
 
+Independent packet sessions can accept unsolicited incoming services and use negotiated split DNS. Chained carriers, conflicting resolver settings, system-managed profiles and host sleep/wake or provider-crash behavior have separate operational requirements. The following dated review records the starting architecture.
 
 Reviewed 5 October 2026 against commit `802bd99`. The objective is a stable virtual
 interface that receives the user's traffic, with an internal routing layer selecting

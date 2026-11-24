@@ -69,6 +69,11 @@ enum ProxyTunnelSettings {
               summary: "Domains to try when you type a short name, so \u{201C}wiki\u{201D} finds wiki.corp.example. Without one, only full names work.",
               group: .dns, default: ""),
 
+        // MARK: Advanced
+
+        .init(id: "px.tls-routes", name: "TLS Backend Routes",
+              summary: "Choose a backend for each visible TLS server name. On the listed ports, unmatched TCP connections and UDP traffic are refused.",
+              group: .advanced, default: ""),
     ]
 
     static let catalog = EngineSettingCatalog(all)

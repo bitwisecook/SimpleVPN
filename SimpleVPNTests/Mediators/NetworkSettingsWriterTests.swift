@@ -162,6 +162,36 @@ struct NetworkSettingsWriterTests {
         #expect(await second.value)
         #expect(writer.enrich(sample()).effectiveDefaultOwned == true)
         #expect(writer.enrich(sample()).settingsRevision == 1)
+        #expect(writer.enrich(sample()).advertisedPrefixes == ["0.0.0.0/0", "10.0.0.0/8"])
+    }
+
+    @Test func failedOverridesDoNotReappearOnEngineRefresh() async throws {
+        let installer = ControlledSettingsInstaller()
+        let writer = NetworkSettingsWriter(install: installer.install)
+        var events = installer.events.stream.makeAsyncIterator()
+        let establish = Task { await withCheckedContinuation { continuation in
+            writer.submit(settings()) { _ in continuation.resume() }
+        } }
+        let initial = try #require(await events.next())
+        initial.complete(nil)
+        await establish.value
+
+        let override = Task { await withCheckedContinuation { continuation in
+            writer.applyRoutes(.init(prefixes: [])) { continuation.resume(returning: $0 != nil) }
+        } }
+        let attempt = try #require(await events.next())
+        #expect(attempt.routes == ["0.0.0.0"])
+        attempt.complete(NSError(domain: "test", code: 1))
+        #expect(await override.value)
+
+        let refresh = Task { await withCheckedContinuation { continuation in
+            writer.applyDNS(.init(servers: ["10.42.0.53"])) { continuation.resume(returning: $0 == nil) }
+        } }
+        let update = try #require(await events.next())
+        #expect(update.routes == ["0.0.0.0", "10.0.0.0"])
+        #expect(update.dns == ["10.42.0.53"])
+        update.complete(nil)
+        #expect(await refresh.value)
     }
 
     @Test func routeRewriteRetainsPairedHalfDefaults() {
@@ -172,5 +202,36 @@ struct NetworkSettingsWriterTests {
             NEIPv4Route(destinationAddress: "10.0.0.0", subnetMask: "255.0.0.0")]
         RouteApplyRequest(prefixes: []).apply(to: source)
         #expect(source.ipv4Settings?.includedRoutes?.map(\.destinationAddress) == ["0.0.0.0", "128.0.0.0"])
+    }
+
+    @Test func splitRouteRewriteKeepsResolverHostRouteAndRejectsUnreachableOverride() async throws {
+        let installer = ControlledSettingsInstaller()
+        let writer = NetworkSettingsWriter(install: installer.install)
+        let initial = settings()
+        initial.ipv4Settings?.includedRoutes?.removeFirst()
+        initial.dnsSettings?.matchDomains = ["corp.example"]
+        var events = installer.events.stream.makeAsyncIterator()
+        let establish = Task { await withCheckedContinuation { continuation in
+            writer.submit(initial) { _ in continuation.resume() }
+        } }
+        let first = try #require(await events.next())
+        first.complete(nil)
+        await establish.value
+
+        let rewrite = Task { await withCheckedContinuation { continuation in
+            writer.applyRoutes(.init(prefixes: ["10.42.0.0/16"])) { continuation.resume(returning: $0 == nil) }
+        } }
+        let next = try #require(await events.next())
+        #expect(next.routes == ["10.42.0.0", "10.0.0.53"])
+        next.complete(nil)
+        #expect(await rewrite.value)
+
+        for address in ["192.0.2.53", "203.0.113.1", "2001:db8::53"] {
+            let refused = await withCheckedContinuation { continuation in
+                writer.applyDNS(.init(servers: [address], matchDomains: ["corp.example"])) { continuation.resume(returning: $0 != nil) }
+            }
+            #expect(refused)
+        }
+        #expect(writer.enrich(sample()).settingsRevision == 2)
     }
 }

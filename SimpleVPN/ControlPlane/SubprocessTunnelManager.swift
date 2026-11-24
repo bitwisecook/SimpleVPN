@@ -73,11 +73,25 @@ final class SubprocessTunnelManager {
     }
 
     @ObservationIgnored weak var gatewayCoordinator: VPNController?
+    @ObservationIgnored weak var configurationStore: SubprocessTunnelStore?
+    private var editingPacketPolicy = Set<String>()
+    func beginPacketPolicyEdit(_ id: String) -> Bool { !isActive(id) && editingPacketPolicy.insert(id).inserted }
+    func finishPacketPolicyEdit(_ id: String) { editingPacketPolicy.remove(id) }
+    func hasPacketSession(_ id: String) -> Bool { inProcessNE.contains(id) }
+    func hasProxyPacketSession(_ id: String) -> Bool { tasks[id]?.isProxyRelay == true && status(id) == .connected }
+    func proxyPacketStatus(_ id: String) async -> Data? { await tasks[id]?.proxySnapshot() }
+    func hasSSHChannelSession(_ id: String) -> Bool { sshEngines[id] != nil || reverseSessions[id] != nil }
+    func sshChannelCounters(_ id: String) async -> SSHChannelCounters? {
+        if let reverse = reverseSessions[id] { return await reverse.snapshot() }
+        return await sshEngines[id]?.channelCounters()
+    }
     var dnsQueryStatusDidChange: (@MainActor () -> Void)?
     private(set) var live: [String: Live] = [:] { didSet { dnsQueryStatusDidChange?() } }
 
+    private var reverseSessions: [String: OpenSSHReverseDelivery] = [:]
     private var tasks: [String: TunnelProcess] = [:]
     private var sshEngines: [String: SSHTunnelEngine] = [:]   // in-process libssh (SOCKS)
+    private var packetAttempts: [String: UUID] = [:]
     private var inProcessNE: Set<String> = []                 // SSL VPNs running via the NE OpenConnect engine
     private var authTasks: [String: Task<Void, Never>] = [:]  // in-flight ocauth-helper sign-ins (SSO)
     @ObservationIgnored private lazy var systemSOCKS = SystemSOCKSProxy { [weak self] id, error in
@@ -88,7 +102,16 @@ final class SubprocessTunnelManager {
     private var controlSockets: [String: String] = [:]       // ssh ControlMaster socket per tunnel (live -O ops)
     private static let log = Logger(subsystem: "com.bragi0.SimpleVPN", category: "subprocess")
 
-    func status(_ id: String) -> Status { live[id]?.status ?? .disconnected }
+    func status(_ id: String) -> Status {
+        if let status = gatewayCoordinator?.virtualMemberStatus(for: id) {
+            switch status {
+            case .connected: return .connected
+            case .connecting, .reasserting: return .connecting
+            default: return .disconnected
+            }
+        }
+        return live[id]?.status ?? .disconnected
+    }
     func isActive(_ id: String) -> Bool {
         switch status(id) { case .connected, .connecting: true; default: false }
     }
@@ -103,8 +126,22 @@ final class SubprocessTunnelManager {
     /// start, we fall back to the subprocess so nothing regresses.
     func connect(_ config: SubprocessTunnelConfig, password: String?,
                  oneTimeCode: String? = nil) {
+        guard !editingPacketPolicy.contains(config.id), gatewayCoordinator?.virtualManager(for: config.id) == nil,
+              gatewayCoordinator?.connectionReservations.isReserved(config.id) != true else { return }
+        var config = config
+        if let stored = configurationStore?.tunnels.first(where: { $0.id == config.id }) {
+            config.routingEventSource = stored.routingEventSource
+        }
         guard tasks[config.id] == nil, sshEngines[config.id] == nil,
               !inProcessNE.contains(config.id), authTasks[config.id] == nil else { return }
+        if config.kind == .ssh, config.sshMode == .netTunnel, let issue = config.sshTunProblem {
+            live[config.id] = Live(status: .failed(issue))
+            return
+        }
+        if config.routingEventSource != nil && ProfilePacketPolicy.adapter(for: config) == nil {
+            live[config.id] = Live(status: .failed(ProfilePacketPolicy.unsupported))
+            return
+        }
         proxyToggleWhileConnecting[config.id] = nil
         // A password embedded in the server or proxy address would be persisted
         // unencrypted in the profile.
@@ -143,6 +180,10 @@ final class SubprocessTunnelManager {
         // which was the only place a port-forward tunnel could go. The in-process
         // engine is handed already-parsed specs, so an unparseable line would
         // otherwise be silently dropped rather than reported.
+        if config.kind == .ssh && config.sshMode == .netTunnel {
+            connectInProcessOpenConnect(config, password: password, oneTimeCode: nil)
+            return
+        }
         if config.kind == .ssh, config.sshMode == .portForward,
            let bad = Self.invalidForwardLine(config.forwards) {
             live[config.id] = Live(status: .failed(
@@ -213,12 +254,45 @@ final class SubprocessTunnelManager {
     /// bridge genuinely cannot carry is a matter of SETTINGS, not kinds, and that is
     /// `inProcessOpenConnectSupports`'s job alone.
     ///
-    /// No SSO clause is needed either. Browser sign-in ends in a cookie, and
-    /// `connectWithCookie` has no per-protocol sign-in code left to run, so it carries any
-    /// protocol whose settings the bridge covers — and it is only reached for a kind whose
-    /// `supportsExternalBrowserSSO` is already true.
+    /// Older profiles can request browser sign-in for a protocol that only supports
+    /// password sign-in. The connect dispatcher uses the tool for that fallback.
     static func willRunInProcess(_ c: SubprocessTunnelConfig) -> Bool {
         c.kind.isSSLVPN && c.runsInProcess && inProcessOpenConnectSupports(c)
+            && (c.authMode != "sso" || c.kind.supportsExternalBrowserSSO)
+    }
+
+    static func virtualOpenConnectProblem(_ config: SubprocessTunnelConfig) -> String? {
+        guard config.kind.supportsSharedOpenConnect, willRunInProcess(config) else {
+            return "Choose a shared-interface transport supported by this SSL VPN profile."
+        }
+        if config.kind != .ciscoAnyConnect && !config.disableDTLS {
+            return "Turn off UDP transport to route this SSL VPN over HTTPS on a shared interface."
+        }
+        if [.juniper, .pulse, .arrayNetworks].contains(config.kind), openconnectAuthMode(config) != "password" {
+            return "This shared SSL VPN requires password sign-in. Connect the profile independently for other methods."
+        }
+        if config.kind == .arrayNetworks && config.realm.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Enter the Array VPN authentication realm before sharing this connection."
+        }
+        if let reason = addressCredentialReason(config) ?? sslAuthBlockReason(config) { return reason }
+        let mode = openconnectAuthMode(config)
+        guard ["password", "certificate", "sso"].contains(mode), config.authMode != "sso" || mode == "sso", !config.needsOneTimeCode || mode == "sso",
+              !config.allowsLocalNetworkAccess, inProcessProxyURL(for: config) == nil, !config.enablePFS else {
+            return "This SSL VPN’s sign-in, proxy, local network or forward-secrecy settings require an independent connection."
+        }
+        return nil
+    }
+
+    /// An enabled built-in profile can fall back to ocproxy at connection time.
+    /// A profile present only in NetworkExtension uses its saved packet tunnel.
+    static func openConnectRouteTargetProblem(config: SubprocessTunnelConfig?, session: Live?) -> String? {
+        if let session, session.socksPort != nil, session.status == .connecting || session.status == .connected {
+            return "This connection uses a SOCKS proxy. Reconnect with the built-in VPN engine to route destinations through it."
+        }
+        if let config, !willRunInProcess(config) {
+            return "These settings use a SOCKS proxy. Choose settings supported by the built-in VPN engine to route destinations through it."
+        }
+        return nil
     }
 
     /// The settings the bridge can't carry — and ONLY those. Eleven clauses used to
@@ -294,7 +368,7 @@ final class SubprocessTunnelManager {
 
     /// The non-secret half of an in-process session, as `providerConfiguration`.
     /// Keys are consumed by `PacketTunnelProvider.startOpenConnect`.
-    static func inProcessConfiguration(_ c: SubprocessTunnelConfig) -> [String: Any] {
+    static func inProcessConfiguration(_ c: SubprocessTunnelConfig, previous: [String: Any]? = nil) -> [String: Any] {
         var conf: [String: Any] = ["profile": c.id,
                                    "vpnType": c.kind.rawValue,
                                    // The port lives INSIDE the address: the bridge
@@ -302,6 +376,11 @@ final class SubprocessTunnelManager {
                                    // takes `host:port` (and `openconnect_get_port`
                                    // reads it back). There is no separate setter.
                                    "server": serverURL(for: c)]
+        if previous?["profile"] as? String == c.id {
+            for key in ["routingRules", "routingIncludes", "customrouting"] {
+                if let routes = previous?[key] as? Data { conf[key] = routes }
+            }
+        }
         func put(_ key: String, _ value: String) {
             let t = value.trimmingCharacters(in: .whitespacesAndNewlines)
             if !t.isEmpty { conf[key] = t }
@@ -398,32 +477,23 @@ final class SubprocessTunnelManager {
 
     private func connectInProcessOpenConnect(_ config: SubprocessTunnelConfig, password: String?,
                                              oneTimeCode: String?) {
+        let attempt = UUID()
+        packetAttempts[config.id] = attempt
         inProcessNE.insert(config.id)
         live[config.id] = Live(status: .connecting)
         Task { [weak self] in
             // `true` means "started", not "connected" — real progress (connecting /
             // connected / auth failure) arrives via NEVPNStatusDidChange events.
-            let ok = await OpenConnectProfileStore.start(config, password: password,
-                                                          oneTimeCode: oneTimeCode, coordinator: self?.gatewayCoordinator) { [weak self] event in
+            let result = await OpenConnectProfileStore.start(config, password: password,
+                                                          oneTimeCode: oneTimeCode, coordinator: self?.gatewayCoordinator, stillCurrent: { [weak self] in self?.packetAttempts[config.id] == attempt }) { [weak self] event in
+                guard self?.packetAttempts[config.id] == attempt else { return }
                 self?.handleInProcessEvent(config.id, event)
             }
-            guard let self else { return }
-            if !ok {
-                self.inProcessNE.remove(config.id); self.live[config.id] = nil
-                // The fallback is only a fallback if it can actually carry traffic.
-                // `sslTransportBlockReason` was nil at connect() precisely BECAUSE
-                // this path was chosen, so re-ask it as a subprocess would: with
-                // ocproxy absent, falling back here would spawn `openconnect` to go
-                // hunting for a tun device it cannot make. Report, don't fall back.
-                if let reason = Self.sslTransportBlockReason(config, inProcess: false) {
-                    Self.log.error("in-process OpenConnect failed and the subprocess can't carry it")
-                    self.live[config.id] = Live(status: .failed(
-                        "SimpleVPN's built-in engine couldn't start this VPN. \(reason)"))
-                    return
-                }
-                Self.log.error("in-process OpenConnect failed, falling back to subprocess")
-                self.connectSubprocess(config, password: self.passwordForSubprocess(
-                    config, password: password, oneTimeCode: oneTimeCode))
+            guard let self, packetAttempts[config.id] == attempt else { return }
+            if case .refused(let reason) = result {
+                packetAttempts.removeValue(forKey: config.id)
+                self.inProcessNE.remove(config.id)
+                self.live[config.id] = Live(status: .failed(reason))
             }
         }
     }
@@ -441,9 +511,11 @@ final class SubprocessTunnelManager {
         case .disconnected:
             l.status = .disconnected
             inProcessNE.remove(id)
+            packetAttempts.removeValue(forKey: id)
         case .failed(let why):
             l.status = .failed(why)
             inProcessNE.remove(id)
+            packetAttempts.removeValue(forKey: id)
         }
         live[id] = l
     }
@@ -467,7 +539,8 @@ final class SubprocessTunnelManager {
         let browser = BrowserDefaults.resolve(config.browser)
         let handlers = OpenConnectAuthClient.Handlers(
             answerForm: { form in
-                let filled = OCAuthFormAutofill.fill(form, username: username, password: storedPassword)
+                let filled = OCAuthFormAutofill.fill(form, username: username, password: storedPassword,
+                                                      realm: config.realm, vpnProtocol: config.kind.openconnectProtocol)
                 guard filled.unanswered.isEmpty else {
                     return .cancel(unanswered: filled.unanswered.map(\.label))
                 }
@@ -577,28 +650,22 @@ final class SubprocessTunnelManager {
         // only with `authMode == "sso"` on a kind that really does browser sign-in, which
         // is why no SSO clause is needed inside the predicate itself.
         if Self.willRunInProcess(config) {
+            let attempt = UUID()
+            packetAttempts[config.id] = attempt
             inProcessNE.insert(config.id)
             var l = live[config.id] ?? Live()
             l.status = .connecting
             live[config.id] = l
             Task { [weak self] in
-                let ok = await OpenConnectProfileStore.start(config, password: nil, auth: auth, coordinator: self?.gatewayCoordinator) { [weak self] event in
+                let result = await OpenConnectProfileStore.start(config, password: nil, auth: auth, coordinator: self?.gatewayCoordinator, stillCurrent: { [weak self] in self?.packetAttempts[config.id] == attempt }) { [weak self] event in
+                    guard self?.packetAttempts[config.id] == attempt else { return }
                     self?.handleInProcessEvent(config.id, event)
                 }
-                guard let self else { return }
-                if !ok {
+                guard let self, packetAttempts[config.id] == attempt else { return }
+                if case .refused(let reason) = result {
+                    packetAttempts.removeValue(forKey: config.id)
                     self.inProcessNE.remove(config.id)
-                    // Same rule as connectInProcessOpenConnect: `cookieCommand`
-                    // appends ocproxy conditionally too, so a fallback without it
-                    // would be the silent no-privilege failure again.
-                    if let reason = Self.sslTransportBlockReason(config, inProcess: false) {
-                        Self.log.error("in-process OpenConnect (cookie) failed and the subprocess can't carry it")
-                        self.live[config.id] = Live(status: .failed(
-                            "You are signed in, but SimpleVPN's built-in engine couldn't start the tunnel. \(reason)"))
-                        return
-                    }
-                    Self.log.error("in-process OpenConnect (cookie) failed, falling back to subprocess")
-                    self.connectSubprocess(config, password: nil, command: Self.cookieCommand(for: config, auth: auth))
+                    self.live[config.id] = Live(status: .failed(reason))
                 }
             }
             return
@@ -650,8 +717,8 @@ final class SubprocessTunnelManager {
     ///    plus an accept poll on the session queue, and the bridge has neither. Such a
     ///    profile keeps running /usr/bin/ssh, which really does support it — a routing
     ///    decision, not a silent downgrade.
-    ///  • `.netTunnel` — never. `-w` needs root for its utun and this build does not
-    ///    take that privilege; `ConnectListing` blocks the mode outright.
+    ///  • `.netTunnel` — OpenSSH opens a separate tunnel device. Both the UI and
+    ///    the manager refuse the mode, including programmatic connection attempts.
     ///
     /// An UNPARSEABLE forward line answers false so the config reaches the one place
     /// that refuses it by name (`connect`'s `invalidForwardLine` guard) rather than
@@ -703,7 +770,7 @@ final class SubprocessTunnelManager {
         }
         switch sshAuthMethod(c) {
         case "keychain":
-            guard willRunInProcessSSH(c) else {
+            guard willRunInProcessSSH(c) || c.sshTunConfiguration != nil else {
                 return "Keychain keys require SOCKS proxy or local/dynamic port forwards without a jump host or extra SSH arguments."
             }
             guard let pem = KeychainCredentialStore.loadSSHPrivateKey(profile: c.id), !pem.isEmpty else {
@@ -757,7 +824,7 @@ final class SubprocessTunnelManager {
         guard !willRunInProcessSSH(c) else { return nil }
         // Which of the reasons it was, so the message names the setting to change.
         if c.sshMode == .netTunnel {
-            return "A pinned host key can't be enforced in network tunnel mode — that runs through /usr/bin/ssh, which has no pin-by-hash option. Choose SOCKS proxy or port forwards, or clear the pin under Security."
+            return c.sshTunProblem
         }
         if !inProcessSSHSupports(c) {
             return "A pinned host key can't be combined with a jump host or extra options — those run through /usr/bin/ssh, which can't check the pin. Clear the pin under Security, or remove the conflicting option."
@@ -789,7 +856,7 @@ final class SubprocessTunnelManager {
         live[config.id] = Live(status: .connecting,
                                socksPort: inSOCKSMode ? config.socksPort : nil,
                                forwardStates: initialForwards)
-        let cfg = SSHTunnelEngine.Config(
+        var cfg = SSHTunnelEngine.Config(
             host: config.server, port: config.port ?? 22,
             // ssh defaults a blank user to the local account; authenticating as
             // "" would burn the whole in-process fallback timeout for nothing.
@@ -810,14 +877,16 @@ final class SubprocessTunnelManager {
             // and asks for zlib at key exchange.
             keepaliveInterval: config.serverAliveInterval,
             compression: config.compression)
+        cfg.routingEventSource = config.routingEventSource
+        let configuration = cfg
         Task { [weak self] in
             do {
                 // The ONLY difference between the two modes: which listeners the
                 // engine opens once the session is up.
                 if inSOCKSMode {
-                    try await engine.startSOCKS(cfg)
+                    try await engine.startSOCKS(configuration)
                 } else {
-                    try await engine.startPortForwards(cfg, forwards: forwards)
+                    try await engine.startPortForwards(configuration, forwards: forwards)
                 }
                 guard let self else { return }
                 // If the user disconnected while we were connecting, `disconnect`
@@ -862,18 +931,51 @@ final class SubprocessTunnelManager {
     /// (`cookieCommand(for:auth:)`) supplies its own; everything else (readiness
     /// markers, log, SOCKS surfacing, exit handling) is shared.
     private func connectSubprocess(_ config: SubprocessTunnelConfig, password: String?,
-                                   command: (String, [String], Data?)? = nil) {
-        guard tasks[config.id] == nil else { return }
+                                   command: (String, [String], Data?)? = nil,
+                                   reverse: OpenSSHReverseDelivery? = nil) {
+        guard tasks[config.id] == nil else { reverse?.stop(); return }
+        if config.kind == .ssh, reverse == nil {
+            let source = config.routingEventSource ?? ""
+            guard let layout = OpenSSHReverseDelivery.layout(for: config) else {
+                live[config.id] = Live(status: .failed("This SSH profile cannot route its forwards. Use fixed local, dynamic, or fixed remote TCP forwards and remove extra options that open channels or run commands."))
+                return
+            }
+            live[config.id] = Live(status: .connecting)
+            authTasks[config.id] = Task { [weak self] in
+                do {
+                    let prepared = try await Task.detached(priority: .userInitiated) {
+                        let session = try OpenSSHReverseDelivery(layout: layout, source: source)
+                        try await session.startListeners()
+                        return session
+                    }.value
+                    guard let self, !Task.isCancelled else { prepared.stop(); return }
+                    self.authTasks[config.id] = nil
+                    self.connectSubprocess(config, password: password, reverse: prepared)
+                } catch {
+                    guard let self, !Task.isCancelled else { return }
+                    self.authTasks[config.id] = nil
+                    self.live[config.id] = Live(status: .failed(error.localizedDescription))
+                }
+            }
+            return
+        }
         // (An invalid forward line is refused in `connect`, before the dispatch —
         // both paths need that check now, so it lives in the one place both reach.)
         guard let (path, baseArgs, stdin) = command
                 ?? Self.command(for: config, password: password) else {
             // Name the tool and the fix — "the required command-line tool" sends
             // nobody anywhere (ONTOLOGY: failure text names the fix).
+            reverse?.stop()
             live[config.id] = Live(status: .failed(Self.missingToolReason(config)))
             return
         }
         var args = baseArgs
+        if let reverse {
+            // Explicit profile settings only. No inherited forwards or shared
+            // master may bypass the private endpoints authorized by the policy.
+            args = ["-F", "/dev/null", "-N", "-S", "none", "-o", "ControlMaster=no"]
+                + Self.sshCommonOptions(config) + reverse.forwardArguments + ["--", Self.sshTarget(config)]
+        }
         var privateConfig: Data?
         if config.kind.isSSLVPN {
             let passphrase = command == nil && Self.openconnectAuthMode(config) == "certificate"
@@ -889,7 +991,7 @@ final class SubprocessTunnelManager {
         }
         // SSH runs as a ControlMaster so forwards can be added/cancelled live
         // (`ssh -S <socket> -O forward/cancel …`) without a reconnect.
-        if config.kind == .ssh, let socket = Self.makeControlSocketPath(id: config.id) {
+        if config.kind == .ssh, reverse == nil, let socket = Self.makeControlSocketPath() {
             controlSockets[config.id] = socket
             args = ["-M", "-S", socket] + args
         }
@@ -930,6 +1032,7 @@ final class SubprocessTunnelManager {
                     askpassPath = tool
                     askpass = try SSHAskpass(target: target, jump: jump)
                 } catch {
+                    reverse?.stop()
                     removeControlSocket(config.id)
                     live[config.id] = Live(status: .failed("Couldn't prepare a private password prompt for SSH: \(error.localizedDescription)"))
                     return
@@ -937,9 +1040,38 @@ final class SubprocessTunnelManager {
             }
         }
 
+        var executable = path
+        if reverse != nil {
+            let client = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/ssh")
+            do { try Installation.verify(client, identifier: "com.bragi0.SimpleVPN.ssh") }
+            catch {
+                reverse?.stop()
+                live[config.id] = Live(status: .failed("SimpleVPN could not verify its OpenSSH client. Reinstall SimpleVPN."))
+                return
+            }
+            executable = client.path
+        }
+        var input = stdin
+        var proxyReady: String?
+        if config.kind.isSSLVPN {
+            guard let proxy = TunnelCLI.ocproxy.resolvedPath else {
+                live[config.id] = Live(status: .failed("Install ocproxy to open this connection’s local SOCKS port."))
+                return
+            }
+            do {
+                let relay = try Self.superviseOpenConnect(config, client: path, proxy: proxy, args: args, input: stdin)
+                executable = relay.path
+                args = relay.args
+                input = relay.input
+                proxyReady = relay.ready
+            } catch {
+                live[config.id] = Live(status: .failed(error.localizedDescription))
+                return
+            }
+        }
         let proc = TunnelProcess(
-            path: path, args: args, stdin: stdin, privateConfig: privateConfig,
-            askpass: askpass, askpassPath: askpassPath,
+            path: executable, args: args, stdin: input, privateConfig: privateConfig,
+            askpass: askpass, askpassPath: askpassPath, requireRemoteForwardAck: reverse?.needsRemoteAcknowledgement == true, proxyReady: proxyReady,
             onOutput: { [weak self] process, lines, isReady in
                 guard let self, self.tasks[config.id] === process else { return }
                 var l = self.live[config.id] ?? Live()
@@ -971,24 +1103,40 @@ final class SubprocessTunnelManager {
                 l.forwardStates = [:]
                 self.live[config.id] = l
                 self.tasks[config.id] = nil
+                self.reverseSessions.removeValue(forKey: config.id)?.stop()
                 self.removeControlSocket(config.id)
             })
         tasks[config.id] = proc
+        if let reverse { reverseSessions[config.id] = reverse }
         proc.start()
+        if let reverse, let process = proc.runningProcess, !reverse.authorize(process) {
+            disconnect(config.id)
+            live[config.id] = Live(status: .failed("Could not verify the OpenSSH process for the protected forwards."))
+        }
     }
 
     func disconnect(_ id: String) {
+        if let vpn = gatewayCoordinator, vpn.virtualManager(for: id) != nil {
+            vpn.disconnect(id: id)
+            return
+        }
         // A sign-in still in flight: cancelling the task kills the helper
         // (OpenConnectAuthClient's cancellation handler), which also abandons
         // any browser page still waiting on the gateway.
         if let auth = authTasks.removeValue(forKey: id) { auth.cancel() }
         proxyToggleWhileConnecting[id] = nil
         systemSOCKS.request(id, port: nil)
+        reverseSessions.removeValue(forKey: id)?.stop()
         tasks[id]?.stop()
         tasks[id] = nil
         sshEngines[id]?.stop()
         sshEngines[id] = nil
-        if inProcessNE.remove(id) != nil { Task { await OpenConnectProfileStore.stop(id) } }
+        if inProcessNE.remove(id) != nil {
+            packetAttempts.removeValue(forKey: id)
+            Task { [weak self] in
+                await OpenConnectProfileStore.stop(id) { self?.packetAttempts[id] == nil }
+            }
+        }
         removeControlSocket(id)
         if var l = live[id] { l.status = .disconnected; l.forwardStates = [:]; live[id] = l }
     }
@@ -1010,6 +1158,16 @@ final class SubprocessTunnelManager {
         let id = config.id
         guard config.kind == .ssh, status(id) == .connected, var l = live[id] else { return }
 
+        // The private endpoints and local targets form one immutable authorization
+        // plan for this session. Never add a raw forward to its OpenSSH process.
+        if reverseSessions[id] != nil {
+            let desired = Set(config.forwards.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.map(Self.forwardKey))
+            if desired != Set(l.forwardStates.keys) {
+                disconnect(id)
+                live[id] = Live(status: .failed("The protected reverse forwards changed. Reconnect to apply the new destinations."))
+            }
+            return
+        }
         let previous = l.forwardStates
         var desired: [String: (flag: String, spec: String)] = [:]
         var states: [String: ForwardPhase] = [:]
@@ -1146,20 +1304,16 @@ final class SubprocessTunnelManager {
 
     /// A short socket path (AF_UNIX caps paths around 104 bytes) inside a
     /// private 0700 directory; nil if it can't be created or is still too long.
-    private static func makeControlSocketPath(id: String) -> String? {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("svpn-cm-\(id.prefix(8))", isDirectory: true)
-        guard (try? FileManager.default.createDirectory(
-            at: dir, withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700])) != nil else { return nil }
-        let path = dir.appendingPathComponent("ctl").path
-        try? FileManager.default.removeItem(atPath: path)   // a stale socket blocks -M
-        return path.utf8.count <= 100 ? path : nil
+    private static func makeControlSocketPath() -> String? {
+        var template = Array("/private/tmp/svpn-cm.XXXXXX".utf8CString)
+        guard let directory = mkdtemp(&template) else { return nil }
+        return String(cString: directory) + "/ctl"
     }
 
     private func removeControlSocket(_ id: String) {
         guard let socket = controlSockets.removeValue(forKey: id) else { return }
-        try? FileManager.default.removeItem(atPath: (socket as NSString).deletingLastPathComponent)
+        unlink(socket)
+        rmdir((socket as NSString).deletingLastPathComponent)
     }
 
     /// Run `ssh -S <socket> -O …` against the ControlMaster and return its exit
@@ -1210,8 +1364,7 @@ final class SubprocessTunnelManager {
                     a += ["-\(fw.flag)", fw.spec]
                 }
             case .netTunnel:
-                // Point-to-point tun (needs root here + PermitTunnel on the server).
-                a += ["-o", "Tunnel=point-to-point", "-w", "any:any"]
+                return nil // OpenSSH owns its device; the app only receives NE packet batches.
             }
             a += ["--", sshTarget(c)]
             return (ssh, a, nil)
@@ -1478,6 +1631,43 @@ final class SubprocessTunnelManager {
     /// The openconnect argv for a config (everything after the executable),
     /// split out from `command(for:)` so the flag set is testable without
     /// openconnect installed.
+    /// The supervisor consumes exactly one bounded frame before openconnect inherits
+    /// the remaining stdin. Passwords, cookies and private config keep their original channels.
+    static func superviseOpenConnect(_ c: SubprocessTunnelConfig, client: String, proxy: String,
+                                     args: [String], input: Data?) throws -> (path: String, args: [String], input: Data, ready: String) {
+        let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/routecheck")
+        do { try Installation.verify(helper, identifier: "com.bragi0.SimpleVPN.routecheck") } catch {
+            throw ProfilePacketPolicy.failure("SimpleVPN could not verify its OpenConnect packet helper. Reinstall SimpleVPN.")
+        }
+        guard (1...65535).contains(c.socksPort), let script = args.firstIndex(of: "--script-tun"),
+              script + 2 < args.count, args[script + 1] == "--script",
+              args[script + 2] == "\(proxy) -D \(c.socksPort)", args.dropLast().last == "--" else {
+            throw ProfilePacketPolicy.failure("OpenConnect needs a managed script tunnel and a valid local SOCKS port.")
+        }
+        // The generated hook is always the last option before the server delimiter.
+        // OpenConnect uses getopt_long, including unambiguous long option prefixes.
+        let reserved = ["--script", "--script-tun", "--background", "--interface"]
+        if c.extraArgs.contains(where: { arg in
+            let flag = String(arg.prefix { $0 != "=" })
+            return flag == "--" || (flag.hasPrefix("--") && reserved.contains { $0.hasPrefix(flag) }) ||
+                   (!flag.hasPrefix("--") && ["-b", "-s", "-S", "-i"].contains(where: { flag.hasPrefix($0) }))
+        }) {
+            throw ProfilePacketPolicy.failure("SimpleVPN manages OpenConnect’s tunnel script, foreground process and interface. Remove switches that replace those settings.")
+        }
+        var options = args
+        options.removeSubrange(script...script + 2)
+        let nonce = UUID().uuidString
+        let settings: [String: Any] = ["client": client, "proxy": proxy, "port": c.socksPort, "nonce": nonce,
+                                       "profile": c.id, "kind": c.kind.rawValue, "source": c.routingEventSource ?? "",
+                                       "authLength": input?.count ?? 0]
+        let body = try JSONSerialization.data(withJSONObject: settings)
+        var count = UInt32(body.count).bigEndian
+        var frame = withUnsafeBytes(of: &count) { Data($0) }
+        frame.append(body)
+        if let input { frame.append(input) }
+        return (helper.path, ["--ocproxy-supervise"] + options, frame, "SimpleVPN proxy ready " + nonce)
+    }
+
     static func openconnectArgs(for c: SubprocessTunnelConfig) -> [String] {
         let proto = c.kind.openconnectProtocol ?? "anyconnect"
         let mode = openconnectAuthMode(c)
@@ -1737,7 +1927,7 @@ final class SubprocessTunnelManager {
             // be shell-quoted or a jump-host value like "x; curl … | sh" is RCE.
             // The jump hop gets the same host-key policy as the tunnel itself —
             // a hardcoded accept-new would silently weaken a "yes" config.
-            var inner = "/usr/bin/env \(SSHAskpass.hopKey)=jump /usr/bin/ssh -o \(Self.shellQuote("StrictHostKeyChecking=\(c.strictHostKey)"))"
+            var inner = "/usr/bin/env \(SSHAskpass.hopKey)=jump /usr/bin/ssh -F /dev/null -S none -o ClearAllForwardings=yes -o \(Self.shellQuote("StrictHostKeyChecking=\(c.strictHostKey)"))"
             if !c.jumpIdentityFile.isEmpty {
                 // IdentitiesOnly so the CONFIGURED jump key is the one used —
                 // not whatever ~/.ssh/id_* or agent key happens to match first.
@@ -1802,17 +1992,43 @@ nonisolated final class TunnelProcess: @unchecked Sendable {
     private let args: [String]
     private var stdin: Data?
     private var privateConfig: Data?
+    let isProxyRelay: Bool
+    private var proxyControl: FileHandle?
+    @MainActor private var pendingProxyStats: [CheckedContinuation<Data?, Never>] = []
+    @MainActor private var proxyTimeout: Task<Void, Never>?
+    @MainActor func proxySnapshot() async -> Data? {
+        guard isProxyRelay, let proxyControl, pendingProxyStats.count < 16 else { return nil }
+        return await withCheckedContinuation { waiter in
+            pendingProxyStats.append(waiter)
+            guard pendingProxyStats.count == 1 else { return }
+            do { try proxyControl.write(contentsOf: Data([83])) } catch { receiveProxyStats(nil); return }
+            proxyTimeout = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                self?.receiveProxyStats(nil)
+            }
+        }
+    }
+    @MainActor private func receiveProxyStats(_ data: Data?) {
+        proxyTimeout?.cancel()
+        proxyTimeout = nil
+        let waiters = pendingProxyStats
+        pendingProxyStats.removeAll(keepingCapacity: true)
+        for waiter in waiters { waiter.resume(returning: data) }
+    }
     private var outputReader: FileHandle?
     private var askpass: SSHAskpass?
     private let askpassPath: String?
     private let onOutput: @MainActor (TunnelProcess, [String], Bool) -> Void
-    private let output = OSAllocatedUnfairLock(initialState: OutputBuffer())
+    private let output: OSAllocatedUnfairLock<OutputBuffer>
     private let onExit: @MainActor (TunnelProcess, Int32) -> Void
     private var process: Process?
+    var runningProcess: Process? { process }
 
     init(path: String, args: [String], stdin: Data?, privateConfig: Data?, askpass: SSHAskpass?, askpassPath: String?,
-         onOutput: @escaping @MainActor (TunnelProcess, [String], Bool) -> Void,
+         requireRemoteForwardAck: Bool = false, proxyReady: String? = nil, onOutput: @escaping @MainActor (TunnelProcess, [String], Bool) -> Void,
          onExit: @escaping @MainActor (TunnelProcess, Int32) -> Void) {
+        output = OSAllocatedUnfairLock(initialState: OutputBuffer(requireRemoteForwardAck: requireRemoteForwardAck, proxyReady: proxyReady))
+        isProxyRelay = proxyReady != nil
         self.path = path; self.args = args; self.stdin = stdin
         self.privateConfig = privateConfig
         self.askpass = askpass
@@ -1838,8 +2054,19 @@ nonisolated final class TunnelProcess: @unchecked Sendable {
     /// A pipe read can split both a UTF-8 scalar and a log line. Bound the partial
     /// line and the pending main-actor delivery independently of the child's rate.
     struct OutputBuffer: Sendable {
+        private let requireRemoteForwardAck: Bool
+        private let proxyReady: String?
+        private let proxyStatsPrefix: String?
+        private var latestStats: Data?
+        init(requireRemoteForwardAck: Bool = false, proxyReady: String? = nil) {
+            self.requireRemoteForwardAck = requireRemoteForwardAck
+            self.proxyReady = proxyReady
+            proxyStatsPrefix = proxyReady.map { $0.replacingOccurrences(of: "proxy ready ", with: "proxy stats ") + " " }
+        }
+
         private var partial = Data()
         private var skippingLongLine = false
+        private var extendedStatsLine = false
         private var queued: [String] = []
         private var ready = false
         private var deliveryScheduled = false
@@ -1849,29 +2076,48 @@ nonisolated final class TunnelProcess: @unchecked Sendable {
             func finishLine() {
                 if !partial.isEmpty && !skippingLongLine {
                     let raw = String(decoding: partial, as: UTF8.self)
+                    if let proxyStatsPrefix, raw.hasPrefix(proxyStatsPrefix) {
+                        latestStats = Data(raw.dropFirst(proxyStatsPrefix.count).utf8)
+                        partial.removeAll(keepingCapacity: true)
+                        extendedStatsLine = false
+                        return
+                    }
                     let line = raw.contains("://") && raw.contains("@") ? scrubber.redactCredentialedURLs(raw) : raw
-                    ready = ready || TunnelProcess.readyMarkers.contains { line.contains($0) }
-                    queued.append(line)
+                    if let proxyReady {
+                        ready = ready || line == proxyReady
+                    } else if requireRemoteForwardAck {
+                        // ssh -v enters its "interactive session" before the remote
+                        // server has answered even the first listen request.
+                        ready = ready || line == "debug1: forwarding_success: all expected forwarding replies received"
+                    } else {
+                        ready = ready || TunnelProcess.readyMarkers.contains { line.contains($0) }
+                    }
+                    queued.append(line == proxyReady ? "Local SOCKS proxy is ready." : line)
                 }
                 partial.removeAll(keepingCapacity: true)
                 skippingLongLine = false
+                extendedStatsLine = false
             }
             for byte in chunk {
                 if byte == 10 || byte == 13 { finishLine() }
                 else if !skippingLongLine {
-                    if partial.count < 8192 { partial.append(byte) }
+                    if partial.count == 8192, let proxyStatsPrefix {
+                        extendedStatsLine = partial.starts(with: proxyStatsPrefix.utf8)
+                    }
+                    if partial.count < (extendedStatsLine ? 512 * 1024 : 8192) { partial.append(byte) }
                     else { partial.removeAll(keepingCapacity: true); skippingLongLine = true }
                 }
             }
             if chunk.isEmpty { finishLine() }
             if queued.count > 300 { queued.removeFirst(queued.count - 300) }
-            guard !queued.isEmpty, !deliveryScheduled else { return false }
+            guard !queued.isEmpty || latestStats != nil, !deliveryScheduled else { return false }
             deliveryScheduled = true
             return true
         }
 
-        mutating func take() -> (lines: [String], ready: Bool) {
-            let batch = (queued, ready)
+        mutating func take() -> (lines: [String], ready: Bool, stats: Data?) {
+            defer { latestStats = nil }
+            let batch = (queued, ready, latestStats)
             queued = []
             ready = false
             deliveryScheduled = false
@@ -1882,6 +2128,7 @@ nonisolated final class TunnelProcess: @unchecked Sendable {
     @MainActor private func deliverOutput() {
         let batch = output.withLock { $0.take() }
         if batch.ready { askpass = nil }
+        if let stats = batch.stats { receiveProxyStats(stats) }
         if !batch.lines.isEmpty { onOutput(self, batch.lines, batch.ready) }
     }
 
@@ -1940,18 +2187,25 @@ nonisolated final class TunnelProcess: @unchecked Sendable {
             Task { @MainActor in
                 guard let self else { return }
                 self.deliverOutput()
+                if self.isProxyRelay {
+                    try? self.proxyControl?.close()
+                    self.proxyControl = nil
+                    self.receiveProxyStats(nil)
+                }
                 self.onExit(self, code)
             }
         }
 
         do {
             try p.run()
+            askpass?.authorize(p)
             try? childOutput?.close()
             if let data = stdin {
                 guard fcntl(inPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else { throw POSIXError(.EIO) }
                 try inPipe.fileHandleForWriting.write(contentsOf: data)
             }
-            try? inPipe.fileHandleForWriting.close()
+            if isProxyRelay { proxyControl = inPipe.fileHandleForWriting }
+            else { try? inPipe.fileHandleForWriting.close() }
             process = p
             stdin = nil
         } catch {
@@ -1976,6 +2230,8 @@ nonisolated final class TunnelProcess: @unchecked Sendable {
     }
 
     func stop() {
+        try? proxyControl?.close()
+        proxyControl = nil
         process?.terminationHandler = nil
         process?.interrupt()
         // SIGINT lets openconnect log out of the gateway cleanly;

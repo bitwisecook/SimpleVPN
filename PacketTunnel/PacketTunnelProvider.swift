@@ -30,6 +30,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
     nonisolated(unsafe) private var wgExtraExcluded: [String] = []     // connect-time carve-outs for WireGuard: .outside diverts
     nonisolated(unsafe) private var wgEngine: WireGuardEngine?        // plain-WireGuard engine
     nonisolated(unsafe) private var virtualEngine: VirtualRoutingEngine?
+    nonisolated(unsafe) private var packetPolicy: SVPPacketPolicy?
+    nonisolated(unsafe) private var lifecycleStopped = false
     nonisolated(unsafe) private var lifecycleStarted = false
     nonisolated(unsafe) private var wgConfig: WireGuardConfig?        // kept (redacted) for live settings re-apply
     nonisolated(unsafe) private var wgSuppressDefault = false         // gateway demotion state for WireGuard
@@ -41,6 +43,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
     nonisolated(unsafe) private var snExtraExcluded: [String] = []      // connect-time carve-outs: the SSH SERVER's own /32(/128) + .outside diverts
     nonisolated(unsafe) private var startCompletion: ((Error?) -> Void)?
     private let lock = NSLock()
+    private var ipsecEngine: OwnedIPsecEngine?
 
     nonisolated(unsafe) private var profileID = "default"
     nonisolated(unsafe) private var connectedSince: Double = 0
@@ -61,13 +64,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
     }
 
     override func startTunnel(options: [String: NSObject]?,
-                              completionHandler: @escaping (Error?) -> Void) {
+                              completionHandler startReply: @escaping (Error?) -> Void) {
         let firstStart = lock.withLock {
-            guard !lifecycleStarted else { return false }
+            guard !lifecycleStarted, !lifecycleStopped else { return false }
             lifecycleStarted = true; return true
         }
         guard firstStart else {
-            completionHandler(NSError(domain: "SimpleVPN", code: 1,
+            startReply(NSError(domain: "SimpleVPN", code: 1,
                 userInfo: [NSLocalizedDescriptionKey: "A stopped tunnel provider cannot be reused. Start a new connection."]))
             return
         }
@@ -81,18 +84,39 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
         let proto = protocolConfiguration as? NETunnelProviderProtocol
         let conf = proto?.providerConfiguration
 
-        if let data = conf?["routingSession"] as? Data {
+        let owned: OwnedIPsecConfiguration?
+        if conf?[OwnedIPsecConfiguration.configurationKey] != nil || conf?["vpnType"] as? String == OwnedIPsecConfiguration.providerKind {
+            guard let conf, conf["routingSession"] == nil || conf["routingSession"] as? Data == StandalonePacketPolicyConfiguration.marker,
+                  let config = OwnedIPsecConfiguration.decode(from: conf)
+            else { startReply(OwnedIPsecNetworkSettings.error("Invalid built-in IPsec profile.")); return }
+            owned = config
+        } else { owned = nil }
+
+        let standaloneSource: String?
+        do { standaloneSource = try StandalonePacketPolicyConfiguration.source(in: conf ?? [:]) }
+        catch { startReply(error); return }
+        if standaloneSource == nil, let session = conf?["routingSession"] {
+            guard let data = session as? Data else {
+                startReply(NSError(domain: "SimpleVPN", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid virtual connection configuration."]))
+                return
+            }
             guard let config = try? JSONDecoder().decode(VirtualRoutingConfig.self, from: data), config.problem == nil,
+                  (config.applicationCapture != nil) == (routingMethod == .sourceApplication),
+                  config.applicationCapture?.matchesInstalledRules(appRules) != false,
                   let startData = options?["routingStart"] as? Data,
                   let start = try? JSONDecoder().decode(VirtualRoutingStartConfig.self, from: startData) else {
-                completionHandler(NSError(domain: "SimpleVPN", code: 1,
+                startReply(NSError(domain: "SimpleVPN", code: 1,
                     userInfo: [NSLocalizedDescriptionKey: "Invalid virtual connection configuration."]))
                 return
             }
             let engine = VirtualRoutingEngine(provider: self, config: config,
                 gatewayOwned: (options?["gatewayOwned"] as? NSNumber)?.boolValue ?? true)
-            lock.withLock { virtualEngine = engine; profileID = config.id }
-            engine.start(start, completion: completionHandler)
+            guard lock.withLock({
+                guard !lifecycleStopped else { return false }
+                virtualEngine = engine; profileID = config.id
+                return true
+            }) else { startReply(CancellationError()); return }
+            engine.start(start, completion: startReply)
             return
         }
 
@@ -103,7 +127,36 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
         // key only exists for the OpenVPN kind — checking for it before the
         // dispatch rejected every non-OpenVPN in-process kind with "missing ovpn
         // configuration" before its engine was ever reached.
-        let kind = (conf?["vpnType"] as? String).flatMap(VPNKind.init(rawValue:)) ?? .openVPN
+        // A legacy OpenVPN profile can omit the type. An unknown explicit type
+        // cannot authorize a packet adapter or fall through to OpenVPN.
+        let kind: VPNKind
+        if let owned { kind = owned.kind }
+        else if conf?["vpnType"] == nil {
+            kind = .openVPN
+        } else if let raw = conf?["vpnType"] as? String, let known = VPNKind(rawValue: raw) {
+            kind = known
+        } else {
+            startReply(NSError(domain: "SimpleVPN", code: 1, userInfo: [NSLocalizedDescriptionKey: "Unknown VPN engine."]))
+            return
+        }
+        guard let adapter = StandalonePacketPolicyConfiguration.adapterID(for: kind, configuration: conf ?? [:]) else {
+            startReply(NSError(domain: "SimpleVPN", code: 1, userInfo: [NSLocalizedDescriptionKey: "This VPN transport has no packet tunnel adapter."]))
+            return
+        }
+        let mediator: SVPPacketPolicy
+        do {
+            mediator = try SVPPacketPolicy.compile(adapter: adapter, profile: conf?["profile"] as? String,
+                                                  kind: kind, source: standaloneSource)
+        } catch { startReply(error); return }
+        guard lock.withLock({
+            guard !lifecycleStopped else { return false }
+            packetPolicy = mediator
+            return true
+        }) else { mediator.close(); startReply(CancellationError()); return }
+        let completionHandler: (Error?) -> Void = { error in
+            if error != nil { mediator.close() }
+            startReply(error)
+        }
 
         // Org policy travels with the session (startTunnel options), so the
         // extension enforces it independently of whatever the persisted config
@@ -144,10 +197,56 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
             Self.log.log("local network access: \(localNetworks.count) prefix(es) offered by the app")
         }
 
+        if kind == .ssh {
+            guard let bytes = conf?["sshTun"] as? Data, let ssh = try? JSONDecoder().decode(SSHTunConfiguration.self, from: bytes),
+                  ssh.problem == nil, conf?["ovpn"] == nil, routingMethod != .sourceApplication,
+                  !profile.isEmpty, let creds = options?["sshTunCredentials"] as? [String: Data], divert.inbound.isEmpty else {
+                completionHandler(OwnedIPsecNetworkSettings.error("Check the point-to-point SSH configuration, credentials and destination routes.")); return
+            }
+            let member = VirtualRoutingConfig.Member(id: profile, sshTun: ssh, prefixes: [])
+            let policy = VirtualRoutingPolicy(defaultOwner: RoutePrefixMath.defaultRoutePrefixes(in: ssh.network.routes).isEmpty ? "" : profile)
+            let config = VirtualRoutingConfig(version: 9, id: profile, members: [member], policy: policy)
+            let start = VirtualRoutingStartConfig(childOptions: [profile: creds], version: 3,
+                members: [.init(id: profile, addresses: [], external: .init(adapter: "ssh-tun", generation: 1))], policy: policy)
+            let engine = VirtualRoutingEngine(provider: self, config: config, gatewayOwned: (options?["gatewayOwned"] as? NSNumber)?.boolValue ?? true,
+                                              identityPolicy: mediator, identityExclusions: divert.outsideCIDRs)
+            guard lock.withLock({ guard !lifecycleStopped else { return false }; virtualEngine = engine; return true }) else {
+                completionHandler(CancellationError()); return
+            }
+            engine.start(start, completion: completionHandler)
+            return
+        }
+
+        if let owned {
+            guard divert.inbound.isEmpty else {
+                completionHandler(OwnedIPsecNetworkSettings.error("IPsec accepts only the routes negotiated with its gateway."))
+                return
+            }
+            let credentials: OwnedIPsecCredentials
+            do { credentials = try OwnedIPsecCredentials(config: owned, options: options ?? [:]) }
+            catch { completionHandler(error); return }
+            let ownedGateway = (options?["gatewayOwned"] as? NSNumber)?.boolValue ?? true
+            let engine = OwnedIPsecEngine(provider: self, policy: mediator, ownsGateway: ownedGateway,
+                                          excluded: divert.outsideCIDRs) { [weak self] error in
+                guard let self else { return }
+                self.finishStart(with: error)
+                if let error { self.cancelTunnelWithError(error) }
+            }
+            let started = lock.withLock {
+                guard !lifecycleStopped else { return false }
+                ipsecEngine = engine
+                startCompletion = completionHandler
+                return true
+            }
+            guard started else { completionHandler(CancellationError()); return }
+            engine.start(owned, credentials: credentials)
+            return
+        }
+
         // WireGuard: one kind, in-process via the Go engine (wireguard-go's
         // device package inside libtsengine.a).
         if kind == .wireGuard {
-            startWireGuard(conf: conf, options: options, profile: profile,
+            startWireGuard(conf: conf, options: options, profile: profile, mediator: mediator,
                            divert: divert, localNetworks: localNetworks,
                            completionHandler: completionHandler)
             return
@@ -157,7 +256,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
         // fortinet / array) run in-process via libopenconnect. VPNKind is the
         // single source of truth for the protocol token.
         if let ocProto = kind.openconnectProtocol {
-            startOpenConnect(conf: conf, options: options, profile: profile,
+            startOpenConnect(conf: conf, options: options, profile: profile, mediator: mediator,
                              protocol: ocProto, divert: divert,
                              localNetworks: localNetworks,
                              completionHandler: completionHandler)
@@ -166,14 +265,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
 
         // Tailscale / Headscale: one kind, in-process via the Go engine.
         if kind == .tailscale {
-            startTailscale(conf: conf, options: options, profile: profile,
+            startTailscale(conf: conf, options: options, profile: profile, mediator: mediator,
                            divert: divert, completionHandler: completionHandler)
             return
         }
 
         // Proxy Tunnel: one kind, in-process via the Go tun2socks engine.
         if kind == .proxyTunnel {
-            startProxyTunnel(conf: conf, options: options, profile: profile,
+            startProxyTunnel(conf: conf, options: options, profile: profile, mediator: mediator,
                              divert: divert, localNetworks: localNetworks,
                              completionHandler: completionHandler)
             return
@@ -182,7 +281,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
         // SSH Network Tunnel: the same Go netstack, dialling each flow over an SSH
         // session this process owns (libssh). TCP only — SSH has no UDP channel.
         if kind == .sshNetworkTunnel {
-            startSSHNetworkTunnel(conf: conf, options: options, profile: profile,
+            startSSHNetworkTunnel(conf: conf, options: options, profile: profile, mediator: mediator,
                                   divert: divert, localNetworks: localNetworks,
                                   completionHandler: completionHandler)
             return
@@ -264,7 +363,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
             settings = s
         }
 
-        let b = OpenVPN3Bridge(provider: self, delegate: self)
+        let b = OpenVPN3Bridge(provider: self, delegate: self, packetPolicy: mediator)
         lock.lock(); bridge = b; startCompletion = completionHandler; lock.unlock()
 
         // "Allow local network access" for this kind is the ENGINE's own feature:
@@ -314,56 +413,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
     /// Bring up an OpenConnect SSL-VPN in-process. Credentials ride startTunnel
     /// options (root can't read the keychain), same as OpenVPN.
     private func startOpenConnect(conf: [String: Any]?, options: [String: NSObject]?,
-                                  profile: String, protocol ocProto: String,
+                                  profile: String, mediator: SVPPacketPolicy, protocol ocProto: String,
                                   divert: DivertPlan, localNetworks: [String],
                                   completionHandler: @escaping (Error?) -> Void) {
-        let s = OCClientSettings()
-        s.server = (conf?["server"] as? String) ?? (protocolConfiguration.serverAddress ?? "")
-        s.protocol = ocProto
-        s.username = (options?["username"] as? String) ?? ""
-        s.password = options?["password"] as? String
-        s.oneTimeCode = options?["oneTimeCode"] as? String
-        s.realm = conf?["realm"] as? String
-        s.serverCertSHA256 = conf?["serverCert"] as? String
-        s.externalBrowser = conf?["samlBrowser"] as? String
-        // Every key below is written by `SubprocessTunnelManager.inProcessConfiguration`
-        // and each one used to be a REFUSAL: a profile that set any of them ran as an
-        // `openconnect` subprocess under `ocproxy -D <port>` instead — a SOCKS port
-        // with no interface, no routes and no DNS. Absent ⇒ the engine's default.
-        s.caFile = conf?["caFile"] as? String
-        s.urlPath = conf?["urlPath"] as? String
-        s.reportedOS = conf?["reportedOS"] as? String
-        s.versionString = conf?["versionString"] as? String
-        s.localName = conf?["localName"] as? String
-        s.clientCertFile = conf?["clientCert"] as? String
-        s.clientKeyFile = conf?["clientKey"] as? String
-        s.proxy = conf?["proxy"] as? String
-        s.proxyUsername = conf?["proxyUsername"] as? String
-        s.compression = conf?["compression"] as? String
-        s.pfs = (conf?["pfs"] as? NSNumber)?.boolValue ?? false
-        s.disableIPv6 = (conf?["disableIPv6"] as? NSNumber)?.boolValue ?? false
-        s.disableDTLS = (conf?["disableDTLS"] as? NSNumber)?.boolValue ?? false
-        s.mtu = Int32((conf?["mtu"] as? NSNumber)?.intValue ?? 0)
-        s.dpd = Int32((conf?["dpd"] as? NSNumber)?.intValue ?? 0)
-        s.reconnectTimeout = conf?["reconnectTimeout"] as? NSNumber
-        // The two secrets among them ride startTunnel options, never
-        // providerConfiguration — the same invariant as `password` above, because
-        // providerConfiguration persists in NE preferences and options do not.
-        s.privateKeyPassword = options?["privateKeyPassword"] as? String
-        s.proxyPassword = options?["proxyPassword"] as? String
-        // A user agent the gateway may be admitting by name. "SimpleVPN" stays the
-        // default, and is NOT a value the user chose — so it must not look like one.
-        s.userAgent = (conf?["userAgent"] as? String) ?? "SimpleVPN"
-        // SSO cookie handoff (ocauth-helper → app → here, all in memory): the
-        // sign-in already happened in user context; connect to the exact URL it
-        // authenticated against, accepting only the certificate it saw.
-        if let cookie = options?["cookie"] as? String, !cookie.isEmpty {
-            s.cookie = cookie
-            if let cert = options?["servercert"] as? String, !cert.isEmpty { s.serverCertSHA256 = cert }
-            if let url = options?["connectURL"] as? String, !url.isEmpty { s.server = url }
-        }
-
-        let b = OpenConnectBridge(provider: self, delegate: self)
+        let s = OCClientSettings.make(configuration: conf, options: options, fallbackServer: protocolConfiguration.serverAddress ?? "", protocol: ocProto)
+        let b = OpenConnectBridge(provider: self, delegate: self, packetPolicy: mediator)
         lock.lock(); ocBridge = b; startCompletion = completionHandler; lock.unlock()
 
         // Default-gateway ownership travels with the session so the ≤1-owner
@@ -416,7 +470,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
     /// there is one) rides startTunnel options in memory, same invariant as
     /// every other credential — it is never in providerConfiguration.
     private func startTailscale(conf: [String: Any]?, options: [String: NSObject]?,
-                                profile: String, divert: DivertPlan,
+                                profile: String, mediator: SVPPacketPolicy, divert: DivertPlan,
                                 completionHandler: @escaping (Error?) -> Void) {
         guard (options?["tailscaleNodeStateBroker"] as? NSNumber)?.boolValue == true else {
             completionHandler(TailscaleEngineError.engine(kind: "badRequest",
@@ -437,7 +491,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
         let authKey = (options?["tailscaleAuthKey"] as? String)
             ?? (options?["password"] as? String) ?? ""
 
-        let engine = TailscaleEngine(provider: self, delegate: self)
+        let engine = TailscaleEngine(provider: self, delegate: self, packetPolicy: mediator)
         // Divert: only the "around this VPN" half applies to a tailnet. What a
         // tailnet CARRIES is the netmap's decision (subnet router / exit node), so
         // an inbound divert is refused rather than installed as a black hole —
@@ -477,7 +531,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
     /// Credentials ride startTunnel options in memory, same invariant as every
     /// other kind — never in providerConfiguration.
     private func startProxyTunnel(conf: [String: Any]?, options: [String: NSObject]?,
-                                  profile: String, divert: DivertPlan,
+                                  profile: String, mediator: SVPPacketPolicy, divert: DivertPlan,
                                   localNetworks: [String],
                                   completionHandler: @escaping (Error?) -> Void) {
         var config = ProxyTunnelConfig.decode(from: conf?["proxytunnel"] as? Data)
@@ -493,6 +547,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
         // fills; both are optional (a no-auth proxy needs neither).
         let username = (options?["username"] as? String) ?? ""
         let password = (options?["password"] as? String) ?? ""
+        if let problem = ProxyTunnelStartConfig.authenticationProblem(config: config, username: username, password: password) {
+            completionHandler(ProxyTunnelEngineError.engine(kind: "badRequest", message: problem))
+            return
+        }
+
 
         // Default-gateway ownership at establish (RC3): the app passes the desired
         // role so a non-owner proxy tunnel comes up already demoted to split.
@@ -533,7 +592,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
         }
         let carveOuts = proxyCarveOuts + divert.outsideCIDRs + localCarveOuts
 
-        let engine = ProxyTunnelEngine(provider: self, delegate: self)
+        let engine = ProxyTunnelEngine(provider: self, delegate: self, packetPolicy: mediator)
         lock.lock(); pxEngine = engine; pxProxyHost = config.proxyHost
         pxConfig = config; pxSuppressDefault = !ownedAtEstablish
         pxExtraExcluded = carveOuts
@@ -583,7 +642,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
     /// keys ride startTunnel options in memory, same invariant as every other
     /// credential — never in providerConfiguration.
     private func startWireGuard(conf: [String: Any]?, options: [String: NSObject]?,
-                                profile: String, divert: DivertPlan,
+                                profile: String, mediator: SVPPacketPolicy, divert: DivertPlan,
                                 localNetworks: [String],
                                 completionHandler: @escaping (Error?) -> Void) {
         var config = WireGuardConfig.decode(from: conf?["wireguard"] as? Data)
@@ -636,7 +695,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
         }
         let carveOuts = divert.outsideCIDRs + localCarveOuts
 
-        let engine = WireGuardEngine(provider: self, delegate: self)
+        let engine = WireGuardEngine(provider: self, delegate: self, packetPolicy: mediator)
         lock.lock(); wgEngine = engine; wgConfig = config
         wgSuppressDefault = !ownedAtEstablish
         wgExtraExcluded = carveOuts
@@ -719,7 +778,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
     /// UI to prompt with, and root+sandbox means no known_hosts to read), so an
     /// absent pin is a refusal to connect rather than a permissive default.
     private func startSSHNetworkTunnel(conf: [String: Any]?, options: [String: NSObject]?,
-                                       profile: String, divert: DivertPlan,
+                                       profile: String, mediator: SVPPacketPolicy, divert: DivertPlan,
                                        localNetworks: [String],
                                        completionHandler: @escaping (Error?) -> Void) {
         var config = SSHNetworkTunnelConfig.decode(from: conf?["sshnet"] as? Data)
@@ -775,7 +834,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
         }
         let carveOuts = serverCarveOuts + divert.outsideCIDRs + localCarveOuts
 
-        let engine = SSHNetworkTunnelEngine(provider: self, delegate: self)
+        let engine = SSHNetworkTunnelEngine(provider: self, delegate: self, packetPolicy: mediator)
         lock.lock(); snEngine = engine; snConfig = config
         snSuppressDefault = !ownedAtEstablish
         snExtraExcluded = carveOuts
@@ -917,7 +976,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
     /// there is as good as the machine's identity on the tailnet. Per-profile,
     /// so two saved networks are two independent nodes, and stable across
     /// relaunches so the node key survives.
-    private static func tailscaleStateDir(profile: String) -> String {
+    static func tailscaleStateDir(profile: String) -> String {
         let safe = profile.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "profile"
         let system = "/Library/Application Support/SimpleVPN/tailscale/\(safe)"
         let fm = FileManager.default
@@ -1047,10 +1106,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
                              completionHandler: @escaping () -> Void) {
         Self.log.log("stopTunnel reason=\(reason.rawValue)")
         settingsWriter.close()
-        lock.lock(); let b = bridge; let oc = ocBridge; let ts = tsEngine; let px = pxEngine
+        lock.lock(); lifecycleStopped = true
+        let mediator = packetPolicy; packetPolicy = nil
+        let b = bridge; let oc = ocBridge; let ts = tsEngine; let px = pxEngine
         let wg = wgEngine; let sn = snEngine; let p = profileID
+        let ipsec = ipsecEngine; ipsecEngine = nil
         wgEngine = nil; wgConfig = nil
         lock.unlock()
+        mediator?.close()
         // System-initiated stops the user didn't ask for become incidents too —
         // notably .superceded: another VPN configuration took over.
         switch reason {
@@ -1072,8 +1135,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
         wg?.stop()
         if wg != nil { finishStart(with: CancellationError()) }
         sn?.stop()
-        lock.withLock { virtualEngine }?.stop()
-        completionHandler()
+        if let virtual = lock.withLock({ virtualEngine }) {
+            let reply = StopReply(block: completionHandler)
+            virtual.stop { reply.block() }
+        } else if let ipsec {
+            finishStart(with: CancellationError())
+            let reply = StopReply(block: completionHandler)
+            ipsec.stop { reply.block() }
+        } else { completionHandler() }
     }
 
     /// The NE reply block for `handleAppMessage`. Apple's signature is not
@@ -1082,6 +1151,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
     /// way to say that. This box says it in one place, with a name, instead of
     /// scattering unchecked conformances (or forcing every engine read onto the
     /// provider's own queue, where a slow engine call would stall the tunnel).
+    private struct StopReply: @unchecked Sendable { let block: () -> Void }
     private struct AppMessageReply: @unchecked Sendable {
         let block: ((Data?) -> Void)?
         func callAsFunction(_ data: Data?) { block?(data) }
@@ -1095,11 +1165,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
         if message.hasPrefix("router:message:"),
            let data = String(message.dropFirst("router:message:".count)).data(using: .utf8),
            let request = try? JSONDecoder().decode(VirtualRoutingMessage.self, from: data),
-           let engine = lock.withLock({ virtualEngine }) {
+           let engine = lock.withLock({ virtualEngine }), !engine.isIdentityTunnel {
             engine.message(request) { reply($0) }
             return
         }
         switch message {
+        case "packet-policy:status":
+            let (policy, virtual) = lock.withLock { (packetPolicy, virtualEngine) }
+            reply(virtual?.packetPolicySnapshot() ?? policy?.snapshot())
         case "tslegacy":
             guard let path = legacyTailscaleStatePath(),
                   let file = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else { reply(nil); return }
@@ -1137,6 +1210,24 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
             reply(v)
 
         case "stats":
+            if let engine = lock.withLock({ virtualEngine }), engine.isIdentityTunnel {
+                engine.identityStats { sample in
+                    guard let sample else { reply(nil); return }
+                    var enriched = self.settingsWriter.enrich(sample)
+                    enriched.advertisedPrefixes = sample.advertisedPrefixes
+                    reply.encode(enriched)
+                }
+                return
+            }
+            if let (engine, profile) = lock.withLock({ ipsecEngine.map { ($0, profileID) } }) {
+                engine.stats(profile: profile) { sample in
+                    guard let sample else { reply(nil); return }
+                    var enriched = self.settingsWriter.enrich(sample)
+                    enriched.advertisedPrefixes = sample.advertisedPrefixes
+                    reply.encode(enriched)
+                }
+                return
+            }
             // Telemetry rides this IPC — app-group UserDefaults/files can't cross
             // the root(system-context) ↔ user boundary, so the app polls instead.
             if let ts = lock.withLock({ tsEngine }) {
@@ -1205,14 +1296,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
             }
 
         case "flows":
-            // Per-VPN traffic log: the flows the bridge observed (IP/L4 headers
-            // only). Same IPC channel as stats — serialized to JSON for the app.
-            // (Neither the OpenConnect nor the Tailscale engine has flow
-            // accounting yet → empty list.)
-            let b = lock.withLock { bridge }
-            guard let b else { reply.encode([TrafficFlow]()); return }
+            let (policy, virtual) = lock.withLock { (packetPolicy, virtualEngine) }
             statsQueue.async {
-                reply.encode(b.flowStats().compactMap { TrafficFlow(dictionary: $0) })
+                reply(policy?.trafficLogSnapshot() ?? virtual?.trafficLogSnapshot())
             }
 
         case "pause:hold", "pause:bypass":
@@ -1252,7 +1338,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
             // "needs-reconnect" reply survives as the coordinator's fallback for any
             // engine that genuinely can't re-apply routes live.
             let owned = message == "gateway:full"
-            if let b = lock.withLock({ bridge }) {                 // openvpn3
+            if let engine = lock.withLock({ virtualEngine }), engine.isIdentityTunnel {
+                engine.setIdentityGateway(owned) { error in reply(error == nil ? "ok" : "error: settings apply failed") }
+            } else if let ipsec = lock.withLock({ ipsecEngine }) {
+                ipsec.setGateway(owned) { error in reply(error == nil ? "ok" : "error: settings apply failed") }
+            } else if let b = lock.withLock({ bridge }) {                 // openvpn3
                 statsQueue.async {
                     reply(b.setDefaultRouteOwned(owned) ? "ok" : "error: settings apply failed")
                 }
@@ -1567,7 +1657,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
     }
 
     private func finishStart(with error: Error?) {
-        lock.lock(); let done = startCompletion; startCompletion = nil; lock.unlock()
+        lock.lock()
+        let done = startCompletion
+        startCompletion = nil
+        let failedPolicy = error == nil ? nil : packetPolicy
+        lock.unlock()
+        failedPolicy?.close()
         done?(error)
     }
 
@@ -1639,6 +1734,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, SVPTunnelSettingsApply
             tunnelIPv4: info["tunnelIP"] as? String ?? "",
             dnsServers: info["dns"] as? [String] ?? [], proxies: [])
         stats.tunnelIPv6 = info["tunnelIPv6"] as? String
+        stats.serverIP = info["serverIP"] as? String
+        stats.serverPort = info["serverPort"] as? String
+        stats.searchDomains = info["searchDomains"] as? [String]
+        stats.defaultRouteV4 = (info["defaultV4"] as? NSNumber)?.boolValue
+        stats.defaultRouteV6 = (info["defaultV6"] as? NSNumber)?.boolValue
         stats.mtu = (info["mtu"] as? NSNumber)?.intValue
         // Ground-truth default-route ownership (RC4), same channel as OpenVPN:
         // feeds the mediator's applied-role cache and the traffic-path UI.

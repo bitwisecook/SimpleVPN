@@ -14,12 +14,15 @@ import (
 	"time"
 
 	"github.com/tailscale/wireguard-go/conn"
+	"pxengine/packetrouter"
 )
 
-// Two real encrypted peers deliberately use identical private addresses. The
-// production session, not two host interfaces, owns capture and reverse NAT.
-func TestVirtualSessionPinsFlowsAcrossTwoEncryptedVPNs(t *testing.T) {
-	const capture = "198.19.255.1"
+const testVirtualCapture = "198.19.255.1"
+
+// Both encrypted peers deliberately own identical private addresses.
+func newEncryptedVirtualSession(t *testing.T, policy vrPolicy, extra ...vrMember) (*vrState, map[string]*wgTestDevice, chan []byte) {
+	t.Helper()
+	const capture = testVirtualCapture
 	var members []vrMember
 	peers := make(map[string]*wgTestDevice)
 	publicKeys := make(map[string]string)
@@ -36,8 +39,16 @@ func TestVirtualSessionPinsFlowsAcrossTwoEncryptedVPNs(t *testing.T) {
 		}})
 	}
 	host := make(chan []byte, 32)
-	st, err := createVRState(vrConfig{Version: 1, Capture: []string{capture, "fd6e:7853:ffff::1"}, Members: members,
-		Policy: vrPolicy{Version: 1, Revision: 1, Default: "first"}},
+	cfg := vrConfig{Version: 1, Capture: []string{capture, "fd6e:7853:ffff::1"}, Members: append(members, extra...), Policy: policy}
+	if len(extra) > 0 {
+		loopback, err := net.InterfaceByName("lo0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.Underlay = uint32(loopback.Index)
+		cfg.Version = 2
+	}
+	st, err := createVRState(cfg,
 		func(p []byte) { host <- bytes.Clone(p) }, func(string) conn.Bind {
 			iface, err := net.InterfaceByName("lo0")
 			if err != nil {
@@ -58,6 +69,12 @@ func TestVirtualSessionPinsFlowsAcrossTwoEncryptedVPNs(t *testing.T) {
 		peer.apply(strings.Join([]string{"public_key=" + wgTestHex(t, publicKeys[id]), "update_only=true",
 			fmt.Sprintf("endpoint=127.0.0.1:%d", ours.listenPort()), ""}, "\n"))
 	}
+	return st, peers, host
+}
+
+func TestVirtualSessionPinsFlowsAcrossTwoEncryptedVPNs(t *testing.T) {
+	const capture = testVirtualCapture
+	st, peers, host := newEncryptedVirtualSession(t, vrPolicy{Version: 1, Revision: 1, Default: "first"})
 	exchange := func(id, message string, sourcePort uint16) {
 		t.Helper()
 		out := wgTestIPv4UDP(t, capture, wgTestPeerTunnelIP, message)
@@ -138,6 +155,69 @@ func TestVirtualSessionPinsFlowsAcrossTwoEncryptedVPNs(t *testing.T) {
 	st.stop()
 	if st.router.Forward(wgTestIPv4UDP(t, capture, wgTestPeerTunnelIP, "stopped")) {
 		t.Fatal("stopped virtual interface accepted a packet")
+	}
+}
+
+// Source metadata is supplied at the trusted capture boundary. The decrypted
+// peer output and returned host packets prove both egress selection and NAT.
+func TestVirtualSourceRoutingAcrossEncryptedPeers(t *testing.T) {
+	st, peers, host := newEncryptedVirtualSession(t, vrPolicy{
+		Version: 1, Revision: 1, SourceRules: []packetrouter.SourceRule{
+			{Source: "signed-mail", Port: "second", Destinations: []packetrouter.Rule{
+				{Prefix: netip.MustParsePrefix(wgTestPeerTunnelIP + "/32"), Port: "first"},
+				{Prefix: netip.MustParsePrefix("fd7a:115c:a1e0::1/128"), Port: "first"},
+			}}, {Source: "temporary-build", Port: "second"},
+		},
+	})
+	for _, family := range [][3]string{
+		{testVirtualCapture, wgTestPeerTunnelIP, wgTestOurTunnelIP},
+		{"fd6e:7853:ffff::1", "fd7a:115c:a1e0::1", "fd7a:115c:a1e0::2"},
+	} {
+		capture, destination, assigned := family[0], family[1], family[2]
+		for _, protocol := range []byte{6, 17} {
+			for _, origin := range []struct {
+				alias, peer string
+				owner       uint64
+				sourcePort  uint16
+			}{
+				{"signed-mail", "first", 0x100000002, 41500},
+				{"temporary-build", "second", 0x300000004, 42500},
+			} {
+				out := vrTestTransport(capture, destination, origin.sourcePort, 443, protocol, false)
+				if !st.router.ForwardWithSource(out, origin.alias, origin.owner) {
+					t.Fatalf("verified %s failed: %+v", origin.alias, st.router.Status())
+				}
+				got := peers[origin.peer].awaitPacket(5 * time.Second)
+				want := vrTestTransport(assigned, destination, origin.sourcePort, 443, protocol, false)
+				if !bytes.Equal(got, want) {
+					t.Fatalf("%s received wrong transport packet", origin.peer)
+				}
+				peers[origin.peer].send(vrTestTransport(destination, assigned, 443, origin.sourcePort, protocol, true))
+				select {
+				case reply := <-host:
+					if !bytes.Equal(reply, vrTestTransport(destination, capture, 443, origin.sourcePort, protocol, true)) {
+						t.Fatalf("%s returned a packet for a different capture flow", origin.peer)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatalf("%s sent no reply", origin.peer)
+				}
+			}
+		}
+		missing := vrTestTransport(capture, destination, 43500, 443, 17, false)
+		if st.router.Forward(missing) || st.router.ForwardWithSource(missing, "unmatched", 0x500000006) ||
+			st.router.ForwardWithSource(missing, "signed-mail", 0) {
+			t.Fatal("source-scoped session admitted missing or unmatched metadata")
+		}
+	}
+	if status := st.router.Status(); status.PacketsOut != 8 || status.PacketsIn != 8 || status.Drops["unattributed or unauthorized source"] != 6 {
+		t.Fatalf("unexpected data-plane counts: %+v", status)
+	}
+	select {
+	case <-peers["first"].rx:
+		t.Fatal("first VPN received extra unattributed traffic")
+	case <-peers["second"].rx:
+		t.Fatal("second VPN received extra unattributed traffic")
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 

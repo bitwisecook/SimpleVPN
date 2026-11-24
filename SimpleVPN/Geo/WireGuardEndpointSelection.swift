@@ -106,27 +106,17 @@ nonisolated enum WireGuardEndpointSelection {
     /// `host:port`, with an IPv6 literal bracketed — the grammar
     /// `WireGuardConfig.endpointProblem` and wireguard-go's own resolver both take.
     /// Setup recognition reuses this rendering with no port until one is known.
-    /// Keep IPv6 bracketing here until the shared Endpoint type replaces it
-    /// (Docs/Drift.md §5), rather than adding another implementation in import.
     static func endpointString(host: String, port: Int?) -> String {
-        let h = host.trimmingCharacters(in: .whitespaces)
-        let displayHost = h.contains(":") && !h.hasPrefix("[") ? "[\(h)]" : h
-        return port.map { "\(displayHost):\($0)" } ?? displayHost
+        NetworkEndpoint.authority(host: host, port: port)
     }
 
     /// The port the configuration is on now, so choosing a different relay from the
     /// same provider keeps the port the user's own `.conf` chose rather than
     /// silently reverting to the well-known one.
     static func currentPort(_ config: WireGuardConfig) -> Int? {
-        let s = config.endpoint.trimmingCharacters(in: .whitespaces)
-        guard !s.isEmpty else { return nil }
-        if s.hasPrefix("["), let close = s.firstIndex(of: "]"),
-           s.index(after: close) < s.endIndex, s[s.index(after: close)] == ":" {
-            return Int(s[s.index(close, offsetBy: 2)...])
-        }
-        guard let colon = s.lastIndex(of: ":"),
-              !s[s.index(after: colon)...].contains(":") else { return nil }
-        return Int(s[s.index(after: colon)...])
+        let endpoint = config.endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard WireGuardConfig.endpointProblem(endpoint) == nil, let colon = endpoint.lastIndex(of: ":") else { return nil }
+        return Int(endpoint[endpoint.index(after: colon)...])
     }
 
     /// WireGuard's registered port. Only reached when neither the row nor the

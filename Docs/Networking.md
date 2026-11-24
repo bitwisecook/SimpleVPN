@@ -235,7 +235,7 @@ flowchart LR
     subgraph FD["fd-shaped engines"]
         SP["socketpair(AF_UNIX, SOCK_DGRAM)"]
         SP --- OV["openvpn3<br/><i>4-byte AF header</i>"]
-        SP --- OC["libopenconnect<br/><i>raw IP, no header</i>"]
+        SP --- OC["libopenconnect on Darwin<br/><i>4-byte AF header</i>"]
     end
     subgraph GO["callback-shaped engines"]
         CB["C function pointers"]
@@ -250,12 +250,9 @@ flowchart LR
 
 * **`openvpn3` and `libopenconnect` want a tun file descriptor.** They are given **one end of a
   `socketpair(AF_UNIX, SOCK_DGRAM)`** and a pump copies between the other end and `packetFlow`.
-  Neither engine ever sees a utun. The framing differs between them and the code says so at both
-  sites: openvpn3's fd is framed like a real utun (a 4-byte big-endian address family prefixed on
-  every packet in both directions), while `libopenconnect`'s `os_tun` fd path carries **raw IP with
-  no prefix**, so inbound the family is inferred from the IP version nibble. That asymmetry is the
-  single most surprising thing in the packet path, and the OpenConnect bridge carries an explicit
-  note that if a future build switches to AF headers, the read and write must change together.
+  Both native Darwin adapters prefix packets with a four-byte address family in network byte
+  order. `VirtualDatagramPort` performs this framing for shared OpenVPN and both OpenConnect
+  attachments. Standalone OpenVPN applies the same framing in its own pump.
 * **The Go and netstack engines never touch a descriptor.** `wireguard-go`, the Tailscale engine, the
   `tun2socks` proxy engine and the SSH network tunnel are handed raw IP packets across a C callback
   boundary (`WGPacketInInstance` / instance callbacks and their equivalents). Because the callbacks are plain

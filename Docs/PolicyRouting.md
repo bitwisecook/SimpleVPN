@@ -3,6 +3,12 @@
 Design doc, 2026-08-03. Status: **agreed direction, phased build**. The near-term
 destination/CIDR divert rules shipped earlier remain the fallback path when PBR is off.
 
+**Current implementation and language draft, 2026-11-18.** SimpleVPN 0.8 ships a
+shared packet router for WireGuard compositions. The first executable policy draft
+adds an offline editor and destination checker. Its compiler, flow commitment rules,
+DNS provenance requirements and implementation stages supersede the corresponding
+sketches below. [Routing language](RoutingLanguage.md) · [Routing evidence](RoutingEvidence.md) · [Editor](RoutingEditor.md)
+
 **Review gate, 2026-10-05:** read [NetworkArchitectureReview.md](NetworkArchitectureReview.md)
 before implementing this proposal. The current app still uses independent VPN interfaces;
 the virtual router is unbuilt. The review identifies incomplete live route/DNS application,

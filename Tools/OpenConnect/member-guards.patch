@@ -1,0 +1,345 @@
+diff --git a/f5.c b/f5.c
+index 87d386ad..30466770 100644
+--- a/f5.c
++++ b/f5.c
+@@ -534,6 +534,14 @@ static int parse_options(struct openconnect_info *vpninfo, char *buf, int len,
+ 			vpn_progress(vpninfo, PRG_INFO, _("Got SplitTunneling0 value of %d\n"), st);
+ 			/* XX: Should we ignore split-{in,ex}cludes if this is zero? */
+ 		}
++		else if (vpninfo->managed_tun && !strncmp((char *)xml_node->name, "DNS_SPLIT", 9)) {
++			free(s);
++			s = (char *)xmlNodeGetContent(xml_node);
++			if (s && *s) {
++				ret = -ENOTSUP;
++				break;
++			}
++		}
+ 		/* XX: This is an objectively stupid way to use XML, a hierarchical data format. */
+ 		else if (   (!strncmp((char *)xml_node->name, "DNS", 3) && isdigit(xml_node->name[3]))
+ 			 || (!strncmp((char *)xml_node->name, "DNS6_", 5) && isdigit(xml_node->name[5])) ) {
+@@ -622,17 +630,19 @@ static int parse_options(struct openconnect_info *vpninfo, char *buf, int len,
+ 	}
+ 	buf_free(domains);
+ 
+-	ret = install_vpn_opts(vpninfo, new_opts, &new_ip_info);
+-
+-	if (ret || (*ipv4 < 1 && *ipv6 < 1) || !*ur_z || !*session_id) {
++	/* Only hand option ownership to vpninfo after validating the complete
++	 * response. Invalid or unsupported input remains locally owned. */
++	if (!ret && ((*ipv4 < 1 && *ipv6 < 1) || !*ur_z || !*session_id))
++		ret = -EINVAL;
++	if (!ret)
++		ret = install_vpn_opts(vpninfo, new_opts, &new_ip_info);
++	if (ret) {
+ 		free_optlist(new_opts);
+ 		free_split_routes(&new_ip_info);
+ 	err:
+-		vpn_progress(vpninfo, PRG_ERR,
+-			     _("Failed to find VPN options\n"));
+-		vpn_progress(vpninfo, PRG_DEBUG,
+-			     _("Response was:%s\n"), buf);
+-		ret = -EINVAL;
++		vpn_progress(vpninfo, PRG_ERR, _("Invalid or unsupported F5 network settings.\n"));
++		if (!ret)
++			ret = -EINVAL;
+ 	}
+ 	xmlFreeDoc(xml_doc);
+ 	free(s);
+@@ -658,7 +668,8 @@ static int get_ip_address(struct openconnect_info *vpninfo, char *header, char *
+ 	} else if (!strcasecmp(header, "X-VPN-client-IPv6")) {
+ 		vpn_progress(vpninfo, PRG_INFO,
+ 			     _("Got IPv6 address %s\n"), val);
+-		if (!vpninfo->ip_info.addr6 && !vpninfo->ip_info.netmask6)
++		if (!vpninfo->ip_info.addr6 && (!vpninfo->ip_info.netmask6 ||
++		    !strcmp(vpninfo->ip_info.netmask6, "::/0")))
+ 			inet_pton(AF_INET6, val, &ppp->out_ipv6_addr);
+ 	}
+ 	/* XX: The server's IP address(es) X-VPN-server-{IP,IPv6} are also
+diff --git a/fortinet.c b/fortinet.c
+index 94abf294..51295d6f 100644
+--- a/fortinet.c
++++ b/fortinet.c
+@@ -342,7 +342,7 @@ again:
+ }
+ 
+ static int parse_split_routes(struct openconnect_info *vpninfo, xmlNode *split_tunnel_info,
+-			      struct oc_vpn_option *new_opts, struct oc_ip_info *new_ip_info)
++			      struct oc_vpn_option **opts, struct oc_ip_info *new_ip_info)
+ {
+ 	int negate = 0, ret = 0;
+ 	int ip_version = !strcmp((char *)split_tunnel_info->parent->name, "ipv6") ? 6 : 4;
+@@ -361,20 +361,18 @@ static int parse_split_routes(struct openconnect_info *vpninfo, xmlNode *split_t
+ 				if (!inc || asprintf(&route, "%s/%s", s, s2) == -1) {
+ 					free(route);
+ 					free(inc);
+-					free_optlist(new_opts);
+-					free_split_routes(new_ip_info);
+ 					ret = -ENOMEM;
+ 					goto out;
+ 				}
+ 
+ 				if (negate) {
+ 					vpn_progress(vpninfo, PRG_INFO, _("Got IPv%d exclude route %s\n"), ip_version, route);
+-					inc->route = add_option_steal(&new_opts, "split-exclude", &route);
++					inc->route = add_option_steal(opts, "split-exclude", &route);
+ 					inc->next = new_ip_info->split_excludes;
+ 					new_ip_info->split_excludes = inc;
+ 				} else {
+ 					vpn_progress(vpninfo, PRG_INFO, _("Got IPv%d route %s\n"), ip_version, route);
+-					inc->route = add_option_steal(&new_opts, "split-include", &route);
++					inc->route = add_option_steal(opts, "split-include", &route);
+ 					inc->next = new_ip_info->split_includes;
+ 					new_ip_info->split_includes = inc;
+ 				}
+@@ -447,8 +445,10 @@ static int parse_fortinet_xml_config(struct openconnect_info *vpninfo, char *buf
+ 	}
+ 
+ 	xml_node = xmlDocGetRootElement(xml_doc);
+-	if (!xml_node || !xmlnode_is_named(xml_node, "sslvpn-tunnel"))
++	if (!xml_node || !xmlnode_is_named(xml_node, "sslvpn-tunnel")) {
++		xmlFreeDoc(xml_doc);
+ 		return -EINVAL;
++	}
+ 
+ 	struct oc_vpn_option *new_opts = NULL;
+ 	struct oc_ip_info new_ip_info = {};
+@@ -531,6 +531,10 @@ static int parse_fortinet_xml_config(struct openconnect_info *vpninfo, char *buf
+ 					}
+ 				} else if (xmlnode_is_named(x, "split-dns")) {
+ 					int ii;
++					if (vpninfo->managed_tun && x->properties) {
++						ret = -ENOTSUP;
++						goto out;
++					}
+ 					if (!xmlnode_get_prop(x, "domains", &s) && s && *s)
+ 						vpn_progress(vpninfo, PRG_ERR, _("WARNING: Got split-DNS domains %s (not yet implemented)\n"), s);
+ 					for (ii=1; ii<10; ii++) {
+@@ -542,7 +546,7 @@ static int parse_fortinet_xml_config(struct openconnect_info *vpninfo, char *buf
+ 							break;
+ 					}
+ 				} else if (xmlnode_is_named(x, "split-tunnel-info")) {
+-					ret = parse_split_routes(vpninfo, x, new_opts, &new_ip_info);
++					ret = parse_split_routes(vpninfo, x, &new_opts, &new_ip_info);
+ 					if (ret < 0)
+ 						goto out;
+ 				}
+@@ -576,6 +580,10 @@ static int parse_fortinet_xml_config(struct openconnect_info *vpninfo, char *buf
+ 					}
+ 				} else if (xmlnode_is_named(x, "split-dns")) {
+ 					int ii;
++					if (vpninfo->managed_tun && x->properties) {
++						ret = -ENOTSUP;
++						goto out;
++					}
+ 					if (!xmlnode_get_prop(x, "domains", &s) && s && *s)
+ 						vpn_progress(vpninfo, PRG_ERR, _("WARNING: Got split-DNS domains %s (not yet implemented)\n"), s);
+ 					for (ii=1; ii<10; ii++) {
+@@ -587,7 +595,7 @@ static int parse_fortinet_xml_config(struct openconnect_info *vpninfo, char *buf
+ 							break;
+ 					}
+ 				} else if (xmlnode_is_named(x, "split-tunnel-info")) {
+-					ret = parse_split_routes(vpninfo, x, new_opts, &new_ip_info);
++					ret = parse_split_routes(vpninfo, x, &new_opts, &new_ip_info);
+ 					if (ret != 0)
+ 						goto out;
+ 				}
+@@ -625,15 +633,16 @@ static int parse_fortinet_xml_config(struct openconnect_info *vpninfo, char *buf
+ 
+ 	ret = install_vpn_opts(vpninfo, new_opts, &new_ip_info);
+ 	if (ret) {
+-		free_optlist(new_opts);
+-                free_split_routes(&new_ip_info);
+-
+ 		vpn_progress(vpninfo, PRG_ERR,
+ 			     _("Failed to find VPN options\n"));
+ 		vpn_progress(vpninfo, PRG_DEBUG,
+ 			     _("Response was:%s\n"), buf);
+ 	}
+  out:
++	if (ret) {
++		free_split_routes(&new_ip_info);
++		free_optlist(new_opts);
++	}
+ 	xmlFreeDoc(xml_doc);
+ 	buf_free(domains);
+ 	free(s);
+diff --git a/libopenconnect.map.in b/libopenconnect.map.in
+index f036c071..538f820c 100644
+--- a/libopenconnect.map.in
++++ b/libopenconnect.map.in
+@@ -40,6 +40,8 @@ OPENCONNECT_5.0 {
+ 	openconnect_set_option_value;
+ 	openconnect_set_pfs;
+ 	openconnect_set_protect_socket_handler;
++	openconnect_check_full_sha256_pin;
++	openconnect_set_member_guards;
+ 	openconnect_set_proxy_auth;
+ 	openconnect_set_reported_os;
+ 	openconnect_set_reqmtu;
+diff --git a/library.c b/library.c
+index 668a1840..f7305b4b 100644
+--- a/library.c
++++ b/library.c
+@@ -196,6 +196,7 @@ struct openconnect_info *openconnect_vpninfo_new(const char *useragent,
+ 	vpninfo->dtls_fd = -1;
+ 	vpninfo->need_poll_cmd_fd = -1;
+ 	vpninfo->cmd_fd = -1;
++	vpninfo->cmd_fd_write = -1;
+ 	init_pkt_queue(&vpninfo->free_queue);
+ 	init_pkt_queue(&vpninfo->incoming_queue);
+ 	init_pkt_queue(&vpninfo->outgoing_queue);
+@@ -1522,6 +1523,32 @@ int openconnect_set_stoken_mode(struct openconnect_info *vpninfo,
+ 	return openconnect_set_token_mode(vpninfo, token_mode, token_str);
+ }
+ 
++int openconnect_check_full_sha256_pin(struct openconnect_info *vpninfo, const char *pin)
++{
++	const char *actual = openconnect_get_peer_cert_hash(vpninfo);
++	char hex[72] = "sha256:";
++	if (!pin || !actual || !*pin)
++		return -EINVAL;
++	if (!strncmp(pin, "pin-sha256:", 11))
++		return strcmp(pin, actual) ? -EINVAL : 0;
++	if (!strchr(pin, ':') && !strncmp(actual, "pin-sha256:", 11) && !strcmp(pin, actual + 11))
++		return 0;
++	if (!strncmp(pin, "sha256:", 7))
++		pin += 7;
++	if (strlen(pin) != 64 || strspn(pin, "0123456789abcdefABCDEF") != 64)
++		return -EINVAL;
++	memcpy(hex + 7, pin, 65);
++	return openconnect_check_peer_cert_hash(vpninfo, hex);
++}
++
++void openconnect_set_member_guards(struct openconnect_info *vpninfo, openconnect_member_socket_vfn socket_guard,
++                                   openconnect_member_pin_vfn pin_guard)
++{
++    vpninfo->managed_tun = 1;
++    vpninfo->member_socket = socket_guard;
++    vpninfo->member_pin = pin_guard;
++}
++
+ void openconnect_set_protect_socket_handler(struct openconnect_info *vpninfo,
+ 					    openconnect_protect_socket_vfn protect_socket)
+ {
+diff --git a/mainloop.c b/mainloop.c
+index f4babc7c..a01926e4 100644
+--- a/mainloop.c
++++ b/mainloop.c
+@@ -112,6 +112,8 @@ static int setup_tun_device(struct openconnect_info *vpninfo)
+ 		vpninfo->setup_tun(vpninfo->cbdata);
+ 		if (tun_is_up(vpninfo))
+ 			return 0;
++		if (vpninfo->managed_tun)
++			return -EIO;
+ 	}
+ 
+ #ifndef _WIN32
+diff --git a/openconnect-internal.h b/openconnect-internal.h
+index 7a836e9e..b2379462 100644
+--- a/openconnect-internal.h
++++ b/openconnect-internal.h
+@@ -816,6 +816,9 @@ struct openconnect_info {
+ 	openconnect_process_auth_form_vfn process_auth_form;
+ 	openconnect_progress_vfn progress;
+ 	openconnect_protect_socket_vfn protect_socket;
++	openconnect_member_socket_vfn member_socket;
++	openconnect_member_pin_vfn member_pin;
++	int managed_tun;
+ 	openconnect_getaddrinfo_vfn getaddrinfo_override;
+ 	openconnect_setup_tun_vfn setup_tun;
+ 	openconnect_reconnected_vfn reconnected;
+diff --git a/openconnect.h b/openconnect.h
+index 136f181a..68461574 100644
+--- a/openconnect.h
++++ b/openconnect.h
+@@ -790,6 +790,14 @@ void openconnect_set_external_browser_callback(struct openconnect_info *vpninfo,
+ /* Callback to allow binding a newly created socket's file descriptor to
+    a specific interface, e.g. with SO_BINDTODEVICE. This tells the kernel
+    not to route the traffic in question over the VPN tunnel. */
++/* SimpleVPN scoped members use error-returning carrier and post-hash TLS checks.
++ * A refused socket is never connected and a refused certificate never sends HTTP. */
++typedef int (*openconnect_member_socket_vfn)(void *privdata, int fd, int family);
++typedef int (*openconnect_member_pin_vfn)(void *privdata);
++int openconnect_check_full_sha256_pin(struct openconnect_info *vpninfo, const char *pin);
++void openconnect_set_member_guards(struct openconnect_info *vpninfo, openconnect_member_socket_vfn socket_guard,
++                                  openconnect_member_pin_vfn pin_guard);
++
+ typedef void (*openconnect_protect_socket_vfn) (void *privdata, int fd);
+ void openconnect_set_protect_socket_handler(struct openconnect_info *vpninfo,
+ 					    openconnect_protect_socket_vfn protect_socket);
+diff --git a/openssl.c b/openssl.c
+index 761cb034..e1853420 100644
+--- a/openssl.c
++++ b/openssl.c
+@@ -1690,6 +1690,8 @@ static int ssl_app_verify_callback(X509_STORE_CTX *ctx, void *arg)
+ 	X509_up_ref(cert);
+ 
+ 	set_peer_cert_hash(vpninfo);
++	if (vpninfo->member_pin && vpninfo->member_pin(vpninfo->cbdata) != 0)
++		return 0;
+ 
+ #ifdef X509_V_FLAG_PARTIAL_CHAIN
+ 	param = X509_STORE_CTX_get0_param(ctx);
+diff --git a/ppp.c b/ppp.c
+index ce1f4716..7abb1d16 100644
+--- a/ppp.c
++++ b/ppp.c
+@@ -780,7 +780,10 @@ static int handle_config_packet(struct openconnect_info *vpninfo,
+ 	int code = p[0], id = p[1];
+ 	int ret = 0, add_state = 0;
+ 
+-	/* XX: The NCP header consist of 4 bytes: u8 code, u8 id, u16 length (length includes this header) */
++	/* Validate control option lengths before either configuration loop allocates
++	 * option buffers or advances to the next option. */
++	if (len < 4 || load_be16(p + 2) < 4)
++		return -EINVAL;
+ 	if (load_be16(p + 2) > len) {
+ 		vpn_progress(vpninfo, PRG_ERR, "PPP config packet too short (header says %d bytes, received %d)\n", load_be16(p+2), len);
+ 		dump_buf_hex(vpninfo, PRG_ERR, '<', p, len);
+@@ -790,6 +793,12 @@ static int handle_config_packet(struct openconnect_info *vpninfo,
+ 		len = load_be16(p + 2);
+ 	}
+ 
++	if (code == CONFREQ || code == CONFNAK || code == CONFREJ) {
++		for (int off = 4; off < len; off += p[off + 1]) {
++			if (len - off < 2 || p[off + 1] < 2 || p[off + 1] > len - off)
++				return -EINVAL;
++		}
++	}
+ 	if (code > 0 && code <= 11)
+ 		vpn_progress(vpninfo, PRG_TRACE, _("Received %s/id %d %s from server\n"), proto_names(proto), id, lcp_names[code]);
+ 	switch (code) {
+@@ -942,7 +951,8 @@ static int handle_state_transition(struct openconnect_info *vpninfo, int dtls,
+ 		}
+ 
+ 		/* Ensure that we use the addresses we configured on PPP */
+-		if (ppp->want_ipv6 && !vpninfo->ip_info.addr6 && !vpninfo->ip_info.netmask6) {
++		if (ppp->want_ipv6 && !vpninfo->ip_info.addr6 && (!vpninfo->ip_info.netmask6 ||
++		    (vpninfo->proto->proto == PROTO_F5 && !strcmp(vpninfo->ip_info.netmask6, "::/0")))) {
+ 			vpninfo->ip_info.addr6 = add_option_ipaddr(&vpninfo->cstp_options, "ppp_ipv6",
+ 								   AF_INET6, &ppp->out_ipv6_addr);
+ 		}
+diff --git a/ssl.c b/ssl.c
+index b64c8979..5402ec32 100644
+--- a/ssl.c
++++ b/ssl.c
+@@ -93,6 +93,8 @@ static int cancellable_connect(struct openconnect_info *vpninfo, int sockfd,
+ 	if (set_sock_nonblock(sockfd))
+ 		goto sockerr;
+ 
++	if (vpninfo->member_socket && vpninfo->member_socket(vpninfo->cbdata, sockfd, addr->sa_family))
++		return -EACCES;
+ 	if (vpninfo->protect_socket)
+ 		vpninfo->protect_socket(vpninfo->cbdata, sockfd);
+ 
+@@ -1124,6 +1126,10 @@ int udp_connect(struct openconnect_info *vpninfo)
+ 		vpn_perror(vpninfo, _("Open UDP socket"));
+ 		return -EINVAL;
+ 	}
++	if (vpninfo->member_socket && vpninfo->member_socket(vpninfo->cbdata, fd, vpninfo->peer_addr->sa_family)) {
++		closesocket(fd);
++		return -EACCES;
++	}
+ 	if (vpninfo->protect_socket)
+ 		vpninfo->protect_socket(vpninfo->cbdata, fd);
+ 

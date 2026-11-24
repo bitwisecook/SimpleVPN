@@ -24,14 +24,18 @@ Tunnelblick replacement. The tunnel runs in a Network Extension **system extensi
 ## Building
 
 Requires Xcode 27.2+ (for the Icon Composer source), [XcodeGen](https://github.com/yonaskolb/XcodeGen), Homebrew
-for native engine prerequisites (installed by the engine scripts), and Go 1.27.3+ for the two
-Go static archives (1Password SDK, Tailscale/Headscale engine).
+for native engine prerequisites (installed by the engine scripts), Go 1.27.4+ for the static
+engines, and Rust with the `aarch64-apple-darwin` target for the routing evaluator.
+Release CI uses Rust 1.100.0. Xcode builds and statically links the evaluator into the packet
+tunnel and the embedded routing checker.
 
 ```sh
 ./Tools/build-openssl.sh               # verified static OpenSSL for macOS 26
 ./Tools/build-openvpn3-xcframework.sh   # one-time: builds Vendor/OpenVPNEngine.xcframework
 ./Tools/build-openconnect-xcframework.sh
 ./Tools/build-libssh-xcframework.sh
+./Tools/build-strongswan.sh
+./Tools/build-openssh-client.sh
 ./Tools/build-onepassword-sdk.sh        # Go: Vendor/onepassword-native/libopnative.a
 ./Tools/build-tailscale-engine.sh       # Go: Vendor/tailscale-engine/libtsengine.a
 xcodegen generate                       # project.yml is the source of truth

@@ -1,19 +1,9 @@
 // Copyright 2026 James Deucker (bitwisecook)
 // SPDX-License-Identifier: GPL-3.0-only
 //
-//  NativeVPNManager.swift
-//  The protocols macOS carries itself, via NEVPNManager (the "personal VPN"):
-//  IKEv2 and IPsec (IKEv1/Cisco). The OS does the tunnelling — no engine, no
-//  system extension. Two facts shape this:
-//   • NEVPNManager.shared() is a SINGLETON — macOS lets an app manage exactly
-//     one personal-VPN configuration at a time. We store the fields for several
-//     and push the selected one into that single slot on connect.
-//   • It needs the Personal VPN capability (com.apple.developer.networking.vpn.api)
-//     on the signing profile. Until that's provisioned, saveToPreferences fails
-//     with a clear entitlement error, surfaced verbatim.
-//  L2TP/IPsec has no third-party NEVPNManager API on macOS, so it's offered as a
-//  downloadable .mobileconfig the user installs (see NativeVPNConfig.mobileconfig).
-//
+// App-initiated IPsec sessions use the authenticated packet provider. The personal
+// manager is observed only for older profiles installed in System Settings.
+// Existing shared-secret, certificate and configuration-profile exports retain their identities.
 
 import Foundation
 @preconcurrency import NetworkExtension
@@ -23,6 +13,7 @@ import os
 struct NativeVPNConfig: Codable, Sendable, Equatable, Identifiable {
     var id = UUID().uuidString
     var name = "New Native VPN"
+    var routingEventSource: String?
     var kind: VPNKind = .ikev2      // .ikev2 | .ipsec | .l2tp
     var server = ""
     var remoteID = ""               // IKEv2 remote identifier (server cert CN / FQDN)
@@ -30,6 +21,8 @@ struct NativeVPNConfig: Codable, Sendable, Equatable, Identifiable {
     // Auth: username/password (EAP) is the default; a shared secret (PSK) is
     // common for IPsec/L2TP and available for IKEv2.
     var usesSharedSecret = false
+    var eapMSCHAPv2: Bool? = nil
+    var l2tpMSCHAPv2: Bool? = nil
     var groupOrRealm = ""           // IPsec group name / local identifier
     var onDemand = false
 
@@ -77,12 +70,15 @@ struct NativeVPNConfig: Codable, Sendable, Equatable, Identifiable {
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
+        routingEventSource = try values.decodeIfPresent(String.self, forKey: .routingEventSource)
         id = try values.decodeIfPresent(String.self, forKey: .id) ?? id
         name = try values.decodeIfPresent(String.self, forKey: .name) ?? name
         kind = try values.decodeIfPresent(VPNKind.self, forKey: .kind) ?? kind
         server = try values.decodeIfPresent(String.self, forKey: .server) ?? server
         remoteID = try values.decodeIfPresent(String.self, forKey: .remoteID) ?? remoteID
         username = try values.decodeIfPresent(String.self, forKey: .username) ?? username
+        l2tpMSCHAPv2 = try values.decodeIfPresent(Bool.self, forKey: .l2tpMSCHAPv2)
+        eapMSCHAPv2 = try values.decodeIfPresent(Bool.self, forKey: .eapMSCHAPv2)
         usesSharedSecret = try values.decodeIfPresent(Bool.self, forKey: .usesSharedSecret) ?? usesSharedSecret
         groupOrRealm = try values.decodeIfPresent(String.self, forKey: .groupOrRealm) ?? groupOrRealm
         onDemand = try values.decodeIfPresent(Bool.self, forKey: .onDemand) ?? onDemand
@@ -290,26 +286,33 @@ final class NativeVPNManager {
 
     private(set) var lastError: String?
     /// Set when saveToPreferences fails for the missing Personal VPN capability.
-    private(set) var needsEntitlement = false
 
     private var store: [NativeVPNConfig] = []
     private static let key = "nativeVPNs.v1"
     private static let installedIdentityKey = "nativeVPN.installedIdentity.v1"
     private var observer: NSObjectProtocol?
+    private var packetObserver: NSObjectProtocol?
+    weak var gatewayCoordinator: VPNController?
+    private var packetManager: NETunnelProviderManager?
+    private static let protectedKey = "nativeVPNs.packet-policy.v1"
     @ObservationIgnored private let operations = AsyncOperationGate()
     private var lifecycleRevision: UInt64 = 0
 
     var configs: [NativeVPNConfig] { store }
 
-    init(loadSaved: Bool = true) {
+    private let configDefaults: UserDefaults
+
+    init(loadSaved: Bool = true, defaults: UserDefaults = .standard, observeSystem: Bool = true) {
+        configDefaults = defaults
         guard loadSaved else { return }
         load()
+        guard observeSystem else { return }
         // Scope to the shared personal-VPN connection so we don't churn on every
         // unrelated OpenVPN packet-tunnel transition.
         observer = NotificationCenter.default.addObserver(
             forName: .NEVPNStatusDidChange, object: NEVPNManager.shared().connection, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    guard let self else { return }
+                    guard let self, self.packetManager == nil else { return }
                     let s = NEVPNManager.shared().connection.status
                     self.status = s
                     // The tunnel can drop OS-side (sleep, server, auth) without a
@@ -325,9 +328,105 @@ final class NativeVPNManager {
 
     func save(_ raw: NativeVPNConfig) {
         // normalized() on every save path (the OpenVPNOverrides rule).
-        let c = raw.normalized()
+        var c = raw.normalized()
+        if let previous = store.first(where: { $0.id == c.id }) {
+            c.routingEventSource = previous.routingEventSource
+        }
         if let i = store.firstIndex(where: { $0.id == c.id }) { store[i] = c } else { store.append(c) }
         persist()
+    }
+
+    func setPacketPolicy(_ source: String?, for draft: NativeVPNConfig) async throws {
+        guard !ManagedPolicy.lockConfiguration else { throw VPNController.configLocked }
+        let reservation = gatewayCoordinator?.connectionReservations.reserve(owner: "native-policy." + draft.id, members: [draft.id])
+        defer { if let reservation { gatewayCoordinator?.connectionReservations.finish(reservation) } }
+        if let coordinator = gatewayCoordinator, reservation == nil || coordinator.virtualManager(for: draft.id) != nil {
+            throw ProfilePacketPolicy.failure("Disconnect the virtual connection before changing this member’s handlers.")
+        }
+        let previous = store.first { $0.id == draft.id }
+        guard previous != nil else { throw ProfilePacketPolicy.failure("Save the VPN before adding traffic handlers.") }
+        await operations.acquire()
+        defer { operations.release() }
+        if source != nil {
+            try await SystemExtensionManager.requireCurrentProvider()
+            try await ProfilePacketPolicy.validate(source, adapter: draft.ownedIPsec?.adapterID)
+            try await retirePersonalMirror(of: draft, requiresIsolation: true)
+        }
+        try await NativePacketMirror.revoke(draft.id)
+        guard let index = store.firstIndex(where: { $0.id == draft.id }), store[index] == previous else {
+            throw ProfilePacketPolicy.failure("The VPN changed. Reopen its routing settings.")
+        }
+        store[index].routingEventSource = source
+        persist()
+    }
+
+    func prepareVirtualMember(_ config: NativeVPNConfig) async throws {
+        await operations.acquire()
+        defer { operations.release() }
+        guard store.first(where: { $0.id == config.id }) == config, !(activeConfigID == config.id && UI.isActive(status)) else {
+            throw ProfilePacketPolicy.failure("The selected IPsec VPN changed or is already active.")
+        }
+        try await retirePersonalMirror(of: config, requiresIsolation: true)
+    }
+
+    func status(for id: String) -> NEVPNStatus {
+        gatewayCoordinator?.virtualMemberStatus(for: id) ?? (activeConfigID == id ? status : .disconnected)
+    }
+
+    func disconnect(_ id: String) {
+        if let vpn = gatewayCoordinator, vpn.virtualManager(for: id) != nil { vpn.disconnect(id: id) }
+        else if activeConfigID == id { disconnect() }
+    }
+
+    private func retirePersonalMirror(of config: NativeVPNConfig, requiresIsolation: Bool) async throws {
+        guard config.kind != .l2tp else { return }
+        let personal = NEVPNManager.shared()
+        let identity = UserDefaults.standard.data(forKey: Self.installedIdentityKey).flatMap {
+            try? JSONDecoder().decode(NativeVPNInstalledIdentity.self, from: $0)
+        }
+        do { try await personal.loadFromPreferences() } catch {
+            if identity?.id == config.id || requiresIsolation { throw error }
+            return
+        }
+        guard personal.isEnabled, let proto = personal.protocolConfiguration else { return }
+        guard identity?.id == config.id || (identity == nil && proto.serverAddress == config.server && personal.localizedDescription == config.name) else { return }
+        if !requiresIsolation, !personal.isOnDemandEnabled, !UI.isActive(personal.connection.status) { return }
+        guard identity?.matches(proto) == true, !UI.isActive(personal.connection.status) else {
+            throw ProfilePacketPolicy.failure("Disconnect and identify the installed personal VPN before switching it to the built-in IPsec engine.")
+        }
+        personal.isOnDemandEnabled = false
+        personal.isEnabled = false
+        try await personal.saveToPreferences()
+    }
+
+    private func observePacket(_ manager: NETunnelProviderManager, id: String) {
+        if let packetObserver { NotificationCenter.default.removeObserver(packetObserver) }
+        packetManager = manager
+        activeConfigID = id
+        status = manager.connection.status
+        updatePacketRole(id: id, manager: manager)
+        packetObserver = NotificationCenter.default.addObserver(forName: .NEVPNStatusDidChange, object: manager.connection, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let current = self.packetManager, NativePacketMirror.profileID(current) == id else { return }
+                self.status = current.connection.status
+                self.updatePacketRole(id: id, manager: current)
+                if !UI.isActive(self.status) {
+                    self.activeConfigID = nil
+                    self.packetManager = nil
+                    if let token = self.packetObserver { NotificationCenter.default.removeObserver(token); self.packetObserver = nil }
+                }
+            }
+        }
+    }
+
+    private func updatePacketRole(id: String, manager: NETunnelProviderManager) {
+        guard let vpn = gatewayCoordinator, let config = store.first(where: { $0.id == id }) else { return }
+        let s = manager.connection.status
+        let ended = s == .invalid || s == .disconnected
+        vpn.nativePacketManagers[id] = ended ? nil : manager
+        vpn.nativePacketProfiles[id] = ended ? nil : .init(id: id, name: config.name, server: config.server, status: s, kind: config.kind)
+        vpn.routes.handleStatusChange(id: id, connected: s == .connected, reasserting: s == .reasserting, disconnected: ended)
+        if ended { vpn.pushedNetworkState[id] = nil }
     }
 
     /// Write new sidebar positions for the configs named in `positions`, and persist
@@ -345,6 +444,10 @@ final class NativeVPNManager {
     }
 
     @discardableResult func remove(_ id: String) async -> Bool {
+        if let vpn = gatewayCoordinator, vpn.virtualManager(for: id) != nil || vpn.connectionReservations.isStarting(id) {
+            lastError = "Disconnect the composition before removing this member."
+            return false
+        }
         lifecycleRevision += 1
         await operations.acquire()
         defer { operations.release() }
@@ -361,7 +464,7 @@ final class NativeVPNManager {
             if identity == nil, let config = store.first(where: { $0.id == id }),
                manager.protocolConfiguration?.serverAddress == config.server,
                manager.localizedDescription == config.name {
-                lastError = "Connect this legacy native VPN once to verify its installed identity before removing it. Its credentials were kept."
+                lastError = "Remove this legacy VPN in System Settings before deleting its saved configuration. Its credentials were kept."
                 return false
             }
             if let identity,
@@ -375,6 +478,8 @@ final class NativeVPNManager {
             lastError = "The installed native VPN could not be removed. Its configuration and credentials were kept."
             return false
         }
+        do { try await NativePacketMirror.revoke(id) }
+        catch { lastError = error.localizedDescription; return false }
         store.removeAll { $0.id == id }
         ConfigSecretTransfer.deleteAll(id: id)
         CustomRoutingFallbackStore().clear(id)
@@ -389,6 +494,11 @@ final class NativeVPNManager {
         await operations.acquire()
         defer { operations.release() }
         guard revision == lifecycleRevision else { return }
+        if !store.isEmpty, let active = try? await NativePacketMirror.managers().first(where: { UI.isActive($0.connection.status) }),
+           let id = NativePacketMirror.profileID(active), store.contains(where: { $0.id == id }), revision == lifecycleRevision {
+            observePacket(active, id: id)
+            return
+        }
         let mgr = NEVPNManager.shared()
         try? await mgr.loadFromPreferences()
         guard revision == lifecycleRevision else { return }
@@ -452,20 +562,12 @@ final class NativeVPNManager {
     func replacementWarning(for id: String) -> String? {
         guard UI.isActive(status), let activeConfigID, activeConfigID != id else { return nil }
         let name = store.first { $0.id == activeConfigID }?.name.trimmingCharacters(in: .whitespaces)
-        return "Connecting will disconnect \(name.flatMap { $0.isEmpty ? nil : $0 } ?? "the other native VPN")."
+        return "Disconnect the active VPN named \(name.flatMap { $0.isEmpty ? nil : $0 } ?? "the other native VPN")."
     }
 
-    /// Push this config into the single personal-VPN slot and start it.
-    /// `secret` is the IKEv2 password/PSK, or the IPsec XAuth password.
-    /// `sharedSecret` is the IPsec group PSK (ignored for IKEv2, which only
-    /// ever needs one secret at a time).
-    /// `proxy` is the user's Custom Routing proxy realized as `NEProxySettings`
-    /// (see `ProxyCustomization.nativeApplyRequest`) — for these kinds the APP is
-    /// the proxy applier, at connect, through the VPN configuration itself; any
-    /// authenticated native proxies are refused because this API persists their
-    /// password values instead of referencing our Keychain rows. Every caller
-    /// must decide, so a new call site can't silently drop the user's proxy.
-    func connect(_ c: NativeVPNConfig, secret: String, sharedSecret: String = "",
+    /// An app-initiated session always starts the owned packet transport. Existing
+    /// personal VPN configurations can still be connected in System Settings.
+    func connect(_ c: NativeVPNConfig, secret: String, sharedSecret: String = "", pppPassword: String = "",
                  proxy: NEProxySettings?) async {
         lifecycleRevision += 1
         let revision = lifecycleRevision
@@ -473,259 +575,69 @@ final class NativeVPNManager {
         defer { operations.release() }
         guard revision == lifecycleRevision, store.contains(where: { $0.id == c.id }), !Task.isCancelled else { return }
         lastConnectionFailure = nil
-        lastError = nil; needsEntitlement = false
+        lastError = nil
         defer {
             if let lastError { lastConnectionFailure = (c.id, lastError) }
         }
-        guard c.kind != .l2tp else {
-            lastError = "L2TP can't be configured programmatically on macOS. Use “Export Configuration Profile” and install it."
+        let reservation = gatewayCoordinator?.connectionReservations.reserve(owner: "native." + c.id, members: [c.id])
+        defer { if let reservation { gatewayCoordinator?.connectionReservations.finish(reservation) } }
+        func canStart() -> Bool {
+            revision == lifecycleRevision && !Task.isCancelled &&
+                (reservation.map { gatewayCoordinator?.connectionReservations.isCurrent($0) == true } ?? (gatewayCoordinator == nil))
+        }
+        if let vpn = gatewayCoordinator, vpn.virtualManager(for: c.id) != nil || reservation == nil {
+            lastError = "Disconnect this VPN’s virtual connection before starting it independently."
             return
         }
-        guard !NativeProxyCredentials.requiresBroker(proxy) else {
-            lastError=NativeProxyCredentials.unsupported; return
+        let source = store.first(where: { $0.id == c.id })?.routingEventSource
+        guard source == c.routingEventSource else {
+            lastError = "The VPN’s routing rules changed. Reopen it before connecting."
+            return
         }
-        let mgr = NEVPNManager.shared()
-        try? await mgr.loadFromPreferences()
-        guard revision == lifecycleRevision, !Task.isCancelled else { return }
-        guard await migrateStoredProxyCredentials(mgr) else { return }
-        guard revision == lifecycleRevision, !Task.isCancelled else { return }
-        lastError=nil
-
-        // Distinct keychain accounts per secret — IPsec needs the group PSK
-        // and the XAuth password to coexist, so they can no longer share one
-        // persistent reference (that was bug: both ended up pointing at
-        // whichever value happened to come in last).
-        let baseAccount = "native.\(c.id)"
-        let pskAccount = "native.\(c.id).psk"
-
+        if packetManager.map({ UI.isActive($0.connection.status) }) == true {
+            lastError = "Disconnect the active IPsec VPN before connecting another."
+            return
+        }
+        if let issue = c.ownedConnectionIssue { lastError = issue.sentence; return }
+        guard proxy == nil else { lastError = "Remove the system proxy override or use this VPN in System Settings. The built-in IPsec transport cannot apply it."; return }
+        guard let config = c.ownedIPsec, let gatewayCoordinator else { lastError = "The built-in IPsec connection is unavailable."; return }
+        let psk = c.kind == .ipsec ? sharedSecret : secret
+        guard !psk.isEmpty else { lastError = config.usesEAP == true ? "Enter the EAP password." : "Enter the IPsec shared secret."; return }
+        guard !config.usesXAuth || !secret.isEmpty else { lastError = "Enter the XAuth password."; return }
+        guard config.usesL2TP != true || OwnedIPsecConfiguration.validPPPCredential(pppPassword) else { lastError = "Enter a printable ASCII PPP password of 1–255 bytes."; return }
         do {
-            let proto: NEVPNProtocol
-            switch c.kind {
-            case .ikev2:
-                let p = NEVPNProtocolIKEv2()
-                p.serverAddress = c.server
-                p.remoteIdentifier = c.remoteID.isEmpty ? c.server : c.remoteID
-                p.localIdentifier = c.username
-                // A reference is only written for a secret that EXISTS: storing
-                // the empty string would hand the OS a valid-looking reference
-                // to nothing (and some concentrators reject the empty attempt
-                // rather than falling through to a prompt).
-                if c.usesSharedSecret {
-                    p.authenticationMethod = .sharedSecret
-                    if !secret.isEmpty {
-                        p.sharedSecretReference = try KeychainCredentialStore.persistentReference(forSecret: secret, account: baseAccount)
-                    } else {
-                        KeychainCredentialStore.deleteNativeSecret(account: baseAccount)
-                    }
-                } else {
-                    p.authenticationMethod = .none
-                    p.useExtendedAuthentication = true      // EAP username/password
-                    p.username = c.username
-                    if !secret.isEmpty {
-                        p.passwordReference = try KeychainCredentialStore.persistentReference(forSecret: secret, account: baseAccount)
-                    } else {
-                        KeychainCredentialStore.deleteNativeSecret(account: baseAccount)
-                    }
-                }
-                applyIKEv2Options(c, to: p)
-                proto = p
-            case .ipsec:
-                let p = NEVPNProtocolIPSec()
-                p.serverAddress = c.server
-                // XAuth is OPTIONAL here (the group PSK alone is sometimes the
-                // whole sign-in), and now explicitly answered by the editor's
-                // toggle: with it off nothing username/password-shaped is sent,
-                // so a name left over from an import can't turn extended
-                // authentication back on behind the user's back.
-                let xauth = c.usesXAuth
-                p.username = xauth ? c.username : ""
-                p.useExtendedAuthentication = xauth && (!c.username.isEmpty || !secret.isEmpty)
-                p.localIdentifier = c.groupOrRealm.isEmpty ? nil : c.groupOrRealm
-                // Certificate/identity authentication isn't wired up (no
-                // identity picker or import path exists) — the only mode that
-                // actually works, and the one the UI now forces, is a shared
-                // secret optionally paired with XAuth username/password (the
-                // Cisco-style combo CiscoImport produces from .pcf files).
-                p.authenticationMethod = .sharedSecret
-                if !sharedSecret.isEmpty {
-                    p.sharedSecretReference = try KeychainCredentialStore.persistentReference(forSecret: sharedSecret, account: pskAccount)
-                } else {
-                    KeychainCredentialStore.deleteNativeSecret(account: pskAccount)
-                }
-                // An empty XAuth password must leave passwordReference NIL — a
-                // reference to "" is an empty XAuth attempt, which some
-                // concentrators refuse outright. Same for XAuth turned off.
-                if xauth, !secret.isEmpty {
-                    p.passwordReference = try KeychainCredentialStore.persistentReference(forSecret: secret, account: baseAccount)
-                } else {
-                    KeychainCredentialStore.deleteNativeSecret(account: baseAccount)
-                }
-                applyCommonOptions(c, to: p)
-                proto = p
-            default:
-                return
+            if let ensure = gatewayCoordinator.ensureExtensionReady, !(await ensure()) {
+                throw ProfilePacketPolicy.failure("Approve SimpleVPN’s network extension in System Settings before connecting with the built-in IPsec engine.")
             }
-
-            // The one native proxy hook: macOS applies these settings itself while the
-            // tunnel is up (we then only OBSERVE them via SCDynamicStore — the Proxy
-            // mediator's `.limited` bucket).
-            proto.proxySettings = proxy
-
-            mgr.protocolConfiguration = proto
-            mgr.localizedDescription = c.name
-            mgr.isEnabled = true
-            mgr.isOnDemandEnabled = c.onDemand
-            // isOnDemandEnabled alone does nothing without at least one rule;
-            // a bare Connect rule is the sensible default (reconnect whenever
-            // something opens a network connection), matching what the
-            // "Connect on demand" toggle implies to a user.
-            mgr.onDemandRules = c.onDemand ? [NEOnDemandRuleConnect()] : []
-
-            try await mgr.saveToPreferences()
-            if let identity = NativeVPNInstalledIdentity(id: c.id, protocol: mgr.protocolConfiguration),
-               let data = try? JSONEncoder().encode(identity) {
-                UserDefaults.standard.set(data, forKey: Self.installedIdentityKey)
+            try await SystemExtensionManager.requireCurrentProvider()
+            try await retirePersonalMirror(of: c, requiresIsolation: c.requiresOwnedIPsec)
+            let manager = try await NativePacketMirror.start(config, name: c.name, psk: psk, xauthPassword: secret, pppPassword: pppPassword, source: source, coordinator: gatewayCoordinator) {
+                canStart() && self.store.first(where: { $0.id == c.id }) == c
             }
-            try await mgr.loadFromPreferences()
-            guard revision == lifecycleRevision, store.contains(where: { $0.id == c.id }), !Task.isCancelled else { return }
-            try mgr.connection.startVPNTunnel()
-            activeConfigID = c.id
-        } catch {
-            let ns = error as NSError
-            Self.log.error("native connect failed: \(ns.localizedDescription, privacy: .public) domain=\(ns.domain, privacy: .public) code=\(ns.code)")
-            if ns.domain == NEVPNErrorDomain, let code = NEVPNError.Code(rawValue: ns.code) {
-                switch code {
-                case .configurationReadWriteFailed:
-                    // macOS gives this same code both for a missing Personal
-                    // VPN entitlement AND for the user declining the "Add VPN
-                    // Configurations" prompt — there's no distinct code for
-                    // either, only the wording differs. Route on that wording
-                    // rather than lumping both under "not provisioned".
-                    let desc = ns.localizedDescription.localizedLowercase
-                    let underlying = ((ns.userInfo[NSUnderlyingErrorKey] as? NSError)?.localizedDescription ?? "").localizedLowercase
-                    if desc.contains("denied") || desc.contains("cancel") || underlying.contains("denied") || underlying.contains("cancel") {
-                        lastError = "You declined the “Add VPN Configurations” prompt. Native VPN needs that approval — try Connect again and allow it."
-                    } else {
-                        needsEntitlement = true
-                        lastError = "This build isn't provisioned for the native personal VPN yet (Personal VPN capability). \(ns.localizedDescription)"
-                    }
-                default:
-                    // configurationInvalid / configurationDisabled / connectionFailed /
-                    // configurationStale / configurationUnknown all mean something
-                    // else entirely — show what actually happened.
-                    lastError = ns.localizedDescription
-                }
-            } else if ns.localizedDescription.localizedCaseInsensitiveContains("entitlement") {
-                needsEntitlement = true
-                lastError = "This build isn't provisioned for the native personal VPN yet (Personal VPN capability). \(ns.localizedDescription)"
-            } else {
-                lastError = ns.localizedDescription
-            }
-        }
-    }
-
-    /// Options that live on NEVPNProtocol itself, not the IKEv2 subclass —
-    /// apply to every native kind so Routing-section toggles (Send All
-    /// Traffic, Allow Local Network, Disconnect on Sleep) actually do
-    /// something for IPsec, not just IKEv2.
-    private func applyCommonOptions(_ c: NativeVPNConfig, to p: NEVPNProtocol) {
-        p.disconnectOnSleep = c.disconnectOnSleep
-        // NO availability gate. Both properties are API_AVAILABLE(macos(10.15))
-        // per <NetworkExtension/NEVPNProtocol.h>, and this app's deployment
-        // target is macOS 26 — the `if #available(macOS 15.0, *)` that used to
-        // wrap these was wrong on both counts (wrong version, and unreachable-
-        // false anyway). While it was there the two Traffic toggles were live in
-        // the UI and did nothing to the protocol object on any system where the
-        // check could fail, i.e. the UI could lie.
-        p.includeAllNetworks = c.includeAllNetworks
-        p.excludeLocalNetworks = c.excludeLocalNetworks
-    }
-
-    /// Map the comprehensive IKEv2 fields onto the protocol object; each blank
-    /// value leaves the OS default in place.
-    private func applyIKEv2Options(_ c: NativeVPNConfig, to p: NEVPNProtocolIKEv2) {
-        applyCommonOptions(c, to: p)
-        // "" means "leave the OS default alone" — the same meaning "" carries in
-        // every other field here. It used to fall through to `.medium`, so the
-        // picker's first option said "Default" while quietly pinning a value.
-        switch c.deadPeerDetection {
-        case "none": p.deadPeerDetectionRate = .none
-        case "low": p.deadPeerDetectionRate = .low
-        case "high": p.deadPeerDetectionRate = .high
-        case "medium": p.deadPeerDetectionRate = .medium
-        default: break
-        }
-        p.disableMOBIKE = c.disableMOBIKE
-        for sa in [p.ikeSecurityAssociationParameters, p.childSecurityAssociationParameters] {
-            // The 128-bit cases are deprecated by Apple (macOS 14) with no
-            // replacement — the advice is "use 256-bit". They stay because a
-            // concentrator that only proposes AES-128 is otherwise unreachable,
-            // and dropping the case would fail the connection silently. Reached
-            // via rawValue (AES128 = 3, AES128GCM = 5 per <NEVPNProtocolIKEv2.h>)
-            // so the deliberate use doesn't raise a deprecation warning every build.
-            switch c.ikeEncryption {
-            case "aes128": sa.encryptionAlgorithm = NEVPNIKEv2EncryptionAlgorithm(rawValue: 3)!
-            case "aes256": sa.encryptionAlgorithm = .algorithmAES256
-            case "aes128gcm": sa.encryptionAlgorithm = NEVPNIKEv2EncryptionAlgorithm(rawValue: 5)!
-            case "aes256gcm": sa.encryptionAlgorithm = .algorithmAES256GCM
-            // NEVPNIKEv2EncryptionAlgorithmChaCha20Poly1305 is
-            // API_AVAILABLE(macos(10.15)) — the `if #available(macOS 14.0, *)`
-            // that used to wrap this was wrong, and with a macOS 26 deployment
-            // target it was also unreachable-false-free. Either way the picker
-            // needs no filtering: every listed cipher is applied on every system
-            // this app runs on.
-            case "chacha20poly1305": sa.encryptionAlgorithm = .algorithmChaCha20Poly1305
-            default: break   // "" — the OS default stands
-            }
-            switch c.ikeIntegrity {
-            case "sha256": sa.integrityAlgorithm = .SHA256
-            case "sha384": sa.integrityAlgorithm = .SHA384
-            case "sha512": sa.integrityAlgorithm = .SHA512
-            default: break   // "" — the OS default stands (SHA-1 is obsoleted)
-            }
-            // Out of range would be refused by saveToPreferences as an opaque
-            // "configuration invalid"; normalized() has already dropped one.
-            if let m = c.ikeLifetimeMinutes, NativeVPNConfig.ikeLifetimeRange.contains(m) {
-                sa.lifetimeMinutes = Int32(m)
-            }
-        }
-        // The DH group picker always sets the IKE SA's group (or leaves the OS
-        // default on "Automatic"). The child SA's diffieHellmanGroup is what
-        // actually turns Perfect Forward Secrecy on for CREATE_CHILD_SA
-        // rekeys — Apple's API has no separate "enable PFS" bit, so the
-        // enablePFS toggle is wired to *whether* the child SA gets a group at
-        // all, using the same group as the picker (falling back to the
-        // widely-supported Group 14 if the picker is left on Automatic).
-        func dhGroup(_ v: String) -> NEVPNIKEv2DiffieHellmanGroup? {
-            switch v {
-            case "14": return .group14
-            case "15": return .group15
-            case "16": return .group16
-            case "19": return .group19
-            case "20": return .group20
-            case "21": return .group21
-            case "31": return .group31
-            default: return nil
-            }
-        }
-        if let g = dhGroup(c.ikeDHGroup) { p.ikeSecurityAssociationParameters.diffieHellmanGroup = g }
-        if c.enablePFS {
-            p.childSecurityAssociationParameters.diffieHellmanGroup = dhGroup(c.ikeDHGroup) ?? .group14
-        }
+            observePacket(manager, id: c.id)
+        } catch { lastError = error.localizedDescription }
     }
 
     func disconnect() {
         lifecycleRevision += 1
-        NEVPNManager.shared().connection.stopVPNTunnel()
+        if let packetManager { packetManager.connection.stopVPNTunnel() }
+        else { NEVPNManager.shared().connection.stopVPNTunnel() }
         activeConfigID = nil
     }
 
     private func load() {
-        guard let d = UserDefaults.standard.data(forKey: Self.key),
-              let list = try? JSONDecoder().decode([NativeVPNConfig].self, from: d) else { return }
-        store = list
+        func list(_ key: String) -> [NativeVPNConfig] {
+            guard let bytes = configDefaults.data(forKey: key) else { return [] }
+            return (try? JSONDecoder().decode([NativeVPNConfig].self, from: bytes)) ?? []
+        }
+        let protected = list(Self.protectedKey)
+        let ids = Set(protected.map(\.id))
+        store = list(Self.key).filter { !ids.contains($0.id) } + protected
     }
     private func persist() {
-        if let d = try? JSONEncoder().encode(store) { UserDefaults.standard.set(d, forKey: Self.key) }
+        guard let ordinary = try? JSONEncoder().encode(store.filter { !$0.requiresOwnedIPsec }),
+              let protected = try? JSONEncoder().encode(store.filter(\.requiresOwnedIPsec)) else { return }
+        configDefaults.set(ordinary, forKey: Self.key)
+        configDefaults.set(protected, forKey: Self.protectedKey)
     }
 }

@@ -78,9 +78,30 @@ final class TailscaleEngine: @unchecked Sendable {
     private var callbackContext: UInt64 = 0
     private var starting = false
 
-    init(provider: NEPacketTunnelProvider & SVPTunnelSettingsApplying, delegate: any TailscaleEngineDelegate) {
+    private let packetPolicy: SVPPacketPolicy?
+    private var childReceive: (@Sendable (Data) -> Void)?
+    private var childSettings: (@Sendable (TailscaleTunnelConfig) -> Void)?
+
+    init(provider: NEPacketTunnelProvider & SVPTunnelSettingsApplying, delegate: any TailscaleEngineDelegate, packetPolicy: SVPPacketPolicy) {
+        self.packetPolicy = packetPolicy
         self.provider = provider
         self.delegate = delegate
+    }
+
+    init(delegate: any TailscaleEngineDelegate, received: @escaping @Sendable (Data) -> Void,
+         negotiated: @escaping @Sendable (TailscaleTunnelConfig) -> Void) {
+        self.packetPolicy = nil
+        self.delegate = delegate
+        self.childReceive = received
+        self.childSettings = negotiated
+    }
+
+    func sendPacket(_ packet: Data) -> Bool {
+        let current = lock.withLock { stopped ? 0 : handle }
+        guard current != 0, !packet.isEmpty, packet.count <= 65_535 else { return false }
+        return packet.withUnsafeBytes { raw in
+            TSPacketInInstance(current, raw.baseAddress, Int32(raw.count)) == 1
+        }
     }
 
     // MARK: - Lifecycle
@@ -229,16 +250,7 @@ final class TailscaleEngine: @unchecked Sendable {
         guard let flow = provider?.packetFlow else { return }
         flow.readPackets { [weak self] packets, _ in
             guard let self else { return }
-            for packet in packets {
-                // Raw IP packet straight through — no PF header on this
-                // boundary. A full queue drops (TSPacketIn returns 0), which is
-                // correct: a VPN must shed load, never stall the flow reader.
-                packet.withUnsafeBytes { raw in
-                    guard let base = raw.baseAddress, !raw.isEmpty, raw.count <= 65_535 else { return }
-                    let current = self.lock.withLock { self.stopped ? 0 : self.handle }
-                    _ = TSPacketInInstance(current, base, Int32(raw.count))
-                }
-            }
+            self.packetPolicy?.routeOutbound(packets) { packet in _ = self.sendPacket(packet) }
             self.lock.lock(); let running = self.pumpRunning && !self.stopped; self.lock.unlock()
             if running { self.readMore() }
         }
@@ -249,7 +261,9 @@ final class TailscaleEngine: @unchecked Sendable {
     /// packet).
     fileprivate func deliver(_ packet: Data) {
         guard !lock.withLock({ stopped }) else { return }
-        guard let flow = provider?.packetFlow, let first = packet.first else { return }
+        if let childReceive { childReceive(packet); return }
+        guard let flow = provider?.packetFlow, let packet = packetPolicy?.routeInbound(packet),
+              let first = packet.first else { return }
         // IP version nibble decides the protocol number NE carries alongside
         // the packet — the packet itself stays raw.
         let proto: Int32 = (first >> 4) == 6 ? AF_INET6 : AF_INET
@@ -297,7 +311,14 @@ final class TailscaleEngine: @unchecked Sendable {
     fileprivate func handleNetmap(_ json: String) {
         guard let config = TailscaleTunnelConfig.decode(json: json) else { return }
         work.async { [weak self] in
-            guard let self, let provider = self.provider else { return }
+            guard let self else { return }
+            if let childSettings = self.childSettings {
+                guard !self.lock.withLock({ self.stopped }) else { return }
+                childSettings(config)
+                if !config.localAddrs.isEmpty { self.finishStart(with: nil) }
+                return
+            }
+            guard let provider = self.provider else { return }
             self.lock.lock()
             guard !self.stopped else { self.lock.unlock(); return }
             let unchanged = self.lastConfig == config

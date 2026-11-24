@@ -1,0 +1,395 @@
+[
+  {
+    "id": "wireguard-shared",
+    "name": "Shared virtual interface",
+    "vpnKinds": [
+      "wireguard",
+      "proxytunnel",
+      "tailscale",
+      "sshnet",
+      "ssh",
+      "openvpn",
+      "cisco",
+      "globalprotect",
+      "fortinet",
+      "f5apm",
+      "juniper",
+      "pulse",
+      "array",
+      "ikev2",
+      "ipsec",
+      "l2tp"
+    ],
+    "profiles": [
+      "Single-peer WireGuard or paired UniFi Teleport",
+      "SOCKS5, HTTP CONNECT or HTTPS CONNECT",
+      "Tailscale or Headscale",
+      "SSH Network Tunnel or point-to-point SSH",
+      "Certificate-only OpenVPN",
+      "Compatible profiles for all seven OpenConnect protocol families",
+      "Built-in IKEv2, Cisco IPsec or L2TP/IPsec"
+    ],
+    "boundary": "Inner IP at member selection and before return delivery to the Mac",
+    "availability": "shipped",
+    "richPolicy": true,
+    "description": "One virtual interface selects a profile for each new flow. The shared outbound handler sees the capture address. The selected member then checks its translated packet. On return, the member and shared rules run before reverse translation. Only the authenticated generation can return a matching flow. The connected profiles must agree on capture and resolver settings."
+  },
+  {
+    "id": "wireguard",
+    "name": "WireGuard · standalone",
+    "vpnKinds": [
+      "wireguard"
+    ],
+    "profiles": [
+      "WireGuard"
+    ],
+    "boundary": "Inner IP packet pump and WireGuard peer status",
+    "availability": "shipped",
+    "richPolicy": true,
+    "description": "The provider moves inner IPv4 and IPv6 packets and reports peer handshakes and byte counters. The WireGuard engine handles encryption and outer UDP. Its own inner-IP attachment runs compiled rules in each direction."
+  },
+  {
+    "id": "wireguard-teleport",
+    "name": "UniFi Teleport · standalone",
+    "vpnKinds": [
+      "wireguard"
+    ],
+    "profiles": [
+      "WireGuard",
+      "UniFi Teleport"
+    ],
+    "boundary": "Paired Teleport session and negotiated WireGuard interface",
+    "availability": "shipped",
+    "richPolicy": true,
+    "description": "Pair with a gateway invite. The engine negotiates peer settings and assigned addresses, then carries inner IP through WireGuard. A paired profile can also be a member of an eligible shared-interface composition. Outbound and inbound inner IP pass through the shared packet policy core."
+  },
+  {
+    "id": "tailscale-node",
+    "name": "Tailscale node",
+    "vpnKinds": [
+      "tailscale"
+    ],
+    "profiles": [
+      "Tailscale",
+      "Headscale"
+    ],
+    "boundary": "Local Tailscale node, packet pump and node status",
+    "availability": "shipped",
+    "richPolicy": true,
+    "description": "The same node uses the configured control server, including a self-hosted Headscale server. The node owns mesh paths, permitted routes and exit-node selection. Route acceptance and node status are observable at this boundary. Outbound and inbound inner IP pass through the shared packet policy core.",
+    "profileModes": [
+      "tailscale",
+      "headscale"
+    ]
+  },
+  {
+    "id": "openvpn3",
+    "name": "OpenVPN 3",
+    "vpnKinds": [
+      "openvpn"
+    ],
+    "profiles": [
+      "OpenVPN"
+    ],
+    "boundary": "Inner IP packet pump and OpenVPN core callbacks",
+    "availability": "shipped",
+    "richPolicy": true,
+    "description": "The packet-tunnel bridge exchanges inner packets with OpenVPN 3. The core supplies negotiated routes, DNS and session status and owns its control channel and encrypted transport. Outbound and inbound inner IP pass through the shared packet policy core."
+  },
+  {
+    "id": "openconnect-packet",
+    "name": "OpenConnect · built-in tunnel",
+    "vpnKinds": [
+      "cisco",
+      "fortinet",
+      "f5apm",
+      "globalprotect",
+      "juniper",
+      "pulse",
+      "array"
+    ],
+    "profiles": [
+      "Cisco AnyConnect",
+      "FortiGate SSL VPN",
+      "F5 BIG-IP APM",
+      "Palo Alto GlobalProtect",
+      "Juniper Network Connect",
+      "Pulse Connect Secure",
+      "Array Networks SSL VPN"
+    ],
+    "boundary": "Inner IP packet pump and negotiated tunnel settings",
+    "availability": "shipped",
+    "richPolicy": true,
+    "description": "The selected protocol runs in libopenconnect inside the packet tunnel. The bridge receives tunnel addresses, routes and DNS. An authentication helper may perform sign-in before the tunnel starts. Outbound and inbound inner IP pass through the shared packet policy core."
+  },
+  {
+    "id": "openconnect-proxy",
+    "name": "OpenConnect · command-line fallback",
+    "vpnKinds": [
+      "cisco",
+      "fortinet",
+      "f5apm",
+      "globalprotect",
+      "juniper",
+      "pulse",
+      "array"
+    ],
+    "profiles": [
+      "Cisco AnyConnect",
+      "FortiGate SSL VPN",
+      "F5 BIG-IP APM",
+      "Palo Alto GlobalProtect",
+      "Juniper Network Connect",
+      "Pulse Connect Secure",
+      "Array Networks SSL VPN"
+    ],
+    "boundary": "Inner IP between the OpenConnect script tunnel and the local SOCKS proxy",
+    "availability": "shipped",
+    "richPolicy": true,
+    "description": "The OpenConnect command-line client handles the selected gateway protocol and advanced options. ocproxy retains its loopback SOCKS listener. Packets in both directions pass through the session’s compiled routing policy before delivery."
+  },
+  {
+    "id": "proxy-socks5",
+    "name": "Proxy Tunnel · SOCKS5",
+    "vpnKinds": [
+      "proxytunnel"
+    ],
+    "profiles": [
+      "SOCKS5",
+      "socks5://",
+      "socks5h://"
+    ],
+    "boundary": "Local netstack, configured SOCKS5 proxy and transport relay",
+    "availability": "shipped",
+    "richPolicy": true,
+    "description": "TCP flows use SOCKS CONNECT. UDP relay, including UDP DNS, requires upstream UDP ASSOCIATE support. Optional TLS backend selection inspects a visible client hello on an eligible TCP connection before dialing the configured proxy. Outbound and inbound inner IP pass through the shared packet policy core.",
+    "profileModes": [
+      "socks5"
+    ]
+  },
+  {
+    "id": "proxy-http",
+    "name": "Proxy Tunnel · HTTP CONNECT",
+    "vpnKinds": [
+      "proxytunnel"
+    ],
+    "profiles": [
+      "HTTP CONNECT",
+      "http://"
+    ],
+    "boundary": "Local TCP endpoint and upstream HTTP proxy",
+    "availability": "shipped",
+    "richPolicy": true,
+    "description": "The netstack opens a CONNECT tunnel for TCP. Configured proxy DNS can use DNS over TCP. Optional TLS backend rules can select or refuse a target based on a visible ClientHello; the original TLS bytes are relayed. Outbound and inbound inner IP pass through the shared packet policy core.",
+    "profileModes": [
+      "httpConnect"
+    ]
+  },
+  {
+    "id": "proxy-https",
+    "name": "Proxy Tunnel · HTTPS CONNECT",
+    "vpnKinds": [
+      "proxytunnel"
+    ],
+    "profiles": [
+      "HTTPS CONNECT",
+      "https://"
+    ],
+    "boundary": "Local TCP endpoint and TLS-protected connection to the proxy",
+    "availability": "shipped",
+    "richPolicy": true,
+    "description": "The client first establishes TLS to the configured proxy, then negotiates CONNECT. It can carry TCP and configured DNS over TCP. The proxy TLS session and any TLS session inside the tunnel have separate peers. Optional ClientHello backend rules apply before dialing. Outbound and inbound inner IP pass through the shared packet policy core.",
+    "profileModes": [
+      "httpsConnect"
+    ]
+  },
+  {
+    "id": "sshnet",
+    "name": "SSH Network Tunnel",
+    "vpnKinds": [
+      "sshnet"
+    ],
+    "profiles": [
+      "SSH Network Tunnel"
+    ],
+    "boundary": "Routed packet tunnel feeding an owned userspace TCP stack",
+    "availability": "shipped",
+    "richPolicy": true,
+    "description": "The stack opens SSH direct-tcpip channels for TCP flows. Configured DNS can travel over TCP to a resolver reachable through the SSH server. General UDP forwarding is unavailable in this mode. Outbound and inbound inner IP pass through the shared packet policy core."
+  },
+  {
+    "id": "ssh-libssh",
+    "name": "SSH · embedded libssh",
+    "vpnKinds": [
+      "ssh"
+    ],
+    "profiles": [
+      "SSH SOCKS proxy",
+      "Local port forwards",
+      "Dynamic forwards"
+    ],
+    "boundary": "Owned SSH session, local listeners and direct-tcpip channels",
+    "availability": "shipped",
+    "richPolicy": true,
+    "description": "The app can serve a dynamic SOCKS listener or compatible local and dynamic forwards. It owns these listeners and SSH channels. The saved SSH profile has no shared packet interface. A typed ssh.forward_open rule may deny a local or dynamic forward before SSH opens the channel.",
+    "profileModes": [
+      "socks",
+      "portForward"
+    ]
+  },
+  {
+    "id": "ssh-openssh-reverse",
+    "name": "SSH · managed reverse delivery",
+    "vpnKinds": [
+      "ssh"
+    ],
+    "profiles": [
+      "Fixed remote forwards with traffic event handlers"
+    ],
+    "boundary": "Authenticated OpenSSH process to an app-owned local service connection",
+    "availability": "shipped",
+    "richPolicy": true,
+    "description": "The bundled OpenSSH client negotiates each remote forward and connects to its private socket. SimpleVPN checks the client process and runs the inbound rule before dialing the saved service. The client uses the explicit profile settings.",
+    "profileModes": [
+      "portForward"
+    ]
+  },
+  {
+    "id": "ssh-openssh",
+    "name": "SSH · managed OpenSSH forwards",
+    "vpnKinds": [
+      "ssh"
+    ],
+    "profiles": [
+      "SSH SOCKS proxy",
+      "Local or remote port forwards",
+      "Dynamic forwards",
+      "Jump host",
+      "Extra SSH options"
+    ],
+    "boundary": "App-owned forwarding listeners and private Unix sockets to the authenticated OpenSSH process",
+    "availability": "shipped",
+    "richPolicy": true,
+    "description": "Local and dynamic connections run ssh.forward_open before their destination reaches the SSH client. Registered reverse forwards run ssh.reverse_delivery before the local service is contacted. The client uses explicit profile settings and can authenticate through a jump host.",
+    "profileModes": [
+      "socks",
+      "portForward"
+    ]
+  },
+  {
+    "id": "ssh-tun",
+    "name": "SSH · point-to-point tunnel",
+    "vpnKinds": [
+      "ssh"
+    ],
+    "profiles": [
+      "SSH point-to-point tunnel (-w) with static addresses and routes"
+    ],
+    "boundary": "IPv4 and IPv6 datagrams on a pinned, interface-bound tun@openssh.com channel",
+    "availability": "shipped",
+    "richPolicy": true,
+    "description": "Both directions of the layer-3 SSH tunnel enter the shared packet router. The server must allow point-to-point tunnelling and configure its end of the link. The profile specifies local IP addresses, reachable prefixes and the remote device number or automatic allocation.",
+    "profileModes": [
+      "netTunnel"
+    ]
+  },
+  {
+    "id": "ikev2-strongswan",
+    "name": "IKEv2 · strongSwan",
+    "vpnKinds": [
+      "ikev2"
+    ],
+    "profileModes": [
+      "ownedIPsec"
+    ],
+    "profiles": [
+      "IKEv2 packet tunnel"
+    ],
+    "boundary": "Inner IP before ESP encryption and after authenticated ESP decryption",
+    "availability": "shipped",
+    "richPolicy": true,
+    "description": "Shared secret or EAP-MSCHAPv2 with a verified gateway certificate. The packet tunnel applies its routing policy in both directions. The gateway assigns the virtual address and negotiates the traffic selectors."
+  },
+  {
+    "id": "ipsec-strongswan",
+    "name": "IKEv1 · strongSwan",
+    "vpnKinds": [
+      "ipsec"
+    ],
+    "profileModes": [
+      "ownedIPsec"
+    ],
+    "profiles": [
+      "IKEv1 packet tunnel"
+    ],
+    "boundary": "Inner IP before ESP encryption and after authenticated ESP decryption",
+    "availability": "shipped",
+    "richPolicy": true,
+    "description": "Main Mode shared secret with optional XAuth sign-in. The packet tunnel applies its routing policy in both directions. The gateway assigns the virtual address and negotiates the traffic selectors."
+  },
+  {
+    "id": "apple-personal",
+    "name": "Apple personal VPN",
+    "vpnKinds": [
+      "ikev2",
+      "ipsec"
+    ],
+    "profiles": [
+      "IKEv2",
+      "IPsec (IKEv1 / Cisco)"
+    ],
+    "boundary": "NEVPNManager preferences and connection status",
+    "availability": "shipped",
+    "richPolicy": false,
+    "description": "System Settings or an administrator owns these existing sessions and their security associations. SimpleVPN can recognize the legacy configuration. Connect inside SimpleVPN selects a compatible built-in IPsec transport and reports configuration changes required to use it.",
+    "profileModes": [
+      "applePersonal"
+    ]
+  },
+  {
+    "id": "l2tp-strongswan",
+    "name": "L2TP / IPsec · strongSwan and lwIP",
+    "vpnKinds": [
+      "l2tp"
+    ],
+    "profileModes": [
+      "ownedIPsec"
+    ],
+    "profiles": [
+      "IPv4 L2TP/IPsec packet tunnel"
+    ],
+    "boundary": "Inner IPv4 at the authenticated PPP interface, before encapsulation and after decapsulation",
+    "availability": "shipped",
+    "richPolicy": true,
+    "description": "IPv4 IKEv1 Main Mode authenticates exact gateway and client identities with a shared secret. ESP protects UDP/1701 in transport mode. PPP uses MSCHAPv2 with printable ASCII credentials and negotiates IPv4, DNS and MTU through IPCP and LCP. Both inner packet directions support routing policies."
+  },
+  {
+    "id": "l2tp-export",
+    "name": "L2TP / IPsec · configuration export",
+    "vpnKinds": [
+      "l2tp"
+    ],
+    "profiles": [
+      "L2TP / IPsec"
+    ],
+    "boundary": "Exported configuration profile and System Settings",
+    "availability": "export-only",
+    "richPolicy": false,
+    "description": "Export a .mobileconfig, install it and connect in System Settings. macOS owns the tunnel. SimpleVPN does not connect this profile or receive its packets or live session status.",
+    "profileModes": [
+      "l2tpExport"
+    ]
+  },
+  {
+    "id": "dns-query-proxy",
+    "name": "DNS query proxy",
+    "vpnKinds": [],
+    "profiles": [
+      "Optional DNS query proxy"
+    ],
+    "boundary": "macOS-delivered TCP or UDP DNS questions, the compiled resolver plan and the selected resolver",
+    "availability": "shipped",
+    "richPolicy": false,
+    "description": "The DNS extension compiles exact, suffix and glob rules into the Rust routing core. The first matching rule selects the resolver. Per-rule counters record queries, replies, failures and bytes; a later application connection makes a separate routing decision."
+  }
+]

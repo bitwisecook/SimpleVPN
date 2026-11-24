@@ -277,6 +277,14 @@ enum ConnectListing {
         }
     }
 
+    /// OpenConnect’s system-startable packet provider is a mirror of its saved
+    /// tunnel. Selection, settings and backups must follow the owning profile.
+    static func standaloneProfiles<P: Identifiable>(_ profiles: [P], tunnels: [SubprocessTunnelConfig]) -> [P] where P.ID == String {
+        guard !tunnels.isEmpty else { return profiles }
+        let mirrored = Set(tunnels.lazy.filter { $0.kind.isSSLVPN }.map(\.id))
+        return profiles.filter { !mirrored.contains($0.id) }
+    }
+
     /// THE SECTIONS, in the order they are drawn, each holding its rows in order.
     ///
     /// Empty sections are dropped rather than drawn as a bare heading — the same rule
@@ -300,7 +308,8 @@ enum ConnectListing {
     static func sections(profiles: [Profile],
                          tunnels: [SubprocessTunnelConfig],
                          native: [NativeVPNConfig]) -> [(scope: ConnectionScope, tags: [String])] {
-        ConnectionScope.allCases.compactMap { scope in
+        let profiles = standaloneProfiles(profiles, tunnels: tunnels)
+        return ConnectionScope.allCases.compactMap { scope in
             var rows: [(tag: String, order: Int?)] = []
             rows += profiles.filter { ConnectionScope.of(profileKind: $0.kind) == scope }
                 .map { ($0.id, $0.order) }
@@ -526,6 +535,9 @@ enum SubprocessTunnelReadiness {
     /// (the sign-in) is the sequence that produces the sentence a person can act on
     /// first.
     static func need(for c: SubprocessTunnelConfig, facts: Facts) -> ConnectNeed? {
+        if c.routingEventSource != nil, ProfilePacketPolicy.adapter(for: c) == nil {
+            return ConnectNeed(.blocked, locus: .entry, ProfilePacketPolicy.unsupported, setting: "cr.packet-events")
+        }
         let serverID = serverSettingID(for: c.kind)
 
         // ── LEVEL 2 — WHICH SERVER. The one field nothing works without, and the
@@ -555,7 +567,7 @@ enum SubprocessTunnelReadiness {
         // no Homebrew at all. That was the last real Homebrew dependency on the
         // in-process path, and it only became reachable for every SSL kind once the
         // dispatch stopped naming three of them by hand.
-        if !SubprocessTunnelManager.willRunInProcess(c) {
+        if !SubprocessTunnelManager.willRunInProcess(c) && !(c.kind == .ssh && (c.sshMode == .netTunnel || SubprocessTunnelManager.willRunInProcessSSH(c))) {
             let cli = requiredCLI(for: c.kind, installed: facts.installedTools)
             if !facts.installedTools.contains(cli) {
                 return ConnectNeed(.blocked, locus: .transport,
@@ -575,10 +587,8 @@ enum SubprocessTunnelReadiness {
 
         // ── SSH: the mode, and the host-key pin's engine constraint.
         if c.kind == .ssh {
-            if c.sshMode == .netTunnel {
-                return ConnectNeed(.blocked, locus: .entry,
-                                   "Network tunnel mode needs root for its utun device, which this build can\u{2019}t take \u{2014} choose SOCKS proxy or port forwards instead.",
-                                   setting: "ssh.mode")
+            if c.sshMode == .netTunnel, let issue = c.sshTunProblem {
+                return ConnectNeed(.blocked, locus: .entry, issue, setting: "ssh.mode")
             }
             if SubprocessTunnelConfig.sshPinnedHostKeyProblem(c.sshPinnedHostKey) != nil {
                 return ConnectNeed(.blocked, locus: .entry,
@@ -724,9 +734,7 @@ enum SubprocessTunnelReadiness {
 /// stored. Same shape and same vocabulary as the subprocess answer; the rules are
 /// `NativeVPNConfig.serverProblem` and the secret each kind actually signs in with.
 ///
-/// L2TP is the honest odd one: macOS gives an app no programmatic L2TP API at all,
-/// so the row can never offer a Connect that works. It says so rather than offering
-/// one that cannot, which is the same rule as everything else here.
+/// Existing L2TP exports stay in System Settings. Explicit IPv4 PPP profiles use the bundled packet engine.
 @MainActor
 enum NativeVPNReadiness {
 
@@ -736,39 +744,22 @@ enum NativeVPNReadiness {
         var hasSecret = false
         /// IPsec's group pre-shared key.
         var hasGroupPSK = false
-        /// Whether this build's signing profile carries the Personal VPN capability
-        /// at all. Without it nothing native can be installed, let alone connected.
-        var hasPersonalVPNCapability = true
+        var hasPPPPassword = false
 
-        init(hasSecret: Bool = false, hasGroupPSK: Bool = false,
-             hasPersonalVPNCapability: Bool = true) {
+        init(hasSecret: Bool = false, hasGroupPSK: Bool = false, hasPPPPassword: Bool = false) {
             self.hasSecret = hasSecret
+            self.hasPPPPassword = hasPPPPassword
             self.hasGroupPSK = hasGroupPSK
-            self.hasPersonalVPNCapability = hasPersonalVPNCapability
         }
     }
 
     static func need(for c: NativeVPNConfig, facts: Facts) -> ConnectNeed? {
-        // L2TP is installed by double-clicking an exported configuration profile
-        // and connected in System Settings — there is no API for either. Naming
-        // that is the only honest thing the row can do.
-        if c.kind == .l2tp {
-            return ConnectNeed(.blocked, locus: .transport,
-                               "macOS gives apps no way to connect L2TP. Export this as a configuration profile from its own settings, install it, then connect it in System Settings \u{25B8} Network \u{25B8} VPN.",
-                               setting: "native.shared-secret")
-        }
-        if !facts.hasPersonalVPNCapability {
-            return ConnectNeed(.blocked, locus: .transport,
-                               "This build of SimpleVPN can\u{2019}t create native VPNs \u{2014} its signing profile is missing the Personal VPN capability. Everything else works; ask to have it provisioned.")
-        }
-        // LEVEL 2 — which server. `serverProblem` catches the empty field AND the
-        // typo, pasted URL or host:port that used to reach NEVPNManager and come
-        // back minutes later as an opaque IKE timeout.
-        if let problem = c.serverProblem {
-            return ConnectNeed(.blocked, locus: .instance, problem, setting: "native.server")
-        }
+        if let issue = c.ownedConnectionIssue { return issue }
         // LEVEL 3 — this VPN's own sign-in.
         switch c.kind {
+        case .l2tp:
+            if !facts.hasSecret { return ConnectNeed(.needsSignIn, locus: .entry, "Enter the IPsec shared secret.", setting: "native.shared-secret") }
+            if !facts.hasPPPPassword { return ConnectNeed(.needsSignIn, locus: .entry, "Enter the PPP password.", setting: "native.password") }
         case .ipsec:
             if !facts.hasGroupPSK {
                 return ConnectNeed(.needsSignIn, locus: .entry,
@@ -863,13 +854,19 @@ extension NativeVPNReadiness {
     /// Gather a native VPN's facts. Same rule as the subprocess side: only the rows
     /// the kind actually owns are read (`NativeVPNSecrets` is the authority on which
     /// those are).
-    static func liveFacts(for c: NativeVPNConfig, hasPersonalVPNCapability: Bool) -> Facts {
+    static func liveFacts(for c: NativeVPNConfig) -> Facts {
         func saved(_ profile: String) -> Bool {
             !(KeychainCredentialStore.loadCredentials(profile: profile)?.password ?? "").isEmpty
         }
-        var facts = Facts(hasPersonalVPNCapability: hasPersonalVPNCapability)
-        // L2TP is answered without reading anything — there is no API to connect it.
-        guard c.kind != .l2tp else { return facts }
+        var facts = Facts()
+        if c.kind == .l2tp {
+            if c.l2tpMSCHAPv2 == true {
+                facts.hasSecret = saved(NativeVPNSecrets.baseProfile(c.id))
+                let ppp = KeychainCredentialStore.loadCredentials(profile: NativeVPNSecrets.pppPasswordProfile(c.id))?.password ?? ""
+                facts.hasPPPPassword = OwnedIPsecConfiguration.validPPPCredential(ppp)
+            }
+            return facts
+        }
         if c.kind == .ipsec {
             facts.hasGroupPSK = saved(NativeVPNSecrets.groupPSKProfile(c.id))
             if c.usesXAuth { facts.hasSecret = saved(NativeVPNSecrets.baseProfile(c.id)) }
@@ -879,18 +876,19 @@ extension NativeVPNReadiness {
         return facts
     }
 
-    static func need(for c: NativeVPNConfig, hasPersonalVPNCapability: Bool) -> ConnectNeed? {
-        need(for: c, facts: liveFacts(for: c, hasPersonalVPNCapability: hasPersonalVPNCapability))
+    static func need(for c: NativeVPNConfig) -> ConnectNeed? {
+        need(for: c, facts: liveFacts(for: c))
     }
 
     /// The secrets `NativeVPNManager.connect` wants, read back from the rows
     /// `NativeVPNSecrets` defines. Read at the moment of connecting and not retained
     /// — the editor does exactly the same thing from its own fields.
-    static func storedSecrets(for c: NativeVPNConfig) -> (base: String, groupPSK: String) {
+    static func storedSecrets(for c: NativeVPNConfig) -> (base: String, groupPSK: String, pppPassword: String) {
         func saved(_ profile: String) -> String {
             KeychainCredentialStore.loadCredentials(profile: profile)?.password ?? ""
         }
         return (base: saved(NativeVPNSecrets.baseProfile(c.id)),
-                groupPSK: c.kind == .ipsec ? saved(NativeVPNSecrets.groupPSKProfile(c.id)) : "")
+                groupPSK: c.kind == .ipsec ? saved(NativeVPNSecrets.groupPSKProfile(c.id)) : "",
+                pppPassword: c.kind == .l2tp && c.l2tpMSCHAPv2 == true ? saved(NativeVPNSecrets.pppPasswordProfile(c.id)) : "")
     }
 }

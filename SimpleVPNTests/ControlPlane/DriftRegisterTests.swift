@@ -67,7 +67,7 @@ struct DriftRegisterTests {
 
     private static let concepts: [Concept] = [
 
-        // ── Docs/Drift.md §5 — five today, and the fifth already differs.
+        // ── Docs/Drift.md §5 — shared rendering and two format-specific parsers.
         //
         // Three shapes, because the bracket has three: rendering one INTO a string,
         // parsing one OFF the front, and the colon-counting guard that distinguishes
@@ -77,18 +77,10 @@ struct DriftRegisterTests {
                 needles: [["\"[\\(", "contains(\":\")"],
                           ["hasPrefix(\"[\")", "firstIndex(of: \"]\")"],
                           ["hasPrefix(\"[\")", "$0 == \":\""]],
-                allowed: ["SimpleVPN/Geo/WireGuardEndpointSelection.swift",
+                allowed: ["Shared/NetworkEndpoint.swift",
                           "SimpleVPN/Geo/EndpointDiscovery.swift",
-                          "SimpleVPN/Import/SSHConfigImport.swift",
-                          "Shared/SSHNetworkTunnelConfig.swift",
-                          "SimpleVPN/Credentials/BitwardenProvider.swift"],
-                instead: """
-                    five places already do this and they do NOT all agree \u{2014} \
-                    BitwardenProvider omits the already-bracketed guard the other four \
-                    carry, so a host arriving bracketed would become [[::1]]. Do not add \
-                    a sixth: the design for the one type that owns the rendering is \
-                    Docs/NetworkTypes.md \u{00A7}3.6
-                    """),
+                          "SimpleVPN/Import/SSHConfigImport.swift"],
+                instead: "Use NetworkEndpoint.authority to render an IPv6 host and port. See Docs/Drift.md §5 before adding a parser."),
 
         // ── Docs/Drift.md §6 — the model entry. Four subsets, each right; what is
         // bounded is the number of places that REFUSE a prefix, which is two.
@@ -117,7 +109,7 @@ struct DriftRegisterTests {
                     two accessibility shapes
                     """),
 
-        // ── Docs/Drift.md §8 — upstream's difference, not ours, and bounded at two.
+        // ── Docs/Drift.md §8 — the standalone OpenVPN and shared datagram pumps.
         //
         // The tell is the socketpair a tun fd is made from. `SOCK_DGRAM` is part of it:
         // the SSH network tunnel makes a `SOCK_STREAM` socketpair for its control
@@ -126,16 +118,8 @@ struct DriftRegisterTests {
                 concept: "an fd-shaped engine, which must choose a framing for its tun fd",
                 needles: [["socketpair(AF_UNIX, SOCK_DGRAM"]],
                 allowed: ["PacketTunnel/Bridges/OpenVPN3Bridge.mm",
-                          "PacketTunnel/Bridges/OpenConnectBridge.mm"],
-                instead: """
-                    the two fd-shaped engines frame differently because their own upstream \
-                    sources do \u{2014} openvpn3 prepends a 4-byte AF header, libopenconnect \
-                    carries raw IP (Docs/Networking.md \u{00A7}3.2, "the single most surprising \
-                    thing in the packet path"). A third one must DECLARE its framing in \
-                    Docs/Drift.md \u{00A7}8 rather than inherit whichever neighbour it was \
-                    copied from; getting it wrong connects the tunnel and carries zero \
-                    traffic, silently
-                    """),
+                          "PacketTunnel/Bridges/VirtualDatagramPort.m"],
+                instead: "Use VirtualDatagramPort for a new engine and document its framing in Docs/Drift.md §8."),
 
         // ── Docs/Drift.md §9 — the status vocabulary, and the literals that escaped it.
         Concept(register: "\u{00A7}9 status words",

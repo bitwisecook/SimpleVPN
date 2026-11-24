@@ -49,7 +49,8 @@ extension VPNController {
     /// matching).
     @discardableResult
     func createWireGuard(from seed: WireGuardConfig = WireGuardConfig(),
-                         name: String? = nil) async throws -> String {
+                         name: String? = nil, routingEventSource: String? = nil) async throws -> String {
+        try await ProfilePacketPolicy.validate(routingEventSource, adapter: RoutingAdapter.packetID(for: .wireGuard, teleport: seed.usesTeleport))
         guard !ManagedPolicy.lockConfiguration else { throw Self.configLocked }
         let id = seed.id
         try seed.saveExtraPeerSecrets()
@@ -66,6 +67,7 @@ extension VPNController {
         var conf: [String: Any] = ["profile": id, "vpnType": VPNKind.wireGuard.rawValue]
         if let blob = config.encodedBlob() { conf["wireguard"] = blob }
         proto.providerConfiguration = conf
+        try await ProfilePacketPolicy.attach(routingEventSource, to: proto)
         mgr.protocolConfiguration = proto
         mgr.localizedDescription = name ?? config.name
         mgr.isEnabled = true
@@ -165,6 +167,7 @@ extension VPNController {
         if let ensureExtensionReady, !(await ensureExtensionReady()) {
             throw err("SimpleVPN needs its network extension approved before it can connect. Open System Settings ▸ General ▸ Login Items & Extensions ▸ Network Extensions and allow SimpleVPN.")
         }
+        if hasPacketPolicy(for: id) { try await SystemExtensionManager.requireCurrentProvider() }
         guard connectionReservations.isCurrent(attempt), !Task.isCancelled,
               managers[id] === mgr else { throw CancellationError() }
         let config = wireGuardConfig(for: id)

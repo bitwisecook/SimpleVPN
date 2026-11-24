@@ -1,0 +1,188 @@
+--- a/src/libipsec/ipsec_sa.h
++++ b/src/libipsec/ipsec_sa.h
+@@ -222,4 +222,5 @@
+ 							ipsec_mode_t mode, uint16_t ipcomp, uint16_t cpi,
+ 							bool encap, bool esn, bool inbound);
+ 
++bool ipsec_sa_is_transport(ipsec_sa_t *sa);
+ #endif /** IPSEC_SA_H_ @}*/
+--- a/src/libipsec/ipsec_sa.c
++++ b/src/libipsec/ipsec_sa.c
+@@ -312,7 +312,8 @@
+ 		DBG1(DBG_ESP, "  IPsec SA: compression not supported");
+ 		return NULL;
+ 	}
+-	if (mode != MODE_TUNNEL)
++	if (mode != MODE_TUNNEL && !(mode == MODE_TRANSPORT && encap &&
++			src->get_family(src) == AF_INET && dst->get_family(dst) == AF_INET))
+ 	{
+ 		DBG1(DBG_ESP, "  IPsec SA: unsupported mode");
+ 		return NULL;
+@@ -361,3 +362,8 @@
+ 	}
+ 	return &this->public;
+ }
++
++bool ipsec_sa_is_transport(ipsec_sa_t *sa)
++{
++	return ((private_ipsec_sa_t*)sa)->mode == MODE_TRANSPORT;
++}
+--- a/src/libipsec/esp_packet.h
++++ b/src/libipsec/esp_packet.h
+@@ -148,5 +148,7 @@
+ esp_packet_t *esp_packet_create_from_payload(host_t *src, host_t *dst,
+ 											 ip_packet_t *payload);
+ 
++status_t esp_l2tp_decrypt(esp_packet_t *pkt, esp_context_t *ctx, host_t *src, host_t *dst);
++status_t esp_l2tp_encrypt(esp_packet_t *pkt, esp_context_t *ctx, uint32_t spi);
+ #endif /** ESP_PACKET_H_ @}*/
+ 
+--- a/src/libipsec/esp_packet.c
++++ b/src/libipsec/esp_packet.c
+@@ -56,6 +56,9 @@
+ 	 * Next Header info (e.g. IPPROTO_IPIP)
+ 	 */
+ 	uint8_t next_header;
++    /* Borrowed authenticated SA endpoints, for the duration of decrypt(). */
++    host_t *transport_src;
++    host_t *transport_dst;
+ 
+ };
+ 
+@@ -182,6 +185,13 @@
+ /**
+  * Remove the padding from the payload and set the next header info
+  */
++static bool l2tp_udp(chunk_t data)
++{
++    return data.len >= 8 && data.len <= UINT16_MAX - 20 &&
++        untoh16(data.ptr) == 1701 && untoh16(data.ptr+2) == 1701 &&
++        untoh16(data.ptr+4) == data.len;
++}
++
+ static bool remove_padding(private_esp_packet_t *this, chunk_t plaintext)
+ {
+ 	uint8_t next_header, pad_length;
+@@ -201,7 +211,28 @@
+ 		DBG1(DBG_ESP, "parsing ESP payload failed: invalid padding");
+ 		goto failed;
+ 	}
+-	this->payload = ip_packet_create(reader->peek(reader));
++	if (this->transport_src)
++    {
++        chunk_t body = reader->peek(reader);
++        if (next_header != IPPROTO_UDP || !l2tp_udp(body)) { goto failed; }
++        host_t *src = this->transport_src->clone(this->transport_src);
++        host_t *dst = this->transport_dst->clone(this->transport_dst);
++        src->set_port(src, 0);
++        dst->set_port(dst, 0);
++        this->payload = ip_packet_create_from_data(src, dst, IPPROTO_UDP, body);
++        src->destroy(src);
++        dst->destroy(dst);
++#if DEBUG_LEVEL >= 3
++        /* The padding is in the plaintext allocation freed below. */
++        padding = chunk_empty;
++#endif
++        chunk_clear(&plaintext);
++    }
++    else
++    {
++        if (next_header != IPPROTO_IPIP && next_header != IPPROTO_IPV6) { goto failed; }
++        this->payload = ip_packet_create(reader->peek(reader));
++    }
+ 	reader->destroy(reader);
+ 	if (!this->payload)
+ 	{
+@@ -328,7 +359,17 @@
+ 	/* plaintext = payload, padding, pad_length, next_header */
+ 	payload = this->payload ? this->payload->get_encoding(this->payload)
+ 							: chunk_empty;
+-	plainlen = payload.len + 2;
++	if (this->next_header == IPPROTO_UDP)
++    {
++        if (payload.len < 20 || payload.ptr[0] != 0x45 || payload.ptr[9] != IPPROTO_UDP ||
++            payload.len != untoh16(payload.ptr + 2) || (untoh16(payload.ptr + 6) & ~0x4000))
++        {
++            return FAILED;
++        }
++        payload = chunk_skip(payload, 20);
++        if (!l2tp_udp(payload)) { return FAILED; }
++    }
++    plainlen = payload.len + 2;
+ 	padding.len = pad_len(plainlen, blocksize);
+ 	/* ICV must be on a 4-byte boundary */
+ 	padding.len += pad_len(iv.len + plainlen + padding.len, 4);
+@@ -489,3 +530,20 @@
+ 	}
+ 	return &this->public;
+ }
++
++status_t esp_l2tp_decrypt(esp_packet_t *pkt, esp_context_t *ctx, host_t *src, host_t *dst)
++{
++    private_esp_packet_t *this = (private_esp_packet_t*)pkt;
++    this->transport_src = src;
++    this->transport_dst = dst;
++    status_t status = pkt->decrypt(pkt, ctx);
++    this->transport_src = this->transport_dst = NULL;
++    return status;
++}
++
++status_t esp_l2tp_encrypt(esp_packet_t *pkt, esp_context_t *ctx, uint32_t spi)
++{
++    private_esp_packet_t *this = (private_esp_packet_t*)pkt;
++    this->next_header = IPPROTO_UDP;
++    return pkt->encrypt(pkt, ctx, spi);
++}
+--- a/src/libipsec/ipsec_processor.c
++++ b/src/libipsec/ipsec_processor.c
+@@ -122,7 +122,11 @@
+ 		return JOB_REQUEUE_DIRECT;
+ 	}
+ 
+-	if (packet->decrypt(packet, sa->get_esp_context(sa)) != SUCCESS)
++	bool transport = ipsec_sa_is_transport(sa);
++    status_t status = transport ?
++        esp_l2tp_decrypt(packet, sa->get_esp_context(sa), sa->get_source(sa), sa->get_destination(sa)) :
++        packet->decrypt(packet, sa->get_esp_context(sa));
++    if (status != SUCCESS)
+ 	{
+ 		ipsec->sas->checkin(ipsec->sas, sa);
+ 		packet->destroy(packet);
+@@ -136,6 +140,7 @@
+ 	next_header = packet->get_next_header(packet);
+ 	switch (next_header)
+ 	{
++		case IPPROTO_UDP: /* authenticated L2TP transport format, checked above */
+ 		case IPPROTO_IPIP:
+ 		case IPPROTO_IPV6:
+ 		{
+@@ -233,8 +238,10 @@
+ 	dst = sa->get_destination(sa);
+ 	esp_packet = esp_packet_create_from_payload(src->clone(src),
+ 												dst->clone(dst), packet);
+-	if (esp_packet->encrypt(esp_packet, sa->get_esp_context(sa),
+-							sa->get_spi(sa)) != SUCCESS)
++	status_t status = ipsec_sa_is_transport(sa) ?
++        esp_l2tp_encrypt(esp_packet, sa->get_esp_context(sa), sa->get_spi(sa)) :
++        esp_packet->encrypt(esp_packet, sa->get_esp_context(sa), sa->get_spi(sa));
++    if (status != SUCCESS)
+ 	{
+ 		ipsec->sas->checkin(ipsec->sas, sa);
+ 		esp_packet->destroy(esp_packet);
+--- a/src/libipsec/ipsec_policy.c
++++ b/src/libipsec/ipsec_policy.c
+@@ -213,7 +213,13 @@
+ 		DBG1(DBG_ESP, "  IPsec policy: compression not supported");
+ 		return NULL;
+ 	}
+-	if (sa->mode != MODE_TUNNEL)
++	if (sa->mode != MODE_TUNNEL &&
++        !(sa->mode == MODE_TRANSPORT && src->get_family(src) == AF_INET &&
++          dst->get_family(dst) == AF_INET && src_ts->is_host(src_ts, src) &&
++          dst_ts->is_host(dst_ts, dst) && src_ts->get_protocol(src_ts) == IPPROTO_UDP &&
++          dst_ts->get_protocol(dst_ts) == IPPROTO_UDP && src_ts->get_from_port(src_ts) == 1701 &&
++          src_ts->get_to_port(src_ts) == 1701 && dst_ts->get_from_port(dst_ts) == 1701 &&
++          dst_ts->get_to_port(dst_ts) == 1701))
+ 	{
+ 		DBG1(DBG_ESP, "  IPsec policy: unsupported mode");
+ 		return NULL;

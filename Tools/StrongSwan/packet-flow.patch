@@ -1,0 +1,151 @@
+--- a/src/libcharon/plugins/kernel_libipsec/kernel_libipsec_ipsec.c
++++ b/src/libcharon/plugins/kernel_libipsec/kernel_libipsec_ipsec.c
+@@ -546,7 +546,7 @@
+ 										 id->src_ts, id->dst_ts, id->dir,
+ 										 data->type, data->sa, id->mark,
+ 										 data->prio);
+-	if (status != SUCCESS)
++	if (status != SUCCESS || lib->get(lib, "simplevpn-packet-flow"))
+ 	{
+ 		return status;
+ 	}
+@@ -593,6 +593,10 @@
+ 										 data->type, data->sa, id->mark,
+ 										 data->prio);
+ 
++	if (lib->get(lib, "simplevpn-packet-flow"))
++	{
++		return status;
++	}
+ 	policy = create_policy_entry(id->src_ts, id->dst_ts, id->dir);
+ 
+ 	this->mutex->lock(this->mutex);
+--- a/src/libstrongswan/collections/blocking_queue.h
++++ b/src/libstrongswan/collections/blocking_queue.h
+@@ -40,6 +40,9 @@
+ 	 */
+ 	void (*enqueue)(blocking_queue_t *this, void *item);
+ 
++	/** Enqueue only while the queue is below the item limit. */
++	bool (*try_enqueue)(blocking_queue_t *this, void *item, unsigned int limit);
++
+ 	/**
+ 	 * Removes the first item in the queue and returns its value.
+ 	 * If the queue is empty, this call blocks until a new item is inserted.
+--- a/src/libstrongswan/collections/blocking_queue.c
++++ b/src/libstrongswan/collections/blocking_queue.c
+@@ -61,6 +61,21 @@
+ 	this->mutex->unlock(this->mutex);
+ }
+ 
++METHOD(blocking_queue_t, try_enqueue, bool,
++    private_blocking_queue_t *this, void *item, unsigned int limit)
++{
++    bool accept;
++    this->mutex->lock(this->mutex);
++    accept = this->list->get_count(this->list) < limit;
++    if (accept)
++    {
++        this->list->insert_first(this->list, item);
++        this->condvar->signal(this->condvar);
++    }
++    this->mutex->unlock(this->mutex);
++    return accept;
++}
++
+ METHOD(blocking_queue_t, dequeue, void*,
+ 	private_blocking_queue_t *this)
+ {
+@@ -124,6 +139,7 @@
+ 	INIT(this,
+ 		.public = {
+ 			.enqueue = _enqueue,
++			.try_enqueue = _try_enqueue,
+ 			.dequeue = _dequeue,
+ 			.destroy = _destroy,
+ 			.destroy_offset = _destroy_offset,
+--- a/src/libipsec/ipsec_processor.c
++++ b/src/libipsec/ipsec_processor.c
+@@ -252,13 +252,21 @@
+ METHOD(ipsec_processor_t, queue_inbound, void,
+ 	private_ipsec_processor_t *this, esp_packet_t *packet)
+ {
+-	this->inbound_queue->enqueue(this->inbound_queue, packet);
++	if (!this->inbound_queue->try_enqueue(this->inbound_queue, packet, 256))
++	{
++		packet->destroy(packet);
++	}
+ }
+ 
+-METHOD(ipsec_processor_t, queue_outbound, void,
++METHOD(ipsec_processor_t, queue_outbound, bool,
+ 	private_ipsec_processor_t *this, ip_packet_t *packet)
+ {
+-	this->outbound_queue->enqueue(this->outbound_queue, packet);
++	if (!this->outbound_queue->try_enqueue(this->outbound_queue, packet, 256))
++	{
++		packet->destroy(packet);
++		return FALSE;
++	}
++	return TRUE;
+ }
+ 
+ METHOD(ipsec_processor_t, register_inbound, void,
+--- a/src/libipsec/ipsec_processor.h
++++ b/src/libipsec/ipsec_processor.h
+@@ -65,7 +65,7 @@
+ 	 *
+ 	 * @param packet		the plaintext IP packet
+ 	 */
+-	void (*queue_outbound)(ipsec_processor_t *this, ip_packet_t *packet);
++	bool (*queue_outbound)(ipsec_processor_t *this, ip_packet_t *packet);
+ 
+ 	/**
+ 	 * Register the callback used to deliver inbound plaintext packets.
+--- a/src/libcharon/plugins/socket_default/socket_default_socket.c
++++ b/src/libcharon/plugins/socket_default/socket_default_socket.c
+@@ -656,6 +656,7 @@
+ 					   int family, uint16_t *port)
+ {
+ 	int on = TRUE;
++	bool loopback = lib->get(lib, "simplevpn-test-loopback") != NULL;
+ 	union {
+ 		struct sockaddr sockaddr;
+ 		struct sockaddr_in sin;
+@@ -671,7 +672,7 @@
+ 	switch (family)
+ 	{
+ 		case AF_INET:
+-			addr.sin.sin_addr.s_addr = htonl(INADDR_ANY);
++			addr.sin.sin_addr.s_addr = htonl(loopback ? INADDR_LOOPBACK : INADDR_ANY);
+ 			addr.sin.sin_port = htons(*port);
+ 			addrlen = sizeof(addr.sin);
+ 			sol = SOL_IP;
+@@ -682,7 +683,7 @@
+ #endif
+ 			break;
+ 		case AF_INET6:
+-			memcpy(&addr.sin6.sin6_addr, &in6addr_any, sizeof(in6addr_any));
++			addr.sin6.sin6_addr = loopback ? in6addr_loopback : in6addr_any;
+ 			addr.sin6.sin6_port = htons(*port);
+ 			addrlen = sizeof(addr.sin6);
+ 			sol = SOL_IPV6;
+--- a/src/libcharon/plugins/socket_default/socket_default_socket.c
++++ b/src/libcharon/plugins/socket_default/socket_default_socket.c
+@@ -700,6 +700,16 @@
+ 		return -1;
+ 	}
+ 
++	/* The Network Extension can pin the member to its physical underlay. */
++	uint32_t *index = lib->get(lib, "simplevpn-underlay-index");
++	if (index && setsockopt(skt, family == AF_INET ? IPPROTO_IP : IPPROTO_IPV6,
++						  family == AF_INET ? IP_BOUND_IF : IPV6_BOUND_IF,
++						  index, sizeof(*index)) < 0)
++	{
++		DBG1(DBG_NET, "unable to bind carrier to interface: %s", strerror(errno));
++		close(skt);
++		return -1;
++	}
+ 	if (family == AF_INET6 &&
+ 		setsockopt(skt, SOL_IPV6, IPV6_V6ONLY, &on, sizeof(on)) < 0)
+ 	{

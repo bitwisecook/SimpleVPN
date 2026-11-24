@@ -3,7 +3,7 @@
 //
 //  TrafficFlow.swift
 //  One observed traffic flow in a VPN's per-connection log, keyed by the remote
-//  endpoint. Built in the extension from the bridge's header-only accounting and
+//  endpoint. Built in the extension from shared header-only accounting and
 //  sent to the app over the "flows" IPC message. No payload is ever captured.
 //
 
@@ -27,20 +27,8 @@ struct TrafficFlow: Codable, Sendable, Identifiable, Equatable {
         switch proto { case 6: "TCP"; case 17: "UDP"; case 1: "ICMP"; case 58: "ICMPv6"; default: "IP\(proto)" }
     }
     var bytesTotal: Int64 { bytesIn + bytesOut }
-    var endpoint: String { port > 0 ? "\(address):\(port)" : address }
-
-    /// Build from the bridge's NSDictionary (see OpenVPN3Bridge.flowStats).
-    init?(dictionary d: [String: Any]) {
-        guard let address = d["address"] as? String else { return nil }
-        self.address = address
-        family = (d["family"] as? NSNumber)?.intValue ?? 4
-        port = (d["port"] as? NSNumber)?.intValue ?? 0
-        proto = (d["proto"] as? NSNumber)?.intValue ?? 0
-        bytesIn = (d["bytesIn"] as? NSNumber)?.int64Value ?? 0
-        bytesOut = (d["bytesOut"] as? NSNumber)?.int64Value ?? 0
-        packetsIn = (d["packetsIn"] as? NSNumber)?.int64Value ?? 0
-        packetsOut = (d["packetsOut"] as? NSNumber)?.int64Value ?? 0
-        ageFirst = (d["ageFirst"] as? NSNumber)?.doubleValue ?? 0
-        ageLast = (d["ageLast"] as? NSNumber)?.doubleValue ?? 0
+    var endpoint: String {
+        guard port > 0 else { return address }
+        return family == 6 ? "[\(address)]:\(port)" : "\(address):\(port)"
     }
 }

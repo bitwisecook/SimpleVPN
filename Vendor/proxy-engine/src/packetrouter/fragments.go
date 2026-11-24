@@ -14,6 +14,8 @@ import (
 
 // An empty port identifies capture input. Registered VPN port IDs are nonempty.
 type fragmentScope struct {
+	owner      uint64
+	source     string
 	port       string
 	generation uint64
 }

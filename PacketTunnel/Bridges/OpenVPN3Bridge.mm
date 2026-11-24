@@ -7,6 +7,8 @@
 //
 
 #import "OpenVPN3Bridge.h"
+#import "VirtualDatagramPort.h"
+#include <fcntl.h>
 #import <os/log.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -16,7 +18,6 @@
 #include <string>
 #include <mutex>
 #include <atomic>
-#include <unordered_map>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
@@ -38,24 +39,12 @@ NSErrorUserInfoKey const OVPNErrorEventInfoKey = @"OVPNEventInfo";
 @end
 static const int kOVPNSockBuf = 1 << 20; // 1 MiB socketpair buffers
 
-// One observed traffic flow, keyed by the *remote* endpoint (destination for
-// outbound packets, source for inbound). Purely for the app's traffic log — no
-// payload is inspected beyond the IP/L4 headers, and nothing is persisted here.
-struct SVFlowStat {
-    uint8_t family = 4;       // 4 | 6
-    std::string addr;         // presentation form of the remote address
-    uint16_t port = 0;        // remote L4 port (0 for non-TCP/UDP)
-    uint8_t proto = 0;        // IPPROTO_TCP / UDP / other
-    int64_t bytesIn = 0, bytesOut = 0;
-    int64_t pktsIn = 0, pktsOut = 0;
-    double firstSeen = 0, lastSeen = 0;
-};
-static const size_t kOVPNMaxFlows = 1024;
 static os_log_t gBridgeLog = os_log_create("com.bragi0.SimpleVPN.PacketTunnel", "bridge");
 #define BLOG(fmt, ...) os_log(gBridgeLog, fmt, ##__VA_ARGS__)
 
 // MARK: - Private ObjC surface the C++ client calls into.
 @interface OpenVPN3Bridge ()
+- (BOOL)protectSocket:(int)fd ipv6:(BOOL)ipv6;
 - (void)tunReset;
 - (void)emitErrorEvent:(NSString *)name info:(NSString *)info;
 - (void)tunSetRemote:(NSString *)address;
@@ -161,8 +150,8 @@ public:
     void tun_builder_teardown(bool) override { [bridge() tunTeardown]; }
 
     // ---- OpenVPNClient ----
-    bool socket_protect(openvpn_io::detail::socket_type, std::string, bool) override {
-        return true; // NE sockets already bypass the tunnel
+    bool socket_protect(openvpn_io::detail::socket_type fd, std::string, bool ipv6) override {
+        return [bridge() protectSocket:fd ipv6:ipv6];
     }
     bool pause_on_connection_timeout() override { return false; }
     void external_pki_cert_request(ExternalPKICertRequest &req) override { req.error = true; req.errorText = "external PKI not supported"; }
@@ -191,6 +180,9 @@ private:
 @implementation OpenVPN3Bridge {
     __weak NEPacketTunnelProvider<SVPTunnelSettingsApplying> *_provider;
     __weak id<OpenVPN3BridgeDelegate> _delegate;
+    SVPPacketPolicy *_packetPolicy;
+    VirtualDatagramPort *_member;
+    uint32_t _interfaceIndex;
     std::unique_ptr<Client> _client;
     dispatch_queue_t _runQueue;   // runs the blocking connect()
     dispatch_queue_t _cbQueue;    // serializes delegate callbacks
@@ -231,14 +223,10 @@ private:
     int _ovpnFD;                  // openvpn3-owned end
     int _ourFD;                   // our end
     dispatch_source_t _readSource;
+    NSFileHandle *_pumpWriter; // kept alive by each active NE write, including during teardown
     // Bumped on every establish/teardown; stale pump loops check it and exit
     // instead of re-arming against a new session's fd.
     std::atomic<uint32_t> _pumpGeneration;
-
-    // Traffic-flow accounting for the app's per-VPN traffic log. Guarded by its
-    // own mutex (the two pump directions run on different queues).
-    std::mutex _flowMutex;
-    std::unordered_map<std::string, SVFlowStat> _flows;
 
     // User divert rules: destinations to exclude from this tunnel (route around
     // the VPN). Set by the provider before connect from providerConfiguration;
@@ -250,9 +238,40 @@ private:
     NSMutableArray<NEIPv6Route *> *_extraV6Included;
 }
 
-- (instancetype)initWithProvider:(NEPacketTunnelProvider<SVPTunnelSettingsApplying> *)provider delegate:(id<OpenVPN3BridgeDelegate>)delegate {
-    if ((self = [super init])) {
+- (instancetype)initWithProvider:(NEPacketTunnelProvider<SVPTunnelSettingsApplying> *)provider delegate:(id<OpenVPN3BridgeDelegate>)delegate
+                    packetPolicy:(SVPPacketPolicy *)packetPolicy {
+    if ((self = [self initWithEngineDelegate:delegate])) {
         _provider = provider;
+        _packetPolicy = packetPolicy;
+    }
+    return self;
+}
+
+- (instancetype)initWithInterfaceIndex:(uint32_t)index delegate:(id<OpenVPN3BridgeDelegate>)delegate
+                               received:(void (^)(NSData *))received {
+    if ((self = [self initWithEngineDelegate:delegate])) {
+        _member = [[VirtualDatagramPort alloc] initWithFamilyHeader:YES received:received];
+        _interfaceIndex = index;
+    }
+    return self;
+}
+
+- (BOOL)protectSocket:(int)fd ipv6:(BOOL)ipv6 {
+    if (!_member) return YES;
+    return _interfaceIndex != 0 && setsockopt(fd, ipv6 ? IPPROTO_IPV6 : IPPROTO_IP,
+        ipv6 ? IPV6_BOUND_IF : IP_BOUND_IF, &_interfaceIndex, sizeof(_interfaceIndex)) == 0;
+}
+
+- (BOOL)sendMemberPacket:(NSData *)packet { return [_member sendPacket:packet]; }
+- (NEPacketTunnelNetworkSettings *)memberNetworkSettings { return [self buildTunSettingsIncludingRoutes:YES]; }
+- (void)stopMemberWithCompletion:(void (^)(void))completion {
+    [_member close];
+    [self disconnect];
+    dispatch_async(_runQueue, completion);
+}
+
+- (instancetype)initWithEngineDelegate:(id<OpenVPN3BridgeDelegate>)delegate {
+    if ((self = [super init])) {
         _delegate = delegate;
         _runQueue = dispatch_queue_create("com.bragi0.SimpleVPN.ovpn.run", DISPATCH_QUEUE_SERIAL);
         _cbQueue = dispatch_queue_create("com.bragi0.SimpleVPN.ovpn.cb", DISPATCH_QUEUE_SERIAL);
@@ -664,7 +683,9 @@ private:
 }
 
 - (int)tunEstablish {
-    if (!_provider) { BLOG("tunEstablish: provider gone"); return -1; }
+    if (_member) return [_member openEngineDescriptor];
+    NEPacketTunnelProvider<SVPTunnelSettingsApplying> *provider = _provider;
+    if (!provider) { BLOG("tunEstablish: provider gone"); return -1; }
     BLOG("tunEstablish: remote=%{public}s v4addrs=%lu defaultV4=%d dns=%lu mtu=%d",
          _remote.UTF8String, (unsigned long)_v4Addrs.count, _defaultV4, (unsigned long)_dns.count, _mtu);
 
@@ -679,104 +700,39 @@ private:
     setsockopt(fds[0], SOL_SOCKET, SO_RCVBUF, &kOVPNSockBuf, sizeof(kOVPNSockBuf));
     setsockopt(fds[1], SOL_SOCKET, SO_SNDBUF, &kOVPNSockBuf, sizeof(kOVPNSockBuf));
     setsockopt(fds[1], SOL_SOCKET, SO_RCVBUF, &kOVPNSockBuf, sizeof(kOVPNSockBuf));
+    int writerFD = fcntl(fds[1], F_DUPFD_CLOEXEC, 0);
+    if (writerFD < 0) {
+        close(fds[0]); close(fds[1]);
+        [self emitError:@"Could not open the tunnel packet writer."]; return -1;
+    }
+    _pumpWriter = [[NSFileHandle alloc] initWithFileDescriptor:writerFD closeOnDealloc:YES];
     _ovpnFD = fds[0];
     _ourFD = fds[1];
     _pumpGeneration.fetch_add(1);   // new session: new pump generation
 
-    NEPacketTunnelProvider<SVPTunnelSettingsApplying> *provider = _provider;
-    if (!provider) { BLOG("tunEstablish: provider gone before pump start"); return -1; }
-    [self startReadingPacketsInto:provider.packetFlow];
+    [self startReadingPacketsInto:provider.packetFlow writer:_pumpWriter generation:_pumpGeneration.load()];
     [self startReadingFDIntoFlow:provider.packetFlow];
     BLOG("tunEstablish: packet pump started, handing fd %d to openvpn3", _ovpnFD);
     return _ovpnFD;
 }
 
-// MARK: - Traffic-flow accounting (for the app's per-VPN traffic log)
-
-// Parse just the IP + TCP/UDP headers of a packet and fold its byte count into
-// the flow for its remote endpoint. Never looks past the L4 ports.
-- (void)accountBytes:(const uint8_t *)b length:(size_t)len family:(uint32_t)af outbound:(BOOL)outbound {
-    if (b == NULL || len < 1) return;
-    uint8_t proto = 0;
-    uint16_t port = 0;
-    char addrbuf[INET6_ADDRSTRLEN] = {0};
-    const uint8_t *l4 = NULL;
-    size_t l4len = 0;
-
-    if (af == AF_INET) {
-        if (len < 20) return;
-        uint8_t ihl = (uint8_t)((b[0] & 0x0f) * 4);
-        if (ihl < 20 || len < ihl) return;
-        proto = b[9];
-        const uint8_t *remote = outbound ? (b + 16) : (b + 12);   // dst if out, src if in
-        if (!inet_ntop(AF_INET, remote, addrbuf, sizeof(addrbuf))) return;
-        l4 = b + ihl; l4len = len - ihl;
-    } else if (af == AF_INET6) {
-        if (len < 40) return;
-        proto = b[6];   // next header (extension headers not walked in v1)
-        const uint8_t *remote = outbound ? (b + 24) : (b + 8);
-        if (!inet_ntop(AF_INET6, remote, addrbuf, sizeof(addrbuf))) return;
-        l4 = b + 40; l4len = len - 40;
-    } else {
-        return;
-    }
-
-    if ((proto == IPPROTO_TCP || proto == IPPROTO_UDP) && l4len >= 4) {
-        const uint8_t *pp = outbound ? (l4 + 2) : (l4 + 0);       // remote port
-        port = (uint16_t)((pp[0] << 8) | pp[1]);
-    }
-
-    std::string key = std::string(addrbuf) + "|" + std::to_string(port) + "|" + std::to_string(proto);
-    double now = CFAbsoluteTimeGetCurrent();
-    std::lock_guard<std::mutex> lk(_flowMutex);
-    auto &f = _flows[key];
-    if (f.firstSeen == 0) {
-        f.family = (af == AF_INET6) ? 6 : 4;
-        f.addr = addrbuf; f.port = port; f.proto = proto; f.firstSeen = now;
-    }
-    f.lastSeen = now;
-    if (outbound) { f.bytesOut += (int64_t)len; f.pktsOut++; } else { f.bytesIn += (int64_t)len; f.pktsIn++; }
-
-    if (_flows.size() > kOVPNMaxFlows) {
-        auto oldest = _flows.begin();
-        for (auto it = _flows.begin(); it != _flows.end(); ++it)
-            if (it->second.lastSeen < oldest->second.lastSeen) oldest = it;
-        _flows.erase(oldest);
-    }
-}
-
-- (NSArray<NSDictionary<NSString *, id> *> *)flowStats {
-    std::lock_guard<std::mutex> lk(_flowMutex);
-    NSMutableArray *out = [NSMutableArray arrayWithCapacity:_flows.size()];
-    double now = CFAbsoluteTimeGetCurrent();
-    for (auto &kv : _flows) {
-        const SVFlowStat &f = kv.second;
-        [out addObject:@{
-            @"family": @(f.family),
-            @"address": [NSString stringWithUTF8String:f.addr.c_str()],
-            @"port": @(f.port),
-            @"proto": @(f.proto),
-            @"bytesIn": @(f.bytesIn),
-            @"bytesOut": @(f.bytesOut),
-            @"packetsIn": @(f.pktsIn),
-            @"packetsOut": @(f.pktsOut),
-            @"ageFirst": @(now - f.firstSeen),
-            @"ageLast": @(now - f.lastSeen),
-        }];
-    }
-    return out;
-}
-
 // apps -> openvpn3: read from packetFlow, prepend the 4-byte PF header openvpn3 expects
 // (tun_prefix=true on macOS), write as one datagram to our fd.
-- (void)startReadingPacketsInto:(NEPacketTunnelFlow *)flow {
-    int fd = _ourFD;
-    uint32_t generation = _pumpGeneration.load();
+- (void)startReadingPacketsInto:(NEPacketTunnelFlow *)flow writer:(NSFileHandle *)writer generation:(uint32_t)generation {
+    __weak NSFileHandle *weakWriter = writer;
+    __weak OpenVPN3Bridge *weakBridge = self;
+    __weak NEPacketTunnelFlow *weakFlow = flow;
     [flow readPacketsWithCompletionHandler:^(NSArray<NSData *> *packets, NSArray<NSNumber *> *protocols) {
         // A teardown (reconnect, stop) bumps the generation: this loop belongs
         // to a dead session — exit without touching the (closed/reused) fd and
         // without re-arming a duplicate reader against the new session.
-        if (self->_pumpGeneration.load() != generation) return;
+        OpenVPN3Bridge *bridge = weakBridge;
+        NEPacketTunnelFlow *flow = weakFlow;
+        __attribute__((objc_precise_lifetime)) NSFileHandle *lease = weakWriter;
+        if (!bridge || !flow || !lease || bridge->_pumpGeneration.load() != generation) return;
+        int fd = lease.fileDescriptor;
+        BOOL inspect = bridge->_packetPolicy.inspectOutbound;
+        if (!inspect && ![bridge->_packetPolicy observeOutboundBatch:packets]) return;
         for (NSUInteger i = 0; i < packets.count; i++) {
             NSData *pkt = packets[i];
             uint32_t af = (uint32_t)protocols[i].unsignedIntValue;   // AF_INET / AF_INET6
@@ -784,34 +740,42 @@ private:
             NSMutableData *framed = [NSMutableData dataWithCapacity:4 + pkt.length];
             [framed appendBytes:&hdr length:4];
             [framed appendData:pkt];
-            (void)write(fd, framed.bytes, framed.length);
-            [self accountBytes:(const uint8_t *)pkt.bytes length:pkt.length family:af outbound:YES];
+            if (inspect && ![bridge->_packetPolicy apply:(uint8_t *)framed.mutableBytes + sizeof(hdr)
+                                               length:pkt.length inbound:NO]) continue;
+            (void)send(fd, framed.bytes, framed.length, MSG_DONTWAIT);
         }
-        [self startReadingPacketsInto:flow];
+        if (bridge->_pumpGeneration.load() == generation) [bridge startReadingPacketsInto:flow writer:lease generation:generation];
     }];
 }
 
 // openvpn3 -> apps: read a datagram (4-byte PF header + IP), strip the header, inject the IP.
 - (void)startReadingFDIntoFlow:(NEPacketTunnelFlow *)flow {
     int fd = _ourFD;   // captured: the handler must never chase the mutable ivar
+    uint32_t generation = _pumpGeneration.load();
     _readSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)fd, 0, _cbQueue);
     dispatch_source_set_event_handler(_readSource, ^{
+        if (self->_pumpGeneration.load() != generation) return;
         uint8_t buf[65536];
         ssize_t n = read(fd, buf, sizeof(buf));
         if (n <= 4) return;                          // need header + at least 1 byte of IP
         uint32_t af = ntohl(*(const uint32_t *)buf); // PF_INET / PF_INET6
         if (af != AF_INET && af != AF_INET6)
             af = ((buf[4] >> 4) == 6) ? AF_INET6 : AF_INET;  // fall back to IP version
-        NSData *ip = [NSData dataWithBytes:buf + 4 length:(NSUInteger)(n - 4)];
+        NSUInteger length = (NSUInteger)(n - 4);
+        BOOL permitted = self->_packetPolicy.inspectInbound
+            ? [self->_packetPolicy apply:buf + 4 length:length inbound:YES]
+            : [self->_packetPolicy observePacket:buf + 4 length:length inbound:YES];
+        if (!permitted) return;
+        NSData *ip = [NSData dataWithBytes:buf + 4 length:length];
         [flow writePackets:@[ip] withProtocols:@[@(af)]];
-        [self accountBytes:buf + 4 length:(size_t)(n - 4) family:af outbound:NO];
     });
     dispatch_resume(_readSource);
 }
 
 - (void)tunTeardown {
-    { std::lock_guard<std::mutex> lk(_flowMutex); _flows.clear(); }  // don't carry flows across sessions
+    [_member close];
     _pumpGeneration.fetch_add(1);   // stale pump loops see this and exit
+    _pumpWriter = nil;
     int fd = _ourFD;
     _ourFD = -1;
     if (_readSource) {

@@ -51,9 +51,10 @@ extension VPNController {
             // filter — the custom proxy especially — must survive relaunch, so it goes
             // to the UserDefaults fallback store), and a fresh import lands here
             // transiently (the cache carries it until a real manager exists).
+            filterActivity.retainRules(for: id, profile: profile)
             customRoutingCache[id] = profile
             CustomRoutingFallbackStore().save(profile, for: id)
-            syncDNSQueryRouting()
+            await applyCustomRouting(forProfile: id, previous: previousRouting)
             return
         }
         let previousProtocol = proto.copy() as? NETunnelProviderProtocol
@@ -68,6 +69,7 @@ extension VPNController {
             throw error
         }
         try await mgr.loadFromPreferences()
+        filterActivity.retainRules(for: id, profile: profile)
         customRoutingCache[id] = profile
         // The providerConfiguration blob is authoritative now — retire any fallback
         // entry a pre-manager save left behind.
@@ -86,10 +88,7 @@ extension VPNController {
     func applyCustomRouting(forProfile id: String, previous: CustomRoutingProfile? = nil) async {
         let current = customRouting(for: id)
         let routesChanged = previous.map { $0.routes != current.routes } ?? true
-        func nativeDNS(_ dns: DNSCustomization) -> DNSCustomization {
-            var value = dns; value.queryRoutingEnabled = false; value.queryRules = []; return value
-        }
-        let dnsChanged = routesChanged || (previous.map { nativeDNS($0.dns) != nativeDNS(current.dns) } ?? true)
+        let dnsChanged = routesChanged || (previous.map { $0.dns.nativeSettings != current.dns.nativeSettings } ?? true)
         let proxyChanged = routesChanged || (previous.map { $0.proxy != current.proxy } ?? true)
         if routesChanged {
             routes.reassertNow()
@@ -131,10 +130,20 @@ extension VPNController {
     /// Establish-time ownership prediction (RC3), passed via `startTunnel`. (Delegates.)
     func startWithInitialGateway(_ session: NETunnelProviderSession, profile id: String,
                                  options: [String: NSObject]) throws {
+        let initialStatus = session.status
         try routes.startWithGateway(for: id, wantsDefault: routes.predictedGatewayOwned(id)) { owned in
             var start = options
             start["gatewayOwned"] = owned as NSNumber
             try session.startTunnel(options: start)
+        }
+        guard managers[id]?.connection === session,
+              let token = connectionReservations.didSubmit(id, from: initialStatus) else { return }
+        // Give macOS time to publish the start, then recheck once to surface
+        // failures that never publish a transition out of the initial state.
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard let self, self.connectionReservations.expireSubmission(token, for: id) else { return }
+            self.resyncStatuses()
         }
     }
     /// Removed managers cannot deliver their final status notification. Retire
@@ -178,8 +187,7 @@ extension VPNController {
     private func tailscaleExitNode(for id: String) -> String {
         let c = tailscaleConfig(for: id)
         if c.useExitNode, !c.exitNode.isEmpty { return c.exitNode }
-        return tailscaleStatuses[id]?.exitNodes.first(where: { $0.online })?.id
-            ?? tailscaleStatuses[id]?.exitNodes.first?.id ?? ""
+        return tailscaleStatuses[id]?.exitNodes.first(where: { $0.online })?.id ?? ""
     }
 
     /// Whether a profile's own config wants to carry everything (redirect-gateway
@@ -199,6 +207,8 @@ extension VPNController {
             return sshNetworkTunnelConfig(for: id).includeDefaultRoute
         case .openVPN:
             return (ovpnText(id: id) ?? "").range(of: "redirect-gateway", options: .caseInsensitive) != nil
+        case .ssh:
+            return pointToPointSSHRoutes(for: id).map { !RoutePrefixMath.defaultRoutePrefixes(in: $0).isEmpty } ?? false
         default:
             return p.kind.isSSLVPN   // OpenConnect builds a full-tunnel by default
         }
@@ -208,25 +218,37 @@ extension VPNController {
     /// default route — the "X also routes …" line under the picker. Best-effort
     /// per engine; empty when we can't enumerate them.
     func gatewaySubnets(for id: String) -> [String] {
-        guard let p = profiles.first(where: { $0.id == id }) else { return [] }
         if let prefixes = pushedNetworkState[id]?.advertisedPrefixes {
-            return prefixes.filter { $0 != "0.0.0.0/0" && $0 != "::/0" }
+            return RoutePrefixMath.specificRoutes(in: prefixes)
         }
+        guard let p = profiles.first(where: { $0.id == id }) else { return [] }
         switch p.kind {
         case .proxyTunnel:
             return proxyTunnelConfig(for: id).includedRoutes
         case .tailscale:
             let routes = tailscaleStatuses[id]?.config?.subnetRoutes ?? []
-            return routes.filter { $0 != "0.0.0.0/0" && $0 != "::/0" }
+            return RoutePrefixMath.specificRoutes(in: routes)
         case .wireGuard:
             // The peer's allowed IPs besides the default routes.
-            return wireGuardConfig(for: id).allowedIPs.filter { $0 != "0.0.0.0/0" && $0 != "::/0" }
+            return RoutePrefixMath.specificRoutes(in: wireGuardConfig(for: id).allowedIPs)
         case .sshNetworkTunnel:
             let c = sshNetworkTunnelConfig(for: id)
             return c.includedRoutes
+        case .ssh:
+            return RoutePrefixMath.specificRoutes(in: pointToPointSSHRoutes(for: id) ?? [])
         default:
             return []
         }
+    }
+
+    private func pointToPointSSHRoutes(for id: String) -> [String]? {
+        if let config = subprocessSessionStore?.configurationStore?.tunnels.first(where: { $0.id == id }) {
+            return config.sshTunConfiguration?.network.routes
+        }
+        let proto = managers[id]?.protocolConfiguration as? NETunnelProviderProtocol
+        guard let data = proto?.providerConfiguration?["sshTun"] as? Data,
+              let config = try? JSONDecoder().decode(SSHTunConfiguration.self, from: data), config.problem == nil else { return nil }
+        return config.network.routes
     }
 
     // MARK: Divert rules (route a destination around this VPN)
@@ -241,15 +263,22 @@ extension VPNController {
     /// Persist a profile's own rules (its excluded/divert destinations), then
     /// re-materialise every profile's "route into me" include-set and reconnect
     /// whatever's live so the change takes effect.
-    func setRoutingRules(_ rules: [RoutingRule], for id: String) async {
+    @discardableResult
+    func setRoutingRules(_ rules: [RoutingRule], for id: String) async -> String? {
         guard let mgr = managers[id],
-              let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { return }
-        var conf = proto.providerConfiguration ?? [:]
+              let proto = mgr.protocolConfiguration as? NETunnelProviderProtocol else { return "This VPN is no longer available." }
+        let previous = proto.providerConfiguration
+        var conf = previous ?? [:]
         if let blob = RoutingRuleStore.encode(rules) { conf["routingRules"] = blob }
         else { conf.removeValue(forKey: "routingRules") }
         proto.providerConfiguration = conf
         mgr.protocolConfiguration = proto
-        try? await mgr.saveToPreferences()
+        do {
+            try await mgr.saveToPreferences()
+        } catch {
+            proto.providerConfiguration = previous
+            return "Couldn’t save the routing rule. \(error.localizedDescription)"
+        }
         try? await mgr.loadFromPreferences()
         routingRulesCache[id] = rules
 
@@ -257,6 +286,7 @@ extension VPNController {
         await reconnectIfActive(id)
         // Targets of any .overVPN rule need their include-set refreshed.
         await syncIncludes()
+        return nil
     }
 
     private func reconnectIfActive(_ id: String) async {
@@ -297,18 +327,28 @@ extension VPNController {
         }
     }
 
-    func addRoutingRule(_ rule: RoutingRule, for id: String) async {
-        // Org policy can forbid diverting traffic around / off the VPN.
+    func routedInUnsupportedReason(for target: Profile) -> String? {
+        if target.kind.isSSLVPN { return openConnectRouteTargetProblem?(target.id) }
+        return target.kind.routedInUnsupportedReason
+    }
+
+    @discardableResult
+    func addRoutingRule(_ rule: RoutingRule, for id: String) async -> String? {
         switch rule.action {
-        case .outside where !ManagedPolicy.allowDivertOutside: return
-        case .overVPN where !ManagedPolicy.allowDivertOverVPN: return
-        default: break
+        case .outside:
+            guard ManagedPolicy.allowDivertOutside else { return "Your organization prevents routing traffic outside the VPN." }
+        case .overVPN(let targetID):
+            guard ManagedPolicy.allowDivertOverVPN else { return "Your organization prevents routing traffic over another VPN." }
+            guard targetID != id, let target = profiles.first(where: { $0.id == targetID }) else {
+                return "Choose another saved VPN for this route."
+            }
+            if let reason = routedInUnsupportedReason(for: target) { return reason }
         }
         var rules = routingRules(for: id)
         // Replace any existing rule for the same destination.
         rules.removeAll { $0.destination == rule.destination }
         rules.append(rule)
-        await setRoutingRules(rules, for: id)
+        return await setRoutingRules(rules, for: id)
     }
 
     func removeRoutingRule(id ruleID: String, for id: String) async {
@@ -321,17 +361,27 @@ extension VPNController {
 // MARK: - RouteMediatorHost (the live NE side for the Route mediator)
 
 extension VPNController: RouteMediatorHost {
+    private var packetSettingsProfiles: [Profile] {
+        let ids = routeVirtualProfileIDs
+        let shared = compositionProfiles.filter { ids.contains($0.id) }
+        let sharedIDs = Set(shared.map(\.id))
+        return (profiles + Array(nativePacketProfiles.values)).filter {
+            !sharedIDs.contains($0.id) && !isApplicationRouted($0.id)
+        } + shared
+    }
     /// Project the live profiles into the mediator's snapshot. Reads the observable
     /// `profiles` (and `lastConnectedAt`) so the mediator's computeds stay tracked.
     var routeProfiles: [RouteProfileInfo] {
-        profiles.map { p in
+        packetSettingsProfiles.map { p in
             RouteProfileInfo(
                 id: p.id, name: p.name, kind: p.kind,
                 connected: p.status == .connected,
-                engaged: isEngaged(id: p.id),
+                engaged: p.kind.isSingletonNative ? Self.isEngaged(p.status) : isEngaged(id: p.id),
                 lastConnectedAt: lastConnectedAt[p.id],
                 tailscaleHasExitNode: p.kind == .tailscale && !tailscaleExitNode(for: p.id).isEmpty,
-                retainingRoutesDuringTransition: p.status == .reasserting || p.status == .disconnecting)
+                retainingRoutesDuringTransition: p.status == .reasserting || p.status == .disconnecting,
+                ownedIPsec: p.kind.isSingletonNative,
+                pointToPointSSH: p.kind == .ssh && pointToPointSSHRoutes(for: p.id) != nil)
         }
     }
 
@@ -354,7 +404,8 @@ extension VPNController: RouteMediatorHost {
             guard !node.isEmpty else { return nil }   // not capable; leave as-is (no-op success)
             patch = TailscalePrefsPatch(acceptRoutes: nil, acceptDNS: nil,
                                         useExitNode: true, exitNode: node,
-                                        exitNodeAllowLANAccess: nil, advertiseRoutes: nil)
+                                        exitNodeAllowLANAccess: tailscaleConfig(for: id).exitNodeAllowLANAccess,
+                                        advertiseRoutes: nil)
         } else {
             patch = TailscalePrefsPatch(acceptRoutes: nil, acceptDNS: nil,
                                         useExitNode: false, exitNode: nil,
@@ -370,8 +421,31 @@ extension VPNController: RouteMediatorHost {
         await fetchStats(id: id, timeout: 2)?.effectiveDefaultOwned
     }
 
-    func routeWantsFullTunnel(id: String) -> Bool { profileWantsFullTunnel(id) }
+    func routeWantsFullTunnel(id: String) -> Bool {
+        if ManagedPolicy.forceKeepInsideVPN { return true }
+        if virtualManager(for: id) != nil, let pushed = pushedNetworkState[id],
+           pushed.defaultRouteV4 != nil || pushed.defaultRouteV6 != nil {
+            return pushed.defaultRouteV4 == true || pushed.defaultRouteV6 == true
+        }
+        if nativePacketProfiles[id] != nil || virtualManager(for: id) != nil && nativeConfigStore?.configs.contains(where: { $0.id == id }) == true { return routeCanCarryDefault(id: id) }
+        if let kind = profiles.first(where: { $0.id == id })?.kind, kind == .openVPN || kind.isSSLVPN,
+           let pushed = pushedNetworkState[id], pushed.defaultRouteV4 != nil || pushed.defaultRouteV6 != nil {
+            return pushed.defaultRouteV4 == true || pushed.defaultRouteV6 == true
+        }
+        return profileWantsFullTunnel(id)
+    }
     func routeCanCarryDefault(id: String) -> Bool {
+        if virtualManager(for: id) != nil, let pushed = pushedNetworkState[id],
+           pushed.defaultRouteV4 != nil || pushed.defaultRouteV6 != nil {
+            return pushed.defaultRouteV4 == true || pushed.defaultRouteV6 == true
+        }
+        if let routes = pointToPointSSHRoutes(for: id) {
+            return !RoutePrefixMath.defaultRoutePrefixes(in: routes).isEmpty
+        }
+        if nativePacketProfiles[id] != nil || virtualManager(for: id) != nil && nativeConfigStore?.configs.contains(where: { $0.id == id }) == true {
+            guard let pushed = pushedNetworkState[id], pushed.defaultRouteV4 != nil || pushed.defaultRouteV6 != nil else { return true }
+            return pushed.defaultRouteV4 == true || pushed.defaultRouteV6 == true
+        }
         guard let kind = profiles.first(where: { $0.id == id })?.kind else { return false }
         switch kind {
         case .wireGuard: return wireGuardConfig(for: id).isFullTunnel
@@ -398,7 +472,7 @@ extension VPNController: DNSMediatorHost {
     /// bridge (the tier-3 `DNS_PUSHED` capture seam) and reads back through the observed
     /// system resolvers the mediator already publishes.
     var dnsProfiles: [DNSProfileInfo] {
-        profiles.map { p in
+        packetSettingsProfiles.map { p in
             var resolvers: [String] = []
             var matchDomains: [String] = []
             var wantsCatchAll = false
@@ -449,13 +523,37 @@ extension VPNController: DNSMediatorHost {
                 engaged: isEngaged(id: p.id),
                 lastConnectedAt: lastConnectedAt[p.id],
                 resolvers: resolvers, searchDomains: searchDomains,
-                matchDomains: matchDomains, wantsCatchAll: wantsCatchAll)
+                matchDomains: matchDomains, wantsCatchAll: wantsCatchAll,
+                ownsPacketSettings: virtualManager(for: p.id) != nil || nativePacketManagers[p.id] != nil ||
+                    (p.kind == .ssh && pointToPointSSHRoutes(for: p.id) != nil))
         }
     }
 
     var dnsDefaultOwner: String? {
         if let applied = routes.appliedPlan { return applied.owner }
         return routes.displayedGatewayOwner
+    }
+
+    var dnsVirtualProfileIDs: Set<String> { routeVirtualProfileIDs }
+
+    func dnsApplyVirtual(_ requests: [String: DNSApplyRequest]) async -> Bool {
+        let snapshot = routeVirtualProfileIDs
+        let groups = Dictionary(grouping: snapshot.sorted(), by: { virtualMembers[$0] })
+        let newCatchAll = requests.first { $0.value.matchDomains.contains("") }?.key
+        let ownerGroup = newCatchAll.flatMap { virtualMembers[$0] }
+        let ordered = groups.sorted {
+            let aOwns = ownerGroup != nil && $0.key == ownerGroup
+            let bOwns = ownerGroup != nil && $1.key == ownerGroup
+            return aOwns == bOwns ? ($0.key ?? "") < ($1.key ?? "") : !aOwns
+        }
+        for (_, members) in ordered {
+            guard let recipient = members.first, let manager = virtualManager(for: recipient) else { return false }
+            let request = requests.filter { members.contains($0.key) }
+            guard let data = try? JSONEncoder().encode(request),
+                  await sendMessage("router:dns-plan:" + String(decoding: data, as: UTF8.self), to: recipient) == "ok",
+                  virtualManager(for: recipient) === manager else { return false }
+        }
+        return true
     }
 
     /// SOLE-WRITER DNS apply: send ONE participant's arbitrated `NEDNSSettings` slice to
@@ -484,7 +582,7 @@ extension VPNController: ProxyMediatorHost {
     /// intent-capture seam for populating them live is deliberately left clean (tier-3
     /// `PROXY_PUSHED`).
     var proxyProfiles: [ProxyProfileInfo] {
-        profiles.map { p in
+        profiles.filter { !isApplicationRouted($0.id) }.map { p in
             // The engine's ground-truth pushed proxy (from stats) is the OpenVPN
             // per-kind capture; other kinds contribute nothing (mode .none).
             let pushed = pushedProxyIntents[p.id]

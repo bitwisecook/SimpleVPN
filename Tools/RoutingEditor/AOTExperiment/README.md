@@ -1,0 +1,17 @@
+# Routing rule native compilation experiment
+
+Run `python3 Tools/RoutingEditor/AOTExperiment/run.py` from the repository root, or invoke the script by absolute path. It needs Python 3, the Go toolchain specified by the proxy engine, and Clang. When installed, Rust and Swift also run the handwritten scalar comparisons. The Swift fixture requires a compiler with `@c` support. The runner builds in a temporary directory, uses the normal Go build cache, and disables Go module downloads.
+
+The runner compiles two equivalent DSL programs with the repository’s compiler. A Go test overlay reads their actual bytecode and emits straight-line C with forward branches. Clang then produces a native executable from the resulting code. The second rule uses two short-circuited boolean tests. The emitter accepts a single bounded TCP SYN handler with integer fields, IPv4 prefix matches and a DSCP effect or drop. Unsupported instructions and fields fail before native compilation. The emitter is a development experiment.
+
+The current Go VM supplies an expected result for every input. Cases distinguish a missing field from a present zero, skip reads on unrelated events or branches, and exercise prefix boundaries and explicit drops. Each target must match 16,864 individual oracle cases and 8,192 mixed events before timing. One timed sample makes 8,388,608 calls over the same warmed 64 KiB corpus. Each table entry reports the median and range across nine interleaved processes.
+
+The native timings include a scalar C call and return an encoded effect. The VM timings include typed host access, diagnostics, execution limits and handler bookkeeping. The stock matched/unmatched VM benchmark runs separately from the mixed-input benchmark. This harness isolates dispatch and effect selection. Packet parsing, encryption, runtime profile editing, whole-tunnel throughput and energy require separate measurements. Go-to-native calls in a Go packet loop would also incur a cgo boundary absent from these C-caller numbers.
+
+## Measurements from the investigation
+
+On an arm64 Apple M5 Max, the original mixed-fixture run measured 106.48 ns per input for the current Go VM, 0.99 ns for the generated rule called from C, and 0.89 ns for each handwritten Swift and Rust function called from C. The preserved runner reproduced the native specialization results within 0.94–0.95 ns per input on a later run. The semantic oracle covers presence, missing values, short-circuit behavior, prefix boundaries and the final effect.
+
+Separate integration probes measured 13.97 ns from Go through cgo to Swift and 14.21 ns from Go through cgo to Rust. The Swift probe used a dynamic library because the Go toolchain rejected the Swift object’s module-hash section in the static link probe. Swift and Rust objects both linked directly to the C driver. The reverse direction, C calling a Go archive, measured 37.12 ns per input. These probes used Go 1.27.4, Apple Swift 6.4.2, Rust 1.99.1 and Apple Clang 21. The preserved runner reproduces the C-caller and VM comparisons. It does not reproduce the separate cgo probes.
+
+The first VM compile in each warmed process took a median of 37.8 µs for this rule. Repeated compilations averaged 4.94 µs in batches of 500. Keep compile latency, steady-state rule dispatch, bridge overhead and whole-packet throughput as separate measurements. The adapter-specific implications and signing boundary are in the [routing atlas](../../../Docs/RoutingAtlas.html#execution-engines).

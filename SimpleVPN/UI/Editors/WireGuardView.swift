@@ -26,7 +26,6 @@ struct WireGuardView: View {
     @State private var showImporter = false
     @State private var pasteText = ""
     @State private var showPaste = false
-    @FocusState private var pasteFocused: Bool
     @State private var customRouting = CustomRoutingProfile()
     @State private var crProxyAuthUsername = ""
     @State private var crProxyAuthPassword = ""
@@ -410,10 +409,11 @@ struct WireGuardView: View {
     private var pasteSheet: some View {
         VStack(spacing: 12) {
             Text("Paste WireGuard configuration").font(.headline)
-            TextEditor(text: $pasteText).font(.callout.monospaced()).frame(width: 460, height: 260)
+            ConfigurationSourceText(text: $pasteText, format: .wireGuard,
+                                    accessibilityLabel: "WireGuard configuration text", initialFocus: true)
+                .frame(width: 460, height: 260)
                 .border(.quaternary)
-                .focused($pasteFocused)
-                .accessibilityLabel("WireGuard configuration text")
+                .privacySensitive()
             HStack {
                 Button("Cancel") { showPaste = false }
                     .keyboardShortcut(.cancelAction)
@@ -424,7 +424,6 @@ struct WireGuardView: View {
             }
         }
         .padding()
-        .onAppear { pasteFocused = true }
     }
 
     /// Status + write-only entry for the private key: the row says whether one is

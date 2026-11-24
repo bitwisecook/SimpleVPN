@@ -51,6 +51,10 @@ func (st *engineState) handleTCP(r *tcp.ForwarderRequest) {
 	targetPort := int(id.LocalPort)
 
 	st.totalFlows.Add(1)
+	if routes := st.tlsRoutes[targetPort]; routes != nil {
+		st.handleGuardedTCP(r, routes)
+		return
+	}
 
 	// Dial the upstream FIRST, before accepting the guest endpoint. If the dial
 	// fails we reset the guest connection (sendReset=true) so the app sees a

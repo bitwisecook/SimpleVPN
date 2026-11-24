@@ -52,6 +52,33 @@ nonisolated struct DNSNameMatch: Codable, Sendable, Equatable {
             return state[bytes.count]
         }
     }
+    /// Emit the validated pattern once when the DNS provider activates a policy.
+    var compiledPattern: (kind: UInt8, bytes: [UInt8])? {
+        guard problem == nil else { return nil }
+        let text = Self.canonical(pattern)
+        switch kind {
+        case .exact: return (1, Array(text.utf8))
+        case .suffix: return (2, Array(text.utf8))
+        case .glob:
+            var bytes: [UInt8] = []
+            for token in Self.tokens(text).values {
+                switch token {
+                case .literal(let byte): bytes.append(contentsOf: [1, byte])
+                case .any: bytes.append(2)
+                case .star: bytes.append(3)
+                case .members:
+                    bytes.append(4)
+                    var mask = [UInt8](repeating: 0, count: 16)
+                    for value in UInt8(33)...126 where token.accepts(value) {
+                        mask[Int(value / 8)] |= 1 << (value % 8)
+                    }
+                    bytes.append(contentsOf: mask)
+                }
+            }
+            return (3, bytes)
+        }
+    }
+
     private enum Token {
         case literal(UInt8), any, star, members([ClosedRange<UInt8>], negated: Bool)
         func accepts(_ byte: UInt8) -> Bool {
@@ -112,6 +139,7 @@ nonisolated struct DNSNameMatch: Codable, Sendable, Equatable {
 
 nonisolated enum DNSResolverAddress {
     static func isValid(_ raw: String) -> Bool {
+        guard !raw.utf8.contains(0) else { return false }
         var v4 = in_addr(), v6 = in6_addr()
         return raw.withCString { inet_pton(AF_INET, $0, &v4) == 1 || inet_pton(AF_INET6, $0, &v6) == 1 }
     }
@@ -163,6 +191,11 @@ nonisolated struct DNSQueryPolicy: Codable, Sendable, Equatable {
         return nil
     }
     func route(for name: String) -> DNSQueryRoute? {
-        routes.first { $0.rule.enabled && $0.rule.match.matches(name) }
+        guard let index = routeIndex(for: name) else { return nil }
+        return routes[index]
+    }
+
+    func routeIndex(for name: String) -> Int? {
+        routes.firstIndex { $0.rule.enabled && $0.rule.match.matches(name) }
     }
 }

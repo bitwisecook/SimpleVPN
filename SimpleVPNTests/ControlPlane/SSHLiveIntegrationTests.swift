@@ -807,7 +807,7 @@ nonisolated enum SOCKS5Client {
         return fd
     }
 
-    private static func connect(port: UInt16, timeout: Double) throws -> Int32 {
+    fileprivate static func connect(port: UInt16, timeout: Double) throws -> Int32 {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { throw Failure.connect(errno) }
         Loopback.suppressSIGPIPE(fd)
@@ -831,7 +831,7 @@ nonisolated enum SOCKS5Client {
         return fd
     }
 
-    private static func send(_ fd: Int32, _ bytes: [UInt8]) throws {
+    fileprivate static func send(_ fd: Int32, _ bytes: [UInt8]) throws {
         var offset = 0
         while offset < bytes.count {
             let n = bytes.withUnsafeBytes { raw -> Int in
@@ -845,7 +845,7 @@ nonisolated enum SOCKS5Client {
         }
     }
 
-    private static func receive(_ fd: Int32, _ want: Int, _ what: String) throws -> [UInt8] {
+    fileprivate static func receive(_ fd: Int32, _ want: Int, _ what: String) throws -> [UInt8] {
         var out = [UInt8]()
         var buf = [UInt8](repeating: 0, count: 65536)
         while out.count < want {
@@ -918,8 +918,9 @@ nonisolated struct SSHLiveIntegrationTests {
 
     /// Connect + verify + authenticate with the key file, the common preamble.
     private func connected(to server: LiveSSHServer, _ fixture: LiveSSHFixture,
-                           compression: Bool = false) throws -> SSHSession {
+                           compression: Bool = false, physicalInterfaceIndex: UInt32 = 0) throws -> SSHSession {
         let session = SSHSession()
+        session.physicalInterfaceIndex = physicalInterfaceIndex
         try session.connect(toHost: "127.0.0.1", port: Int32(server.port), timeout: 10,
                             kexAlgorithms: nil, compression: compression)
         try session.verifyHostKey(withKnownHosts: nil, pin: fixture.hostKeyFingerprintHex,
@@ -931,6 +932,82 @@ nonisolated struct SSHLiveIntegrationTests {
     }
 
     // MARK: 1 — the host-key gate
+
+    @Test(.enabled(if: LiveSSHFixture.isAvailable))
+    func openSSHReverseDeliveryGatesTheLocalServiceAndReturnsItsReply() async throws {
+        let fixture = try fixture()
+        let server = try LiveSSHServer(fixture: fixture)
+        defer { server.stop() }
+        let allowed = try EchoTarget(mode: .immediate)
+        let denied = try EchoTarget(mode: .immediate)
+        defer { allowed.shutdownTarget(); denied.shutdownTarget() }
+        let allowedPort = try #require(Loopback.freePort())
+        let deniedPort = try #require(Loopback.freePort())
+        let localPort = try #require(Loopback.freePort())
+        let dynamicPort = try #require(Loopback.freePort())
+        let layout = OpenSSHReverseDelivery.Layout(reverse: [
+            .init(remote: "127.0.0.1:\(allowedPort)", host: "127.0.0.1", port: Int(allowed.port)),
+            .init(remote: "127.0.0.1:\(deniedPort)", host: "127.0.0.1", port: Int(denied.port))
+        ], local: [
+            .init(bind: "127.0.0.1", port: localPort, target: .fixed("127.0.0.1", Int(allowed.port))),
+            .init(bind: "127.0.0.1", port: dynamicPort, target: .dynamic)
+        ])
+        let session = try OpenSSHReverseDelivery(layout: layout, source: """
+            on inbound_guard: ssh.reverse_delivery { if ssh.port == \(denied.port) && ssh.direction == "inbound" { drop(); } }
+            on outbound_guard: ssh.forward_open { if ssh.port == \(denied.port) && ssh.mode == "dynamic" { drop(); } }
+            """)
+        try await session.startListeners()
+        defer { session.stop() }
+        let known = fixture.directory.appendingPathComponent("known-" + UUID().uuidString)
+        let publicKey = try String(contentsOfFile: fixture.hostKeyPublicPath, encoding: .utf8)
+        try ("[127.0.0.1]:\(server.port) " + publicKey).write(to: known, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: known) }
+        let ssh = Process()
+        ssh.executableURL = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/ssh")
+        ssh.arguments = ["-F", "/dev/null", "-N", "-o", "ExitOnForwardFailure=yes", "-o", "IdentityAgent=none",
+                         "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "GlobalKnownHostsFile=/dev/null",
+                         "-o", "UserKnownHostsFile=\(known.path)", "-o", "StrictHostKeyChecking=yes",
+                         "-i", fixture.clientKeyPath, "-p", String(server.port)] + session.forwardArguments + ["--", "127.0.0.1"]
+        try ssh.run()
+        defer { if ssh.isRunning { ssh.terminate() }; ssh.waitUntilExit() }
+        try #require(session.authorize(ssh))
+        // Polling the denied port itself provides the first observed remote delivery.
+        try #require(Loopback.wait(upTo: 5) { Loopback.accepts(port: deniedPort) })
+        // A different process under this login can discover the Unix path. It
+        // must receive EOF without inducing even a connection to the real target.
+        let fixed = try #require(session.forwardArguments.firstIndex(of: "-L"))
+        let path = try #require(session.forwardArguments[fixed + 1].split(separator: ":").first)
+        let outsider = Process()
+        outsider.executableURL = URL(fileURLWithPath: "/usr/bin/nc")
+        outsider.arguments = ["-w", "1", "-U", String(path)]
+        outsider.standardInput = FileHandle.nullDevice
+        outsider.standardOutput = FileHandle.nullDevice
+        outsider.standardError = FileHandle.nullDevice
+        try outsider.run()
+        outsider.waitUntilExit()
+        let client = try SOCKS5Client.connect(port: allowedPort, timeout: 5)
+        defer { close(client) }
+        let payload = Array("reverse delivery".utf8)
+        try SOCKS5Client.send(client, payload)
+        shutdown(client, SHUT_WR)
+        #expect(try SOCKS5Client.receive(client, payload.count, "echo") == payload)
+        let totals = await session.snapshot()
+        #expect(denied.connectionCount == 0)
+        #expect(allowed.connectionCount == 1)
+        #expect(totals.denied == 1 && totals.opened == 1)
+        #expect(totals.bytesReceived == UInt64(payload.count) && totals.bytesSent == UInt64(payload.count))
+        let local = try SOCKS5Client.connect(port: localPort, timeout: 5)
+        defer { close(local) }
+        try SOCKS5Client.send(local, payload)
+        #expect(try SOCKS5Client.receive(local, payload.count, "fixed local echo") == payload)
+        #expect(try SOCKS5Client.roundTrip(proxyPort: dynamicPort, host: "127.0.0.1", port: allowed.port, payload: payload, timeout: 5) == payload)
+        let request: [UInt8] = [5, 1, 0, 1, 127, 0, 0, 1, UInt8(denied.port >> 8), UInt8(truncatingIfNeeded: denied.port)]
+        let rejection = try SOCKS5Client.rejectedRequest(proxyPort: dynamicPort, request: request)
+        #expect(rejection[1] == 2 && denied.connectionCount == 0)
+        let final = await session.snapshot()
+        #expect(final.rules.first { $0.id == "outbound_guard" }?.entered == 3)
+        #expect(final.rules.first { $0.id == "inbound_guard" }?.entered == 2)
+    }
 
     @Test(.enabled(if: LiveSSHFixture.isAvailable))
     func hostKeyFingerprintMatchesSSHKeygenAndAMatchingPinConnects() throws {
@@ -1095,12 +1172,14 @@ nonisolated struct SSHLiveIntegrationTests {
 
     // MARK: 3 — direct-tcpip: round trip, half-close, teardown
 
-    @Test(.enabled(if: LiveSSHFixture.isAvailable))
-    func directTCPIPRoundTripsBytesAndHalfCloses() throws {
+    @Test(.enabled(if: LiveSSHFixture.isAvailable), arguments: [false, true])
+    func directTCPIPRoundTripsBytesAndHalfCloses(scoped: Bool) throws {
         let fixture = try fixture()
         let server = try LiveSSHServer(fixture: fixture)
         defer { server.stop() }
-        let session = try connected(to: server, fixture)
+        let index = scoped ? if_nametoindex("lo0") : 0
+        if scoped { try #require(index != 0) }
+        let session = try connected(to: server, fixture, physicalInterfaceIndex: index)
         defer { session.disconnect() }
 
         // (a) plain round trip through an echo target, 128 KiB so partial writes

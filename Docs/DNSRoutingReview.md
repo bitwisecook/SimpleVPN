@@ -52,6 +52,22 @@ outside the rule. Existing IP routing determines the packet path to each resolve
 query rules do not choose interfaces or add routes. Application-managed encrypted
 DNS bypasses this feature.
 
+## Routed connections
+
+The packet provider applies saved resolver, search-domain and scope filters to each
+member’s authenticated settings before starting shared capture. A resolver’s IP
+must be reachable through its owning member and cannot also be a carrier exclusion.
+Live changes publish the shared resolver plan and host routes in one transaction.
+If a member with private DNS scopes stops, its resolver remains captured and queries
+fail through that member. Standalone tunnel updates preserve an existing resolver’s
+host route through destination edits and reject a DNS override outside the tunnel’s routes.
+
+A shared interface can publish one native resolver configuration. DNS scopes owned
+by different members require independent interfaces. A scoped-only resolver also
+requires split capture because macOS ignores match domains on its default tunnel.
+Selected-app routing verifies common DNS settings across members. Its DNS rules do
+not participate in the optional whole-Mac query proxy’s global rules.
+
 ## Runtime and deployment
 
 The existing system-extension bundle additionally declares a DNS proxy provider;
@@ -74,6 +90,7 @@ acknowledgement are not substitutes for that check.
 Primary platform references:
 
 - [NEDNSSettings.matchDomains](https://developer.apple.com/documentation/networkextension/nednssettings/matchdomains)
+- [NETunnelNetworkSettings.dnsSettings](https://developer.apple.com/documentation/networkextension/netunnelnetworksettings/dnssettings)
 - [DNS proxy provider](https://developer.apple.com/documentation/networkextension/dns-proxy-provider)
 - [Provider configuration](https://developer.apple.com/documentation/networkextension/nednsproxyproviderprotocol/providerconfiguration)
 - [Only one enabled DNS proxy](https://developer.apple.com/documentation/networkextension/nednsproxymanager/isenabled)

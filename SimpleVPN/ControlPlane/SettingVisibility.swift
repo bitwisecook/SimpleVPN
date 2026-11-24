@@ -86,7 +86,7 @@ extension SettingVisibility {
         case .ipsec:
             hide(["native.auth-method", "native.password"],
                  "IPsec always signs in with a shared secret in this build, so there is no method to choose.")
-            hide(["native.remote-id", "native.encryption", "native.integrity", "native.dh-group",
+            hide(["native.encryption", "native.integrity", "native.dh-group",
                   "native.pfs", "native.ike-lifetime", "native.dpd", "native.mobike"],
                  "macOS only exposes this for IKEv2 \u{2014} set Protocol to IKEv2 to reach it.")
         case .l2tp:
@@ -96,6 +96,10 @@ extension SettingVisibility {
                   "native.remote-id", "native.encryption", "native.integrity", "native.dh-group",
                   "native.pfs", "native.ike-lifetime", "native.dpd", "native.mobike"],
                  l2tpOnlyHas)
+            if c.l2tpMSCHAPv2 == true {
+                hidden["native.remote-id"] = nil
+                hidden["native.group"] = nil
+            }
         default:   // .ikev2
             hide(["native.group", "native.xauth", "native.xauth-password"],
                  "It only applies to IPsec (IKEv1) \u{2014} set Protocol to IPsec to reach it.")
@@ -187,6 +191,9 @@ extension SettingVisibility {
             if c.sshMode != .socks {
                 hide(["ssh.socks-port", "ssh.system-proxy"],
                      "It only applies in SOCKS proxy mode \u{2014} choose that mode to reach it.")
+            }
+            if c.sshMode != .netTunnel {
+                hide(["ssh.tun-addresses", "ssh.tun-routes", "ssh.tun-unit", "ssh.tun-mtu"], "Choose Point-to-point tunnel in Mode.")
             }
             if c.sshMode != .portForward {
                 hidden["ssh.forwards"] =

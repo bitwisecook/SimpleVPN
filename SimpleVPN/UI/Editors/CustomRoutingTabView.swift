@@ -285,6 +285,7 @@ struct CustomRoutingTabView: View {
     /// NEVPNManager kinds) pass it explicitly.
     var kind: VPNKind? = nil
     var scope: Scope = .routesAndProxy
+    var showsProfilePacketPolicy = true
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The host editor's search model — which kind's editor this tab is inside,
@@ -317,10 +318,21 @@ struct CustomRoutingTabView: View {
         Group {
             if scope == .dns {
                 dnsSection
+                RoutingFilterActivitySection(activity: vpn.filterActivity, profileID: profileID, profile: profile, dns: true)
             } else {
                 routesSection
                 proxySection
+                if showsProfilePacketPolicy {
+                    ProfilePacketPolicySection(vpn: vpn, source: vpn.packetPolicy(for: profileID), adapter: vpn.packetPolicyAdapter(for: profileID)) {
+                        try await vpn.setPacketPolicy($0, for: profileID)
+                    }
+                    if vpn.virtualManager(for: profileID) == nil,
+                       let member = vpn.profiles.first(where: { $0.id == profileID }), member.status == .connected {
+                        PacketCoreActivityButton(vpn: vpn, profileID: profileID, name: member.name)
+                    }
+                }
                 crossLinksSection
+                RoutingFilterActivitySection(activity: vpn.filterActivity, profileID: profileID, profile: profile, dns: false)
             }
         }
         .onChange(of: focusedRuleID) { _, new in

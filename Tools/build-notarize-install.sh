@@ -72,6 +72,8 @@ echo "==> re-sign Sparkle nested executables (notary requires our Developer ID +
 # sealed file.  It is generated notarization output, never user content.
 rm -f "$APP/Contents/CodeResources"
 "$REPO/Tools/resign-sparkle.sh" "$APP"
+"$REPO/Tools/verify-source-identity.sh" "$APP"
+"$REPO/Tools/verify-routing-runtime.sh" "$APP"
 
 echo "==> verify not debuggable (no get-task-allow)"
 if codesign -d --entitlements - --xml "$APP" 2>/dev/null | grep -q "get-task-allow"; then

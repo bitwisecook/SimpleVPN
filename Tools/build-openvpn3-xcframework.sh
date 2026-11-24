@@ -12,7 +12,7 @@
 # OpenSSL is built from verified source by build-openssl.sh.
 set -euo pipefail
 
-PIN=0c1ce172fe918b05463d71e682a0c2f2d8fe7899   # openvpn3 revision (core 3.12) — bump deliberately
+PIN=cd2487bcde7c43130582344d9c512cb7842226f6   # openvpn3 revision (core 3.12) — bump deliberately
 # Keep IDENTICAL across all three engine scripts (see build-openconnect for why:
 # three statically-bundled OpenSSL copies land in one binary; version skew between
 # them is a linker/ABI hazard). Bump all three together.

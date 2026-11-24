@@ -1,9 +1,42 @@
 // Copyright 2026 James Deucker (bitwisecook)
 // SPDX-License-Identifier: GPL-3.0-only
+import NetworkExtension
 import Testing
 @testable import SimpleVPN
 
 struct ConnectionReservationsTests {
+    @Test func acceptedStartStaysConnectingUntilNetworkExtensionAcknowledgesIt() throws {
+        var claims = ConnectionReservations()
+        let reserved = claims.reserve(owner: "profile.node", members: ["node"])
+        let claim = try #require(reserved)
+        let submitted = claims.didSubmit("node", from: .disconnected)
+        let submission = try #require(submitted)
+        claims.finish(claim)
+        #expect(claims.status(for: "node", reported: .disconnected) == .connecting)
+        let overlap = claims.reserve(owner: "profile.node", members: ["node"])
+        #expect(overlap == nil)
+        #expect(claims.status(for: "node", reported: .connected) == .connected)
+        let expired = claims.expireSubmission(submission, for: "node")
+        #expect(!expired)
+        #expect(claims.status(for: "node", reported: .disconnected) == .disconnected)
+    }
+
+    @Test func cancellingOrExpiringASubmissionRestoresTheSystemStatus() throws {
+        var claims = ConnectionReservations()
+        let submitted = claims.didSubmit("node", from: .disconnected)
+        let cancelled = try #require(submitted)
+        claims.cancel(member: "node")
+        #expect(claims.status(for: "node", reported: .disconnected) == .disconnected)
+        let next = claims.didSubmit("node", from: .invalid)
+        let replacement = try #require(next)
+        let expiredStale = claims.expireSubmission(cancelled, for: "node")
+        #expect(!expiredStale)
+        #expect(claims.status(for: "node", reported: .invalid) == .connecting)
+        let expiredReplacement = claims.expireSubmission(replacement, for: "node")
+        #expect(expiredReplacement)
+        #expect(claims.status(for: "node", reported: .invalid) == .invalid)
+    }
+
     @Test func overlapIsRefusedUntilCancelledWriteHasDrained() throws {
         var claims = ConnectionReservations()
         let initial = claims.reserve(owner: "virtual.a", members: ["one", "two"])

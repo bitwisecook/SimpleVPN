@@ -83,7 +83,7 @@ struct ManualAnchorParityTests {
     private static let proseAnchors: Set<String> = [
         // App chapters
         "importing", "endpoints-map", "certificates", "pausing",
-        "virtual-routing-compositions",
+        "virtual-routing-compositions", "rule-activity", "app-routing",
         "connection-problems", "privacy",
         // Arranging the VPN list itself, and why a move keeps a VPN in its own group.
         // PROSE, not a setting, for the same reason `endpoints-order` is: the order is

@@ -1,0 +1,5 @@
+on priority: ip.packet {
+    var value = ip.dscp;
+    if value > 32 { value = value - 8; } else { value = value + 8; }
+    ip.dscp = value;
+}

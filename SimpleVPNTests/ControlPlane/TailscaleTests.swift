@@ -16,6 +16,31 @@ import Security
 import Testing
 @testable import SimpleVPN
 
+@MainActor
+struct TailscaleSignInTests {
+    @Test func aRunningNodeClearsAnOldInitialFailure() {
+        let vpn = VPNController()
+        var status = TailscaleStatus()
+        status.state = "Running"
+        for result in [VPNController.TailscaleSignInResult.preparing, .failed] {
+            vpn.tailscaleSignInResults["node"] = result
+            #expect(!vpn.publishTailscaleStatus(status, id: "node"))
+            #expect(vpn.tailscaleSignInResults["node"] == nil)
+        }
+    }
+
+    @Test func aRunningNodeStillReportsAnExplicitRenewalFailure() {
+        let vpn = VPNController()
+        var status = TailscaleStatus()
+        status.state = "Running"
+        for result in [VPNController.TailscaleSignInResult.renewing, .renewalFailed] {
+            vpn.tailscaleSignInResults["node"] = result
+            #expect(!vpn.publishTailscaleStatus(status, id: "node"))
+            #expect(vpn.tailscaleSignInResults["node"] == result)
+        }
+    }
+}
+
 struct TailscaleConfigTests {
 
     // MARK: Start-payload contract (must match Vendor/tailscale-engine/src/main.go)

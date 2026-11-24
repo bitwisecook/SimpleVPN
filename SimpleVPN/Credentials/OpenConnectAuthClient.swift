@@ -75,7 +75,7 @@ nonisolated enum OpenConnectAuthClient {
         /// credentials answer silently where they match; anything else cancels.
         var answerForm: @Sendable (OCAuthFormSpec) async -> FormReply
         /// Open the SSO sign-in URL (per-VPN browser selection).
-        var openURL: @Sendable (String) async -> Void
+        var openURL: @Sendable (String) async throws -> Void
         /// Decide a certificate that FAILED verification. NEVER return true
         /// without an explicit user decision; the default refuses.
         var decideCert: @Sendable (OCAuthCert) async -> Bool = { _ in false }
@@ -149,7 +149,7 @@ nonisolated enum OpenConnectAuthClient {
                         throw OpenConnectAuthError.invalidSignInURL
                     }
                     log.log("SSO sign-in URL raised — opening the browser")
-                    await handlers.openURL(url)
+                    try await handlers.openURL(url)
                 case .form(let form):
                     switch await handlers.answerForm(form) {
                     case .answers(let answers):

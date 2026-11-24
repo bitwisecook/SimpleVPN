@@ -43,7 +43,7 @@ extension VPNController {
     /// One-shot IPC to the running tunnel; nil when no session or send fails.
     func sendMessage(_ message: String, to id: String) async -> String? {   // was private — internal for the +File split
         let reply = await sendMessageData(message, to: id).flatMap { String(data: $0, encoding: .utf8) }
-        if reply == "ok", ["gateway:", "routes:", "dns:", "proxy:", "router:apply-plan:", "router:stop-port", "pause:", "resume"].contains(where: message.hasPrefix) {
+        if reply == "ok", ["gateway:", "routes:", "dns:", "proxy:", "router:apply-plan:", "router:dns-plan:", "router:stop-port", "pause:", "resume"].contains(where: message.hasPrefix) {
             networkStateSamples.invalidate()
         }
         return reply
@@ -52,7 +52,7 @@ extension VPNController {
     func sendMessageData(_ message: String, to id: String,   // was private — internal for the +File split
                                  timeout: TimeInterval = 8) async -> Data? {
         let virtual = virtualManager(for: id)
-        guard let session = (virtual ?? managers[id])?.connection as? NETunnelProviderSession else { return nil }
+        guard let session = (virtual ?? nativePacketManagers[id] ?? managers[id])?.connection as? NETunnelProviderSession else { return nil }
         var wireMessage = message
         if virtual != nil, message != "version" {
             guard let data = try? JSONEncoder().encode(VirtualRoutingMessage(profile: id, message: message)),
@@ -111,10 +111,16 @@ extension VPNController {
         // way as the default-route ownership above. Only kinds that PUSH a proxy
         // structurally do this today (OpenVPN); OpenConnect is a marked TODO below.
         if let stats {
+            if stats.virtualPortStopped == true, let session = stats.virtualRoutingSession,
+               virtualMembers[id] == session, virtualStoppedMembers.insert(id).inserted {
+                sshNetworkAgentBrokers.removeValue(forKey: id)?.cancel()
+                resyncStatuses()
+            }
             let prior = pushedNetworkState[id]
             let state = PushedNetworkState(stats)
             if prior != state { pushedNetworkState[id] = state }
-            if prior?.advertisedPrefixes != stats.advertisedPrefixes {
+            if prior?.advertisedPrefixes != state.advertisedPrefixes ||
+                prior?.defaultRouteV4 != state.defaultRouteV4 || prior?.defaultRouteV6 != state.defaultRouteV6 {
                 routes.reconcileGateway()
             }
             if prior?.dnsServers != stats.dnsServers || prior?.searchDomains != stats.searchDomains ||
@@ -184,7 +190,7 @@ extension VPNController {
 
 /// Cancellation can arrive before installation, while NE is still starting,
 /// or after the reply. The winner releases the continuation exactly once.
-private nonisolated final class ProviderMessageResponse: @unchecked Sendable {
+nonisolated final class ProviderMessageResponse: @unchecked Sendable {
     private let lock = NSLock()
     private var finished = false
     private var continuation: CheckedContinuation<Data?, Never>?

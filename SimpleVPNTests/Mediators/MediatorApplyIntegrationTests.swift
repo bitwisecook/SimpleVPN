@@ -70,6 +70,12 @@ private final class DNSApplyHost: DNSMediatorHost {
     let events = AsyncStream<Void>.makeStream()
     var release: CheckedContinuation<Void, Never>?
     var requests: [DNSApplyRequest?] = []
+    var dnsVirtualProfileIDs: Set<String> = []
+    var virtualRequests: [[String: DNSApplyRequest]] = []
+    func dnsApplyVirtual(_ requests: [String: DNSApplyRequest]) async -> Bool {
+        virtualRequests.append(requests)
+        return reply == "ok"
+    }
     func dnsApply(_ request: DNSApplyRequest?, to id: String) async -> String? {
         calls += 1
         requests.append(request)
@@ -101,6 +107,19 @@ private final class ProxyApplyHost: ProxyMediatorHost {
 @Suite(.serialized)
 @MainActor
 struct MediatorApplyIntegrationTests {
+    @Test func refreshingAnExistingGatewayReappliesItAfterOtherRoutesAreWithdrawn() async {
+        let host = DelayedRouteHost()
+        let mediator = RouteMediator(preferences: nil)
+        mediator.host = host
+        await mediator.setDefaultGateway(to: "b")
+        host.writes.removeAll()
+
+        await mediator.applyGatewayPreference(mediator.gatewayPreference, refreshGateway: true)
+
+        #expect(host.writes == [.split("a"), .full("b")])
+        #expect(mediator.appliedPlan?.owner == "b")
+    }
+
     @Test func virtualGatewaySwitchHasOneCompleteTransactionAndRequiresAck() async {
         let host = DelayedRouteHost()
         host.routeVirtualProfileIDs = ["a", "b"]
@@ -217,6 +236,26 @@ struct MediatorApplyIntegrationTests {
         let empty = DNSArbiter.plan(intents: [], policy: .init(defaultOwner: nil))
         #expect(await realizer.apply(empty, force: false))
         #expect(host.requests == [plan.applyRequests()["a"], plan.applyRequests()["a"], nil])
+    }
+
+    @Test func sharedDNSOwnerSwitchUsesOneCompleteWriteAndRetriesUnacknowledgedPlans() async {
+        let host = DNSApplyHost()
+        host.dnsVirtualProfileIDs = ["a", "b"]
+        let realizer = DNSRealizer(host: host, log: Logger(subsystem: "test", category: "dns"))
+        let intents = [DNSIntent(engine: "a", resolvers: ["10.0.0.53"], wantsCatchAll: true),
+                       DNSIntent(engine: "b", resolvers: ["10.0.0.54"], wantsCatchAll: true)]
+        let first = DNSArbiter.plan(intents: intents, policy: .init(defaultOwner: "a"))
+        let next = DNSArbiter.plan(intents: intents, policy: .init(defaultOwner: "b"))
+        #expect(await realizer.apply(first, force: false))
+        host.reply = "error"
+        #expect(!(await realizer.apply(next, force: false)))
+        host.reply = "ok"
+        #expect(await realizer.apply(next, force: false))
+        #expect(await realizer.apply(next, force: false))
+        #expect(host.virtualRequests == [first.applyRequests(), next.applyRequests(), next.applyRequests()])
+        #expect(host.virtualRequests.last?["a"]?.isEmpty == true)
+        #expect(host.virtualRequests.last?["b"]?.servers == ["10.0.0.54"])
+        #expect(host.requests.isEmpty)
     }
 
     @Test func partiallyFailedProxySwitchCannotSuppressRestoreOfPreviousOwner() async {

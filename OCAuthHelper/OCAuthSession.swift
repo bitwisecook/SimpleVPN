@@ -25,6 +25,11 @@ private func ocValidateCert(_ priv: UnsafeMutableRawPointer?, _ reason: UnsafePo
         .validateCert(reason: reason.map { String(cString: $0) } ?? "")
 }
 
+private func ocRequiredPin(_ priv: UnsafeMutableRawPointer?) -> CInt {
+    guard let priv else { return -1 }
+    return Unmanaged<OCAuthSession>.fromOpaque(priv).takeUnretainedValue().checkRequiredPin()
+}
+
 private func ocProcessForm(_ priv: UnsafeMutableRawPointer?,
                            _ form: UnsafeMutablePointer<oc_auth_form>?) -> CInt {
     guard let priv, let form else { return CInt(OC_FORM_RESULT_ERR) }
@@ -83,6 +88,7 @@ final class OCAuthSession {
         vpninfo = v
 
         openconnect_set_loglevel(v, CInt(PRG_INFO))
+        if request.params.servercert?.isEmpty == false { openconnect_set_member_guards(v, nil, ocRequiredPin) }
         // Certificate trust: OS trust store (+ optional extra CA bundle) verifies
         // by default; validateCert below only runs when that verification FAILS.
         openconnect_set_system_trust(v, 1)
@@ -97,10 +103,14 @@ final class OCAuthSession {
         if let os = request.params.reportedOS, !os.isEmpty { openconnect_set_reported_os(v, os) }
         if let ver = request.params.versionString, !ver.isEmpty { openconnect_set_version_string(v, ver) }
         if let name = request.params.localHostname, !name.isEmpty { openconnect_set_localname(v, name) }
-        if let proxy = request.params.proxy, !proxy.isEmpty { openconnect_set_http_proxy(v, proxy) }
+        if let proxy = request.params.proxy, !proxy.isEmpty, openconnect_set_http_proxy(v, proxy) != 0 {
+            exitWithError(kind: OCAuthErrorKind.badRequest, message: "the configured gateway proxy is invalid")
+        }
         if let cert = request.params.certFile, !cert.isEmpty {
-            openconnect_set_client_cert(v, cert, request.params.keyFile?.isEmpty == false
-                                        ? request.params.keyFile! : nil)
+            guard openconnect_set_client_cert(v, cert, request.params.keyFile?.isEmpty == false
+                                              ? request.params.keyFile : nil) == 0 else {
+                exitWithError(kind: OCAuthErrorKind.badRequest, message: "the configured client certificate is invalid")
+            }
             if let pass = request.params.keyPassword, !pass.isEmpty {
                 openconnect_set_key_password(v, pass)
             }
@@ -133,8 +143,13 @@ final class OCAuthSession {
                           message: "sign-in finished without a session cookie")
         }
         let cookie = String(cString: cookieC)
-        let servercert = openconnect_get_peer_cert_hash(v).map { String(cString: $0) } ?? ""
-        let connectURL = openconnect_get_connect_url(v).map { String(cString: $0) } ?? request.server
+        guard !cookie.isEmpty, let keyHash = openconnect_get_peer_cert_hash(v),
+              let authenticatedURL = openconnect_get_connect_url(v) else {
+            exitWithError(kind: OCAuthErrorKind.authFailed,
+                          message: "the gateway did not supply a complete authenticated session")
+        }
+        let servercert = String(cString: keyHash)
+        let connectURL = String(cString: authenticatedURL)
         let host = openconnect_get_dnsname(v).map { String(cString: $0) } ?? ""
         // get_hostname returns the IP as it would appear in a URL — IPv6 comes
         // []-wrapped and must be stripped for resolve use (per the header).
@@ -150,16 +165,20 @@ final class OCAuthSession {
 
     // MARK: Callbacks
 
+    func checkRequiredPin() -> CInt {
+        guard let v = vpninfo, let pin = start?.params.servercert, !pin.isEmpty else { return -1 }
+        let result = openconnect_check_full_sha256_pin(v, pin)
+        if result != 0 { certRefused = true }
+        return result
+    }
+
     /// Only reached when system-trust verification FAILED. A configured pin that
     /// matches accepts silently (trust-on-configuration for self-signed
     /// gateways); everything else is the app's decision — and the app never
     /// auto-accepts (cert-verification invariant).
     func validateCert(reason: String) -> CInt {
         guard let v = vpninfo else { return -1 }
-        if let pin = start?.params.servercert, !pin.isEmpty {
-            let prefixed = pin.contains(":") ? pin : "pin-sha256:\(pin)"
-            if openconnect_check_peer_cert_hash(v, prefixed) == 0 { return 0 }
-        }
+        if start?.params.servercert?.isEmpty == false { return checkRequiredPin() }
         let fingerprint = openconnect_get_peer_cert_hash(v).map { String(cString: $0) } ?? ""
         var details = ""
         if let d = openconnect_get_peer_cert_details(v) {

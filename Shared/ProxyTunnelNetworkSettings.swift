@@ -67,7 +67,8 @@ nonisolated enum ProxyTunnelNetworkSettings {
             included = [TailscaleNetworkSettings.Prefix(address: "0.0.0.0", length: 0, isIPv6: false),
                         TailscaleNetworkSettings.Prefix(address: "::", length: 0, isIPv6: true)]
         } else {
-            included = TailscaleNetworkSettings.parseAll(config.includedRoutes)
+            let routes = suppressDefaultRoute ? RoutePrefixMath.specificRoutes(in: config.includedRoutes) : config.includedRoutes
+            included = TailscaleNetworkSettings.parseAll(routes)
         }
         let excluded = TailscaleNetworkSettings.parseAll(config.excludedRoutes + extraExcludedRoutes)
         // Advertised DNS servers must reach the tunnel or the engine never sees

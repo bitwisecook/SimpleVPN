@@ -459,15 +459,15 @@ struct TailscaleSignInAction: View {
                                   browser: vpn.tailscaleConfig(for: profileID).signInBrowser) {
                 vpn.openTailscaleSignIn(id: profileID)
             }
-        } else if vpn.tailscaleStatuses[profileID]?.backendState == .needsMachineAuth && result != .failed {
+        } else if vpn.tailscaleStatuses[profileID]?.backendState == .needsMachineAuth && result?.hasFailed != true {
             Label("Waiting for approval on your network", systemImage: "person.badge.clock")
-        } else if result == .preparing {
-            ProgressView("Preparing sign-in…").controlSize(.small)
-        } else if result == .failed || canReauthenticate {
+        } else if result?.inProgress == true {
+            ProgressView(result == .renewing ? "Preparing sign-in renewal…" : "Preparing sign-in…").controlSize(.small)
+        } else if result?.hasFailed == true || canReauthenticate {
             HStack(spacing: 12) {
-                if result == .failed {
+                if result?.hasFailed == true {
                     Label {
-                        Text("Sign-in failed")
+                        Text(result == .renewalFailed ? "Couldn’t renew sign-in" : "Sign-in failed")
                     } icon: {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
                     }
@@ -475,7 +475,7 @@ struct TailscaleSignInAction: View {
                     TailscaleSignInSuccess()
                 }
                 if canReauthenticate {
-                    Button(result == .failed ? "Retry Sign-In" : "Reauthenticate") {
+                    Button(result?.hasFailed == true ? "Retry Sign-In" : "Reauthenticate") {
                         Task { await vpn.reauthenticateTailscale(id: profileID) }
                     }
                 }

@@ -178,17 +178,20 @@ nonisolated struct SSHNetworkTunnelConfig: Codable, Sendable, Equatable {
     /// The upstream URL the engine parses. `ssh://user@host:port` — the username
     /// rides it because it is not a secret, and the engine's own parser accepts
     /// exactly this shape (see parseUpstream in proxy.go).
-    var upstreamURL: String {
+    var carrierEndpoint: String {
         let host = server.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty else { return "" }
-        // Bracket a literal IPv6 address so the URL parses.
-        let hostPart = host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host
+        return NetworkEndpoint.authority(host: host, port: effectivePort)
+    }
+
+    var upstreamURL: String {
+        guard !carrierEndpoint.isEmpty else { return "" }
         let user = username.trimmingCharacters(in: .whitespacesAndNewlines)
         let userPart = user.isEmpty
             ? ""
             : (user.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(
                 CharacterSet(charactersIn: "-._~"))) ?? user) + "@"
-        return "ssh://\(userPart)\(hostPart):\(effectivePort)"
+        return "ssh://\(userPart)\(carrierEndpoint)"
     }
 
     // Lenient decoding, same invariant as OpenVPNOverrides/ProxyTunnelConfig: an
@@ -234,9 +237,9 @@ extension SSHNetworkTunnelConfig {
     func encodedBlob() -> Data? { try? JSONEncoder().encode(self) }
 
     /// Whether this config needs a private key (and therefore a stored one).
-    var needsPrivateKey: Bool { authMethod == .privateKey || authMethod == .certificate }
+    nonisolated var needsPrivateKey: Bool { authMethod == .privateKey || authMethod == .certificate }
     /// Whether it needs an OpenSSH certificate as well.
-    var needsCertificate: Bool { authMethod == .certificate }
+    nonisolated var needsCertificate: Bool { authMethod == .certificate }
 }
 
 // MARK: - Validation

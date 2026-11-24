@@ -37,6 +37,12 @@ struct RouteProfileInfo: Sendable, Identifiable {
     let tailscaleHasExitNode: Bool
     // During teardown/reassertion macOS can still have this interface's default.
     var retainingRoutesDuringTransition = false
+    var ownedIPsec = false
+    var pointToPointSSH = false
+
+    var canAdvertiseDefault: Bool {
+        (ownedIPsec || pointToPointSSH) ? connected : GatewayPolicy.canBeDefaultGateway(kind: kind, connected: connected, tailscaleHasExitNode: tailscaleHasExitNode)
+    }
 }
 
 /// What the mediator needs the host (VPNController) to do on the live NE side. Kept
@@ -334,8 +340,8 @@ final class RouteMediator {
 
     /// Whether a kind takes a live gateway role at all (== the `.full` bucket). This
     /// is the exact predicate the inline code used as `gatewayRoleApplies`.
-    private func gatewayRoleApplies(_ kind: VPNKind) -> Bool {
-        Self.participation(for: kind).appliesGatewayRole
+    private func gatewayRoleApplies(_ info: RouteProfileInfo) -> Bool {
+        info.ownedIPsec || info.pointToPointSSH || Self.participation(for: info.kind).appliesGatewayRole
     }
 
     /// Why a connected profile can't be offered as the default gateway (nil ⇒ it can,
@@ -343,7 +349,7 @@ final class RouteMediator {
     func gatewayExclusionReason(for id: String) -> String? {
         guard let info = info(id) else { return nil }
         if canBeDefaultGateway(id) { return nil }
-        switch Self.participation(for: info.kind) {
+        switch (info.ownedIPsec || info.pointToPointSSH) ? RouteParticipation.full : Self.participation(for: info.kind) {
         case .full:
             // A route-participant that just can't own right now — only Tailscale
             // without an exit node lands here.
@@ -383,8 +389,7 @@ final class RouteMediator {
     /// Whether a connected profile can be the full-tunnel owner.
     func canBeDefaultGateway(_ id: String) -> Bool {
         guard let info = info(id) else { return false }
-        guard GatewayPolicy.canBeDefaultGateway(kind: info.kind, connected: info.connected,
-                                                 tailscaleHasExitNode: info.tailscaleHasExitNode) else { return false }
+        guard info.canAdvertiseDefault else { return false }
         guard host?.routeCanCarryDefault(id: id) == true else { return false }
         var candidate = RouteIntent(engine: id, wantsDefault: host?.routeWantsFullTunnel(id: id) ?? false,
                                     canOwnDefault: host?.routeCanCarryDefault(id: id) ?? false)
@@ -458,7 +463,7 @@ final class RouteMediator {
     /// picture. Passed via `startTunnel` options so the extension sets its suppress
     /// gate at establish and ≤1-owner holds before (or without) the app reconciling.
     func predictedGatewayOwned(_ id: String) -> Bool {
-        guard let info = info(id), gatewayRoleApplies(info.kind) else { return false }
+        guard let info = info(id), gatewayRoleApplies(info) else { return false }
         refreshIntents()
         var prospective = RouteIntent(engine: id,
                                       advertisedPrefixes: host?.routeAdvertisedPrefixes(id: id) ?? [],
@@ -477,7 +482,7 @@ final class RouteMediator {
     func startWithGateway(for id: String, members: Set<String> = [],
                           wantsDefault: Bool, start: (Bool) throws -> Void) rethrows {
         let peers = (host?.routeProfiles ?? []).filter {
-            $0.id != id && !members.contains($0.id) && gatewayRoleApplies($0.kind)
+            $0.id != id && !members.contains($0.id) && gatewayRoleApplies($0)
         }
         let claim = wantsDefault && establishingOwner == nil
             && !peers.contains { $0.engaged || $0.retainingRoutesDuringTransition }
@@ -495,10 +500,18 @@ final class RouteMediator {
     /// members sharing a virtual interface switch in one complete transaction.
     /// Published ownership changes only after acknowledgement.
     func setDefaultGateway(to newOwner: String?) async {
-        defaultGatewayProfileID = newOwner
-        gatewayUserChoseDirect = (newOwner == nil)
+        await applyGatewayPreference(RoutePolicy(storedOwner: newOwner, userChoseDirect: newOwner == nil))
+    }
+
+    var gatewayPreference: RoutePolicy {
+        RoutePolicy(storedOwner: defaultGatewayProfileID, userChoseDirect: gatewayUserChoseDirect)
+    }
+
+    func applyGatewayPreference(_ preference: RoutePolicy, refreshGateway: Bool = false) async {
+        defaultGatewayProfileID = preference.storedOwner
+        gatewayUserChoseDirect = preference.userChoseDirect
         persistPreference() // desired preference; appliedPlan remains separate
-        reconcileGateway()
+        reconcileGateway(force: refreshGateway)
         await applyLoop.waitUntilIdle()
     }
 
@@ -506,7 +519,7 @@ final class RouteMediator {
 
     private func applyGatewayRole(_ role: GatewayRole, to id: String,
                                   force: Bool) async -> Bool {
-        guard let info = info(id), gatewayRoleApplies(info.kind), info.engaged else { return true }
+        guard let info = info(id), gatewayRoleApplies(info), info.engaged else { return true }
         lastApplyAt = Date()
         let outcome = await realizer.apply(role, to: id, kind: info.kind,
                                            hasExitNode: info.tailscaleHasExitNode, force: force)
@@ -535,7 +548,7 @@ final class RouteMediator {
             if let owner = next.owner {
                 if let starting = self.establishingOwner, starting != owner { return false }
                 if self.host?.routeProfiles.contains(where: {
-                    $0.id != owner && $0.retainingRoutesDuringTransition && self.gatewayRoleApplies($0.kind)
+                    $0.id != owner && $0.retainingRoutesDuringTransition && self.gatewayRoleApplies($0)
                 }) == true { return false }
             }
             let virtualIDs = self.host?.routeVirtualProfileIDs ?? []
@@ -661,7 +674,7 @@ final class RouteMediator {
     private func seedGatewayRoleFromEngine(id: String) {
         seedTasks.removeValue(forKey: id)?.cancel()
         seedGeneration[id] = nil
-        guard let info = info(id), info.connected, gatewayRoleApplies(info.kind), info.kind != .tailscale else { return }
+        guard let info = info(id), info.connected, gatewayRoleApplies(info), info.kind != .tailscale else { return }
         let generation = UUID()
         seedGeneration[id] = generation
         seedTasks[id] = Task { [weak self] in
@@ -690,7 +703,7 @@ final class RouteMediator {
     /// Seeds the realizer cache and self-heals any desync. Called from the host's
     /// ~1 Hz stats poll, so a full/split that drifts out of band is corrected (RC4).
     func noteEngineDefaultOwned(id: String, owned: Bool) {
-        guard let info = info(id), gatewayRoleApplies(info.kind), info.engaged,
+        guard let info = info(id), gatewayRoleApplies(info), info.engaged,
               engineDefaultOwned[id] != owned else { return }
         engineDefaultOwned[id] = owned
         realizer.seed(id: id, owned: owned)
@@ -721,13 +734,11 @@ final class RouteMediator {
     /// `intents`/`plan` in step with reality and gives the Tcl hook a real attach point.
     private func currentIntents(capture: Bool = false) -> [RouteIntent] {
         guard let host else { return Array(intents.values) }
-        return connectedInfos.filter { gatewayRoleApplies($0.kind) }.map { info in
+        return connectedInfos.filter { gatewayRoleApplies($0) }.map { info in
             var intent = RouteIntent(engine: info.id,
                                      advertisedPrefixes: host.routeAdvertisedPrefixes(id: info.id),
                                      wantsDefault: host.routeWantsFullTunnel(id: info.id),
-                                     canOwnDefault: host.routeCanCarryDefault(id: info.id) && GatewayPolicy.canBeDefaultGateway(
-                                        kind: info.kind, connected: info.connected,
-                                        tailscaleHasExitNode: info.tailscaleHasExitNode),
+                                     canOwnDefault: host.routeCanCarryDefault(id: info.id) && info.canAdvertiseDefault,
                                      metric: 0, connectedAt: info.lastConnectedAt)
             if capture { captureHook?(intent) }
             intentHook?(&intent)

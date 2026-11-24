@@ -33,7 +33,7 @@ struct ManageVPNsView: View {
     /// Every configured VPN across all backends — "only one VPN" for the
     /// save-closes-the-window behaviour.
     private var totalVPNCount: Int {
-        vpn.profiles.count + tunnels.tunnels.count + nativeVPN.configs.count
+        ConnectListing.standaloneProfiles(vpn.profiles, tunnels: tunnels.tunnels).count + tunnels.tunnels.count + nativeVPN.configs.count
     }
 
     /// Sidebar selection is tagged so rows never collide with NE profile ids.
@@ -75,6 +75,7 @@ struct ManageVPNsView: View {
     /// here exactly as `SettingRevealScrollState` latches the reveal's own.
     @State private var routedGeneration = 0
     @State private var editingComposition: VPNComposition?
+    @State private var ruleActivity: RuleActivityTarget?
     @State private var pendingRemoval: RemovalTarget?
 
     /// A removal is named before it is performed.  The same target model powers
@@ -258,6 +259,9 @@ struct ManageVPNsView: View {
         importPresentationContent
         .sheet(isPresented: $showDiscover) {
             DiscoverEndpointView { candidate in createFromDiscovery(candidate) }
+        }
+        .sheet(item: $ruleActivity) { target in
+            RuleActivityView(vpn: vpn, target: target).tracksWindowActivity()
         }
         .sheet(item: $editingComposition) { comp in
             CompositionEditor(vpn: vpn, store: compositions, draft: comp) {}
@@ -504,6 +508,7 @@ struct ManageVPNsView: View {
                         serverFilesRequest = ServerConfigurationRequest(profile: p)
                     }
                 }
+                routedSetupAction(id: p.id)
                 exportItems(for: p)
                 Button("Remove", role: .destructive) { requestRemoval(.profile(id: p.id, name: p.name)) }
             }
@@ -561,6 +566,7 @@ struct ManageVPNsView: View {
         .contextMenu {
             ReorderMenuItems(commands: order.commands(for: Self.tunnelTag + t.id))
             configurationExportItems(id: t.id, name: t.name)
+            routedSetupAction(id: t.id)
             Divider()
             Button("Remove", role: .destructive) {
                 requestRemoval(.tunnel(id: t.id, name: t.name))
@@ -583,6 +589,7 @@ struct ManageVPNsView: View {
         .contextMenu {
             ReorderMenuItems(commands: order.commands(for: Self.nativeTag + c.id))
             configurationExportItems(id: c.id, name: c.name)
+            routedSetupAction(id: c.id)
             Divider()
             Button("Remove", role: .destructive) { requestRemoval(.native(id: c.id, name: c.name)) }
         }
@@ -597,6 +604,8 @@ struct ManageVPNsView: View {
     /// height, because a sidebar whose rows are two sizes reads as two lists.
     @ViewBuilder private func compositionRow(_ comp: VPNComposition) -> some View {
         let active = vpn.isCompositionActive(comp)
+        let connectTitle = comp.applicationRoutes == nil ? "Connect All" : "Connect"
+        let disconnectTitle = comp.applicationRoutes == nil ? "Disconnect All" : "Disconnect"
         HStack(spacing: ConnectionRowMetrics.spacing) {
             HStack(spacing: ConnectionRowMetrics.spacing) {
                 Image(systemName: "square.stack.3d.up")
@@ -604,7 +613,8 @@ struct ManageVPNsView: View {
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(comp.name)
-                    Text("\(comp.members.count) VPNs").font(.caption).foregroundStyle(.secondary)
+                    Text(comp.applicationRoutes == nil ? "\(comp.members.count) VPNs" : "Selected apps")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
             .accessibilityElement(children: .combine)
@@ -612,7 +622,7 @@ struct ManageVPNsView: View {
             // composition has no kind, so it passes none.
             .accessibilityLabel(ConnectionRowSentence.make(
                 name: comp.name, kind: nil,
-                fact: "composition of \(comp.members.count) VPNs",
+                fact: comp.applicationRoutes == nil ? "composition of \(comp.members.count) VPNs" : "app routing",
                 dot: active ? .connected : .off))
             Spacer(minLength: ConnectionRowMetrics.gutter)
             // THE SAME CONTROL AS EVERY OTHER CONNECT/DISCONNECT IN THE APP. It used to
@@ -624,14 +634,14 @@ struct ManageVPNsView: View {
             // a phrase typed here.
             let groupDot: DotState = active ? .connected : .off
             if active {
-                SidebarActionCircle(symbol: "stop.fill", tint: .red, help: "Disconnect all",
-                                    label: "Disconnect all of \(comp.name)",
+                SidebarActionCircle(symbol: "stop.fill", tint: .red, help: comp.applicationRoutes == nil ? "Disconnect all" : "Disconnect app routing",
+                                    label: comp.applicationRoutes == nil ? "Disconnect all of \(comp.name)" : "Disconnect \(comp.name)",
                                     value: groupDot.accessibilityDescription) {
                     vpn.disconnectComposition(comp)
                 }
             } else {
-                SidebarActionCircle(symbol: "play.fill", tint: .green, help: "Connect all",
-                                    label: "Connect all of \(comp.name)",
+                SidebarActionCircle(symbol: "play.fill", tint: .green, help: comp.applicationRoutes == nil ? "Connect all" : "Connect app routing",
+                                    label: comp.applicationRoutes == nil ? "Connect all of \(comp.name)" : "Connect \(comp.name)",
                                     value: groupDot.accessibilityDescription) {
                     Task { await vpn.connectComposition(comp) }
                 }
@@ -639,12 +649,15 @@ struct ManageVPNsView: View {
             // Edit/Remove used to live only in the context menu, which plain
             // keyboard can't open — this menu is the Tab-reachable path.
             Menu {
-                Button("Connect Through One Virtual Interface") {
-                    Task { await vpn.connectThroughVirtualInterface(comp) }
+                if comp.applicationRoutes == nil {
+                    Button("Connect Through One Virtual Interface") {
+                        Task { await vpn.connectThroughVirtualInterface(comp) }
+                    }
+                    .disabled(vpn.virtualCompositionProblem(comp) != nil)
+                    .help(vpn.virtualCompositionProblem(comp) ?? "Keep one connection to this Mac and route traffic internally between the VPNs.")
+                    .accessibilityValue(vpn.virtualCompositionProblem(comp) ?? "Available")
                 }
-                .disabled(vpn.virtualCompositionProblem(comp) != nil)
-                .help(vpn.virtualCompositionProblem(comp) ?? "Keep one connection to this Mac and route traffic internally between the VPNs.")
-                .accessibilityValue(vpn.virtualCompositionProblem(comp) ?? "Available")
+                ruleActivityAction(for: comp)
                 Button("Edit…") { editingComposition = comp }
                 Button("Remove", role: .destructive) { requestRemoval(.composition(id: comp.id, name: comp.name)) }
             } label: {
@@ -656,17 +669,26 @@ struct ManageVPNsView: View {
         .padding(.vertical, ConnectionRowMetrics.verticalPadding)
         .frame(minHeight: ConnectionRowMetrics.minHeight)
         .contextMenu {
-            Button("Connect Through One Virtual Interface") {
-                Task { await vpn.connectThroughVirtualInterface(comp) }
+            if comp.applicationRoutes == nil {
+                Button("Connect Through One Virtual Interface") {
+                    Task { await vpn.connectThroughVirtualInterface(comp) }
+                }
+                .disabled(vpn.virtualCompositionProblem(comp) != nil)
+                .help(vpn.virtualCompositionProblem(comp) ?? "Route this composition through one virtual interface.")
+                .accessibilityValue(vpn.virtualCompositionProblem(comp) ?? "Available")
             }
-            .disabled(vpn.virtualCompositionProblem(comp) != nil)
-            .help(vpn.virtualCompositionProblem(comp) ?? "Route this composition through one virtual interface.")
-            .accessibilityValue(vpn.virtualCompositionProblem(comp) ?? "Available")
-            Button(active ? "Disconnect All" : "Connect All") {
+            Button(active ? disconnectTitle : connectTitle) {
                 if active { vpn.disconnectComposition(comp) } else { Task { await vpn.connectComposition(comp) } }
             }
+            ruleActivityAction(for: comp)
             Button("Edit…") { editingComposition = comp }
             Button("Remove", role: .destructive) { requestRemoval(.composition(id: comp.id, name: comp.name)) }
+        }
+    }
+
+    @ViewBuilder private func ruleActivityAction(for comp: VPNComposition) -> some View {
+        if let member = comp.members.first(where: { vpn.virtualMembers[$0.profileID] == comp.id }) {
+            Button("Rule Activity…") { ruleActivity = RuleActivityTarget(id: member.profileID, compositionID: comp.id, name: comp.name) }
         }
     }
 
@@ -712,8 +734,8 @@ struct ManageVPNsView: View {
     /// a prefix. Returns nil when nothing by that id exists, so the caller can fall
     /// back rather than clearing a good selection.
     private func sidebarTag(for profileID: String) -> String? {
-        if vpn.profiles.contains(where: { $0.id == profileID }) { return profileID }
         if tunnels.tunnels.contains(where: { $0.id == profileID }) { return Self.tunnelTag + profileID }
+        if vpn.profiles.contains(where: { $0.id == profileID }) { return profileID }
         if nativeVPN.configs.contains(where: { $0.id == profileID }) { return Self.nativeTag + profileID }
         return nil
     }
@@ -798,9 +820,17 @@ struct ManageVPNsView: View {
         switch target {
         case let .tunnel(id, _):
             tunnelManager.disconnect(id)
-            tunnels.remove(id)
-            vpn.customRoutingCache[id] = nil
-            CustomRoutingFallbackStore().clear(id)
+            Task {
+                do {
+                    if let entry = tunnels.tunnels.first(where: { $0.id == id }), entry.kind.isSSLVPN || entry.kind == .ssh {
+                        try await OpenConnectProfileStore.removeMirrors(for: id)
+                        await vpn.loadAll()
+                    }
+                    tunnels.remove(id)
+                    vpn.customRoutingCache[id] = nil
+                    CustomRoutingFallbackStore().clear(id)
+                } catch { vpn.report(error, profile: id) }
+            }
         case let .native(id, _):
             Task {
                 if !(await nativeVPN.remove(id)) { vpn.lastError = nativeVPN.lastError }
@@ -812,7 +842,10 @@ struct ManageVPNsView: View {
             }
         case let .composition(id, _):
             Task {
-                do { try await vpn.removeVirtualComposition(id); compositions.remove(id) }
+                do {
+                    try await vpn.removeVirtualComposition(id)
+                    compositions.remove(id)
+                }
                 catch { vpn.lastError = error.localizedDescription }
             }
         }
@@ -1092,9 +1125,19 @@ struct ManageVPNsView: View {
                 .disabled(selectedProfileForServerFiles == nil)
                 .help(serverFilesMenuReason ?? "Add servers to the selected VPN")
                 Divider()
-                Button("Create a Composition…") { editingComposition = VPNComposition() }
-                    .disabled(vpn.profiles.count < 2)
-                    .help("A composition combines two or more VPNs.")
+                if let selected = vpn.compositionProfiles.first(where: { selection == $0.id || selection == Self.nativeTag + $0.id || selection == Self.tunnelTag + $0.id }) {
+                    routedSetupAction(id: selected.id)
+                    if vpn.virtualMemberProblem(for: selected) == nil {
+                        Button("Route Apps Through This VPN…") { editingComposition = appComposition(for: selected) }
+                    }
+                }
+                Button("Create a Composition…") {
+                    if vpn.compositionProfiles.count == 1, let only = vpn.compositionProfiles.first {
+                        editingComposition = routedComposition(for: only)
+                    } else { editingComposition = VPNComposition() }
+                }
+                .disabled(vpn.compositionProfiles.isEmpty)
+                .help("Route one or more VPNs through a virtual interface or connect multiple VPNs separately.")
             }
             .labelStyle(.iconOnly)
             .menuStyle(.borderlessButton)
@@ -1102,6 +1145,30 @@ struct ManageVPNsView: View {
             .frame(width: 32, height: 32)
             .accessibilityLabel("More VPN Actions")
         }
+    }
+
+    private func routedComposition(for profile: VPNController.Profile) -> VPNComposition {
+        let role: VPNComposition.Role
+        switch profile.kind {
+        case .wireGuard:
+            let cfg = vpn.wireGuardConfig(for: profile.id)
+            role = cfg.usesTeleport || cfg.allowedIPs.contains { TailscaleNetworkSettings.parse($0)?.isDefaultRoute == true } ? .full : .split
+        case .tailscale: role = vpn.tailscaleConfig(for: profile.id).useExitNode ? .full : .split
+        case .proxyTunnel: role = vpn.proxyTunnelConfig(for: profile.id).includeDefaultRoute ? .full : .split
+        case .sshNetworkTunnel: role = vpn.sshNetworkTunnelConfig(for: profile.id).includeDefaultRoute ? .full : .split
+        default: role = .split
+        }
+        return VPNComposition(name: "\(profile.name) Routing", members: [.init(profileID: profile.id, role: role)], sharedInterface: true)
+    }
+
+    @ViewBuilder private func routedSetupAction(id: String) -> some View {
+        if let profile = vpn.compositionProfiles.first(where: { $0.id == id }), vpn.virtualMemberProblem(for: profile) == nil {
+            Button("Set Up a Routed Connection…") { editingComposition = routedComposition(for: profile) }
+        }
+    }
+
+    private func appComposition(for profile: VPNController.Profile) -> VPNComposition {
+        VPNComposition(name: "\(profile.name) Apps", members: [.init(profileID: profile.id, role: .split)], applicationRoutes: [])
     }
 
     private func beginAddingVPN() {
@@ -1227,7 +1294,16 @@ struct ManageVPNsView: View {
         }
     }
 
+    private func permitsRawExport(_ id: String) -> Bool {
+        guard !vpn.hasPacketPolicy(for: id) else {
+            vpn.lastError = "Use Export Settings to include this VPN’s required packet event handlers."
+            return false
+        }
+        return true
+    }
+
     private func exportOVPNWithSecrets(_ p: VPNController.Profile) {
+        guard permitsRawExport(p.id) else { return }
         guard ConfigTransfer.policyRefusal == nil, let stored = vpn.storedOVPNText(id: p.id) else { return }
         let panel = NSSavePanel()
         panel.title = "Export OpenVPN with Secrets"
@@ -1243,6 +1319,7 @@ struct ManageVPNsView: View {
     }
 
     private func export(_ p: VPNController.Profile) {
+        guard permitsRawExport(p.id) else { return }
         guard let text = vpn.exportableOVPNText(id: p.id) else {
             vpn.lastError = "No configuration to export"; return
         }
@@ -1271,6 +1348,7 @@ struct ManageVPNsView: View {
     /// file's own text is `WireGuardConfig.exportText(includingSecrets:)`, which is
     /// where the headers and the redaction live so a test can hold them.
     private func exportWireGuard(_ id: String, includingSecrets: Bool) {
+        guard permitsRawExport(id) else { return }
         let toExport: WireGuardConfig
         do { toExport = try vpn.wireGuardConfig(for: id).withSecretsForExport() }
         catch { vpn.lastError = "Couldn't read the keys for export: \(error.localizedDescription)"; return }

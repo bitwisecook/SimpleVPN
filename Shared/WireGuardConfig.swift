@@ -62,7 +62,7 @@ nonisolated struct WireGuardConfig: Codable, Sendable, Equatable, Identifiable {
     /// Additional [Peer] blocks preserved verbatim for lossless round-trip.
     var rawExtraPeers: [String] = []
 
-    var isFullTunnel: Bool { allowedIPs.contains { $0 == "0.0.0.0/0" || $0 == "::/0" } }
+    var isFullTunnel: Bool { !RoutePrefixMath.defaultRoutePrefixes(in: allowedIPs).isEmpty }
 
     init() {}
 

@@ -8,6 +8,7 @@ struct DNSQueryRulesEditor: View {
     let vpn: VPNController
     let profileID: String
     @Binding var dns: DNSCustomization
+    @State private var showingActivity = false
     @State private var testName = ""
     @Environment(\.routingEditorDraft) private var routingDraft
     private static let specs = CustomRoutingSettings.catalog
@@ -42,6 +43,10 @@ struct DNSQueryRulesEditor: View {
             Text(testResult).font(.callout).textSelection(.enabled)
                 .accessibilityLabel("DNS query preview").accessibilityValue(testResult)
         }
+        Button("DNS Query Activity…") { showingActivity = true }
+            .sheet(isPresented: $showingActivity) {
+                DNSQueryActivityView(controller: vpn.dnsQueries, profileID: profileID).tracksWindowActivity()
+            }
         if let error = vpn.dnsQueries.lastError {
             Text(error).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
                 .accessibilityLabel("DNS query proxy configuration error")

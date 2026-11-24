@@ -13,6 +13,7 @@
 #import <Foundation/Foundation.h>
 #import <NetworkExtension/NetworkExtension.h>
 #import "TunnelSettingsApplying.h"
+#import "SVPPacketPolicy.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -105,7 +106,17 @@ NS_SWIFT_SENDABLE
 @interface OpenVPN3Bridge : NSObject
 
 - (instancetype)initWithProvider:(NEPacketTunnelProvider<SVPTunnelSettingsApplying> *)provider
-                        delegate:(id<OpenVPN3BridgeDelegate>)delegate;
+                        delegate:(id<OpenVPN3BridgeDelegate>)delegate
+                    packetPolicy:(SVPPacketPolicy *)packetPolicy;
+
+/// A scoped member never applies network settings and has its own private
+/// datagram lane. All TCP/UDP carrier sockets must bind to the supplied interface.
+- (instancetype)initWithInterfaceIndex:(uint32_t)index
+                               delegate:(id<OpenVPN3BridgeDelegate>)delegate
+                               received:(void (^)(NSData *))received;
+- (BOOL)sendMemberPacket:(NSData *)packet;
+- (NEPacketTunnelNetworkSettings *)memberNetworkSettings;
+- (void)stopMemberWithCompletion:(void (^)(void))completion;
 
 /// Start a connection. `ovpnConfig` is the full .ovpn text. username/password are
 /// supplied to the server (password should already include any appended OTP).
@@ -197,11 +208,6 @@ NS_SWIFT_SENDABLE
 ///                     suppressed. The app seeds its applied-role cache from this,
 ///                     never the client-.ovpn text grep.)
 - (NSDictionary<NSString *, id> *)connectionInfo;
-
-/// Observed traffic flows since the tunnel came up, for the app's per-VPN traffic
-/// log. Each entry keys off the remote endpoint and carries byte/packet counts and
-/// recency. Only IP/L4 headers are inspected — no payload.
-- (NSArray<NSDictionary<NSString *, id> *> *)flowStats;
 
 /// Destinations to route *around* this VPN (the "send outside the VPN" divert
 /// rule), merged into the tunnel's excluded routes. Set before connect. Each

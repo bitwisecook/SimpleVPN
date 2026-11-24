@@ -17,8 +17,14 @@
 // module already pins wireguard-go); this is its stable C header.
 #import "wgengine.h"
 #import "virtualrouter.h"
+#import "packetpolicy.h"
+#import "SVPPacketPolicy.h"
+#import "SVIPsec.h"
+#import "SVIPsecWorker.h"
 // libssh, for the SSH Network Tunnel kind: the netstack above dials each flow
 // through an SSH session this process owns. The bridge lives in Shared/ because
 // the app drives libssh too (SOCKS / port forwards / the staged probe) — one .m,
 // two targets, no per-target file list to drift.
 #import "SSHBridge.h"
+
+#include "../Vendor/routing-core/include/routing_dns.h"

@@ -57,16 +57,14 @@ nonisolated enum WireGuardNetworkSettings {
 
         // Which destinations enter the tunnel: the peer's allowed IPs, with the
         // default routes gated out when this tunnel is demoted to split.
-        var routes = TailscaleNetworkSettings.parseAll(config.allowedIPs)
-        let carriesDefault = routes.contains(where: \.isDefaultRoute) && !suppressDefaultRoute
-        if suppressDefaultRoute { routes.removeAll(where: \.isDefaultRoute) }
+        let included = suppressDefaultRoute ? RoutePrefixMath.specificRoutes(in: config.allowedIPs) : config.allowedIPs
+        var routes = TailscaleNetworkSettings.parseAll(included)
+        let defaultFamilies = Set(RoutePrefixMath.defaultRoutePrefixes(in: included).map { $0.contains(":") })
         // Advertised DNS servers must reach the tunnel or the resolvers go
         // dark on a split tunnel; under a default route they are covered.
-        if !carriesDefault {
-            for server in config.dns {
-                if let p = TailscaleNetworkSettings.parse(server + (server.contains(":") ? "/128" : "/32")) {
-                    routes.append(p)
-                }
+        for server in config.dns where !defaultFamilies.contains(server.contains(":")) {
+            if let p = TailscaleNetworkSettings.parse(Self.withPrefixLength(server)) {
+                routes.append(p)
             }
         }
 

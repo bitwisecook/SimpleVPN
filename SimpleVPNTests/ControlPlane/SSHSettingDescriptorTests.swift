@@ -14,6 +14,30 @@ import Testing
 
 @MainActor
 struct SSHSettingDescriptorTests {
+    @Test func pointToPointRequiresStaticPeerSettingsAndVerifiedIdentity() throws {
+        var profile = SubprocessTunnelConfig()
+        profile.kind = .ssh
+        profile.sshMode = .netTunnel
+        profile.server = "192.0.2.1"
+        profile.username = "test"
+        profile.sshAuthMethod = "password"
+        profile.sshPinnedHostKey = String(repeating: "ab", count: 32)
+        #expect(profile.sshTunConfiguration == nil)
+        profile.sshTun = .init(addresses: ["198.18.1.2/32", "2001:db8:1::2/128"],
+                               routes: ["198.18.0.0/15", "2001:db8::/32"], remoteUnit: 7)
+        let session = try #require(profile.sshTunConfiguration)
+        #expect(session.network.remoteUnit == 7 && session.endpoint == "192.0.2.1:22")
+        #expect(try JSONDecoder().decode(SSHTunConfiguration.self, from: JSONEncoder().encode(session)) == session)
+        profile.sshTun?.routes = ["10.1.2.3/8"]
+        #expect(profile.sshTunConfiguration == nil)
+        profile.sshTun?.routes = ["198.18.0.0/15"]
+        profile.useJumpHost = true
+        #expect(profile.sshTunConfiguration == nil)
+        profile.useJumpHost = false
+        profile.sshPinnedHostKey = nil
+        #expect(profile.sshTunConfiguration == nil)
+    }
+
     @Test func privateAskpassAnswersOnlyTheMatchingHopAndPromptOnce() throws {
         let id = "alex@vpn.example"
         let session = try SSHAskpass(target: .init(identity: id, password: "target secret"),
@@ -23,9 +47,32 @@ struct SSHSettingDescriptorTests {
         jump[SSHAskpass.hopKey] = "jump"
         #expect(SSHAskpass.response(prompt: "Enter passphrase for key", environment: jump) == nil)
         #expect(SSHAskpass.response(prompt: "(alex@other.example) Password: ", environment: target) == nil)
-        #expect(SSHAskpass.response(prompt: id + "'s password: ", environment: jump) == Data("jump secret".utf8))
-        #expect(SSHAskpass.response(prompt: "(" + id + ") Password: ", environment: target) == Data("target secret".utf8))
-        #expect(SSHAskpass.response(prompt: id + "'s password: ", environment: jump) == nil)
+        let helper = try #require(CLIInstaller.bundledToolPath)
+        let prompt = id + "'s password: "
+        let master = Process(), release = Pipe(), output = Pipe()
+        master.executableURL = URL(fileURLWithPath: "/bin/sh")
+        // The child tree matches the supervised session. Neither another process
+        // under this UID nor a subsequent prompt may consume its credential.
+        master.arguments = ["-c", #"read -r go; "$1" "$2"; "$1" "$2"; :"#, "test", helper, prompt]
+        master.environment = target
+        master.standardInput = release
+        master.standardOutput = output
+        try master.run()
+        session.authorize(master)
+        let rogue = Process(), denied = Pipe()
+        rogue.executableURL = URL(fileURLWithPath: helper)
+        rogue.arguments = [prompt]
+        rogue.environment = target
+        rogue.standardOutput = denied
+        try rogue.run()
+        rogue.waitUntilExit()
+        #expect(rogue.terminationStatus != 0)
+        #expect(denied.fileHandleForReading.readDataToEndOfFile().isEmpty)
+        try release.fileHandleForWriting.write(contentsOf: Data("ready\n".utf8))
+        try release.fileHandleForWriting.close()
+        master.waitUntilExit()
+        #expect(output.fileHandleForReading.readDataToEndOfFile() == Data("target secret".utf8))
+
     }
 
     @Test func discoveryReportsOnlyTheRemoteHandshake() {
@@ -452,9 +499,10 @@ struct SSHSettingDescriptorTests {
         c.forwards = []
         c.sshMode = .socks
 
-        // Network tunnel mode needs root for its utun and stays on /usr/bin/ssh.
+        // OpenSSH does not accept the provider's packet flow as its tunnel device.
         c.sshMode = .netTunnel
         #expect(SubprocessTunnelManager.sshPinBlockReason(c) != nil)
+        #expect(SubprocessTunnelManager.command(for: c, password: nil) == nil)
         c.sshMode = .socks
 
         // No pin → never blocked, whatever else is set.
@@ -515,7 +563,7 @@ struct SSHSettingDescriptorTests {
         c.forwards = ["L 8080:internal:80", "nonsense"]
         #expect(!SubprocessTunnelManager.willRunInProcessSSH(c))
 
-        // -w needs root for its utun; this build doesn't take that privilege.
+        // OpenSSH opens its own TUN device; the provider exposes packet batches.
         c.forwards = []
         c.sshMode = .netTunnel
         #expect(!SubprocessTunnelManager.willRunInProcessSSH(c))

@@ -205,11 +205,113 @@ func TestPoliciesPinExistingFlowsAndDoNotFallbackAfterLoss(t *testing.T) {
 	}
 }
 
+// Reapplying a plan after member loss must retain its more-specific decision
+// for both new flows and the flows pinned to it before it stopped.
+func TestStoppedMemberClaimsSurviveReapply(t *testing.T) {
+	for _, family := range []struct {
+		capture, assigned, private, other, claim, all string
+	}{
+		{"198.19.255.1", "10.0.0.2", "10.2.0.8", "192.0.2.8", "10.2.0.0/16", "0.0.0.0/0"},
+		{"fd6e:7853:ffff::1", "fd01::2", "fd02::8", "2001:db8::8", "fd02::/64", "::/0"},
+	} {
+		t.Run(family.claim, func(t *testing.T) {
+			privatePrefix := netip.MustParsePrefix(family.claim)
+			fullPrefix := netip.MustParsePrefix(family.all)
+			addresses := []netip.Addr{netip.MustParseAddr(family.assigned)}
+			var privateSends, otherSends int
+			ports := []Port{
+				{ID: "private", Generation: 7, Addresses: addresses, MTU: 1280,
+					Allowed: []netip.Prefix{privatePrefix}, Send: func([]byte) bool { privateSends++; return true }},
+				{ID: "full", Generation: 11, Addresses: addresses, MTU: 1280,
+					Allowed: []netip.Prefix{fullPrefix}, Send: func([]byte) bool { otherSends++; return true }},
+			}
+			// The second VPN also claims the same subnet at lower precedence.
+			policy := Policy{Revision: 1, Default: "full", Rules: []Rule{{privatePrefix, "private"}, {privatePrefix, "full"}}}
+			r, err := New([]netip.Addr{netip.MustParseAddr(family.capture)}, ports, policy, func([]byte) {})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pinned := testDatagram(family.capture, family.private, 40000, 17)
+			if !r.Forward(pinned) || privateSends != 1 {
+				t.Fatal("initial member selection", r.Status())
+			}
+			r.RemovePort("private")
+			policy.Revision++
+			if err := r.Check(policy); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Apply(policy); err != nil {
+				t.Fatal(err)
+			}
+			if r.Forward(pinned) || r.Forward(testDatagram(family.capture, family.private, 40001, 17)) {
+				t.Fatal("stopped member's destination leaked to surviving VPN")
+			}
+			if !r.Forward(testDatagram(family.capture, family.other, 40001, 17)) || privateSends != 1 || otherSends != 1 {
+				t.Fatal("unrelated default traffic affected", r.Status())
+			}
+			if r.Return("private", 7, pinned) || r.Status().Drops["stale VPN packet"] == 0 {
+				t.Fatal("detached port still accepts callbacks")
+			}
+			if err := r.Check(Policy{Revision: 3, Rules: []Rule{{fullPrefix, "private"}}}); err == nil {
+				t.Fatal("stopped member gained authority outside its original prefixes")
+			}
+		})
+	}
+}
+
 func TestHalfDefaultsAreAuthorizedOnlyAsCompleteCoverage(t *testing.T) {
 	all := netip.MustParsePrefix("0.0.0.0/0")
 	allowed := []netip.Prefix{netip.MustParsePrefix("0.0.0.0/1"), netip.MustParsePrefix("128.0.0.0/1")}
 	if !covers(all, allowed) || covers(all, allowed[:1]) {
 		t.Fatal("incorrect paired default coverage")
+	}
+}
+
+func TestReplacementMustCoverCurrentClaims(t *testing.T) {
+	capture := netip.MustParseAddr("198.19.255.1")
+	claim := netip.MustParsePrefix("10.2.0.0/16")
+	port := Port{ID: "office", Generation: 1, MTU: 1280,
+		Addresses: []netip.Addr{netip.MustParseAddr("10.0.0.2")}, Allowed: []netip.Prefix{claim},
+		Send: func([]byte) bool { return true }}
+	rules := []Rule{{claim, port.ID}}
+	r, err := New([]netip.Addr{capture}, []Port{port}, Policy{Revision: 1, Rules: rules}, func([]byte) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules[0].Prefix = netip.MustParsePrefix("10.2.0.0/24")
+	r.RemovePort(port.ID)
+	port.Generation++
+	port.Allowed = []netip.Prefix{rules[0].Prefix}
+	if err := r.ReplacePort(1, port); err == nil {
+		t.Fatal("replacement inherited a wider active route")
+	}
+	if err := r.Apply(Policy{Revision: 2, Rules: rules}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ReplacePort(1, port); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDefaultLossBetweenPolicyCheckAndCommitRetainsCapture(t *testing.T) {
+	capture := netip.MustParseAddr("198.19.255.1")
+	port := Port{ID: "office", Generation: 1, MTU: 1280,
+		Addresses: []netip.Addr{netip.MustParseAddr("10.0.0.2")}, Allowed: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")},
+		Send: func([]byte) bool { return true }}
+	r, err := New([]netip.Addr{capture}, []Port{port}, Policy{Revision: 1}, func([]byte) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := Policy{Revision: 2, Default: port.ID}
+	if err := r.Check(policy); err != nil {
+		t.Fatal(err)
+	}
+	r.RemovePort(port.ID)
+	if err := r.Apply(policy); err != nil {
+		t.Fatal(err)
+	}
+	if r.Forward(testDatagram(capture.String(), "192.0.2.20", 40000, 17)) || r.Status().Drops["selected VPN unavailable"] != 1 {
+		t.Fatal("traffic did not retain the unavailable disposition", r.Status())
 	}
 }
 
@@ -310,6 +412,23 @@ func TestTCPRetransmitNewConnectionAndClosedFlowLifetime(t *testing.T) {
 
 // Exercise complete steady-state routing in both directions, including source
 // translation, checksum validation, flow pinning, and generation-scoped return.
+func TestRejectedSubmissionCannotCreateReturnState(t *testing.T) {
+	const capture, vip, peer = "198.19.255.1", "10.0.0.2", "10.0.0.3"
+	port := Port{ID: "vpn", Generation: 1, Addresses: []netip.Addr{netip.MustParseAddr(vip)},
+		Allowed: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")}, MTU: 1280, Send: func([]byte) bool { return false }}
+	r, err := New([]netip.Addr{netip.MustParseAddr(capture)}, []Port{port}, Policy{Revision: 1, Default: "vpn"}, func([]byte) { t.Error("delivered unsolicited reply") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if r.Forward(testDatagram(capture, peer, 443, 17)) || r.Status().Flows != 0 {
+		t.Fatal("rejected submission created a flow")
+	}
+	if r.Return("vpn", 1, testDatagram(peer, vip, 443, 17)) {
+		t.Fatal("accepted reply without an admitted send")
+	}
+}
+
 func BenchmarkRouteQUICRoundTrip(b *testing.B) {
 	for _, addresses := range [][3]string{
 		{"198.19.255.1", "10.0.0.2", "10.0.0.3"},
@@ -341,6 +460,78 @@ func BenchmarkRouteQUICRoundTrip(b *testing.B) {
 			for b.Loop() {
 				if !router.Forward(out) || !router.Return(port.ID, port.Generation, reply) {
 					b.Fatal(router.Status())
+				}
+			}
+		})
+	}
+}
+
+func TestAllowedHostIndexPreservesMixedFamilyBoundaries(t *testing.T) {
+	allowed := []netip.Prefix{
+		netip.MustParsePrefix("10.3.0.0/25"), netip.MustParsePrefix("10.3.0.128/25"),
+		netip.MustParsePrefix("fd02:1234::/48"), netip.MustParsePrefix("fd03::7/128"),
+	}
+	// Exercise the direct small-list check and the large-list index.
+	for _, count := range []int{4, 32} {
+		for len(allowed) < count {
+			addr := netip.AddrFrom4([4]byte{192, 0, 2, byte(len(allowed))})
+			allowed = append(allowed, netip.PrefixFrom(addr, 32))
+		}
+		port := clonePort(Port{Allowed: allowed})
+		for _, tc := range []struct {
+			address string
+			want    bool
+		}{
+			{"10.2.255.255", false}, {"10.3.0.0", true}, {"10.3.0.127", true},
+			{"10.3.0.128", true}, {"10.3.0.255", true}, {"10.3.1.0", false},
+			{"fd02:1234:0:ffff::", true}, {"fd02:1234:1::", false}, {"fd03::7", true},
+			{"fd03::8", false}, {"::ffff:10.3.0.10", false},
+		} {
+			addr := netip.MustParseAddr(tc.address)
+			if got := port.allowsHost(addr); got != tc.want {
+				t.Errorf("allowed count %d, address %s: got %t, want %t", count, addr, got, tc.want)
+			}
+		}
+	}
+}
+
+// Admit new TCP SYNs distributed across 4096 routed hosts. The decision index
+// and traffic are identical; only the WireGuard port's allowed IPs differ.
+func BenchmarkNewTCPFlowAllowedIPs(b *testing.B) {
+	const hosts = 4096
+	capture := netip.MustParseAddr("198.19.255.1")
+	rules := make([]Rule, hosts)
+	allowedHosts := make([]netip.Prefix, hosts)
+	packets := make([][]byte, hosts)
+	for i := range packets {
+		address := netip.AddrFrom4([4]byte{10, 4, byte(i >> 8), byte(i)})
+		allowedHosts[i] = netip.PrefixFrom(address, 32)
+		rules[i] = Rule{Prefix: allowedHosts[i], Port: "work"}
+		packets[i] = sizedDatagram(capture.String(), address.String(), uint16(40000+i), 6, nil)
+	}
+	for _, tc := range []struct {
+		name    string
+		allowed []netip.Prefix
+	}{
+		{"one_subnet", []netip.Prefix{netip.MustParsePrefix("10.4.0.0/16")}},
+		{"4096_hosts", allowedHosts},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			port := Port{ID: "work", Generation: 1, MTU: 1280, Addresses: []netip.Addr{netip.MustParseAddr("10.90.0.1")}, Allowed: tc.allowed, Send: func([]byte) bool { return true }}
+			r, err := New([]netip.Addr{capture}, []Port{port}, Policy{Revision: 1, Rules: rules}, func([]byte) {})
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			index := 0
+			for b.Loop() {
+				if !r.Forward(packets[index]) {
+					b.Fatal(r.Status())
+				}
+				index = (index + 257) % hosts
+				if index == 0 {
+					clear(r.flows)
+					clear(r.reverse)
 				}
 			}
 		})

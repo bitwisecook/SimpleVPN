@@ -15,12 +15,23 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"github.com/sagernet/sing/protocol/socks/socks5"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+)
+
+const (
+	socksAtypIPv4   = 1
+	socksAtypDomain = 3
+	socksAtypIPv6   = 4
+	socksUserPass   = socks5.AuthTypeUsernamePassword
+	socksNoAuth     = socks5.AuthTypeNotRequired
 )
 
 func TestParseUpstream(t *testing.T) {
@@ -330,47 +341,25 @@ func TestDNSOverTCPRejectsOversize(t *testing.T) {
 
 // --- SOCKS UDP framing -------------------------------------------------------
 
-func TestSOCKSUDPEncapDecapRoundTrip(t *testing.T) {
-	payload := []byte("datagram")
-	enc, err := socksUDPEncap("1.2.3.4", 53, payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Header: RSV RSV FRAG ATYP=1 + 4 addr + 2 port = 10 bytes.
-	if len(enc) != 10+len(payload) {
-		t.Fatalf("encap length %d", len(enc))
-	}
-	got, err := socksUDPDecap(enc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, payload) {
-		t.Fatalf("round trip lost payload: %q", got)
-	}
-}
-
-func TestSOCKSUDPDecapRejectsFragment(t *testing.T) {
-	enc, _ := socksUDPEncap("1.2.3.4", 53, []byte("x"))
-	enc[2] = 0x01 // FRAG != 0
-	if _, err := socksUDPDecap(enc); err == nil {
-		t.Fatal("a fragmented datagram must be dropped")
-	}
-}
-
-func TestSOCKSUDPEncapDomain(t *testing.T) {
-	enc, err := socksUDPEncap("example.com", 443, []byte("d"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if enc[3] != socksAtypDomain || int(enc[4]) != len("example.com") {
-		t.Fatalf("domain encap malformed: % x", enc[:6])
+func TestSOCKSUDPHeader(t *testing.T) {
+	for _, tc := range []struct {
+		host string
+		want []byte
+	}{
+		{"1.2.3.4", []byte{0, 0, 0, 1, 1, 2, 3, 4, 0, 53}},
+		{"example.com", append(append([]byte{0, 0, 0, 3, 11}, []byte("example.com")...), 0, 53)},
+	} {
+		header, err := socksUDPHeader(tc.host, 53)
+		if err != nil || !bytes.Equal(header, tc.want) {
+			t.Errorf("%s: header %x, error %v", tc.host, header, err)
+		}
 	}
 }
 
 // --- SOCKS UDP ASSOCIATE end to end -----------------------------------------
 
 // fakeSOCKS5UDP grants UDP ASSOCIATE and echoes datagrams sent to its relay.
-func fakeSOCKS5UDP(t *testing.T) string {
+func fakeSOCKS5UDP(t *testing.T, invalidFirst bool) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -412,6 +401,15 @@ func fakeSOCKS5UDP(t *testing.T) string {
 			if err != nil {
 				return
 			}
+			if invalidFirst && n >= 10 && buf[3] == socksAtypIPv4 {
+				foreign := append([]byte(nil), buf[:n]...)
+				foreign[9] ^= 1
+				copy(foreign[10:], "xx")
+				_, _ = relay.WriteToUDP(foreign, from)
+				foreign[9] ^= 1
+				foreign[2] = 1
+				_, _ = relay.WriteToUDP(foreign, from)
+			}
 			// Echo the whole SOCKS-UDP datagram straight back (header + payload).
 			relay.WriteToUDP(append([]byte(nil), buf[:n]...), from)
 		}
@@ -421,7 +419,7 @@ func fakeSOCKS5UDP(t *testing.T) string {
 }
 
 func TestUDPCancellationClosesIdleAssociation(t *testing.T) {
-	addr := fakeSOCKS5UDP(t)
+	addr := fakeSOCKS5UDP(t, true)
 	up, _ := parseUpstream("socks5://"+addr, "", "")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -434,8 +432,12 @@ func TestUDPCancellationClosesIdleAssociation(t *testing.T) {
 	if _, err := app.Write([]byte("hi")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := io.ReadFull(app, make([]byte, 2)); err != nil {
+	reply := make([]byte, 2)
+	if _, err := io.ReadFull(app, reply); err != nil {
 		t.Fatal(err)
+	}
+	if string(reply) != "hi" || st.udpRelayRejected.Load() != 2 {
+		t.Fatalf("cross-flow or fragmented data reached guest: %q (%d rejected)", reply, st.udpRelayRejected.Load())
 	}
 	cancel()
 	select {
@@ -452,7 +454,7 @@ func TestSOCKS5UDPAssociateGrant(t *testing.T) {
 	// Exercise just the control-plane grant: negotiate + ASSOCIATE returns a
 	// relay without error (the full data-plane relay needs the netstack, tested
 	// via the contract of serveUDPviaSOCKS's error return).
-	addr := fakeSOCKS5UDP(t)
+	addr := fakeSOCKS5UDP(t, false)
 	up, _ := parseUpstream("socks5://"+addr, "", "")
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -461,17 +463,12 @@ func TestSOCKS5UDPAssociateGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	if err := socks5Negotiate(conn, "", ""); err != nil {
-		t.Fatal(err)
-	}
-	req, _ := socksRequest(socksCmdUDPAssoc, "0.0.0.0", 0)
-	conn.Write(req)
-	ip, port, err := readSocksReply(conn)
+	relay, err := up.socksHandshake(conn, socks5.CommandUDPAssociate, "0.0.0.0", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ip.String() != "127.0.0.1" || port == 0 {
-		t.Fatalf("relay address %v:%d", ip, port)
+	if relay.Addr.String() != "127.0.0.1" || relay.Port == 0 {
+		t.Fatalf("relay address %v", relay)
 	}
 }
 
@@ -497,10 +494,7 @@ func TestSOCKS5CommandNotSupported(t *testing.T) {
 	up, _ := parseUpstream("socks5://"+ln.Addr().String(), "", "")
 	conn, _ := up.dialProxyConn(context.Background(), &net.Dialer{})
 	defer conn.Close()
-	socks5Negotiate(conn, "", "")
-	req, _ := socksRequest(socksCmdUDPAssoc, "0.0.0.0", 0)
-	conn.Write(req)
-	if _, _, err := readSocksReply(conn); err == nil || !strings.Contains(err.Error(), "not supported") {
+	if _, err := up.socksHandshake(conn, socks5.CommandUDPAssociate, "0.0.0.0", 0); err == nil || !strings.Contains(err.Error(), "not supported") {
 		t.Fatalf("expected 'command not supported', got %v", err)
 	}
 }
@@ -512,6 +506,7 @@ func TestConnectResponseBoundary(t *testing.T) {
 		name, response, greeting string
 		ok                       bool
 	}{
+		{"interim", "HTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 200 OK\r\n\r\nhello", "hello", true},
 		{"greeting", "HTTP/1.1 200 OK\r\n\r\nSSH-2.0-fixture\r\n", "SSH-2.0-fixture\r\n", true},
 		{"oversized", "HTTP/1.1 200 OK\r\nX: " + strings.Repeat("a", maxConnectHeaders) + "\r\n\r\n", "", false},
 		{"unfinished error body", "HTTP/1.1 407 Denied\r\nContent-Length: 1000\r\n\r\n", "", false},
@@ -623,5 +618,102 @@ func TestCancelledProxyExchangeReleasesSocket(t *testing.T) {
 				t.Fatalf("cancelled socket still open: %v", err)
 			}
 		})
+	}
+}
+
+func TestHTTPSProxyVerifiesIdentityBeforeCONNECT(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { requests.Add(1) }))
+	defer server.Close()
+	up, err := parseUpstream(server.URL, "user", "private")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conn, err := up.dialThrough(context.Background(), &net.Dialer{}, "example.test", 443); err == nil {
+		conn.Close()
+		t.Fatal("accepted an untrusted proxy TLS identity")
+	}
+	if requests.Load() != 0 {
+		t.Fatal("sent CONNECT credentials before proxy authentication")
+	}
+}
+
+func TestSOCKSAuthenticationSelection(t *testing.T) {
+	for _, tc := range []struct {
+		user     string
+		selected byte
+	}{{"alice", socksNoAuth}, {"", socksUserPass}} {
+		client, server := net.Pipe()
+		result := make(chan error, 1)
+		go func() {
+			up := upstream{username: tc.user, password: "private"}
+			_, err := up.socksHandshake(client, socks5.CommandConnect, "example.test", 80)
+			client.Close()
+			result <- err
+		}()
+		_ = server.SetDeadline(time.Now().Add(2 * time.Second))
+		var greeting [3]byte
+		_, err := io.ReadFull(server, greeting[:])
+		if err != nil || greeting[1] != 1 || greeting[2] == tc.selected {
+			t.Fatalf("unexpected greeting %x %v", greeting, err)
+		}
+		if _, err = server.Write([]byte{5, tc.selected}); err != nil {
+			t.Fatal(err)
+		}
+		var data [1]byte
+		n, err := server.Read(data[:])
+		server.Close()
+		if n != 0 || err != io.EOF || <-result == nil {
+			t.Fatalf("accepted unoffered method %d", tc.selected)
+		}
+	}
+}
+
+func TestProxyEndpointDiagnosticsDoNotEchoUserinfo(t *testing.T) {
+	for _, raw := range []string{"https://user:private%zz@proxy.test", "http://proxy.test:99999", "https://proxy.test/path?private=true"} {
+		_, err := parseUpstream(raw, "", "")
+		if err == nil || strings.Contains(err.Error(), "private") {
+			t.Fatal("endpoint error must reject invalid configuration and omit secrets")
+		}
+	}
+}
+
+func TestProxyStartAuthenticationContract(t *testing.T) {
+	required, anonymous := true, false
+	for _, scheme := range []string{"socks5", "socks5h", "http", "https"} {
+		endpoint := scheme + "://127.0.0.1:1080"
+		for _, fields := range [][2]string{{"", ""}, {"alice", ""}, {"", "secret"}} {
+			cfg := startConfig{Upstream: authenticationPrefix + endpoint, RequiresAuth: &required, Username: fields[0], Password: fields[1]}
+			if _, err := cfg.proxy(); err == nil {
+				t.Errorf("%s admitted incomplete credentials", scheme)
+			}
+		}
+		cfg := startConfig{Upstream: authenticationPrefix + endpoint, RequiresAuth: &required, Username: "alice", Password: "p:ass"}
+		if _, err := cfg.proxy(); err != nil {
+			t.Fatalf("%s rejected complete credentials: %v", scheme, err)
+		}
+		cfg.RequiresAuth = &anonymous
+		if _, err := cfg.proxy(); err == nil {
+			t.Errorf("%s stripped authentication requirement", scheme)
+		}
+		cfg.Upstream = endpoint
+		if _, err := cfg.proxy(); err == nil {
+			t.Errorf("%s retained unexpected credentials in anonymous mode", scheme)
+		}
+		cfg.Username, cfg.Password = "", ""
+		if _, err := cfg.proxy(); err != nil {
+			t.Errorf("%s rejected anonymous profile", scheme)
+		}
+	}
+	for _, tc := range [][3]string{
+		{"socks5", strings.Repeat("é", 128), "p"}, {"socks5", "u", strings.Repeat("é", 128)},
+		{"http", "a:b", "p"}, {"https", "u", "p\r\n"}, {"http", "\x7fu", "p"}, {"https", "u", "\x00"},
+	} {
+		if _, err := parseUpstream(tc[0]+"://127.0.0.1", tc[1], tc[2]); err == nil {
+			t.Errorf("%s admitted malformed credentials", tc[0])
+		}
+	}
+	if _, err := parseUpstream("socks5://127.0.0.1", strings.Repeat("u", 255), strings.Repeat("p", 255)); err != nil {
+		t.Fatal(err)
 	}
 }

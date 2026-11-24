@@ -9,8 +9,8 @@
 //  express it — libssh for SOCKS (`inProcessSSHSupports`) and the packet-tunnel
 //  extension for OpenConnect, which is now the DEFAULT for a new SSL VPN
 //  (`preferInProcess` is Optional; absent means in-process). Genuinely
-//  subprocess-only: `.netTunnel`, SSH configs with a jump host or raw extra-options,
-//  SSH port forwards, and the four settings `inProcessOpenConnectSupports` still
+//  subprocess-only: SSH configs with a jump host, raw extra options or reverse
+//  forwards, and the four settings `inProcessOpenConnectSupports` still
 //  can't carry (a host-checker script, a base MTU, HTTP-keepalive off, extra
 //  arguments). Smartcard sign-in used to head that list and was the last thing
 //  keeping the subprocess path alive for SSL VPNs at all; it is gone — see
@@ -27,13 +27,13 @@ import Foundation
 enum SSHMode: String, Codable, Sendable, CaseIterable {
     case socks        // -D dynamic SOCKS proxy
     case portForward  // -L / -R port forwards
-    case netTunnel    // -w point-to-point tun device (needs admin + server PermitTunnel)
+    case netTunnel    // tun@openssh.com point-to-point channel; server must permit the requested device
 
     var label: String {
         switch self {
         case .socks: "SOCKS proxy"
         case .portForward: "Port forwards"
-        case .netTunnel: "Network tunnel"
+        case .netTunnel: "Point-to-point tunnel"
         }
     }
 }
@@ -67,6 +67,7 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
 
     var id: String = UUID().uuidString
     var name: String = "New Tunnel"
+    var routingEventSource: String?
     var kind: VPNKind = .ssh
 
     // Common
@@ -78,6 +79,7 @@ struct SubprocessTunnelConfig: Codable, Sendable, Equatable, Identifiable {
     var username = ""
 
     // SSH
+    var sshTun: SSHTunNetworkSettings?
     var sshMode: SSHMode = .socks
     var socksPort = 1080
     var setSystemProxy = false  // (SOCKS mode) point the active network service's SOCKS at us
@@ -668,18 +670,36 @@ final class SubprocessTunnelStore {
     private(set) var tunnels: [SubprocessTunnelConfig] = []
     private static let key = "subprocessTunnels.v1"
 
-    init(loadSaved: Bool = true) { if loadSaved { load() } }
+    private static let protectedKey = "subprocessTunnels.packetPolicies.v1"
+    private static let packetSSHKey = "subprocessTunnels.pointToPoint.v1"
+    private let defaults: UserDefaults
+    init(loadSaved: Bool = true, defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        if loadSaved { load() }
+    }
 
     @discardableResult func save(_ raw: SubprocessTunnelConfig) -> Bool {
         // normalized() on every save path (the OpenVPNOverrides rule).
         let t = raw.normalized()
         guard !SubprocessTunnelConfig.passwordInAddress(t.proxyURL),
               !SubprocessTunnelConfig.passwordInAddress(t.server) else { return false }
-        if let i = tunnels.firstIndex(where: { $0.id == t.id }) { tunnels[i] = t }
+        if let i = tunnels.firstIndex(where: { $0.id == t.id }) {
+            var updated = t
+            // A stale settings draft cannot remove a required packet program.
+            updated.routingEventSource = tunnels[i].routingEventSource
+            tunnels[i] = updated
+        }
         else { tunnels.append(t) }
         persist()
         return true
     }
+    @discardableResult func setPacketPolicy(_ source: String?, for id: String) -> Bool {
+        guard let i = tunnels.firstIndex(where: { $0.id == id }) else { return false }
+        tunnels[i].routingEventSource = source
+        persist()
+        return true
+    }
+
     /// Write new sidebar positions for the tunnels named in `positions`, and persist
     /// ONCE.
     ///
@@ -705,8 +725,15 @@ final class SubprocessTunnelStore {
     }
 
     private func load() {
-        guard let d = UserDefaults.standard.data(forKey: Self.key),
-              let list = try? JSONDecoder().decode([SubprocessTunnelConfig].self, from: d) else { return }
+        func read(_ key: String) -> [SubprocessTunnelConfig] {
+            guard let data = defaults.data(forKey: key) else { return [] }
+            return (try? JSONDecoder().decode([SubprocessTunnelConfig].self, from: data)) ?? []
+        }
+        let packetSSH = read(Self.packetSSHKey)
+        let packetIDs = Set(packetSSH.map(\.id))
+        let protected = read(Self.protectedKey).filter { !packetIDs.contains($0.id) } + packetSSH
+        let protectedIDs = Set(protected.map(\.id))
+        let list = read(Self.key).filter { !protectedIDs.contains($0.id) } + protected
         let (fixed, changed) = Self.migrated(list)
         tunnels = fixed
         if changed { persist() }
@@ -743,6 +770,13 @@ final class SubprocessTunnelStore {
         return (list, changed)
     }
     private func persist() {
-        if let d = try? JSONEncoder().encode(tunnels) { UserDefaults.standard.set(d, forKey: Self.key) }
+        // Remove unrestricted copies first. Older clients read only the original key.
+        let encoder = JSONEncoder()
+        guard let ordinary = try? encoder.encode(tunnels.filter { $0.routingEventSource == nil && $0.sshTun == nil }),
+              let protected = try? encoder.encode(tunnels.filter { $0.routingEventSource != nil && $0.sshTun == nil }),
+              let packetSSH = try? encoder.encode(tunnels.filter { $0.sshTun != nil }) else { return }
+        defaults.set(ordinary, forKey: Self.key)
+        defaults.set(protected, forKey: Self.protectedKey)
+        defaults.set(packetSSH, forKey: Self.packetSSHKey)
     }
 }

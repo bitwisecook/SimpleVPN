@@ -33,6 +33,17 @@ struct RouteMediatorTests {
 
     // MARK: - Arbiter plan (stage 2)
 
+    @Test func discoveringAnExitNodeDoesNotPromoteASplitTunnel() {
+        let split = RouteIntent(engine: "mesh", wantsDefault: false, canOwnDefault: true, connectedAt: .distantFuture)
+        let automatic = RoutePolicy(storedOwner: nil, userChoseDirect: false)
+        let disconnectedOwner = RoutePolicy(storedOwner: "old", userChoseDirect: false)
+        let explicitlySelected = RoutePolicy(storedOwner: "mesh", userChoseDirect: false)
+        #expect(RouteArbiter.plan(intents: [split], policy: automatic).owner == nil)
+        #expect(RouteArbiter.plan(intents: [split], policy: disconnectedOwner).owner == nil)
+        #expect(RouteArbiter.plan(intents: [split, intent("full")], policy: automatic).owner == "full")
+        #expect(RouteArbiter.plan(intents: [split], policy: explicitlySelected).owner == "mesh")
+    }
+
     private func intent(_ id: String, capable: Bool = true, at seconds: Double? = nil) -> RouteIntent {
         RouteIntent(engine: id, advertisedPrefixes: [], wantsDefault: capable,
                     canOwnDefault: capable, metric: 0,

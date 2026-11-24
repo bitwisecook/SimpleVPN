@@ -27,6 +27,10 @@ enum CustomRoutingSettings {
 
     static let all: [EngineSettingSpec] = [
 
+        .init(id: "cr.packet-events", name: "Traffic Event Handlers",
+              summary: "Run rules as the built-in tunnel carries packets or opens SSH forwarding channels.",
+              group: .traffic, default: ""),
+
         // MARK: Traffic — routes
 
         .init(id: "cr.routes-default", name: "Unmatched Routes",

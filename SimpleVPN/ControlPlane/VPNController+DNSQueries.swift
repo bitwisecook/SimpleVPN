@@ -15,8 +15,9 @@ extension VPNController {
     }
     /// Preview includes the selected draft even while disconnected, but never activates it.
     func dnsQueryPolicy(replacing id: String? = nil, with draft: DNSCustomization? = nil, resolversOverride: [String]? = nil) -> DNSQueryPolicy {
-        var names = Dictionary(uniqueKeysWithValues: profiles.filter { $0.status == .connected }.map { ($0.id, $0.name) })
-        for (id, name) in auxiliaryDNSQueryProfiles { names[id] = name }
+        let connected = dnsProfiles.filter(\.connected)
+        var names = Dictionary(connected.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+        for (id, name) in auxiliaryDNSQueryProfiles where !isApplicationRouted(id) { names[id] = name }
         if let id { names[id] = profiles.first { $0.id == id }?.name ?? auxiliaryDNSQueryProfiles[id] ?? "This VPN" }
         let inputs = names.keys.map { id in
             DNSIntent(engine: id, connectedAt: lastConnectedAt[id])

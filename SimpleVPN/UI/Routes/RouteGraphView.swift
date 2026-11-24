@@ -54,6 +54,8 @@ struct RouteGraphView: View {
     @Bindable var vpn: VPNController
     /// The editor uses the same viewer with a configuration railroad layout.
     var editorGraph: RoutingRailroadDiagram? = nil
+    var routingBlocks: RoutingBlockDiagram? = nil
+    private var isEditorGraph: Bool { editorGraph != nil || routingBlocks != nil }
     @Environment(\.accessibilityReduceMotion) var reduceMotion   // was private — internal for the file split
     @Environment(\.liveVisualPolicy) var liveVisuals   // shared Low Power Mode policy for graph drawing
     @Environment(\.accessibilityDifferentiateWithoutColor) var differentiateWithoutColor   // read by the edge Canvas (RouteGraphNodes)
@@ -114,7 +116,7 @@ struct RouteGraphView: View {
     let guestLineHeight: CGFloat = 14   // was private — internal for the file split
     let guestButtonHeight: CGFloat = 26   // was private — internal for the file split
 
-    private var minZoom: CGFloat { editorGraph == nil ? 0.5 : 0.15 }
+    private var minZoom: CGFloat { isEditorGraph ? 0.15 : 0.5 }
     private let maxZoom: CGFloat = 3
 
     @State var zoom: CGFloat = 1   // was private — internal for the file split
@@ -173,19 +175,27 @@ struct RouteGraphView: View {
                 Color.clear.accessibilityHidden(true)
             }
         }
-        .modifier(RouteGraphWindowTitle(isWindow: editorGraph == nil))
+        .modifier(RouteGraphWindowTitle(isWindow: !isEditorGraph))
     }
 
     private var visibleGraph: some View {
         // Resolved ONCE and handed down: every card, row and edge that lights up is
         // reading the same answer, and the resolver runs once per pass rather than
         // once per card.
-        let outcome = searchOutcome
-        let layout = editorGraph.map(editorLayout) ?? buildLayout(outcome)
+        let outcome = isEditorGraph ? nil : searchOutcome
+        let drawing = routingBlocks?.drawing(headerHeight: headerHeight)
+        let layout = drawing?.layout ?? editorGraph.map(editorLayout) ?? buildLayout(outcome)
         let content = CGSize(width: layout.canvas.width + canvasInset * 2,
                              height: layout.canvas.height + canvasInset * 2)
         return VStack(spacing: 0) {
-            if let editorGraph {
+            if routingBlocks != nil {
+                HStack {
+                    Text("Routing Railroad").font(.headline)
+                    Spacer(minLength: 8)
+                    zoomControls
+                }
+                .padding(.horizontal, 12).padding(.vertical, 8)
+            } else if let editorGraph {
                 editorControlBar(editorGraph)
             } else {
                 controlBar(outcome)
@@ -202,7 +212,7 @@ struct RouteGraphView: View {
                 // two-finger flicks glide because macOS keeps sending momentum-phase
                 // scroll events to the same monitor.
                 ZStack(alignment: .topLeading) {
-                    diagram(layout, outcome)
+                    diagram(layout, outcome, routingDrawing: drawing)
                         .frame(width: content.width, height: content.height,
                                alignment: .topLeading)
                         .scaleEffect(zoom, anchor: .topLeading)
@@ -216,6 +226,11 @@ struct RouteGraphView: View {
                     // a card still pans instead of dying against the card's button.
                     DragGesture(minimumDistance: 2)
                         .onChanged { value in
+                            if let drawing, dragBase == nil {
+                                let start = CGPoint(x: (value.startLocation.x - pan.width) / zoom - canvasInset,
+                                                    y: (value.startLocation.y - pan.height) / zoom - canvasInset)
+                                if drawing.containsControl(at: start) { return }
+                            }
                             let base = dragBase ?? pan
                             if dragBase == nil { dragBase = base }
                             pan = clampedPan(CGSize(width: base.width + value.translation.width,
@@ -295,24 +310,24 @@ struct RouteGraphView: View {
         // without walking the whole diagram. Entries are rebuilt from the same
         // layout the drawing uses, so the rotor can never list a card that
         // isn't on screen to land on.
-        .accessibilityRotor(editorGraph == nil ? "VPNs" : "Routing stages") {
-            rotorEntries(editorGraph == nil ? vpnRotorTargets(layout) : railroadRotorTargets(layout))
+        .accessibilityRotor(isEditorGraph ? "Routing stages" : "VPNs") {
+            rotorEntries(isEditorGraph ? railroadRotorTargets(layout) : vpnRotorTargets(layout))
         }
-        .accessibilityRotor("Guests") { rotorEntries(editorGraph == nil ? guestRotorTargets() : []) }
+        .accessibilityRotor("Guests") { rotorEntries(isEditorGraph ? [] : guestRotorTargets()) }
         .accessibilityRotor("Problems") {
-            rotorEntries(editorGraph == nil ? problemRotorTargets(layout) : railroadRotorTargets(layout, warningsOnly: true))
+            rotorEntries(isEditorGraph ? railroadRotorTargets(layout, warningsOnly: true) : problemRotorTargets(layout))
         }
         .background(Color(nsColor: .underPageBackgroundColor))
         // Initial focus: the search field — typing filters at once, and the
         // diagram (arrows/+/−) is one Tab away.
         .onAppear {
-            guard editorGraph == nil, !hasFocusedSearchOnOpen else { return }
+            guard !isEditorGraph, !hasFocusedSearchOnOpen else { return }
             hasFocusedSearchOnOpen = true
             searchFocused = true
         }
-        .liveWindowTask { await topo?.watchWhileVisible() }
+        .liveWindowTask { if routingBlocks == nil { await topo?.watchWhileVisible() } }
         .overlay {
-            if layout.nodes.count <= 1 {
+            if routingBlocks == nil, layout.nodes.count <= 1 {
                 ContentUnavailableView("No Active Routes", systemImage: "arrow.triangle.branch",
                     description: Text("Connect a VPN, or wait for the routing table to be read."))
             }
@@ -365,17 +380,22 @@ struct RouteGraphView: View {
 
     // MARK: The diagram itself (everything here is scaled — SwiftUI drawing only)
 
-    private func diagram(_ layout: Layout, _ outcome: SearchOutcome?) -> some View {
+    private func diagram(_ layout: Layout, _ outcome: SearchOutcome?, routingDrawing: RoutingBlockDiagram.Drawing?) -> some View {
         // What the current selection feeds off — computed once, read by the edge
         // Canvas and (as a plain id comparison) by each card's border.
-        let chain = selectedChain(inspecting, in: layout.edges)
+        let chain = selectedChain(routingBlocks?.selected.map(String.init) ?? inspecting, in: layout.edges)
         return ZStack(alignment: .topLeading) {
             dotGrid(size: layout.canvas)
             edgeLayer(layout.edges, chain: chain)
             ForEach(layout.nodes) { node in
-                card(node, outcome)
+                card(node, outcome, routingRows: routingDrawing?.rows[node.id] ?? [])
                     .frame(width: node.frame.width, height: node.frame.height)
                     .offset(x: node.frame.minX, y: node.frame.minY)
+            }
+            if let routingBlocks, let routingDrawing {
+                ForEach(routingDrawing.tracks, id: \.edge.id) { track in
+                    routingTrack(track, diagram: routingBlocks)
+                }
             }
             // Clickable status controls sit ON the edges, above them.
             ForEach(layout.edges.filter { $0.controllable && $0.status.symbol != nil }) { e in
@@ -397,8 +417,8 @@ struct RouteGraphView: View {
         // included — so pan and zoom move the AX frames with the pixels (the
         // UITest audit's hitRegion check is the regression net for this).
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(editorGraph == nil ? "Route diagram" : "Routing configuration railroad")
-        .accessibilityIdentifier(editorGraph == nil ? "route-diagram" : "editor-routing-railroad")
+        .accessibilityLabel(routingBlocks != nil ? "Routing handler railroad" : isEditorGraph ? "Routing configuration railroad" : "Route diagram")
+        .accessibilityIdentifier(routingBlocks != nil ? "routing-block-railroad" : isEditorGraph ? "editor-routing-railroad" : "route-diagram")
     }
 
     // MARK: Top bar — search on the left, zoom on the right, both in fixed homes
@@ -544,11 +564,12 @@ struct RouteGraphView: View {
     /// that the zoom is the user's, and a route change must not yank it around.
     private func autoFit(content: CGSize, hasGraph: Bool) {
         lastContent = content
+        if routingBlocks != nil { pan = clampedPan(pan) }
         guard !didInitialFit, hasGraph, viewport.width > 40, content.width > 40 else { return }
         didInitialFit = true
         // Editors can have many observed lanes below their draft. Start with
         // readable draft stations; Fit still provides the whole-system overview.
-        setZoom(editorGraph == nil ? fitScale : max(0.75, fitScale), animated: false)
+        setZoom(isEditorGraph ? max(0.75, fitScale) : fitScale, animated: false)
     }
 
     /// Double-click on empty background: fit ⇄ 100%, the two views people want.

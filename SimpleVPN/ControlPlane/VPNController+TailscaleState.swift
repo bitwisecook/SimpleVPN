@@ -71,6 +71,7 @@ extension VPNController {
         guard Self.permitsLiveCredentialBrokers, !tailscaleStartingIDs.contains(id),
               tailscaleStateBrokers[id] == nil, !locallyRemovedProfileIDs.contains(id),
               !tailscaleProbingIDs.contains(id) else { return }
+        if virtualManager(for: id) != nil { beginVirtualTailscaleStateSync(for: id); return }
         let lease: Installation.Lease
         do { lease = try tailscaleIdentityLease(id) }
         catch TailscaleBrokerLeases.BrokerError.owned {
@@ -174,7 +175,52 @@ extension VPNController {
         await task?.value
     }
 
-    func watchTailscaleNodeState(_ id: String, session: NETunnelProviderSession, lease: Installation.Lease) {
+    private func sendNodeBrokerMessage(_ message: Data, member: String?, session: NETunnelProviderSession) async -> Data? {
+        guard let member else { return await sendSessionMessageData(message, session: session, timeout: 2) }
+        guard let command = String(data: message, encoding: .utf8),
+              let envelope = try? JSONEncoder().encode(VirtualRoutingMessage(profile: member, message: command)) else { return nil }
+        return await sendSessionMessageData(Data("router:message:".utf8) + envelope, session: session, timeout: 2)
+    }
+
+    func virtualTailscaleOptions(for id: String, config: TailscaleConfig) async throws -> [String: Data] {
+        guard pendingVirtualNodeLeases[id] == nil, tailscaleStateBrokers[id] == nil else {
+            throw err("This Tailscale identity is already in use.")
+        }
+        let lease = try tailscaleIdentityLease(id)
+        await migrateLegacyTailscaleIdentity(id)
+        if let issue = config.controlURLProblem ?? config.exitNodeSelectionProblem ?? TailscaleConfig.routesProblem(config.advertiseRoutes) {
+            throw err(issue)
+        }
+        let state = try await Task.detached {
+            try KeychainCredentialStore.credentialsForExport(profile: Self.tailscaleNodeStateProfile(id))?.password
+        }.value
+        var options = ["broker": Data([1])]
+        if let state {
+            guard TailscaleNodeState(revision: 0, data: state).isValid else { throw err("The saved Tailscale identity is invalid.") }
+            options["nodeState"] = Data(state.utf8)
+        }
+        let key = tailscaleAuthKey(for: id)
+        if !key.isEmpty { options["authKey"] = Data(key.utf8) }
+        pendingVirtualNodeLeases[id] = lease
+        return options
+    }
+
+    func discardVirtualTailscaleSetup(for id: String) { pendingVirtualNodeLeases[id] = nil }
+
+    func beginVirtualTailscaleStateSync(for id: String) {
+        guard Self.permitsLiveCredentialBrokers, tailscaleStateBrokers[id] == nil, !virtualStoppedMembers.contains(id),
+              let session = virtualManager(for: id)?.connection as? NETunnelProviderSession else { return }
+        let lease: Installation.Lease
+        do { lease = try pendingVirtualNodeLeases.removeValue(forKey: id) ?? tailscaleIdentityLease(id) }
+        catch TailscaleBrokerLeases.BrokerError.owned {
+            if watchTailscalePeerExit() { attachTailscaleNodeState(id) }
+            return
+        } catch { return }
+        watchTailscaleNodeState(id, session: session, lease: lease, member: true)
+        watchTailscaleSignIn(id: id, lease: lease)
+    }
+
+    func watchTailscaleNodeState(_ id: String, session: NETunnelProviderSession, lease: Installation.Lease, member: Bool = false) {
         guard tailscaleStateBrokers[id] == nil else { return }
         let epoch = UUID()
         tailscaleStateBrokerEpochs[id] = epoch
@@ -197,6 +243,9 @@ extension VPNController {
             var observedActive = false
             while !Task.isCancelled {
                 guard let self, self.tailscaleStateBrokerEpochs[id] == epoch else { return }
+                if member {
+                    guard self.virtualManager(for: id)?.connection === session, !self.virtualStoppedMembers.contains(id) else { return }
+                }
                 if UI.isActive(session.status) { observedActive = true }
                 if session.status == .disconnecting { return }
                 if session.status == .disconnected || session.status == .invalid,
@@ -204,7 +253,7 @@ extension VPNController {
 
                 let requestedCursor = requestFullSnapshot ? nil : acknowledged
                 let request = TailscaleNodeState.request(after: requestedCursor)
-                let bytes = await self.sendSessionMessageData(request, session: session, timeout: 2)
+                let bytes = await self.sendNodeBrokerMessage(request, member: member ? id : nil, session: session)
                 guard !Task.isCancelled, self.tailscaleStateBrokerEpochs[id] == epoch else { return }
                 let response = bytes.flatMap { TailscaleNodeState.decodeReply($0, after: requestedCursor) }
                 requestFullSnapshot = response == nil || response == .starting
@@ -235,14 +284,20 @@ extension VPNController {
                             saveFailures += 1
                             if !failure.canRetry || saveFailures >= 3 {
                                 self.report(failure, profile: id)
-                                session.stopVPNTunnel()
+                                if member, await self.sendNodeBrokerMessage(Data("router:stop-port".utf8), member: id, session: session) == Data("ok".utf8) {
+                                    self.virtualStoppedMembers.insert(id)
+                                    self.resyncStatuses()
+                                } else {
+                                    // The provider could not confirm revoking the unsaved identity.
+                                    session.stopVPNTunnel()
+                                }
                                 return
                             }
                         }
                     }
                     guard !Task.isCancelled, self.tailscaleStateBrokerEpochs[id] == epoch else { return }
                     if verified == cursor, acknowledged != cursor {
-                        let ack = await self.sendSessionMessageData(state.acknowledgement, session: session, timeout: 2)
+                        let ack = await self.sendNodeBrokerMessage(state.acknowledgement, member: member ? id : nil, session: session)
                         if ack == Data("ok".utf8) { acknowledged = cursor }
                     } else if acknowledged == cursor { delay = .seconds(1) }
                 case .unchanged:

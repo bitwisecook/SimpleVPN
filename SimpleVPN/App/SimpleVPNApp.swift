@@ -55,10 +55,23 @@ struct SimpleVPNApp: App {
     /// server is measured once, not once per surface).
     @State private var endpointProbes = EndpointProbeStore()
     @State private var topology = TopologyMonitor()
-    @State private var compositions = CompositionStore()
-    @State private var tunnels = SubprocessTunnelStore(loadSaved: !VPNController.usesEmptyProfileFixture)
+    @State private var compositions: CompositionStore = {
+        guard VPNController.usesEmptyProfileFixture else { return CompositionStore() }
+        let store = CompositionStore(defaults: nil)
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-SimpleVPNProcessConditionsFixture") {
+            let profileID = "fixture-app-routing"
+            let route = VPNApplicationRoute(id: "curl", name: "Fixture Tool", signingIdentifier: "test.fixture.tool",
+                                            designatedRequirement: "(always) and anchor apple", port: profileID)
+            store.save(VPNComposition(id: "fixture-conditions", name: "Process Conditions Fixture",
+                                      members: [.init(profileID: profileID, role: .split)], applicationRoutes: [route]))
+        }
+        #endif
+        return store
+    }()
+    @State private var tunnels: SubprocessTunnelStore
     @State private var tunnelManager: SubprocessTunnelManager
-    @State private var nativeVPN = NativeVPNManager(loadSaved: !VPNController.usesEmptyProfileFixture)
+    @State private var nativeVPN: NativeVPNManager
     @State private var wireguard = WireGuardStore(loadSaved: VPNController.permitsLiveCredentialBrokers)
     @State private var reachability: ReachabilityMonitor
     /// One derivation of "what is this connection doing", shared by every surface.
@@ -82,10 +95,22 @@ struct SimpleVPNApp: App {
         CrashDiagnostics.install()
         // linkState derives from the two stores, so it's built once here rather than
         // re-derived per surface (which is how the old per-view copies drifted).
+        let tunnels = SubprocessTunnelStore(loadSaved: !VPNController.usesEmptyProfileFixture)
+        _tunnels = State(initialValue: tunnels)
         let tunnelManager = SubprocessTunnelManager()
         _tunnelManager = State(initialValue: tunnelManager)
         let vpn = VPNController()
+        let native = NativeVPNManager(loadSaved: !VPNController.usesEmptyProfileFixture)
+        _nativeVPN = State(initialValue: native)
+        native.gatewayCoordinator = vpn
+        vpn.nativeConfigStore = native
+        vpn.subprocessSessionStore = tunnelManager
         tunnelManager.gatewayCoordinator = vpn
+        tunnelManager.configurationStore = tunnels
+        vpn.openConnectRouteTargetProblem = { id in
+            SubprocessTunnelManager.openConnectRouteTargetProblem(
+                config: tunnels.tunnels.first { $0.id == id }, session: tunnelManager.live[id])
+        }
         let evaluator = ProfileEvaluator()
         _evaluator = State(initialValue: evaluator)
         vpn.profileEvaluationProvider = { [weak vpn, weak evaluator] id in

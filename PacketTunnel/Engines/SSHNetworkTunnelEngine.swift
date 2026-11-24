@@ -135,9 +135,26 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
     private var callbackContext: UInt64 = 0
     private var starting = false
 
-    init(provider: NEPacketTunnelProvider, delegate: any SSHNetworkTunnelEngineDelegate) {
+    private let physicalInterfaceIndex: UInt32
+    private let memberPacket: (@Sendable (Data) -> Void)?
+    private let memberFailed: (@Sendable (Error) -> Void)?
+    private let packetPolicy: SVPPacketPolicy?
+
+    init(provider: NEPacketTunnelProvider, delegate: any SSHNetworkTunnelEngineDelegate, packetPolicy: SVPPacketPolicy) {
+        self.physicalInterfaceIndex = 0
+        self.memberPacket = nil
+        self.memberFailed = nil
+        self.packetPolicy = packetPolicy
         self.provider = provider
         self.delegate = delegate
+    }
+
+    init(interfaceIndex: UInt32, received: @escaping @Sendable (Data) -> Void,
+         failed: @escaping @Sendable (Error) -> Void) {
+        self.physicalInterfaceIndex = interfaceIndex
+        self.memberPacket = received
+        self.memberFailed = failed
+        self.packetPolicy = nil
     }
 
     // MARK: - One live flow
@@ -258,7 +275,7 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
 
     /// Tear everything down. Safe to call more than once, and safe after a failed
     /// start.
-    func stop() {
+    func stop(completion: @escaping @Sendable () -> Void = {}) {
         let (current, context) = lock.withLock {
             stopping = true
             pumpRunning = false
@@ -270,6 +287,10 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
         Self.callbacks.remove(context)
         if current != 0 { _ = Self.takeString(PXStopInstance(current)) }
         teardownSession(reason: "stopping")
+        sshQueue.async { [self] in
+            lock.withLock { start = nil; signingBroker = nil }
+            completion()
+        }
 
         // Callbacks last: a packet already inside the Go writer would otherwise
         // land on a torn-down flow.
@@ -286,6 +307,7 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
 
     private func openSession(_ config: SSHNetworkTunnelStartConfig) -> Error? {
         let s = SSHSession()
+        s.physicalInterfaceIndex = physicalInterfaceIndex
         guard let (host, port) = Self.hostAndPort(from: config.upstream) else {
             return SSHNetworkTunnelEngineError.engine(
                 kind: "badRequest", message: "This tunnel's server address can't be used.")
@@ -483,7 +505,7 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
         while !flow.pending.isEmpty {
             let sent = flow.pending.withUnsafeBytes { raw -> Int in
                 guard let base = raw.baseAddress else { return -1 }
-                return send(flow.fd, base, raw.count, MSG_DONTWAIT)
+                return Darwin.send(flow.fd, base, raw.count, MSG_DONTWAIT)
             }
             if sent > 0 {
                 flow.pending.removeFirst(sent)
@@ -539,6 +561,10 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
         // is refused rather than escaping to the physical path while we reconnect.
         // See the kill-switch note in the file header — this is deliberate.
         teardownSession(reason: reason)
+        if let memberFailed {
+            memberFailed(SSHNetworkTunnelEngineError.engine(kind: "network", message: "The SSH member lost its authenticated session."))
+            return
+        }
         scheduleReconnect(attempt: attempt)
     }
 
@@ -829,16 +855,7 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
         guard let flow = provider?.packetFlow else { return }
         flow.readPackets { [weak self] packets, _ in
             guard let self else { return }
-            for packet in packets {
-                // Raw IP packet straight in — no PF header on this boundary. A full
-                // queue drops (PXPacketIn returns 0), which is correct: a VPN must
-                // shed load, never stall the flow reader.
-                packet.withUnsafeBytes { raw in
-                    guard let base = raw.baseAddress, !raw.isEmpty, raw.count <= 65_535 else { return }
-                    let current = self.lock.withLock { self.stopping ? 0 : self.handle }
-                    _ = PXPacketInInstance(current, base, Int32(raw.count))
-                }
-            }
+            self.packetPolicy?.routeOutbound(packets) { packet in _ = self.send(packet) }
             self.lock.lock(); let running = !self.stopping; self.lock.unlock()
             if running { self.readMore() }
         }
@@ -846,9 +863,17 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
 
     /// engine → flow. Called from a Go goroutine; NEPacketTunnelFlow's write is
     /// thread-safe, so no hop is needed (and a hop would add latency per packet).
+    func send(_ packet: Data) -> Bool {
+        let current = lock.withLock { stopping ? 0 : handle }
+        guard current != 0, !packet.isEmpty, packet.count <= 65_535 else { return false }
+        return packet.withUnsafeBytes { PXPacketInInstance(current, $0.baseAddress, Int32(packet.count)) > 0 }
+    }
+
     fileprivate func deliver(_ packet: Data) {
         guard !lock.withLock({ stopping }) else { return }
-        guard let flow = provider?.packetFlow, let first = packet.first else { return }
+        if let memberPacket { memberPacket(packet); return }
+        guard let flow = provider?.packetFlow, let packet = packetPolicy?.routeInbound(packet),
+              let first = packet.first else { return }
         let proto: Int32 = (first >> 4) == 6 ? AF_INET6 : AF_INET
         flow.writePackets([packet], withProtocols: [NSNumber(value: proto)])
     }
@@ -865,7 +890,7 @@ final class SSHNetworkTunnelEngine: @unchecked Sendable {
         guard let comps = URLComponents(string: upstream), let host = comps.host, !host.isEmpty else {
             return nil
         }
-        return (host, Int32(comps.port ?? 22))
+        return (host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")), Int32(comps.port ?? 22))
     }
 
     private static func takeString(_ p: UnsafeMutablePointer<CChar>?) -> String? {
@@ -967,4 +992,58 @@ enum SSHNetworkTunnelEngineError: LocalizedError {
             }
         }
     }
+}
+
+/// Adapts the same authenticated libssh session and TCP/IP stack used by an
+/// independent SSH Network Tunnel. Only the capture owner reads the host utun.
+final class VirtualSSHNetworkPort: VirtualChildPacketPort, @unchecked Sendable {
+    private let engine: SSHNetworkTunnelEngine
+    private let config: SSHNetworkTunnelConfig
+    private let payload: SSHNetworkTunnelStartConfig
+    private let index: UInt32
+    private let work = DispatchQueue(label: "com.bragi0.SimpleVPN.sshnet-member")
+
+    init(config: SSHNetworkTunnelConfig, options: [String: Data], interfaceIndex: UInt32,
+         received: @escaping @Sendable (Data) -> Void, failed: @escaping @Sendable (Error) -> Void) throws {
+        self.config = config
+        self.index = interfaceIndex
+        let auth = try config.sharedCredentials(options: options)
+        self.payload = SSHNetworkTunnelStartConfig(config: config, password: auth.password,
+            privateKeyPEM: auth.key, certificatePEM: auth.certificate, expectedHostKeySHA256: config.normalizedPin)
+        self.engine = SSHNetworkTunnelEngine(interfaceIndex: interfaceIndex, received: received, failed: failed)
+    }
+
+    func start(completion: @escaping @Sendable (Result<VirtualPortNegotiation, Error>) -> Void) {
+        work.async {
+            guard self.index != 0, self.config.virtualMemberProblem == nil else {
+                completion(.failure(SSHNetworkTunnelEngineError.engine(kind: "badRequest", message: "The shared SSH VPN requires a bound carrier and a trusted server."))); return
+            }
+            if let error = self.engine.start(config: self.payload) { completion(.failure(error)); return }
+            completion(.success(.init(addresses: [SSHNetworkTunnelNetworkSettings.tunnelIPv4 + "/32",
+                                                   SSHNetworkTunnelNetworkSettings.tunnelIPv6 + "/128"],
+                allowed: self.config.sharedDestinations, endpoints: [self.config.carrierEndpoint],
+                dns: SSHNetworkTunnelNetworkSettings.resolvers(for: self.config),
+                searchDomains: self.config.searchDomains, mtu: self.config.mtu)))
+        }
+    }
+
+    func send(_ packet: Data) -> Bool { engine.send(packet) }
+
+    func agentMessage(_ request: String, reply: @escaping @Sendable (Data?) -> Void) {
+        if request == "sshnetstatus" { reply(try? JSONEncoder().encode(engine.status())); return }
+        guard config.authMethod == .agent else { reply(nil); return }
+        switch request {
+        case "sshnetagent:wait":
+            engine.waitForAgentRequest { reply(try? JSONEncoder().encode($0)) }
+        case "sshnetagent:request":
+            reply(try? JSONEncoder().encode(engine.agentRequest()))
+        default:
+            let prefix = "sshnetagent:reply:"
+            guard request.hasPrefix(prefix), request.utf8.count <= 400_000,
+                  let response = try? JSONDecoder().decode(SSHAgentSigningResponse.self, from: Data(request.dropFirst(prefix.count).utf8)) else { reply(nil); return }
+            reply(Data((engine.agentReply(response) ? "ok" : "error:Signing request expired.").utf8))
+        }
+    }
+
+    func stop(completion: @escaping @Sendable () -> Void) { engine.stop(completion: completion) }
 }

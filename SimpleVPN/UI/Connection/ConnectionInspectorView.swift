@@ -19,7 +19,9 @@ struct ConnectionInspectorView: View {   // was private — internal for the fil
     let profile: VPNController.Profile
     @Environment(PublicIPMonitor.self) private var publicIP
     @Environment(ReachabilityMonitor.self) private var reach: ReachabilityMonitor?
+    @Environment(CompositionStore.self) private var compositions: CompositionStore?
     @State private var showTrafficLog = false
+    @State private var ruleActivity: RuleActivityTarget?
     @Environment(\.windowShowsLiveContent) private var windowVisible
 
     private var isPaused: Bool { vpn.pausedProfiles.contains(profile.id) }
@@ -30,6 +32,9 @@ struct ConnectionInspectorView: View {   // was private — internal for the fil
             if windowVisible { liveDetails } else { Color.clear.accessibilityHidden(true) }
         }
         .navigationTitle("")
+        .sheet(item: $ruleActivity) { target in
+            RuleActivityView(vpn: vpn, target: target).tracksWindowActivity()
+        }
         .sheet(isPresented: $showTrafficLog) {
             TrafficLogView(vpn: vpn, profileID: profile.id, vpnName: profile.name)
                 .tracksWindowActivity()
@@ -48,14 +53,23 @@ struct ConnectionInspectorView: View {   // was private — internal for the fil
                         // history and never restarts empty on reopen.
                         ThroughputReadout(inRate: reach?.inRate(for: profile.id) ?? 0,
                                           outRate: reach?.outRate(for: profile.id) ?? 0)
-                        Button { showTrafficLog = true } label: { Label("Traffic Log", systemImage: "list.bullet.rectangle") }
+                        if let compositionID = vpn.virtualMembers[profile.id] {
+                            Button("Rule Activity") {
+                                let name = compositions?.compositions.first { $0.id == compositionID }?.name
+                                ruleActivity = RuleActivityTarget(id: profile.id, compositionID: compositionID, name: name ?? "Composition")
+                            }
                             .controlSize(.small)
+                        } else {
+                            Button { showTrafficLog = true } label: { Label("Traffic Log", systemImage: "list.bullet.rectangle") }
+                                .controlSize(.small)
+                        }
                     }
                     // ONE traffic graph. There used to be two stacked here — this VPN's
                     // tunnel counters, then a per-interface chart — which asked the user
                     // to reconcile two different pictures of the same traffic. The
                     // interface chart is the general case (it plots this VPN by default
                     // and can add any other connection), so it's the one that stays.
+                    PacketCoreActivityButton(vpn: vpn, profileID: profile.id, name: profile.name)
                     InterfaceTrafficView()
                     Divider()
                     ConnectionInfoPanel(stats: reach?.stats(for: profile.id), clientLabel: profile.server,

@@ -4,7 +4,7 @@ import Foundation
 @preconcurrency import NetworkExtension
 
 extension VPNController {
-    func watchSSHAgentSigning(_ id: String, session: NETunnelProviderSession, socket: String) {
+    func watchSSHAgentSigning(_ id: String, session: NETunnelProviderSession, socket: String, virtual: Bool = false) {
         sshNetworkAgentBrokers.removeValue(forKey:id)?.cancel()
         let epoch=UUID(); sshNetworkAgentEpochs[id]=epoch
         sshNetworkAgentBrokers[id]=Task { [weak self] in
@@ -12,6 +12,16 @@ extension VPNController {
                 if self?.sshNetworkAgentEpochs[id] == epoch {
                     self?.sshNetworkAgentBrokers[id]=nil; self?.sshNetworkAgentEpochs[id]=nil
                 }
+            }
+            @MainActor func send(_ message: String, timeout: TimeInterval) async -> Data? {
+                guard let self else { return nil }
+                if virtual {
+                    guard self.virtualManager(for: id)?.connection === session,
+                          !self.virtualStoppedMembers.contains(id),
+                          let payload = try? JSONEncoder().encode(VirtualRoutingMessage(profile: id, message: message)) else { return nil }
+                    return await self.sendSessionMessageData(Data("router:message:".utf8) + payload, session: session, timeout: timeout)
+                }
+                return await self.sendSessionMessageData(Data(message.utf8), session: session, timeout: timeout)
             }
             let started=Date(); var observedActive=false
             let transport: any SSHAgentTransport
@@ -29,14 +39,13 @@ extension VPNController {
                 if session.status == .disconnected || session.status == .invalid {
                     if observedActive || Date().timeIntervalSince(started)>12 { return }
                 }
-                var bytes = await self.sendSessionMessageData(Data("sshnetagent:wait".utf8),
-                                                              session: session, timeout: 60)
+                if virtual && self.virtualStoppedMembers.contains(id) { return }
+                var bytes = await send("sshnetagent:wait", timeout: 60)
                 guard !Task.isCancelled else { return }
                 if bytes == nil {
                     // An active extension from a previous build responds nil
                     // to the new message. Its original snapshot remains usable.
-                    bytes = await self.sendSessionMessageData(Data("sshnetagent:request".utf8),
-                                                              session: session, timeout: 2)
+                    bytes = await send("sshnetagent:request", timeout: 2)
                 }
                 if let bytes,
                    let request=try? JSONDecoder().decode(SSHAgentSigningRequest.self,from:bytes), !Task.isCancelled {
@@ -56,7 +65,7 @@ extension VPNController {
                     guard !Task.isCancelled else { return }
                     if let data=try? JSONEncoder().encode(SSHAgentSigningResponse(id:request.id,response:response)),
                        let text=String(data:data,encoding:.utf8) {
-                        _=await self.sendSessionMessageData(Data(("sshnetagent:reply:"+text).utf8),session:session,timeout:2)
+                        _ = await send("sshnetagent:reply:" + text, timeout: 2)
                     }
                     continue
                 }
@@ -67,11 +76,11 @@ extension VPNController {
 
     func restoreSSHAgentSigning(_ id: String) async {
         guard sshNetworkAgentBrokers[id] == nil, !locallyRemovedProfileIDs.contains(id),
-              let session=managers[id]?.connection as? NETunnelProviderSession, UI.isActive(session.status),
+              let session=(virtualManager(for: id) ?? managers[id])?.connection as? NETunnelProviderSession, UI.isActive(session.status),
               sshNetworkTunnelConfig(for:id).authMethod == .agent else { return }
         let configured=sshNetworkTunnelConfig(for:id).agentSocketPath
         let state=await Task.detached { SSHAgentProbe().probe(configuredSocketPath:configured) }.value
         guard !locallyRemovedProfileIDs.contains(id), UI.isActive(session.status), let socket=state.socketPath, state.canSignIn else { return }
-        watchSSHAgentSigning(id,session:session,socket:socket)
+        watchSSHAgentSigning(id, session: session, socket: socket, virtual: virtualManager(for: id) != nil)
     }
 }

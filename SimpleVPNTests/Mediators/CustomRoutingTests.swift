@@ -32,9 +32,31 @@ struct CustomRoutingTests {
 
     // MARK: - Routes: identity
 
+    @Test func configurationRuleCountersIdentifyOnlyWinningRulesAndAdds() {
+        var filter = RouteFilter()
+        let first = RouteFilter.RouteRule(verb: .accept, match: RoutePrefix("10.0.0.0/8"))
+        let shadowed = RouteFilter.RouteRule(verb: .ignore, match: first.match)
+        let injected = RouteFilter.RouteRule(verb: .add, target: RoutePrefix("192.0.2.0/24"))
+        filter.rules = [first, shadowed, injected]
+        var observed: [UUID?] = []
+        _ = filter.apply(to: routeIntent(prefixes: ["10.0.0.0/8", "127.0.0.0/8"], wantsDefault: true)) {
+            observed.append($0)
+        }
+        #expect(observed == [first.id, nil, nil, injected.id])
+    }
+
     @Test func routeEmptyFilterIsIdentity() {
         let captured = routeIntent(prefixes: ["10.0.0.0/8"], wantsDefault: true)
         #expect(RouteFilter().apply(to: captured) == captured)
+    }
+
+    @Test func routeRulesMatchEquivalentIPv6AndInstallBareHosts() {
+        var filter = RouteFilter()
+        filter.rules = [rule(.ignore, match: "2001:db8:0:0:0:0:0:0/64"), rule(.add, target: "192.0.2.7")]
+        let intent = routeIntent(prefixes: ["2001:db8::/64"])
+        let result = filter.apply(to: intent)
+        #expect(result.advertisedPrefixes == ["192.0.2.7/32"])
+        #expect(RouteApplyRequest(prefixes: result.advertisedPrefixes).isValid)
     }
 
     // MARK: - Routes: the four verbs (accept-unmatched default)

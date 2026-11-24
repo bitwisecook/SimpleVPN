@@ -176,11 +176,12 @@ struct ConnectionView: View {
                 stop: { [weak tunnelManager] in tunnelManager?.disconnect(t.id) }))
         }
         for c in nativeVPN.configs {
-            let isActive = nativeBackendActive && nativeVPN.activeConfigID == c.id
+            let state = nativeVPN.status(for: c.id)
+            let isActive = UI.isActive(state)
             rows.append(OtherConnection(
                 id: ConnectListing.nativeTag + c.id, configID: c.id, name: c.name, kind: c.kind,
                 scope: ConnectionScope.of(native: c), portSummary: nil,
-                dot: isActive ? .from(status: nativeVPN.status) : .off,
+                dot: .from(status: state),
                 isActive: isActive,
                 note: nativeVPN.connectionError(for: c.id),
                 replacementWarning: nativeVPN.replacementWarning(for: c.id),
@@ -189,7 +190,7 @@ struct ConnectionView: View {
                     Task { await vpn.connectNative(c, using: nativeVPN) }
                 },
                 stop: { [weak nativeVPN] in
-                    if nativeVPN?.activeConfigID == c.id { nativeVPN?.disconnect() }
+                    nativeVPN?.disconnect(c.id)
                 }))
         }
         return rows
@@ -379,7 +380,6 @@ struct ConnectionView: View {
         }
         let installed: Set<TunnelCLI> = tunnels.tunnels.contains { !SubprocessTunnelManager.willRunInProcess($0) }
             ? TunnelCLI.installed() : []
-        let capability = !nativeVPN.needsEntitlement
         var needs: [String: ConnectNeed] = [:]
         for t in tunnels.tunnels {
             // Passwords and OTPs entered in the main window are deliberately
@@ -391,8 +391,8 @@ struct ConnectionView: View {
             }
         }
         for c in nativeVPN.configs {
-            guard nativeVPN.activeConfigID != c.id else { continue }
-            if let need = NativeVPNReadiness.need(for: c, hasPersonalVPNCapability: capability) {
+            guard !UI.isActive(nativeVPN.status(for: c.id)) else { continue }
+            if let need = NativeVPNReadiness.need(for: c) {
                 needs[ConnectListing.nativeTag + c.id] = need
             }
         }
@@ -677,6 +677,16 @@ struct ConnectionView: View {
                         Color.clear.accessibilityHidden(true)
                     } else if otherSelection == nil, let p = vpn.selected {
                         ConnectionInspectorView(vpn: vpn, profile: p).id(p.id)
+                    } else if let row = selectedOther, row.isActive, tunnelManager.hasPacketSession(row.configID) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(row.name).font(.headline)
+                            PacketCoreActivityButton(vpn: vpn, profileID: row.configID, name: row.name)
+                            Spacer()
+                        }
+                        .padding()
+                        .id(row.configID)
+                    } else if let row = selectedOther, row.isActive, tunnelManager.hasSSHChannelSession(row.configID) {
+                        SSHChannelActivityView(manager: tunnelManager, profileID: row.configID).id(row.configID)
                     } else {
                         ContentUnavailableView("Live Details", systemImage: "chart.line.uptrend.xyaxis",
                             description: Text("Connect a VPN to see live traffic and connection details."))
@@ -949,6 +959,6 @@ extension VPNController {
         let proxy = customRouting(for: config.id).proxy.nativeApplyRequest(
             username: auth.username.isEmpty ? nil : auth.username,
             password: auth.password.isEmpty ? nil : auth.password)?.makeNEProxySettings()
-        await manager.connect(config, secret: secrets.base, sharedSecret: secrets.groupPSK, proxy: proxy)
+        await manager.connect(config, secret: secrets.base, sharedSecret: secrets.groupPSK, pppPassword: secrets.pppPassword, proxy: proxy)
     }
 }

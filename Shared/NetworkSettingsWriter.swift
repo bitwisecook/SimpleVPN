@@ -11,13 +11,40 @@ import Darwin
 nonisolated final class NetworkSettingsWriter: @unchecked Sendable {
     typealias Completion = @Sendable (Error?) -> Void
     typealias Install = @Sendable (NETunnelNetworkSettings?, @escaping Completion) -> Void
+    private enum Change {
+        case base(NEPacketTunnelNetworkSettings?)
+        case dns(DNSApplyRequest?)
+        case routes(RouteApplyRequest)
+    }
+
+    private struct Configuration {
+        var base: NEPacketTunnelNetworkSettings?
+        var dns: DNSApplyRequest?
+        var routes: RouteApplyRequest?
+    }
+
     private final class Job: @unchecked Sendable {
-        let settings: NEPacketTunnelNetworkSettings?
+        let change: Change
         let createdAt = DispatchTime.now()
         let completion: (Error?) -> Void
-        init(_ settings: NEPacketTunnelNetworkSettings?, _ completion: @escaping (Error?) -> Void) {
-            self.settings = settings
+        init(_ change: Change, _ completion: @escaping (Error?) -> Void) {
+            self.change = change
             self.completion = completion
+        }
+    }
+
+    private final class Installation: @unchecked Sendable {
+        let configuration: Configuration
+        let settings: NEPacketTunnelNetworkSettings?
+
+        init?(_ configuration: Configuration) {
+            self.configuration = configuration
+            let settings = configuration.base.flatMap(NetworkSettingsWriter.snapshot)
+            if let dns = configuration.dns { settings?.dnsSettings = dns.makeNEDNSSettings() }
+            if let routes = configuration.routes, let settings { routes.apply(to: settings) }
+            if let settings, configuration.dns != nil || configuration.routes?.prefixes != nil,
+               !NetworkSettingsWriter.keepResolverRoutes(in: settings, base: configuration.base) { return nil }
+            self.settings = settings
         }
     }
     private let queue = DispatchQueue(label: "com.bragi0.SimpleVPN.network-settings")
@@ -28,9 +55,7 @@ nonisolated final class NetworkSettingsWriter: @unchecked Sendable {
     private var jobs: [Job] = []
     private var active: Job?
     private var poisoned = false
-    private var base: NEPacketTunnelNetworkSettings?
-    private var dnsOverride: DNSApplyRequest?
-    private var routeOverride: RouteApplyRequest?
+    private var configuration = Configuration()
     private var confirmed: NEPacketTunnelNetworkSettings?
     private var revision: UInt64 = 0
 
@@ -43,44 +68,24 @@ nonisolated final class NetworkSettingsWriter: @unchecked Sendable {
     }
 
     func submit(_ settings: NETunnelNetworkSettings?, completion: @escaping (Error?) -> Void) {
-        let job = Job(settings.flatMap(Self.snapshot), completion)
-        queue.async { self.enqueue(job, replaceBase: true) }
+        enqueue(Job(.base(settings.flatMap(Self.snapshot)), completion))
     }
 
     func applyDNS(_ request: DNSApplyRequest?, completion: @escaping (Error?) -> Void) {
-        let job = Job(nil, completion)
-        queue.async {
-            guard self.canAccept(job) else { return }
-            guard self.base != nil else { job.completion(Self.problem("No tunnel settings to update.")); return }
-            self.dnsOverride = request
-            self.enqueue(job, replaceBase: false)
-        }
+        enqueue(Job(.dns(request), completion))
     }
 
     func applyRoutes(_ request: RouteApplyRequest, completion: @escaping (Error?) -> Void) {
-        let job = Job(nil, completion)
+        enqueue(Job(.routes(request), completion))
+    }
+
+    private func enqueue(_ job: Job) {
         queue.async {
-            guard self.canAccept(job) else { return }
-            guard request.isValid else { job.completion(Self.problem("Invalid route prefix.")); return }
-            guard self.base != nil else { job.completion(Self.problem("No tunnel settings to update.")); return }
-            self.routeOverride = request
-            self.enqueue(job, replaceBase: false)
+            guard !self.poisoned else { job.completion(Self.problem("Tunnel settings writer stopped.")); return }
+            guard self.jobs.count < 64 else { job.completion(Self.problem("Too many pending settings updates.")); return }
+            self.jobs.append(job)
+            self.startNext()
         }
-    }
-
-    private func enqueue(_ job: Job, replaceBase: Bool) {
-        guard canAccept(job) else { return }
-        if replaceBase { base = job.settings }
-        // Resolve queued requests from the latest engine snapshot and policy at
-        // dispatch, so an old netmap/proxy callback cannot erase a new DNS rule.
-        jobs.append(job)
-        startNext()
-    }
-
-    private func canAccept(_ job: Job) -> Bool {
-        guard !poisoned else { job.completion(Self.problem("Tunnel settings writer stopped.")); return false }
-        guard jobs.count < 64 else { job.completion(Self.problem("Too many pending settings updates.")); return false }
-        return true
     }
 
     /// Release bridge waits before engine teardown. A late OS completion cannot
@@ -108,15 +113,43 @@ nonisolated final class NetworkSettingsWriter: @unchecked Sendable {
             startNext()
             return
         }
+        // Compose each request with the last acknowledged configuration. A failed
+        // override must not be installed by a later, unrelated engine update.
+        var next = configuration
+        var problem: String?
+        switch job.change {
+        case .base(let settings):
+            if let override = next.dns, !override.isEmpty, !override.isScoped,
+               Self.ownsDefault(next.base), !Self.ownsDefault(settings) {
+                // A gateway demotion must also release its catch-all override.
+                next.dns = nil
+            }
+            next.base = settings
+        case .dns(let request):
+            if next.base == nil { problem = "No tunnel settings to update." }
+            if request?.isValid == false { problem = "Invalid DNS settings." }
+            next.dns = request
+        case .routes(let request):
+            if next.base == nil { problem = "No tunnel settings to update." }
+            if !request.isValid { problem = "Invalid route prefix." }
+            next.routes = request
+        }
+        if let problem {
+            job.completion(Self.problem(problem))
+            startNext()
+            return
+        }
+        guard let owned = Installation(next) else {
+            job.completion(Self.problem("The VPN cannot route one of its DNS resolvers with these settings."))
+            startNext()
+            return
+        }
         active = job
-        let settings = base.flatMap(Self.snapshot)
-        if let dnsOverride { settings?.dnsSettings = dnsOverride.makeNEDNSSettings() }
-        if let routeOverride, let settings { routeOverride.apply(to: settings) }
-        let owned = Job(settings, { _ in }) // owns immutable settings during the OS call
         install(owned.settings) { error in
             self.queue.async {
                 guard self.active === job, !self.poisoned else { return }
                 if error == nil {
+                    self.configuration = owned.configuration
                     self.confirmed = owned.settings
                     self.revision += 1
                 }
@@ -145,8 +178,8 @@ nonisolated final class NetworkSettingsWriter: @unchecked Sendable {
             var out = sample
             out.settingsRevision = self.revision
             out.effectiveDefaultOwned = Self.ownsDefault(self.confirmed)
-            out.advertisedPrefixes = Self.prefixes(self.base)
-            if let dns = self.base?.dnsSettings {
+            out.advertisedPrefixes = Self.prefixes(self.configuration.base)
+            if let dns = self.configuration.base?.dnsSettings {
                 out.dnsServers = dns.servers
                 out.searchDomains = dns.searchDomains ?? []
                 out.dnsMatchDomains = dns.matchDomains ?? []
@@ -167,18 +200,44 @@ nonisolated final class NetworkSettingsWriter: @unchecked Sendable {
 
     private static func ownsDefault(_ settings: NEPacketTunnelNetworkSettings?) -> Bool {
         let routes = Set(prefixes(settings))
-        return routes.contains("0.0.0.0/0") || routes.contains("::/0") ||
-            routes.isSuperset(of: ["0.0.0.0/1", "128.0.0.0/1"]) ||
-            routes.isSuperset(of: ["::/1", "8000::/1"])
+        return !RoutePrefixMath.defaultRoutePrefixes(in: Array(routes)).isEmpty
     }
 
-    private static func prefixes(_ settings: NEPacketTunnelNetworkSettings?) -> [String] {
-        let v4 = (settings?.ipv4Settings?.includedRoutes ?? []).compactMap { route -> String? in
+    private static func keepResolverRoutes(in settings: NEPacketTunnelNetworkSettings,
+                                           base: NEPacketTunnelNetworkSettings?) -> Bool {
+        guard let servers = settings.dnsSettings?.servers, !servers.isEmpty else { return true }
+        let proposed = prefixes(settings)
+        let original = prefixes(base)
+        let excluded = prefixes(settings, excluded: true)
+        for server in servers {
+            guard let cidr = RoutePrefixMath.canonicalNetwork(server), let host = TailscaleNetworkSettings.parse(cidr),
+                  !excluded.contains(where: { RoutePrefixMath.overlaps($0, cidr) }) else { return false }
+            if proposed.contains(where: { RoutePrefixMath.overlaps($0, cidr) }) { continue }
+            guard original.contains(where: { RoutePrefixMath.overlaps($0, cidr) }) else { return false }
+            if host.isIPv6, let ipv6 = settings.ipv6Settings {
+                var included = ipv6.includedRoutes ?? []
+                included.append(NEIPv6Route(destinationAddress: host.address, networkPrefixLength: 128))
+                ipv6.includedRoutes = included
+                settings.ipv6Settings = ipv6
+            } else if !host.isIPv6, let ipv4 = settings.ipv4Settings {
+                var included = ipv4.includedRoutes ?? []
+                included.append(NEIPv4Route(destinationAddress: host.address, subnetMask: host.ipv4Mask))
+                ipv4.includedRoutes = included
+                settings.ipv4Settings = ipv4
+            } else { return false }
+        }
+        return true
+    }
+
+    private static func prefixes(_ settings: NEPacketTunnelNetworkSettings?, excluded: Bool = false) -> [String] {
+        let ipv4 = settings?.ipv4Settings
+        let ipv6 = settings?.ipv6Settings
+        let v4 = ((excluded ? ipv4?.excludedRoutes : ipv4?.includedRoutes) ?? []).compactMap { route -> String? in
             var mask = in_addr()
             guard route.destinationSubnetMask.withCString({ inet_pton(AF_INET, $0, &mask) }) == 1 else { return nil }
             return "\(route.destinationAddress)/\(mask.s_addr.nonzeroBitCount)"
         }
-        let v6 = (settings?.ipv6Settings?.includedRoutes ?? []).map {
+        let v6 = ((excluded ? ipv6?.excludedRoutes : ipv6?.includedRoutes) ?? []).map {
             "\($0.destinationAddress)/\($0.destinationNetworkPrefixLength.intValue)"
         }
         return Array(Set(v4 + v6)).sorted()
